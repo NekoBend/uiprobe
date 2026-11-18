@@ -1,4 +1,4 @@
-"""Tests for ``uiprobe crawl --dry-run`` and ``uiprobe.preview``.
+"""Tests for ``uiprobe crawl`` (the preview) and ``uiprobe.preview``.
 
 The device is a strict `FakeAndroid`: any command beyond the reads a dump, the
 foreground and the keyboard need fails the test. On top of that every test of a
@@ -20,7 +20,11 @@ from tests.fake_device import El, FakeAndroid, Screen
 from uiprobe import Device, Policy, Preview, cli, preview
 from uiprobe.errors import AdbError
 from uiprobe.guards import REASONS, judge
-from uiprobe.settings import SETTINGS_FILE, write_default_settings
+from uiprobe.settings import (
+    SETTINGS_FILE,
+    render_default_settings,
+    write_default_settings,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -338,6 +342,7 @@ def test_text_output(fake_adb, capsys):
     code, out, err = crawl(capsys, fake_adb)
     assert (code, err) == (0, "")
     lines = out.splitlines()
+    assert lines.pop() == DRY_RUN_LAST
     assert re.fullmatch(
         rf"preview for {re.escape(SHOP)} on screen s-[0-9a-f]+; nothing was pressed",
         lines[0],
@@ -377,6 +382,7 @@ def test_text_output_with_empty_lists(fake_adb, android, capsys):
     code, out, _ = crawl(capsys, fake_adb)
     assert code == 0
     lines = out.splitlines()
+    assert lines.pop() == DRY_RUN_LAST
     assert lines[3:] == ["would press (0):", "would not press (0):"]
 
 
@@ -412,6 +418,7 @@ def test_other_app_in_front_exits_zero_with_everything_skipped(
     code, out, err = crawl(capsys, fake_adb)
     assert (code, err) == (0, "")
     lines = out.splitlines()
+    assert lines.pop() == DRY_RUN_LAST
     assert lines[2] == f"foreground: {OTHER}, keyboard: hidden"
     assert lines[3:5] == ["would press (0):", "would not press (7):"]
     for line in lines[5:]:
@@ -458,6 +465,8 @@ def test_json_shape_and_values(fake_adb, capsys, monkeypatch):
         "screen_id",
         "captured_at",
         "settings",
+        "pressed",
+        "mode",
         "foreground",
         "keyboard_shown",
         "press",
@@ -636,18 +645,168 @@ def crawl_usage_error(
     return usage_error(capsys, fake_adb, "crawl", "--json", *argv)
 
 
-def test_crawl_without_dry_run_is_refused(fake_adb, android, capsys):
-    message = crawl_usage_error(capsys, fake_adb, SHOP)
-    assert message == "only crawl --dry-run is available so far"
-    assert android.inputs == []
+PRESS_MESSAGE = (
+    "pressing crawls are not available yet; this version only previews"
+    " (run without --press)"
+)
+
+
+def file_press_message(path: str) -> str:
+    return (
+        "pressing crawls are not available yet; this version only previews"
+        f" (the settings file {path} says press = true: add --dry-run, or set"
+        " press = false there)"
+    )
+
+
+def both_press_message(path: str) -> str:
+    return (
+        "pressing crawls are not available yet; this version only previews"
+        f" (--press is given and the settings file {path} says press = true:"
+        " use --dry-run instead of --press, or set press = false there)"
+    )
+
+
+DEFAULT_LAST = "nothing was pressed: this was a preview (the default)"
+DRY_RUN_LAST = "nothing was pressed: this was a preview (--dry-run)"
+
+
+def set_press(folder: Path) -> None:
+    path = folder / SETTINGS_FILE
+    text = path.read_text(encoding="utf-8")
+    assert text.count("press = false") == 1
+    path.write_text(text.replace("press = false", "press = true"), encoding="utf-8")
+
+
+def test_crawl_without_a_switch_previews(fake_adb, android, capsys):
+    code, out, err = invoke(capsys, fake_adb, "crawl", SHOP)
+    assert (code, err) == (0, "")
+    code2, out_dry, err2 = invoke(capsys, fake_adb, "crawl", SHOP, "--dry-run")
+    assert (code2, err2) == (0, "")
+    body, last = out.rstrip("\n").rsplit("\n", 1)
+    body_dry, last_dry = out_dry.rstrip("\n").rsplit("\n", 1)
+    assert body == body_dry
+    assert last == DEFAULT_LAST
+    assert last_dry == DRY_RUN_LAST
+    assert_read_only(fake_adb, android)
 
 
 @pytest.mark.usefixtures("android")
-def test_crawl_without_dry_run_text_mode(fake_adb, capsys):
+def test_preview_json_says_not_pressed(fake_adb, capsys):
+    for argv in (("crawl", SHOP, "--json"), ("crawl", SHOP, "--dry-run", "--json")):
+        code, out, err = invoke(capsys, fake_adb, *argv)
+        assert (code, err) == (0, "")
+        payload = json.loads(out)
+        assert payload["pressed"] is False
+        assert payload["mode"] == "preview"
+
+
+@pytest.mark.parametrize("as_json", [False, True])
+def test_press_is_refused_before_any_contact(
+    fake_adb, android, capsys, connections, as_json
+):
+    argv = ["crawl", SHOP, "--press", *(["--json"] if as_json else [])]
+    code, out, err = invoke(capsys, fake_adb, *argv)
+    assert code == 2
+    if as_json:
+        assert err == ""
+        error = json.loads(out)["error"]
+        assert (error["code"], error["message"]) == ("usage_error", PRESS_MESSAGE)
+    else:
+        assert out == ""
+        assert err == f"uiprobe: error: {PRESS_MESSAGE}\n"
+    assert fake_adb.requests == []
+    assert connections == []
+    assert android.inputs == []
+
+
+def test_press_in_the_file_is_refused_without_dry_run(
+    fake_adb, android, capsys, settings_dir, connections
+):
+    set_press(settings_dir)
     code, out, err = invoke(capsys, fake_adb, "crawl", SHOP)
     assert (code, out) == (2, "")
-    assert err == "uiprobe: error: only crawl --dry-run is available so far\n"
+    assert err == f"uiprobe: error: {file_press_message(SETTINGS_FILE)}\n"
     assert fake_adb.requests == []
+    assert connections == []
+    assert android.inputs == []
+
+
+def test_press_in_the_file_with_press_names_the_file_and_dry_run(
+    fake_adb, android, capsys, settings_dir, connections
+):
+    set_press(settings_dir)
+    code, out, err = invoke(capsys, fake_adb, "crawl", SHOP, "--press")
+    assert (code, out) == (2, "")
+    assert err == f"uiprobe: error: {both_press_message(SETTINGS_FILE)}\n"
+    assert "--dry-run" in err
+    assert fake_adb.requests == []
+    assert connections == []
+    assert android.inputs == []
+
+
+def test_press_in_another_file_names_that_file(
+    fake_adb, android, capsys, tmp_path, connections
+):
+    other = tmp_path / "other.toml"
+    text = render_default_settings()
+    assert text.count("press = false") == 1
+    other.write_text(text.replace("press = false", "press = true"), encoding="utf-8")
+    code, out, err = invoke(capsys, fake_adb, "crawl", SHOP, "--config", str(other))
+    assert (code, out) == (2, "")
+    assert err == f"uiprobe: error: {file_press_message(str(other))}\n"
+    assert fake_adb.requests == []
+    assert connections == []
+    assert android.inputs == []
+
+
+def test_press_in_the_file_allows_dry_run(fake_adb, android, capsys, settings_dir):
+    set_press(settings_dir)
+    code, out, err = invoke(capsys, fake_adb, "crawl", SHOP, "--dry-run")
+    assert (code, err) == (0, "")
+    assert out.rstrip("\n").endswith(DRY_RUN_LAST)
+    assert_read_only(fake_adb, android)
+
+
+@pytest.mark.parametrize("switch", [[], ["--dry-run"], ["--press"]])
+@pytest.mark.usefixtures("android")
+def test_press_is_refused_after_the_file_is_checked(
+    fake_adb, capsys, tmp_path, connections, switch
+):
+    bad = tmp_path / "bad.toml"
+    text = render_default_settings()
+    assert text.count("press = false") == 1
+    bad.write_text(text.replace("press = false", "press = 3"), encoding="utf-8")
+    code, out, err = invoke(
+        capsys, fake_adb, "crawl", SHOP, *switch, "--config", str(bad)
+    )
+    assert (code, out) == (2, "")
+    assert err == f"uiprobe: error: {bad}: press: must be true or false\n"
+    assert fake_adb.requests == []
+    assert connections == []
+
+
+def test_press_in_the_file_is_refused_in_json(
+    fake_adb, android, capsys, settings_dir, connections
+):
+    set_press(settings_dir)
+    code, out, err = invoke(capsys, fake_adb, "crawl", SHOP, "--json")
+    assert (code, err) == (2, "")
+    error = json.loads(out)["error"]
+    assert (error["code"], error["message"]) == (
+        "usage_error",
+        file_press_message(SETTINGS_FILE),
+    )
+    assert fake_adb.requests == []
+    assert connections == []
+    assert android.inputs == []
+
+
+def test_press_with_dry_run_is_refused(fake_adb, android, capsys, connections):
+    message = crawl_usage_error(capsys, fake_adb, SHOP, "--press", "--dry-run")
+    assert message == "--press and --dry-run cannot be combined"
+    assert connections == []
+    assert android.inputs == []
 
 
 @pytest.mark.parametrize("equals_form", [False, True])
@@ -701,7 +860,7 @@ def test_crawl_usage_error_text_is_escaped(fake_adb, capsys, tmp_path):
 
 
 def test_usage_errors_do_not_depend_on_the_adb_server(capsys):
-    code = cli.run(["--adb-server", "tcp:127.0.0.1:1", "crawl", "com.x.y"])
+    code = cli.run(["--adb-server", "tcp:127.0.0.1:1", "crawl", "com.x.y", "--press"])
     assert code == 2
     assert capsys.readouterr().out == ""
 
@@ -843,13 +1002,17 @@ def test_keyboard_interrupt_while_reading_the_foreground(fake_adb, capsys, monke
     assert json.loads(out)["error"]["code"] == "interrupted"
 
 
-def test_crawl_help_says_only_dry_run_exists(capsys):
+def test_crawl_help_says_the_preview_is_the_default(capsys):
     code = cli.run(["crawl", "--help"])
     out = " ".join(capsys.readouterr().out.split())
     assert code == 0
-    assert "Only --dry-run exists so far" in out
+    assert "The preview is the default" in out
+    assert "--dry-run forces the preview" in out
+    assert "not available yet" in out
     assert "presses nothing" in out
     assert "screen showing now" in out
+    assert "cannot be combined with --press" in out
+    assert "cannot be combined with --dry-run" in out
 
 
 @pytest.mark.usefixtures("android")
@@ -919,6 +1082,7 @@ def test_number_only_and_toggle_in_text(fake_adb, android, capsys):
     code, out, err = crawl(capsys, fake_adb)
     assert (code, err) == (0, "")
     lines = out.splitlines()
+    assert lines.pop() == DRY_RUN_LAST
     assert lines[3:] == [
         "would press (1):",
         '  e4 TextView "Page 2" [tap] center=160,245',

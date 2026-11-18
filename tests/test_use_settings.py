@@ -1,7 +1,7 @@
 """Tests for the use of the settings file by ``crawl`` and ``key``.
 
-Covers `policy_from_settings`, the new `Policy` fields, ``crawl --dry-run``
-(which needs the file), ``key`` (which uses it when there is one) and the
+Covers `policy_from_settings`, the new `Policy` fields, ``crawl`` (the
+preview, which needs the file), ``key`` (which uses it when there is one) and the
 ``refused`` keyword of `Device.key`.
 """
 
@@ -320,7 +320,7 @@ def test_a_removed_deny_word_is_not_applied(tmp_path) -> None:
     assert reasons(run([item], policy=policy), "e2") == ()
 
 
-# -- crawl --dry-run needs the settings file -----------------------------------------
+# -- crawl needs the settings file -----------------------------------------
 
 
 def test_crawl_with_the_default_file_gives_the_old_preview(
@@ -343,13 +343,13 @@ def test_crawl_with_the_default_file_gives_the_old_preview(
 def test_crawl_without_a_file_stops_before_any_contact(
     capsys, fake_adb, android, folder
 ) -> None:
-    code, out, err = invoke(capsys, fake_adb, "crawl", SHOP, "--dry-run")
+    code, out, err = invoke(capsys, fake_adb, "crawl", SHOP)
     assert (code, out) == (2, "")
     assert err == (
         "uiprobe: error: crawl needs a settings file and none was found"
         " (looked for ./uiprobe.toml)\n"
         "create it with:    uiprobe init\n"
-        f"or name one with:  uiprobe crawl {SHOP} --dry-run --config PATH\n"
+        f"or name one with:  uiprobe crawl {SHOP} --config PATH\n"
     )
     assert fake_adb.requests == []
     assert android.inputs == []
@@ -358,19 +358,19 @@ def test_crawl_without_a_file_stops_before_any_contact(
 
 @pytest.mark.usefixtures("android", "folder")
 def test_crawl_without_a_file_in_json(capsys, fake_adb) -> None:
-    code, out, err = invoke(capsys, fake_adb, "crawl", SHOP, "--dry-run", "--json")
+    code, out, err = invoke(capsys, fake_adb, "crawl", SHOP, "--json")
     assert (code, err) == (2, "")
     error = json.loads(out)["error"]
     assert error["code"] == "usage_error"
     assert error["message"].splitlines() == [
         "crawl needs a settings file and none was found (looked for ./uiprobe.toml)",
         "create it with:    uiprobe init",
-        f"or name one with:  uiprobe crawl {SHOP} --dry-run --config PATH",
+        f"or name one with:  uiprobe crawl {SHOP} --config PATH",
     ]
     assert error["details"] == {
         "looked_for": "./uiprobe.toml",
         "create": "uiprobe init",
-        "name_one": f"uiprobe crawl {SHOP} --dry-run --config PATH",
+        "name_one": f"uiprobe crawl {SHOP} --config PATH",
     }
     assert fake_adb.requests == []
 
@@ -456,6 +456,32 @@ def test_crawl_config_that_is_missing_in_json(capsys, fake_adb, tmp_path) -> Non
         "name_one": f"uiprobe crawl {SHOP} --dry-run --config PATH",
     }
     assert fake_adb.requests == []
+
+
+@pytest.mark.usefixtures("android", "folder")
+def test_the_missing_file_hint_works_with_a_press_file(
+    capsys, fake_adb, tmp_path
+) -> None:
+    path = tmp_path / "missing.toml"
+    code, out, err = invoke(
+        capsys, fake_adb, "crawl", SHOP, "--dry-run", "--json", "--config", str(path)
+    )
+    assert (code, err) == (2, "")
+    hint = json.loads(out)["error"]["details"]["name_one"]
+    # Follow the printed command with a valid file that says press = true.
+    pressing = write(
+        tmp_path,
+        render_default_settings().replace("press = false", "press = true"),
+        "press.toml",
+    )
+    argv = [str(pressing) if word == "PATH" else word for word in hint.split()]
+    assert argv[:2] == ["uiprobe", "crawl"]
+    code, _, err = invoke(capsys, fake_adb, *argv[1:], "--json")
+    assert code == 0
+    assert err == ""
+    # Without --dry-run the same hint is refused.
+    code, out, _ = invoke(capsys, fake_adb, "crawl", SHOP, "--config", str(pressing))
+    assert code == 2
 
 
 @pytest.mark.usefixtures("android", "folder")
