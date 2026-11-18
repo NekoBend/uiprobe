@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+import re
 import tomllib
 from pathlib import Path
 
@@ -32,7 +33,9 @@ def test_the_package_version_matches_pyproject():
 
 def test_the_readme_names_the_version():
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
-    assert f"version {uiprobe.__version__}" in readme
+    named = re.findall(r"\bversion (\d[0-9A-Za-z.+]*[0-9A-Za-z])", readme)
+    assert named
+    assert set(named) == {uiprobe.__version__}
 
 
 def test_version_prints_one_line_and_exits_zero(capsys):
