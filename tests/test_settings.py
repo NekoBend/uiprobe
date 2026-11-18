@@ -24,6 +24,7 @@ from uiprobe.guards import (
     API36_TOP_PX,
     CONFIRM_WORDS,
     DEFAULT_DENY_WORDS,
+    IRREVERSIBLE_PHRASES,
 )
 from uiprobe.model import MIN_VISIBLE_PX
 from uiprobe.settings import (
@@ -189,6 +190,21 @@ V1_CONFIRM = (
     "apply",
     "done",
 )
+V1_IRREVERSIBLE = (
+    "can't undo",
+    "cannot undo",
+    "can not be undone",
+    "cannot be undone",
+    "can't be undone",
+    "irreversible",
+    "permanently",
+    "this action is permanent",
+    "元に戻せません",
+    "取り消せません",
+    "元に戻すことはできません",
+    "取り消すことはできません",
+    "完全に削除",
+)
 V1_KEYS = (
     "KEYCODE_ACCESSIBILITY",
     "KEYCODE_ALL_APPS",
@@ -281,6 +297,8 @@ def test_the_defaults_round_trip(tmp_path):
     assert loaded.press is False
     assert loaded.deny_words == DEFAULT_DENY_WORDS
     assert loaded.confirm_words == CONFIRM_WORDS
+    assert loaded.irreversible_phrases == IRREVERSIBLE_PHRASES
+    assert loaded.refuse_irreversible_screens is True
     assert loaded.tap_unlabeled is False
     assert loaded.skip_number_only is True
     assert loaded.skip_toggles is True
@@ -302,9 +320,17 @@ def test_the_rendered_file_layout():
     assert "\r" not in text
     assert "format_version = 1\ndefaults_version = 1\n" in text
     assert "press = false\n" in text
-    for table in ("[deny]", "[confirm]", "[rules]", "[limits]", "[keys]"):
+    for table in (
+        "[deny]",
+        "[confirm]",
+        "[irreversible]",
+        "[rules]",
+        "[limits]",
+        "[keys]",
+    ):
         assert f"\n{table}\n" in text
-    assert text.count("remove = []") == 3
+    assert text.count("remove = []") == 4
+    assert "refuse_irreversible_screens = true\n" in text
     assert '    "購入",\n' in text  # Japanese stays readable
 
 
@@ -568,6 +594,7 @@ def test_write_default_settings_refuses_a_descriptor(tmp_path):
     [
         ("_DENY_WORDS", V1_DENY),
         ("_CONFIRM_WORDS", V1_CONFIRM),
+        ("_IRREVERSIBLE_PHRASES", V1_IRREVERSIBLE),
         ("_REFUSE_KEYS", V1_KEYS),
         ("_REFUSE_PREFIXES", V1_PREFIXES),
     ],
@@ -586,7 +613,14 @@ def test_the_version_1_defaults_are_pinned(table, snapshot):
 
 
 @pytest.mark.parametrize(
-    "table", ["_DENY_WORDS", "_CONFIRM_WORDS", "_REFUSE_KEYS", "_REFUSE_PREFIXES"]
+    "table",
+    [
+        "_DENY_WORDS",
+        "_CONFIRM_WORDS",
+        "_IRREVERSIBLE_PHRASES",
+        "_REFUSE_KEYS",
+        "_REFUSE_PREFIXES",
+    ],
 )
 def test_no_default_is_tagged_beyond_the_current_version(table):
     for version, item in getattr(settings, table):
@@ -843,11 +877,11 @@ def test_unknown_key_names_are_shown_escaped(tmp_path):
 def with_remove(tmp_path: Path, index: int, items: str) -> Path:
     """Write the default file with the `remove` list number `index` set."""
     parts = render_default_settings().split("remove = []")
-    assert len(parts) == 4
-    ends = ["remove = []"] * 3
+    assert len(parts) == 5
+    ends = ["remove = []"] * 4
     ends[index] = f"remove = {items}"
-    text = parts[0] + ends[0] + parts[1] + ends[1] + parts[2] + ends[2] + parts[3]
-    return write(tmp_path, text)
+    text = "".join(part + end for part, end in zip(parts, ends, strict=False))
+    return write(tmp_path, text + parts[4])
 
 
 @pytest.mark.parametrize("name", ["format_version", "defaults_version", "press"])
@@ -983,10 +1017,13 @@ def test_remove_lists_take_words_out(tmp_path):
     text = render_default_settings()
     text = text.replace("remove = []", 'remove = ["call"]', 1)  # deny
     text = text.replace("remove = []", 'remove = ["yes"]', 1)  # confirm
+    text = text.replace("remove = []", 'remove = ["permanently"]', 1)  # phrases
     text = text.replace("remove = []", 'remove = ["KEYCODE_CAMERA"]', 1)  # keys
     loaded = load_settings(write(tmp_path, text))
     assert "call" not in loaded.deny_words
     assert "yes" not in loaded.confirm_words
+    assert "permanently" not in loaded.irreversible_phrases
+    assert "irreversible" in loaded.irreversible_phrases
     assert "KEYCODE_CAMERA" not in loaded.refused_keys
 
 
@@ -1232,22 +1269,22 @@ def test_confirm_words_are_compared_in_the_confirm_form(tmp_path):
 
 
 def test_removing_a_key_that_a_prefix_covers_warns(tmp_path):
-    loaded = load_settings(with_remove(tmp_path, 2, '["KEYCODE_MEDIA_PLAY"]'))
+    loaded = load_settings(with_remove(tmp_path, 3, '["KEYCODE_MEDIA_PLAY"]'))
     assert len(loaded.warnings) == 1
     assert "KEYCODE_MEDIA_PLAY" in loaded.warnings[0]
     assert "prefix" in loaded.warnings[0]
     both = load_settings(
-        with_remove(tmp_path, 2, '["KEYCODE_POWER", "KEYCODE_TV_POWER"]')
+        with_remove(tmp_path, 3, '["KEYCODE_POWER", "KEYCODE_TV_POWER"]')
     )
     assert len(both.warnings) == 2
     assert all("always refused" in warning for warning in both.warnings)
-    plain = load_settings(with_remove(tmp_path, 2, '["KEYCODE_VOLUME_UP"]'))
+    plain = load_settings(with_remove(tmp_path, 3, '["KEYCODE_VOLUME_UP"]'))
     assert plain.warnings == ()
     assert "KEYCODE_VOLUME_UP" not in plain.refused_keys
 
 
 def test_removing_a_prefix_removes_it(tmp_path):
-    loaded = load_settings(with_remove(tmp_path, 2, '["KEYCODE_MEDIA_"]'))
+    loaded = load_settings(with_remove(tmp_path, 3, '["KEYCODE_MEDIA_"]'))
     assert "KEYCODE_MEDIA_" not in loaded.refused_key_prefixes
     assert loaded.warnings == ()
 
@@ -1653,3 +1690,46 @@ def test_a_huge_integer_in_a_list_is_refused_with_the_file_and_key(
     path = with_list(tmp_path, table, key, literal)
     message = refused(path, f"[{table}] {key}", "must hold only strings")
     assert len(message) < 400
+
+
+# -- the irreversibility phrases and their switch -----------------------------------
+
+
+def test_the_generated_file_lists_every_phrase():
+    text = render_default_settings()
+    table = text.split("[irreversible]")[1].split("[rules]")[0]
+    for phrase in IRREVERSIBLE_PHRASES:
+        assert f'    "{phrase}",\n' in table
+    assert "phrases = [" in table
+
+
+def test_a_missing_irreversible_table_or_switch_is_refused(tmp_path):
+    text = render_default_settings()
+    head, _, tail = text.partition("[irreversible]")
+    _, _, rest = tail.partition("[rules]")
+    refused(write(tmp_path, head + "[rules]" + rest), "irreversible")
+    refused(
+        edited(tmp_path, "refuse_irreversible_screens = true\n", ""),
+        "refuse_irreversible_screens",
+    )
+    refused(
+        edited(
+            tmp_path,
+            "refuse_irreversible_screens = true",
+            "refuse_irreversible_screens = 1",
+        ),
+        "refuse_irreversible_screens",
+    )
+
+
+def test_a_phrase_is_removed_after_the_apostrophe_is_normalized(tmp_path):
+    loaded = load_settings(with_remove(tmp_path, 2, '["Can\u2019t Undo"]'))
+    assert "can't undo" not in loaded.irreversible_phrases
+    assert "cannot undo" in loaded.irreversible_phrases
+
+
+def test_an_empty_phrase_is_refused(tmp_path):
+    refused(
+        edited(tmp_path, '    "permanently",\n', '    "  ",\n'),
+        "irreversible",
+    )

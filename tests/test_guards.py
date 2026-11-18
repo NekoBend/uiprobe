@@ -776,9 +776,19 @@ def test_every_reason_together_in_the_fixed_order() -> None:
     numeric = el("e2", text="200", flags=("clickable", "checkable"))
     fourth = run([numeric])
     assert reasons(fourth, "e2") == ("number_only", "toggle")
+    warned = el("e2", text="Browse", bounds=(50, 100, 250, 150))
+    note = el(
+        "e3",
+        text="This cannot be undone",
+        cls="android.widget.TextView",
+        flags=(),
+        bounds=(20, 300, 300, 340),
+    )
+    fifth = run([warned, note])
+    assert reasons(fifth, "e2") == ("irreversible_screen",)
     seen = {
         r
-        for j in (first, second, third, fourth, huge)
+        for j in (first, second, third, fourth, huge, fifth)
         for d in j.decisions
         for r in d.reasons
     }
@@ -788,7 +798,7 @@ def test_every_reason_together_in_the_fixed_order() -> None:
 
 def test_reasons_follow_the_order_of_reasons_constant() -> None:
     assert get_args(guards.Reason) == REASONS
-    assert len(set(REASONS)) == len(REASONS) == 15
+    assert len(set(REASONS)) == len(REASONS) == 16
     order = {reason: index for index, reason in enumerate(REASONS)}
     policy = Policy(avoid=edge_areas(DISPLAY))
     elements = [
@@ -2758,7 +2768,7 @@ def test_with_deny_words_keeps_the_new_switches() -> None:
 # -- confirm labels that start with a confirm word ---------------------------------
 
 
-def _restart_screen(yes: str, no: str = "Wait, cancel!"):
+def _restart_screen(yes: str, no: str = "Wait, cancel!", warning: str = ""):
     """A full-screen confirmation: the title, the text and two buttons."""
     text = "android.widget.TextView"
     return [
@@ -2767,7 +2777,7 @@ def _restart_screen(yes: str, no: str = "Wait, cancel!"):
             "e3",
             cls=text,
             flags=(),
-            text="Are you sure you want to restart? You can't undo this",
+            text="Are you sure you want to restart?" + warning,
             bounds=(20, 150, 300, 250),
         ),
         el("e4", text=yes, bounds=(20, 300, 300, 360)),
@@ -2858,3 +2868,196 @@ def test_the_start_over_words_are_default_deny_words(word) -> None:
 )
 def test_start_over_labels_are_refused(label) -> None:
     assert "deny_word" in reasons(run([el("e2", text=label)]), "e2")
+
+
+# -- screens that warn that nothing can be undone ----------------------------------
+
+WARNING = " You can't undo this"
+TEXT_VIEW = "android.widget.TextView"
+
+
+def _warning_screen(text: str, *, field: str = "text", element=None):
+    """A full-screen screen with one warning element and two buttons."""
+    if element is None:
+        kwargs = {field: text}
+        element = el(
+            "e3", cls=TEXT_VIEW, flags=(), bounds=(20, 150, 300, 250), **kwargs
+        )
+    return [
+        element,
+        el("e4", text="Home", bounds=(20, 300, 300, 360)),
+        el("e5", text="Back", bounds=(20, 380, 300, 440)),
+    ]
+
+
+def test_the_restart_screen_refuses_both_buttons() -> None:
+    found = run(_restart_screen("Yes I'm sure!", warning=WARNING))
+    assert reasons(found, "e4") == ("irreversible_screen", "confirm_button")
+    assert reasons(found, "e5") == ("irreversible_screen",)
+    detail = decision(found, "e5").details[0]
+    assert detail.reason == "irreversible_screen"
+    assert detail.word == "can't undo"
+    assert detail.field == "text"
+    assert detail.element_id == "e3"
+
+
+def test_the_reason_stands_between_deny_word_and_confirm_button() -> None:
+    assert REASONS.index("irreversible_screen") == REASONS.index("deny_word") + 1
+    assert REASONS[REASONS.index("irreversible_screen") + 1] == "confirm_button"
+    row = el("e2", text="Delete", bounds=(20, 300, 300, 360))
+    found = run([*_warning_screen("It is irreversible"), row])
+    assert reasons(found, "e2") == ("deny_word", "irreversible_screen")
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "You can't undo this",
+        "You can\u2019t undo this",
+        "CANNOT UNDO",
+        "This can not be undone.",
+        "It cannot be undone",
+        "It can't be undone",
+        "This is irreversible",
+        "Deleted permanently",
+        "This action is permanent",
+        "This action is  PERMANENT!",
+        "元に戻せません",
+        "この操作は取り消せません。",
+        "元に戻すことはできません",
+        "取り消すことはできません",
+        "データを完全に削除します",
+        "Can\u200bnot be und\u00adone",
+    ],
+)
+def test_every_phrase_refuses_every_candidate(text) -> None:
+    found = run(_warning_screen(text))
+    assert reasons(found, "e4") == ("irreversible_screen",)
+    assert reasons(found, "e5") == ("irreversible_screen",)
+
+
+@pytest.mark.parametrize("field", ["text", "desc", "hint"])
+def test_the_phrase_is_read_in_text_description_and_hint(field) -> None:
+    found = run(_warning_screen("This is irreversible", field=field))
+    assert reasons(found, "e4") == ("irreversible_screen",)
+    names = {"text": "text", "desc": "content_desc", "hint": "hint"}
+    assert decision(found, "e4").details[0].field == names[field]
+
+
+def test_the_phrase_on_a_clickable_element_refuses_it_too() -> None:
+    own = el("e3", text="Delete permanently?", bounds=(20, 150, 300, 250))
+    found = run(_warning_screen("", element=own))
+    assert "irreversible_screen" in reasons(found, "e3")
+    assert reasons(found, "e5") == ("irreversible_screen",)
+
+
+def test_the_resource_id_is_not_read_for_phrases() -> None:
+    named = el(
+        "e3",
+        cls=TEXT_VIEW,
+        flags=(),
+        rid="com.example:id/cannot_be_undone",
+        bounds=(20, 150, 300, 250),
+    )
+    found = run(_warning_screen("", element=named))
+    assert reasons(found, "e4") == ()
+
+
+def test_the_first_element_in_document_order_is_named() -> None:
+    first = el("e3", cls=TEXT_VIEW, flags=(), text="Irreversible", bounds=(0, 0, 9, 9))
+    second = el("e6", cls=TEXT_VIEW, flags=(), text="Permanently", bounds=(0, 0, 9, 9))
+    found = run([*_warning_screen("", element=first), second])
+    detail = decision(found, "e4").details[0]
+    assert (detail.word, detail.element_id) == ("irreversible", "e3")
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["Undo", "Can I undo?", "Permanent link", "Reverse the order", "Cancel", ""],
+)
+def test_a_screen_without_a_phrase_is_unchanged(text) -> None:
+    on = run(_warning_screen(text))
+    off = run(_warning_screen(text), policy=Policy(skip_irreversible=False))
+    assert [d.reasons for d in on.decisions] == [d.reasons for d in off.decisions]
+    assert all("irreversible_screen" not in d.reasons for d in on.decisions)
+
+
+def test_the_switch_off_restores_the_old_decisions() -> None:
+    off = Policy(skip_irreversible=False)
+    found = run(_restart_screen("Yes I'm sure!", warning=WARNING), policy=off)
+    assert reasons(found, "e4") == ("confirm_button",)
+    assert reasons(found, "e5") == ()
+
+
+def test_custom_phrases_replace_the_defaults() -> None:
+    policy = Policy(irreversible_phrases=("no way back",))
+    assert reasons(run(_warning_screen("No way back"), policy=policy), "e4") == (
+        "irreversible_screen",
+    )
+    assert reasons(run(_warning_screen("Irreversible"), policy=policy), "e4") == ()
+    empty = Policy(irreversible_phrases=())
+    assert reasons(run(_warning_screen("Irreversible"), policy=empty), "e4") == ()
+
+
+def test_an_empty_phrase_is_refused() -> None:
+    with pytest.raises(ValueError, match="empty"):
+        Policy(irreversible_phrases=("  ",))
+
+
+def test_with_deny_words_keeps_the_phrases_and_the_switch() -> None:
+    policy = Policy(irreversible_phrases=("x y",), skip_irreversible=False)
+    copy = policy.with_deny_words(["rent"])
+    assert copy.irreversible_phrases == ("x y",)
+    assert copy.skip_irreversible is False
+
+
+def test_the_other_screens_candidates_all_get_the_reason_when_not_visible() -> None:
+    hidden = el("e6", text="Gone", bounds=(400, 0, 500, 30))
+    found = run([*_warning_screen("Irreversible"), hidden])
+    assert "irreversible_screen" in reasons(found, "e6")
+
+
+def test_the_default_phrases_are_unique_and_documented_ones() -> None:
+    assert len(set(guards.IRREVERSIBLE_PHRASES)) == len(guards.IRREVERSIBLE_PHRASES)
+    assert len(guards.IRREVERSIBLE_PHRASES) == 13
+    assert Policy().irreversible_phrases == guards.IRREVERSIBLE_PHRASES
+
+
+def test_the_rule_only_adds_the_reason_on_random_screens() -> None:
+    rng = random.Random(20261120)  # noqa: S311
+    on = Policy(avoid=())
+    off = Policy(avoid=(), skip_irreversible=False)
+    warned = 0
+    for _ in range(300):
+        base, _denies = _random_screen(rng)
+        elements = list(base.elements)
+        if rng.random() < 0.5:
+            at = rng.randrange(len(elements))
+            elements[at] = replace(
+                elements[at], text=rng.choice(guards.IRREVERSIBLE_PHRASES)
+            )
+        screen = make_screen(elements)
+        after = judge(screen, PKG, on, foreground=PKG)
+        before = judge(screen, PKG, off, foreground=PKG)
+        for new, old in zip(after.decisions, before.decisions, strict=True):
+            kept = tuple(r for r in new.reasons if r != "irreversible_screen")
+            assert kept == old.reasons
+            if "irreversible_screen" in new.reasons:
+                warned += 1
+                assert new.reasons
+    assert warned > 100
+
+
+def test_screens_without_phrases_get_the_old_decisions_on_random_screens() -> None:
+    rng = random.Random(20261121)  # noqa: S311
+    off = Policy(skip_irreversible=False)
+    for _ in range(300):
+        screen, _denies = _random_screen(rng)
+        texts = " ".join(
+            f"{e.text} {e.content_desc} {e.hint}" for e in screen.elements
+        ).casefold()
+        if any(phrase in texts for phrase in guards.IRREVERSIBLE_PHRASES):
+            continue
+        assert judge(screen, PKG, Policy(), foreground=PKG) == judge(
+            screen, PKG, off, foreground=PKG
+        )

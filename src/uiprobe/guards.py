@@ -66,6 +66,22 @@ Two crawl rules, each a separate check that a
 Both rules only add refusals. In `REASONS` they come right after
 ``unlabeled``: ``number_only`` first, then ``toggle``.
 
+A third rule works on the whole screen: ``irreversible_screen``
+(``Policy.skip_irreversible``). When the text, content_desc or hint of any
+element holds one of ``Policy.irreversible_phrases`` (`IRREVERSIBLE_PHRASES`:
+"can't undo", "cannot be undone", "permanently", "元に戻せません", ...), every
+candidate of the screen gets the reason, whatever its own label is, because
+a screen that warns about an action that cannot be taken back is not a place
+to press anything. A phrase matches as a substring after the same
+normalization as the deny words (NFKC, case folding, invisible characters
+removed, separators ignored) and with curly apostrophes mapped to a plain one,
+so "You CAN'T undo this" matches, and so does the same text with a curly
+apostrophe. The fields of each element are matched alone, in document order
+(text, content_desc, hint; the resource id is not read); a phrase split over
+two elements is not found. In `REASONS` the reason comes right after
+``deny_word``. Known over-block: ``permanently`` also matches
+"Permanently moved" and a settings text such as "Permanently allowed".
+
 Choices that block more than strictly needed:
 
 * The deny scope of a candidate holds every clickable ancestor's whole
@@ -111,8 +127,8 @@ its descendants. This is the rule of ``Screen.tap_point``. The reasons come in
 the order of `REASONS`: ``screen_too_large``, ``outside_target_app``,
 ``permission_screen``, ``not_visible``, ``covered``, ``disabled``,
 ``text_input``, ``password_field``, ``unlabeled``, ``number_only``,
-``toggle``, ``deny_word``, ``confirm_button``, ``dialog_confirm_button``,
-``screen_edge``.
+``toggle``, ``deny_word``, ``irreversible_screen``, ``confirm_button``,
+``dialog_confirm_button``, ``screen_edge``.
 
 Hit targets: the hit targets of a candidate are the elements whose visible part
 holds its press point (the candidate, its ancestors and every overlay). A
@@ -215,6 +231,7 @@ __all__ = [
     "API36_TOP_PX",
     "CONFIRM_WORDS",
     "DEFAULT_DENY_WORDS",
+    "IRREVERSIBLE_PHRASES",
     "MAX_ELEMENTS",
     "PERMISSION_PACKAGES",
     "REASONS",
@@ -245,6 +262,7 @@ Reason = Literal[
     "number_only",
     "toggle",
     "deny_word",
+    "irreversible_screen",
     "confirm_button",
     "dialog_confirm_button",
     "screen_edge",
@@ -383,6 +401,25 @@ _SHOP_DENY_WORDS: Final[tuple[str, ...]] = (
 
 DEFAULT_DENY_WORDS: Final[tuple[str, ...]] = (
     _BASE_DENY_WORDS + _EXTRA_DENY_WORDS + _SETTINGS_DENY_WORDS + _SHOP_DENY_WORDS
+)
+
+# Phrases that say a screen's action cannot be taken back (English, then
+# Japanese). A screen whose text holds one refuses every element
+# (``irreversible_screen``). They are matched like the deny words.
+IRREVERSIBLE_PHRASES: Final[tuple[str, ...]] = (
+    "can't undo",
+    "cannot undo",
+    "can not be undone",
+    "cannot be undone",
+    "can't be undone",
+    "irreversible",
+    "permanently",
+    "this action is permanent",
+    "元に戻せません",
+    "取り消せません",
+    "元に戻すことはできません",
+    "取り消すことはできません",
+    "完全に削除",
 )
 
 # Labels of buttons that confirm what the screen asks for.
@@ -606,6 +643,32 @@ class _Matcher:
         return found
 
 
+_APOSTROPHES: Final = str.maketrans(
+    {"\u2018": "'", "\u2019": "'", "\u201b": "'", "\u02bc": "'", "\u2032": "'"}
+)
+
+
+class _PhraseMatcher:
+    """Irreversibility phrases, matched like deny words in three fields."""
+
+    def __init__(self, phrases: Iterable[str]) -> None:
+        self._matcher = _Matcher(p.translate(_APOSTROPHES) for p in phrases)
+
+    def find(self, elements: Iterable[Element]) -> tuple[str, str, str] | None:
+        """Return ``(phrase, field, element id)`` of the first match, or None."""
+        for element in elements:
+            for field, value in (
+                ("text", element.text),
+                ("content_desc", element.content_desc),
+                ("hint", element.hint),
+            ):
+                if value:
+                    phrase = self._matcher.match_text(value.translate(_APOSTROPHES))
+                    if phrase is not None:
+                        return phrase, field, element.id
+        return None
+
+
 def deny_word_in(element: Element, words: Iterable[str]) -> tuple[str, str] | None:
     """Return ``(word, field)`` of the first deny word found in the element.
 
@@ -675,6 +738,9 @@ class Policy:
     reason; False drops only that reason (the ``confirm_button`` reason, a deny
     word on the screen, stays).
 
+    ``skip_irreversible`` (default True) applies the ``irreversible_screen``
+    reason with the phrases of ``irreversible_phrases``; False turns it off.
+
     ``edges`` holds the sizes in pixels ``(top, bottom, left, right)`` that
     `judge` turns into `edge_areas` of each screen's display when ``avoid`` is
     None; None keeps the API 36 sizes. An explicit ``avoid`` wins over
@@ -684,7 +750,8 @@ class Policy:
     ``Screen.visible_bounds`` keep the fixed `MIN_VISIBLE_PX`.
 
     Raises:
-        ValueError: A deny or confirm word is empty after normalization, or a
+        ValueError: A deny word, confirm word or irreversible phrase is empty
+            after normalization, or a
             confirm word is empty after the label cleaning (invisible
             characters, normalization, surrounding punctuation), or
             ``edges`` is not four non-negative integers, or ``min_visible_px``
@@ -701,9 +768,11 @@ class Policy:
     refuse_dialog_confirm: bool = True
     edges: tuple[int, int, int, int] | None = None
     min_visible_px: int = MIN_VISIBLE_PX
+    irreversible_phrases: tuple[str, ...] = IRREVERSIBLE_PHRASES
+    skip_irreversible: bool = True
 
     def __post_init__(self) -> None:
-        for word in (*self.deny_words, *self.confirm_words):
+        for word in (*self.deny_words, *self.confirm_words, *self.irreversible_phrases):
             _check_word(word)
         if self.edges is not None and (
             len(self.edges) != _EDGE_SIDES
@@ -741,6 +810,8 @@ class Policy:
             refuse_dialog_confirm=self.refuse_dialog_confirm,
             edges=self.edges,
             min_visible_px=self.min_visible_px,
+            irreversible_phrases=self.irreversible_phrases,
+            skip_irreversible=self.skip_irreversible,
         )
 
 
@@ -812,7 +883,8 @@ class Detail:
     ``element_id`` is the element on top of the press point. For
     ``number_only``, ``note`` and ``word`` both hold the cleaned label; for
     ``toggle``, ``element_id`` is the first checkable element in document
-    order.
+    order. For ``irreversible_screen``, ``word`` is the phrase, ``field`` the
+    field and ``element_id`` the element where it was found.
     """
 
     reason: Reason
@@ -1097,6 +1169,7 @@ class _Judge:
             self.screen_note = f"screen package is {screen.package}"
         self.dialog = _is_dialog(self.tree)
         self._screen_hit: Detail | Literal[False] | None = False
+        self._irreversible: Detail | Literal[False] | None = False
         self._summarize()
         self._joined_hit: dict[int, str | None] = {}
         self._labels: dict[int, str] = {}
@@ -1545,10 +1618,7 @@ class _Judge:
         if not self.policy.tap_unlabeled and not self.sub_labeled[i]:
             reasons.append("unlabeled")
         self._crawl_rules(i, reasons, details)
-        deny = self._deny_detail(found)
-        if deny:
-            reasons.append("deny_word")
-            details.append(deny)
+        self._word_rules(found, reasons, details)
         if found[_CONFIRM] != _NONE:
             self._confirm_reasons(i, own, found, reasons, details)
         if point is not None and any(_contains(area, point) for area in self._avoid):
@@ -1569,6 +1639,40 @@ class _Judge:
             reasons.append("toggle")
             checkable = self.elements[self.tree.pre[self.sub_checkable[i]]]
             details.append(Detail("toggle", element_id=checkable.id))
+
+    def _word_rules(
+        self, found: _Agg, reasons: list[Reason], details: list[Detail]
+    ) -> None:
+        """Add the ``deny_word`` and ``irreversible_screen`` reasons."""
+        deny = self._deny_detail(found)
+        if deny:
+            reasons.append("deny_word")
+            details.append(deny)
+        irreversible = self.irreversible_detail()
+        if irreversible is not None:
+            reasons.append("irreversible_screen")
+            details.append(irreversible)
+
+    def irreversible_detail(self) -> Detail | None:
+        """Return the irreversibility phrase found on the screen, if any.
+
+        Computed once per screen; always None when the rule is off.
+        """
+        if self._irreversible is False:
+            self._irreversible = None
+            if self.policy.skip_irreversible and self.policy.irreversible_phrases:
+                hit = _PhraseMatcher(self.policy.irreversible_phrases).find(
+                    self.elements
+                )
+                if hit is not None:
+                    phrase, field, ident = hit
+                    self._irreversible = Detail(
+                        "irreversible_screen",
+                        word=phrase,
+                        field=field,
+                        element_id=ident,
+                    )
+        return self._irreversible
 
     def _deny_detail(self, found: _Agg) -> Detail | None:
         """Return the deny word of the scope: own fields first, then joined."""
@@ -1691,6 +1795,11 @@ def judge(
       subtree text (field ``joined``) of the candidate, its clickable
       ancestors and the clickable hit targets: the text and content_desc
       sequence, the texts alone and the content_descs alone.
+    * ``irreversible_screen``: the text, content description or hint of any
+      element of the screen holds a phrase of ``policy.irreversible_phrases``
+      (unless ``skip_irreversible`` is False). Every candidate gets it. The
+      detail's ``word`` is the phrase, ``field`` the field and ``element_id``
+      the first element (in document order) where it was found.
     * ``confirm_button``: a confirm word is the label of the candidate or of
       any clickable hit target (any source: own text, content_desc, hint,
       those of any descendant, or the joined descendant texts or

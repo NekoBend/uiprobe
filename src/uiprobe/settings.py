@@ -9,8 +9,10 @@ file format, the generator (`render_default_settings`,
 limits are not used yet, and ``press = true`` only makes ``crawl`` refuse to run
 unless ``--dry-run`` is given.
 
-What the file holds: the deny words, the confirm words, the rules (unlabeled,
-number-only and toggle elements, confirm buttons in dialogs, the screen-edge
+What the file holds: the deny words, the confirm words, the phrases that mark a
+screen as irreversible, the rules (unlabeled,
+number-only and toggle elements, confirm buttons in dialogs, irreversible
+screens, the screen-edge
 sizes, the smallest visible size), the crawl limits, ``press`` and the
 device-wide keys that ``uiprobe key`` refuses. What it never holds: the
 ``--allow-real-device`` flag, permission screens, password fields, typing,
@@ -62,11 +64,13 @@ from typing import TYPE_CHECKING, Final
 
 from uiprobe.device import DEVICE_WIDE_KEY_PREFIXES, DEVICE_WIDE_KEYS, FIXED_DEVICE_KEYS
 from uiprobe.guards import (
+    _APOSTROPHES,
     API36_BOTTOM_PX,
     API36_SIDE_PX,
     API36_TOP_PX,
     CONFIRM_WORDS,
     DEFAULT_DENY_WORDS,
+    IRREVERSIBLE_PHRASES,
     Policy,
     _check_word,
     _confirm_form,
@@ -107,6 +111,7 @@ MAX_SETTINGS_BYTES: Final = 1024 * 1024
 # older version would be given it only through the map's version.
 _LATER_DENY: Final[dict[str, int]] = {}
 _LATER_CONFIRM: Final[dict[str, int]] = {}
+_LATER_IRREVERSIBLE: Final[dict[str, int]] = {}
 _LATER_KEYS: Final[dict[str, int]] = {}
 _LATER_PREFIXES: Final[dict[str, int]] = {}
 _DENY_WORDS: Final[tuple[tuple[int, str], ...]] = tuple(
@@ -114,6 +119,9 @@ _DENY_WORDS: Final[tuple[tuple[int, str], ...]] = tuple(
 )
 _CONFIRM_WORDS: Final[tuple[tuple[int, str], ...]] = tuple(
     (_LATER_CONFIRM.get(word, 1), word) for word in CONFIRM_WORDS
+)
+_IRREVERSIBLE_PHRASES: Final[tuple[tuple[int, str], ...]] = tuple(
+    (_LATER_IRREVERSIBLE.get(phrase, 1), phrase) for phrase in IRREVERSIBLE_PHRASES
 )
 _REFUSE_KEYS: Final[tuple[tuple[int, str], ...]] = tuple(
     (_LATER_KEYS.get(key, 1), key)
@@ -137,6 +145,7 @@ _BOOL_RULES: Final = (
     "skip_number_only",
     "skip_toggles",
     "refuse_dialog_confirm",
+    "refuse_irreversible_screens",
 )
 # table -> key -> (lowest, highest) allowed value
 _INT_RANGES: Final[dict[str, dict[str, tuple[int, int]]]] = {
@@ -155,6 +164,7 @@ _INT_RANGES: Final[dict[str, dict[str, tuple[int, int]]]] = {
 _TABLE_KEYS: Final[dict[str, frozenset[str]]] = {
     "deny": frozenset({"words", "remove"}),
     "confirm": frozenset({"words", "remove"}),
+    "irreversible": frozenset({"phrases", "remove"}),
     "rules": frozenset(_BOOL_RULES) | frozenset(_INT_RANGES["rules"]),
     "limits": frozenset(_INT_RANGES["limits"]),
     "keys": frozenset({"refuse", "refuse_prefixes", "remove"}),
@@ -192,10 +202,12 @@ class Settings:
     press: bool
     deny_words: tuple[str, ...]
     confirm_words: tuple[str, ...]
+    irreversible_phrases: tuple[str, ...]
     tap_unlabeled: bool
     skip_number_only: bool
     skip_toggles: bool
     refuse_dialog_confirm: bool
+    refuse_irreversible_screens: bool
     min_visible_px: int
     edge_top_px: int
     edge_bottom_px: int
@@ -234,6 +246,8 @@ def policy_from_settings(
     policy = Policy(
         deny_words=settings.deny_words,
         confirm_words=settings.confirm_words,
+        irreversible_phrases=settings.irreversible_phrases,
+        skip_irreversible=settings.refuse_irreversible_screens,
         tap_unlabeled=settings.tap_unlabeled
         if tap_unlabeled is None
         else tap_unlabeled,
@@ -314,11 +328,18 @@ def render_default_settings() -> str:
         *_toml_list("words", _current(_CONFIRM_WORDS)),
         "remove = []",
         "",
+        "[irreversible]",
+        "# A screen whose text holds one of these phrases is refused as a whole:",
+        "# nothing on it is pressed (see refuse_irreversible_screens below).",
+        *_toml_list("phrases", _current(_IRREVERSIBLE_PHRASES)),
+        "remove = []",
+        "",
         "[rules]",
         "tap_unlabeled = false",
         "skip_number_only = true",
         "skip_toggles = true",
         "refuse_dialog_confirm = true",
+        "refuse_irreversible_screens = true",
         f"min_visible_px = {MIN_VISIBLE_PX}",
         f"edge_top_px = {API36_TOP_PX}",
         f"edge_bottom_px = {API36_BOTTOM_PX}",
@@ -554,6 +575,17 @@ def _confirm_identity(word: str) -> str:
     return form
 
 
+def _phrase_form(phrase: str) -> str:
+    """Return the form in which two irreversibility phrases are equal."""
+    return normalize(phrase.translate(_APOSTROPHES))
+
+
+def _phrase_identity(phrase: str) -> str:
+    """Check a phrase as `Policy` does; return what makes two phrases equal."""
+    _word_identity(phrase)
+    return _phrase_form(phrase)
+
+
 def _key_identity(name: str) -> str:
     if not _KEY_NAME.fullmatch(name):
         msg = f"{name!r} does not match KEYCODE_[A-Z0-9_]{{1,40}}"
@@ -751,6 +783,14 @@ def load_settings(path: str | os.PathLike[str]) -> Settings:
         confirm, "confirm", "remove", _confirm_identity, optional=True
     )
 
+    irreversible = reader.table(parsed, "irreversible", _TABLE_KEYS["irreversible"])
+    phrase_listed = reader.strings(
+        irreversible, "irreversible", "phrases", _phrase_identity
+    )
+    phrase_removed = reader.strings(
+        irreversible, "irreversible", "remove", _phrase_identity, optional=True
+    )
+
     rules = reader.table(parsed, "rules", _TABLE_KEYS["rules"])
     flags = {key: reader.boolean(rules, "rules", key) for key in _BOOL_RULES}
     sizes = {
@@ -799,10 +839,18 @@ def load_settings(path: str | os.PathLike[str]) -> Settings:
             defaults_version,
             _confirm_form,
         ),
+        irreversible_phrases=_merge(
+            phrase_listed,
+            phrase_removed,
+            _IRREVERSIBLE_PHRASES,
+            defaults_version,
+            _phrase_form,
+        ),
         tap_unlabeled=flags["tap_unlabeled"],
         skip_number_only=flags["skip_number_only"],
         skip_toggles=flags["skip_toggles"],
         refuse_dialog_confirm=flags["refuse_dialog_confirm"],
+        refuse_irreversible_screens=flags["refuse_irreversible_screens"],
         min_visible_px=sizes["min_visible_px"],
         edge_top_px=sizes["edge_top_px"],
         edge_bottom_px=sizes["edge_bottom_px"],
