@@ -22,9 +22,10 @@ More in [docs/safety.md](docs/safety.md).
 ## Requirements
 
 - Python 3.12 or newer.
-- CI tests uiprobe on Linux and Windows with Python 3.12, 3.13 and 3.14. macOS is not tested in CI yet.
 - `adb` from the Android SDK Platform-Tools, and a device or emulator that adb can see.
 - No Python dependencies.
+
+CI tests uiprobe on Linux and Windows with Python 3.12, 3.13 and 3.14. The tests that start a fake adb run on Linux only, so starting the adb server is not tested on Windows. macOS is not tested in CI yet.
 
 ## Installation
 
