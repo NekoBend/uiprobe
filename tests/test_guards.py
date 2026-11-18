@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import itertools
 import random
 import time
 import unicodedata
@@ -2929,6 +2930,13 @@ def test_the_reason_stands_between_deny_word_and_confirm_button() -> None:
         "取り消すことはできません",
         "データを完全に削除します",
         "Can\u200bnot be und\u00adone",
+        "取り消すことができません",
+        "元に戻すことができません",
+        "This action cannot be reversed",
+        "It can\u2019t be reversed",
+        "Your data will be irreversibly deleted",
+        "Deleted files cannot be recovered",
+        "削除したデータは復元できません",
     ],
 )
 def test_every_phrase_refuses_every_candidate(text) -> None:
@@ -3020,7 +3028,9 @@ def test_the_other_screens_candidates_all_get_the_reason_when_not_visible() -> N
 
 def test_the_default_phrases_are_unique_and_documented_ones() -> None:
     assert len(set(guards.IRREVERSIBLE_PHRASES)) == len(guards.IRREVERSIBLE_PHRASES)
-    assert len(guards.IRREVERSIBLE_PHRASES) == 13
+    assert len(guards.IRREVERSIBLE_PHRASES) == 20
+    keys = {guards._phrase_key(phrase) for phrase in guards.IRREVERSIBLE_PHRASES}
+    assert len(keys) == len(guards.IRREVERSIBLE_PHRASES)
     assert Policy().irreversible_phrases == guards.IRREVERSIBLE_PHRASES
 
 
@@ -3088,14 +3098,25 @@ def test_a_clickable_over_thousands_of_mark_only_texts_is_judged_quickly() -> No
 @pytest.mark.parametrize(
     ("words", "label", "counts"),
     [
-        (("\uc608",), "\uc608\uc57d", True),
-        (("\ud655\uc778",), "\ud655\uc778\ucde8\uc18c", True),
+        # Japanese: the word needs no boundary, whatever letter ends it.
         (("\u30aa\u30fc\u30b1\u30fc",), "\u30aa\u30fc\u30b1\u30fc", True),
-        (("\u30aa\u30fc\u30b1\u30fc",), "\u30aa\u30fc\u30b1\u30fc\u3067\u3059", False),
+        (("\u30aa\u30fc\u30b1\u30fc",), "\u30aa\u30fc\u30b1\u30fc\u3067\u3059", True),
+        (("\u306f\u3044",), "\u306f\u3044\u3069\u3046\u305e", True),
+        (("\u78ba\u8a8d",), "\u78ba\u8a8d\u3057\u307e\u3059", True),
+        (("\u4eba\u3005",), "\u4eba\u3005\u306e", True),
+        (("\u3044\u3059\u309e",), "\u3044\u3059\u309e\u3067\u3059", True),
+        (("\uff75\uff70\uff79\uff70",), "\u30aa\u30fc\u30b1\u30fc\u3067\u3059", True),
+        # Every other script keeps the boundary.
+        (("\u05d0\u05d1",), "\u05d0\u05d1\u05d9\u05d1", False),
+        (("\u05d0\u05d1",), "\u05d0\u05d1, \u05db\u05df", True),
+        (("\uc608",), "\uc608\uc57d", False),
+        (("\uc608",), "\uc608, \uacc4\uc18d", True),
+        (("\ud655\uc778",), "\ud655\uc778\ucde8\uc18c", False),
         (("ok",), "OK\u3067\u3059", False),
+        (("ok",), "OKAY", False),
     ],
 )
-def test_only_a_word_ending_in_a_letter_of_category_lo_is_open_ended(
+def test_only_a_word_ending_in_a_japanese_letter_is_open_ended(
     words, label, counts
 ) -> None:
     policy = Policy(confirm_words=words)
@@ -3103,6 +3124,188 @@ def test_only_a_word_ending_in_a_letter_of_category_lo_is_open_ended(
         [el("e2", text=label)], policy=policy, root_bounds=(20, 200, 300, 400)
     )
     assert ("dialog_confirm_button" in reasons(judgement, "e2")) is counts
+
+
+@pytest.mark.parametrize(
+    ("char", "japanese"),
+    [
+        ("\u3042", True),
+        ("\u30fc", True),
+        ("\u3005", True),
+        ("\u309d", True),
+        ("\u30fd", True),
+        ("\u6f22", True),
+        ("\uff71", True),
+        ("\U00020b9f", True),
+        ("\u30fb", False),
+        ("\u3001", False),
+        ("\u3099", False),
+        ("\u05d0", False),
+        ("\uac00", False),
+        ("a", False),
+        ("1", False),
+    ],
+)
+def test_the_japanese_letter_predicate(char, japanese) -> None:
+    assert guards._is_japanese_letter(char) is japanese
+
+
+def _split_label_row(field: str, parts: tuple[str, ...]):
+    row = el("e2", cls=LAYOUT, bounds=(50, 300, 250, 340))
+    kids = [
+        el(f"k{n}", parent="e2", cls=TEXT_VIEW, flags=(), **{field: part})
+        for n, part in enumerate(parts)
+    ]
+    return [row, *kids]
+
+
+@pytest.mark.parametrize("field", ["text", "desc"])
+@pytest.mark.parametrize(
+    "parts",
+    [
+        ("\u78ba", "\u8a8d\u3057\u3066\u304f\u3060\u3055\u3044"),
+        ("\u306f", "\u3044"),
+        ("\u7d9a", "\u3051", "\u308b"),
+        ("\u78ba", "\u8a8d"),
+    ],
+)
+def test_a_japanese_confirm_word_split_over_children_is_found(field, parts) -> None:
+    found = run(_split_label_row(field, parts), root_bounds=(20, 200, 300, 400))
+    assert "dialog_confirm_button" in reasons(found, "e2")
+
+
+@pytest.mark.parametrize("field", ["text", "desc"])
+def test_latin_parts_are_still_joined_with_a_space(field) -> None:
+    found = run(_split_label_row(field, ("O", "K")), root_bounds=(20, 200, 300, 400))
+    assert "dialog_confirm_button" not in reasons(found, "e2")
+    found = run(
+        _split_label_row(field, ("OK", "Cancel")), root_bounds=(20, 200, 300, 400)
+    )
+    assert "dialog_confirm_button" in reasons(found, "e2")
+
+
+def test_a_half_width_voiced_mark_is_not_joined_to_the_kana_before_it() -> None:
+    # NFKC would merge the two into one letter; the join keeps a space there.
+    policy = Policy(confirm_words=("\u30ab",))
+    found = run(
+        _split_label_row("text", ("\uff76", "\uff9e")),
+        policy=policy,
+        root_bounds=(20, 200, 300, 400),
+    )
+    assert "dialog_confirm_button" in reasons(found, "e2")
+
+
+def _nested_rows(count: int, text: str):
+    """A chain of nested clickable rows, each with one text child."""
+    rows = [el("c0", cls=LAYOUT, bounds=(50, 100, 250, 150))]
+    for n in range(1, count):
+        rows.append(
+            el(f"c{n}", parent=f"c{n - 1}", cls=LAYOUT, bounds=(50, 100, 250, 150))
+        )
+        rows.append(
+            el(
+                f"t{n}",
+                parent=f"c{n - 1}",
+                cls=TEXT_VIEW,
+                flags=(),
+                text=text,
+                bounds=(50, 100, 250, 150),
+            )
+        )
+    return rows
+
+
+def test_long_child_texts_are_judged_quickly() -> None:
+    # Every row reads only the start of its descendants' texts. Reading all
+    # of them (about 110 000 characters for each of the 1000 rows) took about
+    # 15 seconds.
+    rows = _nested_rows(1000, "lorem ipsum dolor sit amet " * 4)
+    start = time.perf_counter()
+    judgement = run(rows, root_bounds=(20, 50, 300, 400))
+    assert time.perf_counter() - start < 5
+    assert all("dialog_confirm_button" not in d.reasons for d in judgement.decisions)
+    one_long = _nested_rows(3, "lorem ipsum " * 5000)
+    start = time.perf_counter()
+    run(one_long, root_bounds=(20, 50, 300, 400))
+    assert time.perf_counter() - start < 5
+
+
+def _all_joined_forms(self, values):
+    """`_Judge._joined_forms` without the early stop: every value is read."""
+    parts = [guards._clean(value) for value in values]
+    parts = [part for part in parts if part]
+    spaced = " ".join(parts)
+    tight = parts[0] if parts else ""
+    for before, part in itertools.pairwise(parts):
+        join = (
+            guards._is_japanese_letter(before[-1])
+            and guards._is_japanese_letter(part[0])
+            and part[0] not in "\uff9e\uff9f"
+        )
+        tight += ("" if join else " ") + part
+    del self
+    return guards._confirm_form(spaced), guards._confirm_form(tight)
+
+
+def test_the_early_stop_gives_the_same_decisions(monkeypatch) -> None:
+    rng = random.Random(20261119)  # noqa: S311
+    pieces = [
+        "OK",
+        "ok",
+        "Yes",
+        "\u306f",
+        "\u3044",
+        "\u78ba",
+        "\u8a8d",
+        "!",
+        " ",
+        "-",
+        "x",
+        "Continue",
+        "\uff76",
+        "\uff9e",
+        "e\u0301",
+        "\u0301",
+        "lorem ipsum dolor",
+        "!!!!!!!!!!",
+        "( - ) ( - ) ( - )",
+        "Continued",
+        "OK OK OK OK OK",
+    ]
+    marks = "!!!!!!!!!! ( - ) ( - ) ( - )"
+    fixed = [
+        (marks, "\u78ba", "\u8a8d"),
+        (marks, "\u306f", "\u3044\u3069\u3046\u305e"),
+        (marks + " \u78ba", "\u8a8d"),
+        (marks, "O", "K"),
+        (marks, "ok", "!", "x"),
+        (marks, "\uff76", "\uff9e"),
+        ("x" * 40, "\u78ba", "\u8a8d"),
+    ]
+    screens = [
+        [
+            el("e2", cls=LAYOUT, bounds=(50, 300, 250, 340)),
+            *(
+                el(f"k{n}", parent="e2", cls=TEXT_VIEW, flags=(), text=label)
+                for n, label in enumerate(labels)
+            ),
+        ]
+        for labels in fixed
+    ]
+    for _ in range(300):
+        rows = [el("e2", cls=LAYOUT, bounds=(50, 300, 250, 340))]
+        for n in range(rng.randint(2, 8)):
+            label = "".join(rng.choice(pieces) for _ in range(rng.randint(1, 4)))
+            field = rng.choice(["text", "desc"])
+            rows.append(
+                el(f"k{n}", parent="e2", cls=TEXT_VIEW, flags=(), **{field: label})
+            )
+        screens.append(rows)
+    policy = Policy(confirm_words=(*guards.CONFIRM_WORDS, "e\u0301", "\u30ac"))
+    fast = [run(rows, policy=policy, root_bounds=DIALOG_ROOT) for rows in screens]
+    monkeypatch.setattr(guards._Judge, "_joined_forms", _all_joined_forms)
+    full = [run(rows, policy=policy, root_bounds=DIALOG_ROOT) for rows in screens]
+    assert fast == full
 
 
 @pytest.mark.parametrize("label", ["Undoubtedly", "Undock", "Restarted", "Undone"])

@@ -89,21 +89,25 @@ Choices that block more than strictly needed:
 * A candidate is a confirm button when the confirm form of any of these is a
   confirm word: its own text, content_desc and hint, the text, content_desc
   and hint of any descendant, and the descendants' texts (and, likewise,
-  content_descs) joined by one space in document order. ``Book`` is not a
-  confirm word.
+  content_descs) joined by one space in document order, also joined with no
+  space where one text ends and the next starts with a letter of the
+  Japanese script (``確`` + ``認してください``). ``Book`` is not a confirm
+  word.
 * A confirm form also counts when it starts with a confirm word followed by a
   boundary: ``Yes I'm sure!``, ``OK, delete``, ``Yes, continue`` and
   ``Continue anyway`` are confirm labels, ``Okinawa``, ``Yesterday`` and
   ``Continued`` are not (the word is only the start of a longer word). The
   boundary is a character that is not a letter (a space, punctuation or a
-  digit), or the end of the form. A confirm word that ends in a letter
-  without case (Unicode category Lo: hiragana, kanji, hangul and most
-  katakana) needs no boundary, because these scripts are written without
-  spaces: ``はい、削除します`` and ``はい削除します`` both start with ``はい``.
-  A word ending in the katakana long-vowel mark (``ー``, category Lm) still
-  needs a boundary. The cost is over-blocking, for example ``はいる``,
-  ``確認画面`` and ``許可しない``. A confirm word in Latin letters is not
-  matched when Japanese follows it (``OKです``).
+  digit), or the end of the form. A confirm word that ends in a letter of
+  the Japanese script (hiragana, katakana with the prolonged sound mark
+  ``ー`` and the iteration marks, kanji with ``々``) needs no boundary,
+  because Japanese is written without spaces: ``はい、削除します`` and
+  ``はい削除します`` both start with ``はい``, and ``オーケーです`` starts
+  with ``オーケー``. The cost is over-blocking, for example ``はいる``,
+  ``確認画面`` and ``許可しない``. Every other script keeps the boundary
+  (a Hebrew or Korean word is not matched at the start of a longer word),
+  and a confirm word in Latin letters is not matched when Japanese follows
+  it (``OKです``).
 * Whitespace, punctuation and symbols are trimmed from both ends of a confirm
   label until nothing changes (``OK!``, ``( OK )``, ``[ OK ]``), and custom
   confirm words go through the same cleaning as the label.
@@ -410,20 +414,29 @@ DEFAULT_DENY_WORDS: Final[tuple[str, ...]] = (
 
 # Phrases that say a screen's action cannot be taken back (English, then
 # Japanese). A screen whose text holds one refuses every element
-# (``irreversible_screen``). They are matched like the deny words.
+# (``irreversible_screen``). They are matched like the deny words, so spaces
+# and separators do not count: "cannot be undone" also matches "can not be
+# undone", and "cannot undo" matches "can not undo".
 IRREVERSIBLE_PHRASES: Final[tuple[str, ...]] = (
     "can't undo",
     "cannot undo",
-    "can not be undone",
     "cannot be undone",
     "can't be undone",
+    "cannot be reversed",
+    "can't be reversed",
+    "cannot be recovered",
+    "can't be recovered",
     "irreversible",
+    "irreversibly",
     "permanently",
     "this action is permanent",
     "元に戻せません",
     "取り消せません",
     "元に戻すことはできません",
+    "元に戻すことができません",
     "取り消すことはできません",
+    "取り消すことができません",
+    "復元できません",
     "完全に削除",
 )
 
@@ -513,6 +526,26 @@ _SEARCH_AUTOCOMPLETE: Final = "searchautocomplete"
 _CACHED_VALUE_LENGTH: Final = 256
 _SPACES_RE: Final = re.compile(r"\s+")
 _SEPARATOR_CHARS: Final = frozenset("_-./:\u2212\u00b7\u30fb\uff65")
+# Code point ranges of the Japanese script: kana (with the prolonged sound
+# mark and the iteration marks), CJK ideographs (with the ideographic
+# iteration mark and closing mark) and half-width katakana. Only letters
+# (category L*) in these ranges count, see `_is_japanese_letter`.
+_JAPANESE_RANGES: Final[tuple[tuple[int, int], ...]] = (
+    (0x3005, 0x3006),  # ideographic iteration mark, closing mark
+    (0x3031, 0x3035),  # vertical kana repeat marks
+    (0x303B, 0x303C),  # vertical ideographic iteration mark, masu mark
+    (0x3041, 0x309F),  # hiragana, with its iteration marks
+    (0x30A0, 0x30FF),  # katakana, with the prolonged sound and iteration marks
+    (0x31F0, 0x31FF),  # katakana phonetic extensions
+    (0x3400, 0x4DBF),  # CJK extension A
+    (0x4E00, 0x9FFF),  # CJK unified ideographs
+    (0xF900, 0xFAFF),  # CJK compatibility ideographs
+    (0xFF66, 0xFF9F),  # half-width katakana
+    (0x1B000, 0x1B16F),  # kana supplement and extensions
+    (0x20000, 0x323AF),  # CJK extensions B to H
+)
+# Half-width voiced sound marks: letters that NFKC turns into combining marks.
+_HALF_WIDTH_VOICED: Final = frozenset("\uff9e\uff9f")
 
 
 # -- normalization and matching ------------------------------------------------
@@ -576,6 +609,30 @@ def _forms(value: str) -> tuple[str, ...]:
     spaced = normalize(_separators_to_spaces(_split_camel(visible)))
     joined = "".join(spaced.split(" "))
     return tuple(dict.fromkeys((plain, spaced, joined)))
+
+
+def _is_japanese_letter(char: str) -> bool:
+    """True for a letter of the Japanese script (kana, ``ー``, ``々``, kanji)."""
+    if not unicodedata.category(char).startswith("L"):
+        return False
+    code = ord(char)
+    return any(low <= code <= high for low, high in _JAPANESE_RANGES)
+
+
+def _phrase_key(phrase: str) -> str:
+    """Return what decides which texts an irreversibility phrase matches.
+
+    The phrase normalized with curly apostrophes read as plain ones and with
+    every space and separator removed: the matching always compares this
+    form with the same form of the text, and every other form that matches
+    implies that this one does. Two phrases with the same key match the
+    same texts.
+    """
+    visible = _strip_invisible(
+        unicodedata.normalize("NFKC", phrase.translate(_APOSTROPHES))
+    )
+    spaced = normalize(_separators_to_spaces(_split_camel(visible)))
+    return "".join(spaced.split(" "))
 
 
 def _check_word(word: str) -> str:
@@ -1026,6 +1083,32 @@ def _clean(value: str) -> str:
     return _strip_invisible(value).strip()
 
 
+def _add_part(spaced: list[str], tight: list[str], part: str) -> int:
+    """Append a cleaned label part to both joins; return how many items each got.
+
+    ``spaced`` puts one space before every part but the first. ``tight`` does
+    the same, except where the previous part ends and this one starts with a
+    letter of the Japanese script: there it joins them directly. A half-width
+    voiced sound mark is never joined directly, because NFKC would merge it
+    into the letter before it.
+    """
+    if not spaced:
+        spaced.append(part)
+        tight.append(part)
+        return 1
+    previous = spaced[-1]
+    spaced.extend((" ", part))
+    if (
+        _is_japanese_letter(previous[-1])
+        and _is_japanese_letter(part[0])
+        and part[0] not in _HALF_WIDTH_VOICED
+    ):
+        tight.extend(("", part))
+    else:
+        tight.extend((" ", part))
+    return 2
+
+
 def _is_mark(char: str) -> bool:
     return char.isspace() or unicodedata.category(char)[0] in "PS"
 
@@ -1152,10 +1235,13 @@ class _Judge:
         self.matcher = _Matcher(policy.deny_words)
         self.confirm = frozenset(_confirm_form(w) for w in policy.confirm_words)
         self.max_confirm = max((len(form) for form in self.confirm), default=0)
-        # A confirm word that ends in a letter of category Lo can be
+        # The lengths of the confirm words, shortest first: only a start of a
+        # label of one of these lengths can be a confirm word.
+        self._confirm_lengths = sorted({len(form) for form in self.confirm})
+        # A confirm word that ends in a letter of the Japanese script can be
         # followed by anything; the others need a boundary (`_is_confirm`).
         self._open_ended = frozenset(
-            form for form in self.confirm if unicodedata.category(form[-1]) == "Lo"
+            form for form in self.confirm if _is_japanese_letter(form[-1])
         )
         self.target = target_package
         self._confirm_forms: dict[str, str] = {}
@@ -1308,13 +1394,15 @@ class _Judge:
 
         A confirm word at the start counts when a boundary follows it: a
         character that is not a letter, or nothing. A word ending in a
-        letter of category Lo needs no boundary.
+        letter of the Japanese script needs no boundary.
         """
         if not form:
             return False
         if form in self.confirm:
             return True
-        for end in range(1, min(len(form), self.max_confirm + 1)):
+        for end in self._confirm_lengths:
+            if end >= len(form):
+                break
             head = form[:end]
             if head in self.confirm and (
                 head in self._open_ended or not form[end].isalpha()
@@ -1406,7 +1494,7 @@ class _Judge:
 
         The sources are its own text, content_desc and hint, the same three
         fields of each descendant, and the descendants' texts (and likewise
-        content_descs) joined by one space in document order.
+        content_descs) joined in document order (`_joined_forms`).
         """
         cached = self._labels.get(i)
         if cached is None:
@@ -1421,20 +1509,71 @@ class _Judge:
                 form = self._form(value)
                 if self._is_confirm(form):
                     return form
-        below = [self.elements[j] for j in self.tree.subtree(i)[1:]]
-        # A single part is a field that was matched above. The joined form is
-        # only needed up to one character past the longest confirm word.
+        below = self.tree.subtree(i)[1:]
+        # A single part is a field that was matched above.
         for getter, count in (
             (lambda e: e.text, self.sub_core_text[i] - self.core_text[i]),
             (lambda e: e.content_desc, self.sub_core_desc[i] - self.core_desc[i]),
         ):
             if count < _MIN_JOINED_PARTS:
                 continue
-            parts = (_clean(getter(e)) for e in below)
-            form = _confirm_form(" ".join(part for part in parts if part))
-            if self._is_confirm(form):
-                return form
+            values = (getter(self.elements[j]) for j in below)
+            for form in self._joined_forms(values):
+                if self._is_confirm(form):
+                    return form
         return ""
+
+    def _joined_forms(self, values: Iterable[str]) -> tuple[str, str]:
+        """Return the confirm forms of the values joined in document order.
+
+        The first form joins the cleaned values with one space. The second
+        joins them with no space where one value ends and the next starts
+        with a letter of the Japanese script (``確`` + ``認してください``),
+        which is written without spaces, and with one space elsewhere.
+
+        Only the start of the values is read: once both forms are longer
+        than the longest confirm word, the forms of what was read are the
+        start of the forms of all values, because every place where the
+        reading stops (the end of a value, or a space inside a long value)
+        is a normalization boundary. `_is_confirm` then gives the same
+        answer for both. What was read is measured in doubling steps, so the
+        work stays linear in what is read.
+        """
+        spaced: list[str] = []
+        tight: list[str] = []
+        read = 0
+        budget = 2 * (self.max_confirm + 1)
+        for value in values:
+            if read < budget:
+                # A long value is first read up to a space past the budget.
+                cut = value.find(" ", budget)
+                head = _clean(value[:cut]) if cut != -1 else ""
+                if head:
+                    added = _add_part(spaced, tight, head)
+                    forms = self._long_forms(spaced, tight)
+                    if forms is not None:
+                        return forms
+                    del spaced[-added:], tight[-added:]
+            part = _clean(value)
+            if not part:
+                continue
+            _add_part(spaced, tight, part)
+            read += len(part) + 1
+            if read >= budget:
+                forms = self._long_forms(spaced, tight)
+                if forms is not None:
+                    return forms
+                budget *= 2
+        return _confirm_form("".join(spaced)), _confirm_form("".join(tight))
+
+    def _long_forms(
+        self, spaced: list[str], tight: list[str]
+    ) -> tuple[str, str] | None:
+        """Return both joined forms when both are longer than every word."""
+        forms = _confirm_form("".join(spaced)), _confirm_form("".join(tight))
+        if min(len(forms[0]), len(forms[1])) > self.max_confirm:
+            return forms
+        return None
 
     def _own_confirm(self, element: Element) -> bool:
         return any(
