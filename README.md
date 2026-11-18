@@ -25,7 +25,7 @@ More in [docs/safety.md](docs/safety.md).
 - `adb` from the Android SDK Platform-Tools, and a device or emulator that adb can see.
 - No Python dependencies.
 
-CI tests uiprobe on Linux and Windows with Python 3.12, 3.13 and 3.14. The tests that start a fake adb run on Linux only, so starting the adb server is not tested on Windows. macOS is not tested in CI yet.
+CI tests uiprobe on Linux and Windows with Python 3.12, 3.13 and 3.14. The tests that run a fake adb shell script are skipped on Windows, so on Windows no test runs `adb start-server` as a real program. macOS is not tested in CI yet.
 
 ## Installation
 
