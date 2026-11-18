@@ -51,6 +51,7 @@ from uiprobe.settings import (
     InterruptedFileError,
     Settings,
     SettingsError,
+    _shown,
     load_settings,
     policy_from_settings,
     write_default_settings,
@@ -633,8 +634,23 @@ def _is_missing(path: str) -> bool:
     return False
 
 
+def _check_config_path(path: str | None) -> None:
+    """Refuse a ``--config`` value that ends with a path separator.
+
+    A folder-like name such as ``rules.toml/`` would otherwise lose its slash
+    when turned into a path and name the file ``rules.toml``.
+    """
+    if path is not None and path.endswith(("/", "\\") if _ON_WINDOWS else "/"):
+        msg = (
+            f"--config {_shown(path)}: a settings file path cannot end with "
+            "a path separator"
+        )
+        raise _UsageError(msg)
+
+
 def _key_settings(args: argparse.Namespace) -> Settings | None:
     """Return the settings for ``key``, or None to use the built-in lists."""
+    _check_config_path(args.config)
     if args.config is not None:
         return _load_settings(args.config)
     if _is_missing(SETTINGS_FILE):
@@ -657,6 +673,7 @@ def _crawl_settings(args: argparse.Namespace) -> Settings:
     guidance, naming that path; an unreadable file or a broken link is left to
     the reader, which names the problem.
     """
+    _check_config_path(args.config)
     path = SETTINGS_FILE if args.config is None else args.config
     if _is_missing(path):
         looked = f"./{SETTINGS_FILE}" if args.config is None else path
@@ -669,7 +686,8 @@ def _crawl_settings(args: argparse.Namespace) -> Settings:
         name = f"uiprobe crawl {args.package} --dry-run --config PATH"
         raise _GuidedUsageError(
             (
-                f"crawl needs a settings file and none was found (looked for {looked})",
+                "crawl needs a settings file and none was found "
+                f"(looked for {_shown(looked)})",
                 f"create it with:    {create}",
                 f"or name one with:  {name}",
             ),
@@ -686,7 +704,7 @@ def _cmd_key(args: argparse.Namespace) -> int:
         else RefusedKeys(
             frozenset(settings.refused_keys),
             settings.refused_key_prefixes,
-            str(settings.source),
+            _shown(str(settings.source)),
         )
     )
     _key_code(args.name, refused)  # a bad name is a usage error before any contact
@@ -784,7 +802,7 @@ def _preview_text(result: Preview, settings_path: str) -> str:
     lines = [
         f"preview for {_printable(result.package)} on screen {screen.screen_id};"
         " nothing was pressed",
-        f"settings: {_printable(settings_path)}",
+        f"settings: {_printable(_shown(settings_path))}",
         f"foreground: {_printable(foreground)}, keyboard: {shown}",
         f"would press ({len(pressable)}):",
     ]

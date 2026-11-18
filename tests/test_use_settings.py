@@ -935,6 +935,10 @@ def test_a_link_or_entry_that_cannot_be_read_is_not_missing(
         assert (code, out) == (2, "")
         assert "none was found" not in err
         assert str(SETTINGS_FILE) in err
+        if kind == "dangling":
+            assert "the link's target is missing" in err
+        else:
+            assert "target is missing" not in err
         assert fake_adb.requests == []
 
 
@@ -999,3 +1003,80 @@ def test_create_line_follows_the_platform_rule(
 ) -> None:
     monkeypatch.setattr(cli, "_ON_WINDOWS", windows)
     assert cli._create_line(given) == create
+
+
+@pytest.mark.usefixtures("android")
+@pytest.mark.parametrize(
+    "command", [("crawl", SHOP, "--dry-run"), ("key", "KEYCODE_F2")]
+)
+@pytest.mark.parametrize("as_json", [False, True])
+def test_config_ending_with_a_separator_is_a_usage_error(
+    capsys, fake_adb, folder, command, as_json
+) -> None:
+    write(folder, render_default_settings(), "rules.toml")
+    extra = ("--json",) if as_json else ()
+    code, out, err = invoke(
+        capsys, fake_adb, *command, "--config", "rules.toml/", *extra
+    )
+    assert code == 2
+    text = json.loads(out)["error"]["message"] if as_json else err
+    assert "rules.toml/" in text
+    assert "path separator" in text
+    assert fake_adb.requests == []
+
+
+@pytest.mark.usefixtures("android", "folder")
+def test_a_path_with_a_newline_is_escaped_in_text_and_kept_in_json(
+    capsys, fake_adb, tmp_path
+) -> None:
+    try:
+        other = write(tmp_path, render_default_settings(), "a\nb.toml")
+    except OSError:
+        pytest.skip("cannot create such a file name here")
+    code, out, err = invoke(
+        capsys, fake_adb, "crawl", SHOP, "--dry-run", "--config", str(other)
+    )
+    assert (code, err) == (0, "")
+    line = out.splitlines()[1]
+    assert line == "settings: " + str(other).replace("\n", "\\x0a")
+    assert "\\x0a" in line
+    assert crawl_json(capsys, fake_adb, "--config", str(other))["settings"] == str(
+        other
+    )
+
+
+@pytest.mark.usefixtures("android", "folder")
+def test_a_missing_path_with_a_newline_is_escaped_in_the_guidance(
+    capsys, fake_adb, tmp_path
+) -> None:
+    given = str(tmp_path / "a\nb.toml")
+    shown = given.replace("\n", "\\x0a")
+    args = ("crawl", SHOP, "--dry-run", "--config", given)
+    code, out, err = invoke(capsys, fake_adb, *args)
+    assert (code, out) == (2, "")
+    assert err.splitlines()[0] == (
+        f"uiprobe: error: crawl needs a settings file and none was found"
+        f" (looked for {shown})"
+    )
+    assert len(err.splitlines()) == 3
+    code, out, err = invoke(capsys, fake_adb, *args, "--json")
+    assert (code, err) == (2, "")
+    error = json.loads(out)["error"]
+    assert error["details"]["looked_for"] == given
+    assert error["message"].splitlines()[0].endswith(f"(looked for {shown})")
+    assert fake_adb.requests == []
+
+
+@pytest.mark.usefixtures("android", "folder")
+def test_key_refusal_escapes_a_path_with_a_newline(capsys, fake_adb, tmp_path) -> None:
+    try:
+        other = write(tmp_path, render_default_settings(), "a\nb.toml")
+    except OSError:
+        pytest.skip("cannot create such a file name here")
+    code, out, err = invoke(
+        capsys, fake_adb, "key", "KEYCODE_VOLUME_UP", "--config", str(other)
+    )
+    assert (code, out) == (2, "")
+    assert str(other).replace("\n", "\\x0a") in err
+    assert len(err.splitlines()) == 1
+    assert fake_adb.requests == []

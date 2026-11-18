@@ -617,6 +617,8 @@ def _read_bytes(path: Path, shown: str) -> bytes:
     try:
         fd = os.open(path, _READ_FLAGS)
     except FileNotFoundError:
+        if os.path.lexists(path):
+            raise fail("no such file: the link's target is missing") from None
         raise fail("no such file") from None
     except (OSError, ValueError) as error:
         # Windows cannot open a directory (PermissionError): name it as POSIX
