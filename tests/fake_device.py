@@ -382,6 +382,7 @@ class FakeAndroid:
             re.compile(
                 "^am start -n (?:" + "|".join(re.escape(c) for c in components) + r")\Z"
             ),
+            re.compile(rf"^am force-stop (?:{monkey})\Z"),
         ]
         if extra:
             missing = "|".join(re.escape(p) for p in extra)
@@ -476,6 +477,10 @@ class FakeAndroid:
         # Assumed: black from API 33; only API 24 (empty) and 36 (black) captured.
         self.secure_screencap = secure_screencap or ("black" if api >= 33 else "empty")
         self.serial = serial
+        # False: monkey reports success but the app does not come to the front.
+        self.launch_in_front = True
+        # Packages stopped with ``am force-stop``, in order.
+        self.stopped: list[str] = []
         self.dropped: list[str] = []
         self.dropped_at: list[int] = []
         self.props = {"ro.build.version.sdk": str(api), "ro.kernel.qemu": "1"}
@@ -660,10 +665,15 @@ class FakeAndroid:
                 args = words[1:]
                 categories = [c for a, c in pairwise(rest) if a == "-c"]
                 # An unsupported category matches no activity, as in real monkey.
-                ok = all(c == LAUNCHER_CATEGORY for c in categories) and self._launch(
-                    package
-                )
+                ok = all(c == LAUNCHER_CATEGORY for c in categories)
+                if ok and self.launch_in_front:
+                    ok = self._launch(package)
+                elif ok:
+                    ok = any(s.package == package for s in self.screens.values())
                 return _monkey_output(args, ok=ok).encode()
+            case ["am", "force-stop", package]:
+                self._stop(package)
+                return b""
             case ["am", "start", "-n", component, *_]:
                 full = _full_component(component)
                 ok = self._launch(full.partition("/")[0], full)
@@ -744,6 +754,18 @@ class FakeAndroid:
             self._keyboard_hidden = True
         elif len(self.stack) > 1:
             self.stack.pop()
+            self._keyboard_hidden = False
+
+    def _stop(self, package: str) -> None:
+        """Remove the screens of `package` from the stack (``am force-stop``).
+
+        The fake has no home screen, so a stack that would become empty is left
+        as it is.
+        """
+        self.stopped.append(package)
+        kept = [n for n in self.stack if self.screens[n].package != package]
+        if kept:
+            self.stack = kept
             self._keyboard_hidden = False
 
     def _launch(self, package: str, component: str | None = None) -> bool:

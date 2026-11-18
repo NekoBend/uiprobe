@@ -30,8 +30,10 @@ from uiprobe._json import dumps
 from uiprobe.crawl_preview import check_package
 from uiprobe.crawl_preview import preview as make_preview
 from uiprobe.device import (
+    DEFAULT_LAUNCH_TIMEOUT,
     DEFAULT_PRESS_MS,
     DEFAULT_SWIPE_MS,
+    MAX_LAUNCH_TIMEOUT,
     MAX_PRESS_MS,
     Device,
     DeviceDetails,
@@ -361,6 +363,32 @@ def _build_parser() -> _Parser:
         required=True,
         metavar="PATH",
         help="the new PNG file to write (required)",
+    )
+    launch = commands.add_parser(
+        "launch",
+        allow_abbrev=False,
+        help="start an app and wait until it is in front",
+        description=(
+            "Start the app PACKAGE through its launcher activity and wait until"
+            " it is the foreground app. With --restart the app is stopped"
+            " first (am force-stop), so it starts a fresh task; state it has"
+            " not saved is lost. It starts the app on whatever device is"
+            " selected. Exit 15 (launch_failed) when the app has no launcher"
+            " activity, monkey prints something unexpected, or the app is not"
+            " in front within the timeout."
+        ),
+    )
+    _add_common_options(launch, in_command=True)
+    launch.add_argument("package", metavar="PACKAGE", help="the app's package name")
+    launch.add_argument(
+        "--restart",
+        action="store_true",
+        help="stop the app first, so it starts a fresh task",
+    )
+    launch.add_argument(
+        "--timeout",
+        metavar="SECONDS",
+        help="how long to wait for the app to come to the front (default 10)",
     )
     crawl = commands.add_parser(
         "crawl",
@@ -854,6 +882,45 @@ def _cmd_key(args: argparse.Namespace) -> int:
     return 0
 
 
+def _parse_timeout(value: str | None) -> float:
+    """Read ``--timeout``: a plain decimal number of seconds from 0 to 600."""
+    if value is None:
+        return DEFAULT_LAUNCH_TIMEOUT
+    if not re.fullmatch(r"[0-9]{1,12}(?:\.[0-9]{1,12})?", value):
+        msg = f"--timeout needs a number of seconds from 0 to 600, not {value!r}"
+        raise _UsageError(msg)
+    seconds = float(value)
+    if seconds > MAX_LAUNCH_TIMEOUT:
+        msg = f"--timeout needs a number of seconds from 0 to 600, not {value!r}"
+        raise _UsageError(msg)
+    return seconds
+
+
+def _cmd_launch(args: argparse.Namespace) -> int:
+    package = check_package(args.package)
+    timeout = _parse_timeout(args.timeout)
+    device = Device(
+        _single_serial(args),
+        adb_server=args.adb_server,
+        adb=args.adb,
+        start_server=args.start_server,
+    )
+    device.launch(package, restart=args.restart, timeout=timeout)
+    if args.json:
+        payload: dict[str, object] = {
+            "schema": ACTION_SCHEMA,
+            "action": "launch",
+            "package": package,
+            "device": {"serial": device.serial},
+            "restart": args.restart,
+            "captured_at": datetime.now(UTC).astimezone().isoformat(timespec="seconds"),
+        }
+        _emit(dumps(payload))
+    else:
+        _emit(f"launched {package}")
+    return 0
+
+
 def _crawl_policy(args: argparse.Namespace) -> tuple[Policy, Settings]:
     """Check the crawl options, read the settings and build the policy.
 
@@ -1144,6 +1211,7 @@ _HANDLERS: dict[str, Callable[[argparse.Namespace], int]] = {
     "tap": _cmd_tap,
     "swipe": _cmd_swipe,
     "key": _cmd_key,
+    "launch": _cmd_launch,
     "screenshot": _cmd_screenshot,
     "crawl": _cmd_crawl,
     "init": _cmd_init,
