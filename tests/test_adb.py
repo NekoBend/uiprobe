@@ -14,6 +14,7 @@ import subprocess
 import sys
 import threading
 import time
+import types
 from pathlib import Path
 from typing import Any, cast
 
@@ -1182,34 +1183,52 @@ def test_start_server_then_connect(
     assert calls == [[str(adb_path), "start-server"]]
 
 
-@pytest.mark.skipif(sys.platform == "win32", reason="uses a shell script")
 def test_retry_keeps_trying_until_the_server_listens(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     connections: list[tuple[object, ...]],
 ) -> None:
-    monkeypatch.setattr(adb, "START_RETRY_SECONDS", 3.0)
+    # The server starts listening in the client's first pause after a
+    # refused retry, so the sequence does not depend on how fast the system
+    # refuses a connection: one refused attempt before start-server, one
+    # refused retry, then the retry that reaches the server.
+    monkeypatch.setattr(adb, "START_RETRY_SECONDS", 10.0)
     port = unused_port()
     server = FakeAdbServer(port=port)
-    timer = threading.Timer(0.25, server.start)
+    attempts_before_start: list[int] = []
+    pauses: list[float] = []
 
     def fake_run(
         args: list[str], **_kwargs: object
     ) -> subprocess.CompletedProcess[bytes]:
-        timer.start()  # the server comes up a little after start-server returns
+        attempts_before_start.append(len(connections))
         return subprocess.CompletedProcess(args, 0, b"", b"")
 
+    def pause(seconds: float) -> None:
+        if not pauses:
+            server.start()
+        pauses.append(seconds)
+        time.sleep(seconds)
+
     monkeypatch.setattr(adb.subprocess, "run", fake_run)
+    monkeypatch.setattr(
+        adb,
+        "time",
+        types.SimpleNamespace(
+            monotonic=time.monotonic, perf_counter=time.perf_counter, sleep=pause
+        ),
+    )
     client = AdbClient(
         ServerAddress("127.0.0.1", port, is_default=True), adb_path=tmp_path / "adb"
     )
     try:
         assert client.server_version() == 41
     finally:
-        timer.join()
         server.stop()
-    attempts = [c for c in connections if c[1] == port]
-    assert len(attempts) >= 3
+    target = ("127.0.0.1", port)
+    assert attempts_before_start == [1]
+    assert connections == [target, target, target]
+    assert pauses == [adb.START_RETRY_INTERVAL]
 
 
 def test_retry_gives_up_after_the_deadline(
