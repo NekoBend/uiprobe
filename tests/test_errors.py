@@ -21,6 +21,7 @@ from uiprobe.errors import (
     InputFailedError,
     MultipleDevicesError,
     MultipleElementsError,
+    ScreenshotFailedError,
     UiprobeError,
 )
 
@@ -40,6 +41,7 @@ TABLE = [
     (MultipleElementsError, "multiple_elements", 13),
     (ElementNotVisibleError, "element_not_visible", 12),
     (InputFailedError, "input_failed", 14),
+    (ScreenshotFailedError, "screenshot_failed", 16),
 ]
 
 

@@ -41,4 +41,5 @@ Automating an app you do not own may break its terms of service. Read them first
 ## Personal data in dumps
 
 - A dump holds the text on the screen, which may include personal data such as names, addresses and messages. Check saved screens before you share them, also in an issue.
+- A screenshot (`uiprobe screenshot`, `Device.screenshot`) can contain personal data too, like a dump, and an image can show what no text names, so look at it before you share it.
 - Android lets an app forbid screenshots of a screen (`FLAG_SECURE`), but `uiautomator` still returns that screen's structure and text. So a dump of such a screen, and any copy of it you save, contains that text, which may include personal data. For example, on Android emulators at API 24 and API 36, Chrome's Incognito tab had `FLAG_SECURE`: Android's screenshot command, `screencap`, gave empty output on API 24 and an almost entirely black image on API 36, while `uiautomator dump` and `uiprobe dump` returned the full tree with its text.

@@ -21,6 +21,7 @@ import os
 import re
 import stat
 import sys
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, NoReturn, TextIO, override
 
@@ -49,6 +50,7 @@ from uiprobe.errors import (
 )
 from uiprobe.guards import REASONS, Policy
 from uiprobe.model import MAX_CANDIDATES, _describe
+from uiprobe.pngfile import check_png, save_png
 from uiprobe.settings import (
     SETTINGS_FILE,
     IncompleteFileError,
@@ -75,6 +77,7 @@ FIND_SCHEMA = "uiprobe.find/1"
 ACTION_SCHEMA = "uiprobe.action/1"
 CRAWL_PREVIEW_SCHEMA = "uiprobe.crawl_preview/1"
 INIT_SCHEMA = "uiprobe.init/1"
+SCREENSHOT_SCHEMA = "uiprobe.screenshot/1"
 _MAX_COORDINATE = 32767
 _COORDINATE_RE = re.compile(r"[0-9]{1,5}")
 _MAX_MS = 10000
@@ -331,6 +334,28 @@ def _build_parser() -> _Parser:
         ),
     )
     key.add_argument("name", metavar="NAME", help="an alias or a KEYCODE_ name")
+    screenshot = commands.add_parser(
+        "screenshot",
+        allow_abbrev=False,
+        help="save a screenshot as a new PNG file",
+        description=(
+            "Take a screenshot of the screen showing now and save it as a PNG"
+            " file at PATH, which must not exist (an existing file, link or"
+            " folder is a usage error and is left as it is). The image is"
+            " checked before the file is made; a failed screenshot (exit 16,"
+            " screenshot_failed) makes no file. A screen can forbid"
+            " screenshots, for example a private browser tab; its structure can"
+            " still be dumped. A screenshot can contain personal data."
+        ),
+    )
+    _add_common_options(screenshot, in_command=True)
+    screenshot.add_argument(
+        "-o",
+        "--output",
+        required=True,
+        metavar="PATH",
+        help="the new PNG file to write (required)",
+    )
     crawl = commands.add_parser(
         "crawl",
         allow_abbrev=False,
@@ -1044,6 +1069,53 @@ def _cmd_init(args: argparse.Namespace) -> int:
     return 0
 
 
+def _check_new_file(path: str) -> None:
+    """Refuse an empty path and anything that exists there, also a broken link."""
+    shown = _printable(path)
+    if not path:
+        msg = "-o PATH must not be empty"
+        raise _UsageError(msg)
+    if os.path.lexists(path):
+        msg = f"-o {shown}: already exists; give a new file name"
+        raise _UsageError(msg)
+
+
+def _cmd_screenshot(args: argparse.Namespace) -> int:
+    path = args.output
+    _check_new_file(path)
+    device = Device(
+        _single_serial(args),
+        adb_server=args.adb_server,
+        adb=args.adb,
+        start_server=args.start_server,
+    )
+    png = device.screenshot()
+    captured_at = datetime.now(UTC).astimezone()
+    width, height = check_png(png)
+    try:
+        save_png(path, png)
+    except FileExistsError:
+        msg = f"-o {_printable(path)}: already exists; give a new file name"
+        raise _UsageError(msg) from None
+    if args.json:
+        payload: dict[str, object] = {
+            "schema": SCREENSHOT_SCHEMA,
+            "captured_at": captured_at.isoformat(timespec="seconds"),
+            "device": {"serial": device.serial},
+            "path": path,
+            "bytes": len(png),
+            "width": width,
+            "height": height,
+        }
+        display = device.display_for_image(width, height)
+        if display is not None:
+            payload["display"] = {"width": display[0], "height": display[1]}
+        _emit(dumps(payload, indent=2))
+    else:
+        _emit(f"saved {_printable(path)} ({width}x{height}, {len(png)} bytes)")
+    return 0
+
+
 _HANDLERS: dict[str, Callable[[argparse.Namespace], int]] = {
     "devices": _cmd_devices,
     "dump": _cmd_dump,
@@ -1051,6 +1123,7 @@ _HANDLERS: dict[str, Callable[[argparse.Namespace], int]] = {
     "tap": _cmd_tap,
     "swipe": _cmd_swipe,
     "key": _cmd_key,
+    "screenshot": _cmd_screenshot,
     "crawl": _cmd_crawl,
     "init": _cmd_init,
 }

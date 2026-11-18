@@ -8,7 +8,7 @@ uiprobe saves the screen structure of an Android app and sends taps, swipes and 
 
 uiprobe is alpha software: the command line, the JSON formats and the Python API may change in any later version. This is a development snapshot, version 0.1.0a1.dev0; no alpha is tagged yet.
 
-Eight commands exist: `devices`, `dump`, `find`, `tap`, `swipe`, `key`, `crawl` and `init`. Of `crawl` only the preview exists: it shows what a crawl would press on the screen showing now and presses nothing, and it is what `crawl` does by default. The pressing crawl is planned, not implemented, and a run that asks for pressing (`--press` or `press = true` in the settings file) is refused. Typing and other ways of operating the app are planned too. The guards have been checked only on Android emulators; real devices and other Android versions may behave differently.
+Nine commands exist: `devices`, `dump`, `screenshot`, `find`, `tap`, `swipe`, `key`, `crawl` and `init`. Of `crawl` only the preview exists: it shows what a crawl would press on the screen showing now and presses nothing, and it is what `crawl` does by default. The pressing crawl is planned, not implemented, and a run that asks for pressing (`--press` or `press = true` in the settings file) is refused. Typing and other ways of operating the app are planned too. The guards have been checked only on Android emulators; real devices and other Android versions may behave differently.
 
 ## Safety
 
@@ -72,6 +72,7 @@ Add `--json` to get JSON instead of text (`uiprobe dump --json`), or `--brief` f
 | --- | --- | --- |
 | `devices` | Lists the devices the adb server knows. | [Listing devices](docs/commands.md#listing-devices) |
 | `dump` | Prints the screen showing now as a tree, or as JSON. | [Dumping a screen](docs/commands.md#dumping-a-screen) |
+| `screenshot` | Saves a screenshot as a new PNG file. | [Taking a screenshot](docs/commands.md#taking-a-screenshot) |
 | `find` | Lists the visible elements that match all of the given `--text`, `--id` and `--desc`. | [Finding elements](docs/commands.md#finding-elements) |
 | `tap` | Taps or long-presses an element or a point. | [Tapping](docs/commands.md#tapping) |
 | `swipe` | Drags one finger, or scrolls in a direction. | [Swiping and scrolling](docs/commands.md#swiping-and-scrolling) |

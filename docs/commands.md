@@ -52,6 +52,29 @@ e4 ScrollView [scroll]
 - A folded label is at most 60 characters, counted before escaping. A longer label is cut and ends with `...`, which counts in the 60; spaces left at the cut are removed, so a cut label can be a little shorter than 60. Text is then escaped as in the full view, so a line break or control character shows as `\n` or `\u202e` and the printed value can be longer than 60 characters.
 - `--brief` cannot be used with `--json`, because the JSON stays complete. The command exits with 2 (`usage_error`) and sends nothing to the device. `find`, `tap` and the other commands are not affected.
 
+## Taking a screenshot
+
+Save the screen that is showing on the device as a PNG file:
+
+```console
+$ uiprobe -s emulator-5554 screenshot -o login.png
+saved login.png (1080x2400, 84213 bytes)
+```
+
+`-o PATH` is required and names a new file. The file is created and never replaced: if a file, a link or a folder exists at `PATH`, the command exits with 2 (a usage error) before it asks the device for anything, and the existing item is left untouched. The folder of `PATH` must exist. `PATH` is written as you typed it, in the output too; on Windows a path such as `shots\login.png` or `C:\shots\login.png` works as usual.
+
+The command sent to the device is exactly this, through the binary-safe `exec:` service, and the bytes are saved as they come:
+
+```sh
+screencap -p
+```
+
+The image is checked in memory before the file is made: it must start with the PNG signature, have a well-formed header chunk (`IHDR`) with a width and a height above 0, and end with the closing `IEND` chunk. Checksums and the image data are not checked. Empty output, a cut-off image or anything that is not a PNG exits with 16 (`screenshot_failed`) and makes no file. An app can forbid screenshots of a screen, for example a private browser tab: on older Android (an emulator at API 24, for example) `screencap` then gives empty output, so the command fails, but `uiprobe dump` still returns the structure of that screen. On newer Android (API 36, for example) such a screen gives a mostly black image instead. That is a valid PNG, so it is saved like any other; look at the image before you rely on it.
+
+If the file was created but writing it failed (a full disk, for example), the partial file stays where it is and the error (exit 1, `file_error`) names it; uiprobe never deletes it. If the file could not be created at all (the folder is missing, access is denied), the error names the path and no file exists.
+
+With `--json` the result is a `uiprobe.screenshot/1` document, see [Output formats](output.md). A screenshot can contain personal data, like a dump; see [Safety](safety.md#personal-data-in-dumps).
+
 ## Finding elements
 
 `uiprobe find` lists the elements of the current screen that match all the criteria you give. At least one is needed:
