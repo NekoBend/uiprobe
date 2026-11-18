@@ -3140,6 +3140,7 @@ def test_only_a_word_ending_in_a_japanese_letter_is_open_ended(
         ("\u3001", False),
         ("\u3099", False),
         ("\u05d0", False),
+        ("\U0001aff0", False),  # kana extended-B is Taiwanese, not Japanese
         ("\uac00", False),
         ("a", False),
         ("1", False),
