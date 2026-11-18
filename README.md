@@ -25,6 +25,8 @@ More in [docs/safety.md](docs/safety.md).
 - `adb` from the Android SDK Platform-Tools, and a device or emulator that adb can see.
 - No Python dependencies.
 
+CI tests uiprobe on Linux and Windows with Python 3.12, 3.13 and 3.14. The tests that run a fake adb shell script are skipped on Windows, so on Windows no test runs `adb start-server` as a real program. macOS is not tested in CI yet.
+
 ## Installation
 
 From the GitHub repository:
@@ -108,7 +110,7 @@ uiprobe connects only to the adb server, which is on `127.0.0.1:5037` unless you
 
 ## Contributing
 
-Issues are welcome. While uiprobe is alpha, pull requests are not accepted yet.
+Issues are welcome. Report a suspected vulnerability privately instead, as [SECURITY.md](SECURITY.md) describes. While uiprobe is alpha, pull requests are not accepted yet.
 
 ## License
 

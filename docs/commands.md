@@ -191,7 +191,7 @@ These options work before or after the command, except for `init`, which accepts
 | `ADB_SERVER_SOCKET` | The adb server address, `tcp:HOST:PORT`, with the same `HOST` rules as `--adb-server`. |
 | `ANDROID_ADB_SERVER_PORT` | The port of the adb server on `127.0.0.1`. |
 | `UIPROBE_ADB` | Path of the adb executable. |
-| `ANDROID_HOME`, `ANDROID_SDK_ROOT` | SDK directories; `platform-tools/adb` below them is used when adb is not found otherwise. |
+| `ANDROID_HOME`, `ANDROID_SDK_ROOT` | SDK directories; `platform-tools/adb` (`platform-tools/adb.exe` on Windows) below them is used when adb is not found otherwise. |
 
 The adb server address is taken from `--adb-server`, then `ADB_SERVER_SOCKET`, then `ANDROID_ADB_SERVER_PORT`, then `tcp:127.0.0.1:5037`. The adb executable is taken from `--adb`, then `UIPROBE_ADB`, then `adb` on `PATH`, then the SDK directories. Empty variables count as unset.
 
