@@ -338,3 +338,12 @@ def test_stream_configuration_ignores_json_after_double_dash(monkeypatch):
     calls.clear()
     cli._configure_streams(["dump", "--json", "--", "x"])
     assert {"encoding": "utf-8", "errors": "backslashreplace"} in calls
+
+
+@pytest.mark.usefixtures("android")
+def test_find_keeps_the_full_dump_for_its_screen_id(fake_adb, capsys):
+    # The screen id includes the activity, so find reads it like dump does.
+    invoke(capsys, fake_adb, "find", "--text", "Login")
+    commands = [c for _, _, c in fake_adb.commands]
+    assert any(c.startswith("dumpsys window") for c in commands)
+    assert "getprop ro.build.version.sdk" in commands

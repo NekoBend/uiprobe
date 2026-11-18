@@ -528,7 +528,8 @@ def _cmd_tap(args: argparse.Namespace) -> int:
     element: Element | None = None
     element_json: dict[str, object] | None = None
     if xy is None:
-        screen = device.dump()
+        # The activity and the API level are not used here: skip their reads.
+        screen = device.dump(details=False)
         element = screen.find_one(
             text=args.text, resource_id=args.resource_id, desc=args.desc
         )
@@ -621,10 +622,10 @@ def _cmd_swipe(args: argparse.Namespace) -> int:
             try:
                 start, end = device.scroll_display(args.direction, duration_ms=duration)
             except DisplaySizeUnknownError:
-                device.dump()
+                device.dump(details=False)
                 start, end = device.scroll(args.direction, duration_ms=duration)
         else:
-            screen = device.dump()
+            screen = device.dump(details=False)
             element = screen.find_one(
                 text=args.text, resource_id=args.resource_id, desc=args.desc
             )

@@ -1046,3 +1046,80 @@ def test_cli_tap_on_an_element_with_no_press_target_exits_12(capsys, fake_adb, m
     assert "nothing that can receive a press" in error["message"]
     assert matches.inputs == []
     assert sent_inputs(fake_adb) == []
+
+
+# --- the selector commands read only what their checks need ---
+
+
+def _commands(fake_adb: FakeAdbServer) -> list[str]:
+    return [c for _, _, c in fake_adb.commands]
+
+
+@pytest.mark.usefixtures("android")
+def test_cli_tap_by_text_sends_exactly_the_commands_it_needs(capsys, fake_adb):
+    code, _, err = invoke(capsys, fake_adb, "tap", "--text", "Login")
+    assert (code, err) == (0, "")
+    commands = _commands(fake_adb)
+    assert [c.split(" ")[0] for c in commands] == [
+        "uiautomator",
+        "cat",
+        "rm",
+        "wm",
+        "input",
+    ]
+    assert commands[3] == "wm size"
+    assert commands[4] == TAP_COMMAND
+    assert not any(c.startswith(("dumpsys window", "getprop")) for c in commands)
+
+
+@pytest.mark.usefixtures("android")
+def test_cli_dump_still_sends_the_activity_and_api_level_reads(capsys, fake_adb):
+    code, out, _ = invoke(capsys, fake_adb, "dump", "--json")
+    assert code == 0
+    commands = _commands(fake_adb)
+    assert any(c.startswith("dumpsys window") for c in commands)
+    assert "getprop ro.build.version.sdk" in commands
+    payload = json.loads(out)
+    assert payload["app"]["activity"] == ".Main"
+    assert payload["device"]["api_level"] == 36
+    code, out, _ = invoke(capsys, fake_adb, "dump")
+    assert out.splitlines()[0].startswith(f"{SHOP}/.Main  (s-")
+
+
+def test_dump_without_details_skips_the_two_reads(device, fake_adb):
+    screen = device.dump(details=False)
+    assert (screen.activity, screen.api_level) == (None, None)
+    assert screen.display == (320, 640)
+    commands = _commands(fake_adb)
+    assert not any(c.startswith(("dumpsys window", "getprop")) for c in commands)
+    assert "wm size" in commands
+    data = screen.to_dict()
+    assert "activity" not in data["app"]
+    assert "api_level" not in data["device"]
+
+
+def test_dump_by_default_fills_activity_and_api_level(device):
+    screen = device.dump()
+    assert screen.activity == ".Main"
+    assert screen.api_level == 36
+    assert device.dump(details=True).activity == ".Main"
+
+
+@pytest.mark.usefixtures("cover")
+def test_a_light_dump_gives_the_same_tap_checks_as_a_full_one(fake_adb):
+    device = Device(COVER_SERIAL, adb_server=fake_adb.address)
+    light = device.dump(details=False)
+    full = device.dump()
+
+    def outcome(screen: ScreenModel, element: Element) -> object:
+        try:
+            return screen.tap_point(element)
+        except ElementNotVisibleError as error:
+            return error.details["reason"]
+
+    results = [
+        (outcome(light, a), outcome(full, b))
+        for a, b in zip(light.elements, full.elements, strict=True)
+    ]
+    assert all(one == other for one, other in results)
+    assert {"covered", "too_small"} <= {r for r, _ in results if isinstance(r, str)}
