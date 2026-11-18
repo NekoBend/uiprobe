@@ -628,10 +628,16 @@ def _phrase_identity(phrase: str) -> str:
     Two phrases are equal when they match the same texts: the same after
     normalization, with curly apostrophes read as plain ones and spaces and
     separators ignored (`uiprobe.guards._phrase_key`), so ``can not be undone``
-    and ``cannot be undone`` are one phrase.
+    and ``cannot be undone`` are one phrase. A phrase with nothing left
+    once spaces, separators and invisible characters are removed (``-``) is
+    refused: it has no words to match.
     """
     _word_identity(phrase)
-    return _phrase_key(phrase)
+    key = _phrase_key(phrase)
+    if not key:
+        msg = f"phrase must contain a letter or digit: {phrase!r}"
+        raise ValueError(msg)
+    return key
 
 
 def _key_identity(name: str) -> str:
@@ -914,7 +920,7 @@ def load_settings(path: str | os.PathLike[str]) -> Settings:
             phrase_removed,
             _IRREVERSIBLE_PHRASES,
             defaults_version,
-            _phrase_key,
+            _phrase_identity,
         ),
         tap_unlabeled=flags["tap_unlabeled"],
         skip_number_only=flags["skip_number_only"],

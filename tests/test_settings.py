@@ -1873,6 +1873,38 @@ def test_spellings_of_one_phrase_are_one_entry(tmp_path):
     )
 
 
+@pytest.mark.parametrize(
+    ("key", "items"),
+    [
+        ("phrases", '["-"]'),
+        ("remove", '["_"]'),
+        ("phrases", '["- _ . / :"]'),
+        ("remove", '["\u200b-\u2014"]'),
+    ],
+)
+def test_a_phrase_of_only_separators_is_refused_in_a_version_1_file(
+    tmp_path, key, items
+):
+    head, _, tail = v1_text().partition("[rules]\n")
+    text = head + f"[irreversible]\n{key} = {items}\n\n[rules]\n" + tail
+    refused(
+        write(tmp_path, text),
+        f"[irreversible] {key}",
+        "must contain a letter or digit",
+    )
+
+
+@pytest.mark.parametrize("index", [2, None])
+def test_a_phrase_of_only_separators_is_refused_in_a_version_2_file(tmp_path, index):
+    if index is None:
+        path = edited(tmp_path, '    "permanently",\n', '    "-",\n')
+        key = "phrases"
+    else:
+        path = with_remove(tmp_path, index, '["_"]')
+        key = "remove"
+    refused(path, f"[irreversible] {key}", "must contain a letter or digit")
+
+
 def test_no_two_default_phrases_match_the_same_texts():
     keys = [guards._phrase_key(phrase) for phrase in IRREVERSIBLE_PHRASES]
     assert len(set(keys)) == len(keys)

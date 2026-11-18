@@ -541,6 +541,7 @@ _JAPANESE_RANGES: Final[tuple[tuple[int, int], ...]] = (
     (0x4E00, 0x9FFF),  # CJK unified ideographs
     (0xF900, 0xFAFF),  # CJK compatibility ideographs
     (0xFF66, 0xFF9F),  # half-width katakana
+    (0x1AFF0, 0x1AFFF),  # kana extended-B (Taiwanese katakana)
     (0x1B000, 0x1B16F),  # kana supplement and extensions
     (0x20000, 0x323AF),  # CJK extensions B to H
 )
@@ -1083,8 +1084,8 @@ def _clean(value: str) -> str:
     return _strip_invisible(value).strip()
 
 
-def _add_part(spaced: list[str], tight: list[str], part: str) -> int:
-    """Append a cleaned label part to both joins; return how many items each got.
+def _add_part(spaced: list[str], tight: list[str], part: str) -> None:
+    """Append a cleaned label part to both joins.
 
     ``spaced`` puts one space before every part but the first. ``tight`` does
     the same, except where the previous part ends and this one starts with a
@@ -1095,7 +1096,7 @@ def _add_part(spaced: list[str], tight: list[str], part: str) -> int:
     if not spaced:
         spaced.append(part)
         tight.append(part)
-        return 1
+        return
     previous = spaced[-1]
     spaced.extend((" ", part))
     if (
@@ -1106,7 +1107,6 @@ def _add_part(spaced: list[str], tight: list[str], part: str) -> int:
         tight.extend(("", part))
     else:
         tight.extend((" ", part))
-    return 2
 
 
 def _is_mark(char: str) -> bool:
@@ -1234,7 +1234,6 @@ class _Judge:
         self.elements = screen.elements
         self.matcher = _Matcher(policy.deny_words)
         self.confirm = frozenset(_confirm_form(w) for w in policy.confirm_words)
-        self.max_confirm = max((len(form) for form in self.confirm), default=0)
         # The lengths of the confirm words, shortest first: only a start of a
         # label of one of these lengths can be a confirm word.
         self._confirm_lengths = sorted({len(form) for form in self.confirm})
@@ -1530,50 +1529,14 @@ class _Judge:
         joins them with no space where one value ends and the next starts
         with a letter of the Japanese script (``確`` + ``認してください``),
         which is written without spaces, and with one space elsewhere.
-
-        Only the start of the values is read: once both forms are longer
-        than the longest confirm word, the forms of what was read are the
-        start of the forms of all values, because every place where the
-        reading stops (the end of a value, or a space inside a long value)
-        is a normalization boundary. `_is_confirm` then gives the same
-        answer for both. What was read is measured in doubling steps, so the
-        work stays linear in what is read.
         """
         spaced: list[str] = []
         tight: list[str] = []
-        read = 0
-        budget = 2 * (self.max_confirm + 1)
         for value in values:
-            if read < budget:
-                # A long value is first read up to a space past the budget.
-                cut = value.find(" ", budget)
-                head = _clean(value[:cut]) if cut != -1 else ""
-                if head:
-                    added = _add_part(spaced, tight, head)
-                    forms = self._long_forms(spaced, tight)
-                    if forms is not None:
-                        return forms
-                    del spaced[-added:], tight[-added:]
             part = _clean(value)
-            if not part:
-                continue
-            _add_part(spaced, tight, part)
-            read += len(part) + 1
-            if read >= budget:
-                forms = self._long_forms(spaced, tight)
-                if forms is not None:
-                    return forms
-                budget *= 2
+            if part:
+                _add_part(spaced, tight, part)
         return _confirm_form("".join(spaced)), _confirm_form("".join(tight))
-
-    def _long_forms(
-        self, spaced: list[str], tight: list[str]
-    ) -> tuple[str, str] | None:
-        """Return both joined forms when both are longer than every word."""
-        forms = _confirm_form("".join(spaced)), _confirm_form("".join(tight))
-        if min(len(forms[0]), len(forms[1])) > self.max_confirm:
-            return forms
-        return None
 
     def _own_confirm(self, element: Element) -> bool:
         return any(
