@@ -12,6 +12,7 @@ import random
 import re
 import sys
 from dataclasses import replace
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pytest
@@ -45,8 +46,6 @@ from uiprobe.settings import (
 )
 
 if TYPE_CHECKING:
-    from pathlib import Path
-
     from tests.fake_adb_server import FakeAdbServer
 
 SUFFIX = "; echo uiprobe-exit:$?"
@@ -320,6 +319,36 @@ def test_a_removed_deny_word_is_not_applied(tmp_path) -> None:
     assert reasons(run([item], policy=policy), "e2") == ()
 
 
+def test_the_generated_file_lists_the_start_over_words(tmp_path) -> None:
+    text = render_default_settings()
+    for word in ("restart", "undo", "やり直", "元に戻"):
+        assert f'"{word}"' in text
+        assert word in loaded(tmp_path, text).deny_words
+
+
+def test_removing_the_start_over_words_makes_them_pressable_again(tmp_path) -> None:
+    text = render_default_settings().replace(
+        "remove = []", 'remove = ["restart", "undo", "やり直", "元に戻"]', 1
+    )
+    policy = policy_from_settings(loaded(tmp_path, text))
+    for label in ("Restart", "Undo", "やり直す", "元に戻す"):
+        item = el("e2", text=label, bounds=(50, 100, 250, 150))
+        assert reasons(run([item]), "e2") == ("deny_word",)
+        assert reasons(run([item], policy=policy), "e2") == ()
+    screen = [
+        el(
+            "e2",
+            text="Are you sure you want to restart?",
+            cls="android.widget.TextView",
+            flags=(),
+            bounds=(20, 100, 300, 140),
+        ),
+        el("e3", text="Yes I'm sure!", bounds=(20, 300, 300, 360)),
+    ]
+    assert reasons(run(screen), "e3") == ("confirm_button",)
+    assert reasons(run(screen, policy=policy), "e3") == ()
+
+
 # -- crawl needs the settings file -----------------------------------------
 
 
@@ -583,9 +612,12 @@ def test_removing_a_deny_word_in_the_file_makes_the_element_pressable(
 def test_a_later_default_word_applies_without_being_listed(
     capsys, fake_adb, folder, monkeypatch
 ) -> None:
-    write(folder, render_default_settings())  # a version 1 file
-    monkeypatch.setattr(settings, "DEFAULTS_VERSION", 2)
-    monkeypatch.setattr(settings, "_DENY_WORDS", (*settings._DENY_WORDS, (2, "browse")))
+    write(folder, render_default_settings())  # a file of the current version
+    later = settings.DEFAULTS_VERSION + 1
+    monkeypatch.setattr(settings, "DEFAULTS_VERSION", later)
+    monkeypatch.setattr(
+        settings, "_DENY_WORDS", (*settings._DENY_WORDS, (later, "browse"))
+    )
     payload = crawl_json(capsys, fake_adb)
     assert skipped(payload)["Browse"] == ["deny_word"]
     assert pressed(payload) == ["Help"]
@@ -1110,3 +1142,118 @@ def test_key_refusal_escapes_a_path_with_a_newline(capsys, fake_adb, tmp_path) -
     assert str(other).replace("\n", "\\x0a") in err
     assert len(err.splitlines()) == 1
     assert fake_adb.requests == []
+
+
+# -- irreversible screens through the file --------------------------------------
+
+
+def _warned_screen():
+    text = "android.widget.TextView"
+    return [
+        el(
+            "e2",
+            text="Restart game? You can't undo this",
+            cls=text,
+            flags=(),
+            bounds=(20, 100, 300, 140),
+        ),
+        el("e3", text="Yes I'm sure!", bounds=(20, 300, 300, 360)),
+        el("e4", text="Wait, cancel!", bounds=(20, 380, 300, 440)),
+    ]
+
+
+def test_the_default_file_refuses_every_element_of_a_warned_screen(tmp_path):
+    policy = policy_from_settings(loaded(tmp_path))
+    assert policy.skip_irreversible is True
+    found = run(_warned_screen(), policy=policy)
+    assert reasons(found, "e3") == ("irreversible_screen", "confirm_button")
+    assert reasons(found, "e4") == ("irreversible_screen",)
+
+
+def test_the_switch_in_the_file_turns_the_rule_off(tmp_path):
+    text = render_default_settings().replace(
+        "refuse_irreversible_screens = true", "refuse_irreversible_screens = false"
+    )
+    policy = policy_from_settings(loaded(tmp_path, text))
+    assert policy.skip_irreversible is False
+    found = run(_warned_screen(), policy=policy)
+    assert reasons(found, "e3") == ("confirm_button",)
+    assert reasons(found, "e4") == ()
+
+
+def test_phrases_removed_in_the_file_stop_applying(tmp_path):
+    text = render_default_settings()
+    head, _, tail = text.partition("[irreversible]")
+    table, _, rest = tail.partition("[rules]")
+    table = table.replace("remove = []", 'remove = ["can\'t undo", "CANNOT UNDO"]')
+    policy = policy_from_settings(
+        loaded(tmp_path, head + "[irreversible]" + table + "[rules]" + rest)
+    )
+    assert "can't undo" not in policy.irreversible_phrases
+    found = run(_warned_screen(), policy=policy)
+    assert reasons(found, "e3") == ("confirm_button",)
+    assert reasons(found, "e4") == ()
+    other = [
+        el("e2", text="Cannot be undone", cls="android.widget.TextView", flags=()),
+        el("e3", text="Home", bounds=(20, 300, 300, 360)),
+    ]
+    assert reasons(run(other, policy=policy), "e3") == ("irreversible_screen",)
+
+
+def test_japanese_phrases_come_through_the_file(tmp_path):
+    policy = policy_from_settings(loaded(tmp_path))
+    screen = [
+        el(
+            "e2",
+            text="この操作は取り消せません",
+            cls="android.widget.TextView",
+            flags=(),
+        ),
+        el("e3", text="ホーム", bounds=(20, 300, 300, 360)),
+    ]
+    assert reasons(run(screen, policy=policy), "e3") == ("irreversible_screen",)
+
+
+def test_the_default_file_decides_like_policy_on_random_screens(tmp_path):
+    rng = random.Random(20261122)  # noqa: S311
+    policy = policy_from_settings(loaded(tmp_path))
+    for _ in range(100):
+        screen, _denies = _random_screen(rng)
+        assert judge(
+            screen, "com.example.shop", policy, foreground="com.example.shop"
+        ) == judge(screen, "com.example.shop", Policy(), foreground="com.example.shop")
+
+
+# -- a settings file written before defaults version 2 ------------------------------
+
+
+def _v1_text() -> str:
+    path = Path(__file__).parent / "data" / "settings_v1.toml"
+    text = path.read_text(encoding="utf-8")
+    assert "defaults_version = 1\n" in text
+    assert "[irreversible]" not in text
+    return text
+
+
+@pytest.mark.usefixtures("android")
+def test_key_works_with_a_version_1_file(capsys, fake_adb, folder) -> None:
+    write(folder, _v1_text())
+    code, out, err = invoke(capsys, fake_adb, "key", "KEYCODE_VOLUME_UP", "--json")
+    assert (code, err) == (2, "")
+    assert json.loads(out)["error"]["message"] == (
+        f"KEYCODE_VOLUME_UP is refused by {SETTINGS_FILE}; remove it there to send it"
+    )
+    code, out, err = invoke(capsys, fake_adb, "key", "back")
+    assert (code, out, err) == (0, "pressed key KEYCODE_BACK\n", "")
+
+
+def test_a_version_1_file_refuses_warned_screens_and_start_over_words(
+    tmp_path,
+) -> None:
+    policy = policy_from_settings(loaded(tmp_path, _v1_text()))
+    found = run(_warned_screen(), policy=policy)
+    assert reasons(found, "e3") == ("irreversible_screen", "confirm_button")
+    assert reasons(found, "e4") == ("irreversible_screen",)
+    for label in ("Restart", "Undo", "やり直す", "元に戻す"):
+        item = el("e2", text=label, bounds=(50, 100, 250, 150))
+        assert reasons(run([item], policy=policy), "e2") == ("deny_word",)

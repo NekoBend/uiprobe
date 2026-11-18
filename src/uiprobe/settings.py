@@ -9,8 +9,10 @@ file format, the generator (`render_default_settings`,
 limits are not used yet, and ``press = true`` only makes ``crawl`` refuse to run
 unless ``--dry-run`` is given.
 
-What the file holds: the deny words, the confirm words, the rules (unlabeled,
-number-only and toggle elements, confirm buttons in dialogs, the screen-edge
+What the file holds: the deny words, the confirm words, the phrases that mark a
+screen as irreversible, the rules (unlabeled,
+number-only and toggle elements, confirm buttons in dialogs, irreversible
+screens, the screen-edge
 sizes, the smallest visible size), the crawl limits, ``press`` and the
 device-wide keys that ``uiprobe key`` refuses. What it never holds: the
 ``--allow-real-device`` flag, permission screens, password fields, typing,
@@ -24,15 +26,25 @@ file records the defaults version it was written with. The effective list is:
   added by a later uiprobe apply without editing the file, then
 * minus the items under ``remove``.
 
+A file written at an older defaults version may leave out the tables and
+rules that a later version added (`_LATER_TABLES`, `_LATER_RULES`): a missing
+table counts as empty, so all of its defaults apply, and a missing rule takes
+its default. Version 2 added the ``[irreversible]`` table, the rule
+``refuse_irreversible_screens`` and four deny words.
+
 A deny word is compared with the ``remove`` list after the normalization the
 deny matching uses (`uiprobe.guards.normalize`: NFKC, case-folded, whitespace
 runs made one space), so ``Login`` under ``remove`` also removes ``login``. A
 confirm word is compared in the form the confirm matching uses, which also
 strips surrounding punctuation and invisible characters, so ``OK!`` and ``OK``
-are the same word. Duplicates in one list are judged the same way. Key names
-are compared as exact strings; ``[keys] remove`` takes names out of both
-``refuse`` and ``refuse_prefixes``, and a removed name that a remaining prefix
-still covers stays refused and gives a warning. The fixed keys
+are the same word. An irreversibility phrase is compared in the form that
+decides what it matches (`uiprobe.guards._phrase_key`: normalized, curly
+apostrophes made plain, spaces and separators removed), so ``can not be
+undone`` under ``remove`` removes ``cannot be undone``. Duplicates in one list
+are judged the same way. Key names are compared as exact strings; ``[keys]
+remove`` takes names out of both ``refuse`` and ``refuse_prefixes``, and a
+removed name that a remaining prefix still covers stays refused and gives a
+warning. The fixed keys
 (`FIXED_DEVICE_KEYS`) are always refused: they are added back whatever the
 file says, and listing one under ``[keys] remove`` only adds a warning.
 
@@ -67,9 +79,11 @@ from uiprobe.guards import (
     API36_TOP_PX,
     CONFIRM_WORDS,
     DEFAULT_DENY_WORDS,
+    IRREVERSIBLE_PHRASES,
     Policy,
     _check_word,
     _confirm_form,
+    _phrase_key,
     normalize,
 )
 from uiprobe.model import MIN_VISIBLE_PX
@@ -92,7 +106,7 @@ __all__ = [
 
 SETTINGS_FILE: Final = "uiprobe.toml"
 FORMAT_VERSION: Final = 1
-DEFAULTS_VERSION: Final = 1
+DEFAULTS_VERSION: Final = 2
 MAX_SETTINGS_BYTES: Final = 1024 * 1024
 
 # Every default list item with the defaults version that introduced it. Each
@@ -104,9 +118,21 @@ MAX_SETTINGS_BYTES: Final = 1024 * 1024
 # its built-in tuple and to the `_LATER_*` map of its table as
 # {item: new version}. Without the map entry the item would be tagged 1 and
 # fail the snapshot test in tests/test_settings.py, and files written at an
-# older version would be given it only through the map's version.
-_LATER_DENY: Final[dict[str, int]] = {}
+# older version would be given it only through the map's version. A new table
+# or rule also goes into `_LATER_TABLES` or `_LATER_RULES` (with the value of a
+# missing rule in `_LATER_RULE_VALUES`), so that older files still load.
+# Version 2 added the start-over deny words, the [irreversible] table with all
+# of its phrases and the rule refuse_irreversible_screens.
+_LATER_DENY: Final[dict[str, int]] = {
+    "やり直": 2,
+    "元に戻": 2,
+    "restart": 2,
+    "undo": 2,
+}
 _LATER_CONFIRM: Final[dict[str, int]] = {}
+# The [irreversible] table came with version 2, so its items start there.
+_FIRST_IRREVERSIBLE: Final = 2
+_LATER_IRREVERSIBLE: Final[dict[str, int]] = {}
 _LATER_KEYS: Final[dict[str, int]] = {}
 _LATER_PREFIXES: Final[dict[str, int]] = {}
 _DENY_WORDS: Final[tuple[tuple[int, str], ...]] = tuple(
@@ -114,6 +140,10 @@ _DENY_WORDS: Final[tuple[tuple[int, str], ...]] = tuple(
 )
 _CONFIRM_WORDS: Final[tuple[tuple[int, str], ...]] = tuple(
     (_LATER_CONFIRM.get(word, 1), word) for word in CONFIRM_WORDS
+)
+_IRREVERSIBLE_PHRASES: Final[tuple[tuple[int, str], ...]] = tuple(
+    (_LATER_IRREVERSIBLE.get(phrase, _FIRST_IRREVERSIBLE), phrase)
+    for phrase in IRREVERSIBLE_PHRASES
 )
 _REFUSE_KEYS: Final[tuple[tuple[int, str], ...]] = tuple(
     (_LATER_KEYS.get(key, 1), key)
@@ -137,6 +167,7 @@ _BOOL_RULES: Final = (
     "skip_number_only",
     "skip_toggles",
     "refuse_dialog_confirm",
+    "refuse_irreversible_screens",
 )
 # table -> key -> (lowest, highest) allowed value
 _INT_RANGES: Final[dict[str, dict[str, tuple[int, int]]]] = {
@@ -152,9 +183,18 @@ _INT_RANGES: Final[dict[str, dict[str, tuple[int, int]]]] = {
         "minutes": (1, 1440),
     },
 }
+# Tables and keys that a later defaults version added, with that version. A
+# file written at an older version may leave them out: a missing table reads
+# as empty (its list defaults are then merged like any later default) and a
+# missing rule takes the value in `_LATER_RULE_VALUES`. When present they are
+# checked like every other table and key.
+_LATER_TABLES: Final[dict[str, int]] = {"irreversible": 2}
+_LATER_RULES: Final[dict[str, int]] = {"refuse_irreversible_screens": 2}
+_LATER_RULE_VALUES: Final[dict[str, bool]] = {"refuse_irreversible_screens": True}
 _TABLE_KEYS: Final[dict[str, frozenset[str]]] = {
     "deny": frozenset({"words", "remove"}),
     "confirm": frozenset({"words", "remove"}),
+    "irreversible": frozenset({"phrases", "remove"}),
     "rules": frozenset(_BOOL_RULES) | frozenset(_INT_RANGES["rules"]),
     "limits": frozenset(_INT_RANGES["limits"]),
     "keys": frozenset({"refuse", "refuse_prefixes", "remove"}),
@@ -192,10 +232,12 @@ class Settings:
     press: bool
     deny_words: tuple[str, ...]
     confirm_words: tuple[str, ...]
+    irreversible_phrases: tuple[str, ...]
     tap_unlabeled: bool
     skip_number_only: bool
     skip_toggles: bool
     refuse_dialog_confirm: bool
+    refuse_irreversible_screens: bool
     min_visible_px: int
     edge_top_px: int
     edge_bottom_px: int
@@ -234,6 +276,8 @@ def policy_from_settings(
     policy = Policy(
         deny_words=settings.deny_words,
         confirm_words=settings.confirm_words,
+        irreversible_phrases=settings.irreversible_phrases,
+        skip_irreversible=settings.refuse_irreversible_screens,
         tap_unlabeled=settings.tap_unlabeled
         if tap_unlabeled is None
         else tap_unlabeled,
@@ -309,7 +353,17 @@ def render_default_settings() -> str:
         "",
         "[confirm]",
         "# Labels of buttons that confirm what the screen asks.",
+        "# A label counts when it equals a word or starts with one followed by a",
+        '# character that is not a letter ("Yes, continue"). A word that ends in a',
+        "# Japanese letter (kana, kanji) needs no character after it, so the word",
+        '# "はい" also matches "はいる".',
         *_toml_list("words", _current(_CONFIRM_WORDS)),
+        "remove = []",
+        "",
+        "[irreversible]",
+        "# A screen whose text holds one of these phrases is refused as a whole:",
+        "# nothing on it is pressed (see refuse_irreversible_screens below).",
+        *_toml_list("phrases", _current(_IRREVERSIBLE_PHRASES)),
         "remove = []",
         "",
         "[rules]",
@@ -317,6 +371,7 @@ def render_default_settings() -> str:
         "skip_number_only = true",
         "skip_toggles = true",
         "refuse_dialog_confirm = true",
+        "refuse_irreversible_screens = true",
         f"min_visible_px = {MIN_VISIBLE_PX}",
         f"edge_top_px = {API36_TOP_PX}",
         f"edge_bottom_px = {API36_BOTTOM_PX}",
@@ -458,8 +513,15 @@ class _Reader:
         return SettingsError(f"{self.shown}: {_capped(_shown(where))}: {text}")
 
     def table(
-        self, data: Mapping[str, object], name: str, allowed: frozenset[str]
+        self,
+        data: Mapping[str, object],
+        name: str,
+        allowed: frozenset[str],
+        *,
+        optional: bool = False,
     ) -> Mapping[str, object]:
+        if name not in data and optional:
+            return {}
         if name not in data:
             raise self.fail(f"[{name}]", "the table is missing")
         value = data[name]
@@ -470,8 +532,16 @@ class _Reader:
                 raise self.fail(f"[{name}] {key}", "unknown key")
         return value
 
-    def boolean(self, table: Mapping[str, object], name: str, key: str) -> bool:
+    def boolean(
+        self,
+        table: Mapping[str, object],
+        name: str,
+        key: str,
+        default: bool | None = None,  # noqa: FBT001 - the value of a missing key
+    ) -> bool:
         value = table.get(key)
+        if key not in table and default is not None:
+            return default
         if key not in table:
             raise self.fail(self._where(name, key), "is missing")
         if not isinstance(value, bool):
@@ -550,6 +620,27 @@ def _confirm_identity(word: str) -> str:
         msg = f"confirm word is empty after cleaning: {word!r}"
         raise ValueError(msg)
     return form
+
+
+def _phrase_identity(phrase: str) -> str:
+    """Check a phrase as `Policy` does; return what makes two phrases equal.
+
+    Two phrases are equal when they match the same texts: the same after
+    normalization, with curly apostrophes read as plain ones and spaces and
+    separators ignored (`uiprobe.guards._phrase_key`), so ``can not be undone``
+    and ``cannot be undone`` are one phrase. A phrase with nothing left
+    once spaces, separators and invisible characters are removed (``-``) is
+    refused: it has no words to match.
+    """
+    _word_identity(phrase)
+    key = _phrase_key(phrase)
+    if not key:
+        msg = (
+            "phrase is empty after removing spaces, separators and invisible"
+            f" characters: {phrase!r}"
+        )
+        raise ValueError(msg)
+    return key
 
 
 def _key_identity(name: str) -> str:
@@ -699,7 +790,10 @@ def load_settings(path: str | os.PathLike[str]) -> Settings:
     The file must be a regular file of at most 1 MiB, strict UTF-8 (a UTF-8 BOM
     is accepted, UTF-16 is refused) and valid TOML. ``format_version`` and
     ``defaults_version`` and every table and key that `render_default_settings`
-    writes must be present; only the ``remove`` lists may be left out. Unknown
+    writes must be present; only the ``remove`` lists may be left out, and a
+    file written at an older defaults version may leave out what a later
+    version added (`_LATER_TABLES`, `_LATER_RULES`): the missing rule takes its
+    default and the missing list its defaults. Unknown
     tables or keys, wrong types, numbers out of range, words that deny matching
     rejects, key names that do not match ``KEYCODE_[A-Z0-9_]{1,40}`` and
     duplicate entries are refused.
@@ -749,8 +843,35 @@ def load_settings(path: str | os.PathLike[str]) -> Settings:
         confirm, "confirm", "remove", _confirm_identity, optional=True
     )
 
+    irreversible = reader.table(
+        parsed,
+        "irreversible",
+        _TABLE_KEYS["irreversible"],
+        optional=defaults_version < _LATER_TABLES["irreversible"],
+    )
+    phrase_listed = reader.strings(
+        irreversible,
+        "irreversible",
+        "phrases",
+        _phrase_identity,
+        optional=defaults_version < _LATER_TABLES["irreversible"],
+    )
+    phrase_removed = reader.strings(
+        irreversible, "irreversible", "remove", _phrase_identity, optional=True
+    )
+
     rules = reader.table(parsed, "rules", _TABLE_KEYS["rules"])
-    flags = {key: reader.boolean(rules, "rules", key) for key in _BOOL_RULES}
+    flags = {
+        key: reader.boolean(
+            rules,
+            "rules",
+            key,
+            _LATER_RULE_VALUES[key]
+            if defaults_version < _LATER_RULES.get(key, 1)
+            else None,
+        )
+        for key in _BOOL_RULES
+    }
     sizes = {
         key: reader.integer(rules, "rules", key, *bounds)
         for key, bounds in _INT_RANGES["rules"].items()
@@ -797,10 +918,18 @@ def load_settings(path: str | os.PathLike[str]) -> Settings:
             defaults_version,
             _confirm_form,
         ),
+        irreversible_phrases=_merge(
+            phrase_listed,
+            phrase_removed,
+            _IRREVERSIBLE_PHRASES,
+            defaults_version,
+            _phrase_identity,
+        ),
         tap_unlabeled=flags["tap_unlabeled"],
         skip_number_only=flags["skip_number_only"],
         skip_toggles=flags["skip_toggles"],
         refuse_dialog_confirm=flags["refuse_dialog_confirm"],
+        refuse_irreversible_screens=flags["refuse_irreversible_screens"],
         min_visible_px=sizes["min_visible_px"],
         edge_top_px=sizes["edge_top_px"],
         edge_bottom_px=sizes["edge_bottom_px"],

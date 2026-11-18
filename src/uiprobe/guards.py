@@ -18,9 +18,9 @@ separators ``_ - . / :`` read as spaces, and also with all spaces removed. So
 
 The default deny words come from four lists: the base list (purchases,
 payments, sending, deleting, signing out and similar), a list of further
-actions such as subscriptions, the nine words for disabling, force-stopping
-and signing in (``_SETTINGS_DENY_WORDS``), and the four words for carts and
-accounts (``_SHOP_DENY_WORDS``).
+actions such as subscriptions and starting over, the nine words for
+disabling, force-stopping and signing in (``_SETTINGS_DENY_WORDS``), and the
+four words for carts and accounts (``_SHOP_DENY_WORDS``).
 
 Known and accepted over-block: because words are substrings, ``Posture``
 matches ``post`` and ``Recorder`` matches ``order``. They are not pressed. The
@@ -66,6 +66,22 @@ Two crawl rules, each a separate check that a
 Both rules only add refusals. In `REASONS` they come right after
 ``unlabeled``: ``number_only`` first, then ``toggle``.
 
+A third rule works on the whole screen: ``irreversible_screen``
+(``Policy.skip_irreversible``). When the text, content_desc or hint of any
+element holds one of ``Policy.irreversible_phrases`` (`IRREVERSIBLE_PHRASES`:
+"can't undo", "cannot be undone", "permanently", "元に戻せません", ...), every
+candidate of the screen gets the reason, whatever its own label is, because
+a screen that warns about an action that cannot be taken back is not a place
+to press anything. A phrase matches as a substring after the same
+normalization as the deny words (NFKC, case folding, invisible characters
+removed, separators ignored) and with curly apostrophes mapped to a plain one,
+so "You CAN'T undo this" matches, and so does the same text with a curly
+apostrophe. The fields of each element are matched alone, in document order
+(text, content_desc, hint; the resource id is not read); a phrase split over
+two elements is not found. In `REASONS` the reason comes right after
+``deny_word``. Known over-block: ``permanently`` also matches
+"Permanently moved" and a settings text such as "Permanently allowed".
+
 Choices that block more than strictly needed:
 
 * The deny scope of a candidate holds every clickable ancestor's whole
@@ -73,8 +89,25 @@ Choices that block more than strictly needed:
 * A candidate is a confirm button when the confirm form of any of these is a
   confirm word: its own text, content_desc and hint, the text, content_desc
   and hint of any descendant, and the descendants' texts (and, likewise,
-  content_descs) joined by one space in document order. ``Book`` is not a
-  confirm word.
+  content_descs) joined by one space in document order, also joined with no
+  space where one text ends and the next starts with a letter of the
+  Japanese script (``確`` + ``認してください``). ``Book`` is not a confirm
+  word.
+* A confirm form also counts when it starts with a confirm word followed by a
+  boundary: ``Yes I'm sure!``, ``OK, delete``, ``Yes, continue`` and
+  ``Continue anyway`` are confirm labels, ``Okinawa``, ``Yesterday`` and
+  ``Continued`` are not (the word is only the start of a longer word). The
+  boundary is a character that is not a letter (a space, punctuation or a
+  digit), or the end of the form. A confirm word that ends in a letter of
+  the Japanese script (hiragana, katakana with the prolonged sound mark
+  ``ー`` and the iteration marks, kanji with ``々``) needs no boundary,
+  because Japanese is written without spaces: ``はい、削除します`` and
+  ``はい削除します`` both start with ``はい``, and ``オーケーです`` starts
+  with ``オーケー``. The cost is over-blocking, for example ``はいる``,
+  ``確認画面`` and ``許可しない``. Every other script keeps the boundary
+  (a Hebrew or Korean word is not matched at the start of a longer word),
+  and a confirm word in Latin letters is not matched when Japanese follows
+  it (``OKです``).
 * Whitespace, punctuation and symbols are trimmed from both ends of a confirm
   label until nothing changes (``OK!``, ``( OK )``, ``[ OK ]``), and custom
   confirm words go through the same cleaning as the label.
@@ -102,8 +135,8 @@ its descendants. This is the rule of ``Screen.tap_point``. The reasons come in
 the order of `REASONS`: ``screen_too_large``, ``outside_target_app``,
 ``permission_screen``, ``not_visible``, ``covered``, ``disabled``,
 ``text_input``, ``password_field``, ``unlabeled``, ``number_only``,
-``toggle``, ``deny_word``, ``confirm_button``, ``dialog_confirm_button``,
-``screen_edge``.
+``toggle``, ``deny_word``, ``irreversible_screen``, ``confirm_button``,
+``dialog_confirm_button``, ``screen_edge``.
 
 Hit targets: the hit targets of a candidate are the elements whose visible part
 holds its press point (the candidate, its ancestors and every overlay). A
@@ -155,6 +188,12 @@ Known limits:
   does not refuse the candidate (the container is not pressed); only the
   candidate, its clickable hit targets and a hit target that is itself a
   password field count.
+* The words ``restart`` and ``undo`` (やり直, 元に戻) are deny words, so an
+  ``Undo`` button that only reverts the last edit is refused too, and so is a
+  ``Restart`` button of a media player. Because they match as substrings,
+  ``Restarted``, ``Undone``, ``Undoubtedly`` and ``Undock`` are refused as
+  well. All of these are accepted:
+  a miss is worse than an over-block.
 * Half-width or full-width katakana ``ハイ`` (``ﾊｲ``) is not a confirm word,
   because the confirm list has only ``はい``.
 * Substring matching over-blocks: ``Posture`` contains ``post`` and
@@ -201,6 +240,7 @@ __all__ = [
     "API36_TOP_PX",
     "CONFIRM_WORDS",
     "DEFAULT_DENY_WORDS",
+    "IRREVERSIBLE_PHRASES",
     "MAX_ELEMENTS",
     "PERMISSION_PACKAGES",
     "REASONS",
@@ -231,6 +271,7 @@ Reason = Literal[
     "number_only",
     "toggle",
     "deny_word",
+    "irreversible_screen",
     "confirm_button",
     "dialog_confirm_button",
     "screen_edge",
@@ -314,6 +355,8 @@ _EXTRA_DENY_WORDS: Final[tuple[str, ...]] = (
     "プレミアム",
     "無料体験",
     "チェックアウト",
+    "やり直",
+    "元に戻",
     "check out",
     "submit",
     "subscription",
@@ -337,6 +380,8 @@ _EXTRA_DENY_WORDS: Final[tuple[str, ...]] = (
     "agree",
     "log off",
     "sign off",
+    "restart",
+    "undo",
 )
 
 # Words for disabling an app, force-stopping it and signing in, such as the
@@ -365,6 +410,34 @@ _SHOP_DENY_WORDS: Final[tuple[str, ...]] = (
 
 DEFAULT_DENY_WORDS: Final[tuple[str, ...]] = (
     _BASE_DENY_WORDS + _EXTRA_DENY_WORDS + _SETTINGS_DENY_WORDS + _SHOP_DENY_WORDS
+)
+
+# Phrases that say a screen's action cannot be taken back (English, then
+# Japanese). A screen whose text holds one refuses every element
+# (``irreversible_screen``). They are matched like the deny words, so spaces
+# and separators do not count: "cannot be undone" also matches "can not be
+# undone", and "cannot undo" matches "can not undo".
+IRREVERSIBLE_PHRASES: Final[tuple[str, ...]] = (
+    "can't undo",
+    "cannot undo",
+    "cannot be undone",
+    "can't be undone",
+    "cannot be reversed",
+    "can't be reversed",
+    "cannot be recovered",
+    "can't be recovered",
+    "irreversible",
+    "irreversibly",
+    "permanently",
+    "this action is permanent",
+    "元に戻せません",
+    "取り消せません",
+    "元に戻すことはできません",
+    "元に戻すことができません",
+    "取り消すことはできません",
+    "取り消すことができません",
+    "復元できません",
+    "完全に削除",
 )
 
 # Labels of buttons that confirm what the screen asks for.
@@ -413,6 +486,7 @@ API36_TOP_PX: Final = 24
 API36_BOTTOM_PX: Final = 32
 API36_SIDE_PX: Final = 30
 _EDGE_SIDES: Final = 4
+_MIN_JOINED_PARTS: Final = 2
 
 _CLICKABLE: Final = "clickable"
 _DISABLED: Final = "disabled"
@@ -452,6 +526,26 @@ _SEARCH_AUTOCOMPLETE: Final = "searchautocomplete"
 _CACHED_VALUE_LENGTH: Final = 256
 _SPACES_RE: Final = re.compile(r"\s+")
 _SEPARATOR_CHARS: Final = frozenset("_-./:\u2212\u00b7\u30fb\uff65")
+# Code point ranges of the Japanese script: kana (with the prolonged sound
+# mark and the iteration marks), CJK ideographs (with the ideographic
+# iteration mark and closing mark) and half-width katakana. Only letters
+# (category L*) in these ranges count, see `_is_japanese_letter`.
+_JAPANESE_RANGES: Final[tuple[tuple[int, int], ...]] = (
+    (0x3005, 0x3006),  # ideographic iteration mark, closing mark
+    (0x3031, 0x3035),  # vertical kana repeat marks
+    (0x303B, 0x303C),  # vertical ideographic iteration mark, masu mark
+    (0x3041, 0x309F),  # hiragana, with its iteration marks
+    (0x30A0, 0x30FF),  # katakana, with the prolonged sound and iteration marks
+    (0x31F0, 0x31FF),  # katakana phonetic extensions
+    (0x3400, 0x4DBF),  # CJK extension A
+    (0x4E00, 0x9FFF),  # CJK unified ideographs
+    (0xF900, 0xFAFF),  # CJK compatibility ideographs
+    (0xFF66, 0xFF9F),  # half-width katakana
+    (0x1B000, 0x1B16F),  # kana supplement and extensions
+    (0x20000, 0x323AF),  # CJK extensions B to H
+)
+# Half-width voiced sound marks: letters that NFKC turns into combining marks.
+_HALF_WIDTH_VOICED: Final = frozenset("\uff9e\uff9f")
 
 
 # -- normalization and matching ------------------------------------------------
@@ -515,6 +609,30 @@ def _forms(value: str) -> tuple[str, ...]:
     spaced = normalize(_separators_to_spaces(_split_camel(visible)))
     joined = "".join(spaced.split(" "))
     return tuple(dict.fromkeys((plain, spaced, joined)))
+
+
+def _is_japanese_letter(char: str) -> bool:
+    """True for a letter of the Japanese script (kana, ``ー``, ``々``, kanji)."""
+    if not unicodedata.category(char).startswith("L"):
+        return False
+    code = ord(char)
+    return any(low <= code <= high for low, high in _JAPANESE_RANGES)
+
+
+def _phrase_key(phrase: str) -> str:
+    """Return what decides which texts an irreversibility phrase matches.
+
+    The phrase normalized with curly apostrophes read as plain ones and with
+    every space and separator removed: the matching always compares this
+    form with the same form of the text, and every other form that matches
+    implies that this one does. Two phrases with the same key match the
+    same texts.
+    """
+    visible = _strip_invisible(
+        unicodedata.normalize("NFKC", phrase.translate(_APOSTROPHES))
+    )
+    spaced = normalize(_separators_to_spaces(_split_camel(visible)))
+    return "".join(spaced.split(" "))
 
 
 def _check_word(word: str) -> str:
@@ -587,6 +705,32 @@ class _Matcher:
         return found
 
 
+_APOSTROPHES: Final = str.maketrans(
+    {"\u2018": "'", "\u2019": "'", "\u201b": "'", "\u02bc": "'", "\u2032": "'"}
+)
+
+
+class _PhraseMatcher:
+    """Irreversibility phrases, matched like deny words in three fields."""
+
+    def __init__(self, phrases: Iterable[str]) -> None:
+        self._matcher = _Matcher(p.translate(_APOSTROPHES) for p in phrases)
+
+    def find(self, elements: Iterable[Element]) -> tuple[str, str, str] | None:
+        """Return ``(phrase, field, element id)`` of the first match, or None."""
+        for element in elements:
+            for field, value in (
+                ("text", element.text),
+                ("content_desc", element.content_desc),
+                ("hint", element.hint),
+            ):
+                if value:
+                    phrase = self._matcher.match_text(value.translate(_APOSTROPHES))
+                    if phrase is not None:
+                        return phrase, field, element.id
+        return None
+
+
 def deny_word_in(element: Element, words: Iterable[str]) -> tuple[str, str] | None:
     """Return ``(word, field)`` of the first deny word found in the element.
 
@@ -656,6 +800,9 @@ class Policy:
     reason; False drops only that reason (the ``confirm_button`` reason, a deny
     word on the screen, stays).
 
+    ``skip_irreversible`` (default True) applies the ``irreversible_screen``
+    reason with the phrases of ``irreversible_phrases``; False turns it off.
+
     ``edges`` holds the sizes in pixels ``(top, bottom, left, right)`` that
     `judge` turns into `edge_areas` of each screen's display when ``avoid`` is
     None; None keeps the API 36 sizes. An explicit ``avoid`` wins over
@@ -665,9 +812,10 @@ class Policy:
     ``Screen.visible_bounds`` keep the fixed `MIN_VISIBLE_PX`.
 
     Raises:
-        ValueError: A deny or confirm word is empty after normalization, or a
-            confirm word is empty after the label cleaning (invisible
-            characters, normalization, surrounding punctuation), or
+        ValueError: A deny word, confirm word or irreversible phrase is empty
+            after normalization, or a confirm word is empty after the label
+            cleaning (invisible characters, normalization, surrounding
+            punctuation), or
             ``edges`` is not four non-negative integers, or ``min_visible_px``
             is not an integer of at least 1.
         TypeError: ``edges`` is not a sequence.
@@ -682,9 +830,11 @@ class Policy:
     refuse_dialog_confirm: bool = True
     edges: tuple[int, int, int, int] | None = None
     min_visible_px: int = MIN_VISIBLE_PX
+    irreversible_phrases: tuple[str, ...] = IRREVERSIBLE_PHRASES
+    skip_irreversible: bool = True
 
     def __post_init__(self) -> None:
-        for word in (*self.deny_words, *self.confirm_words):
+        for word in (*self.deny_words, *self.confirm_words, *self.irreversible_phrases):
             _check_word(word)
         if self.edges is not None and (
             len(self.edges) != _EDGE_SIDES
@@ -722,6 +872,8 @@ class Policy:
             refuse_dialog_confirm=self.refuse_dialog_confirm,
             edges=self.edges,
             min_visible_px=self.min_visible_px,
+            irreversible_phrases=self.irreversible_phrases,
+            skip_irreversible=self.skip_irreversible,
         )
 
 
@@ -793,7 +945,8 @@ class Detail:
     ``element_id`` is the element on top of the press point. For
     ``number_only``, ``note`` and ``word`` both hold the cleaned label; for
     ``toggle``, ``element_id`` is the first checkable element in document
-    order.
+    order. For ``irreversible_screen``, ``word`` is the phrase, ``field`` the
+    field and ``element_id`` the element where it was found.
     """
 
     reason: Reason
@@ -930,6 +1083,31 @@ def _clean(value: str) -> str:
     return _strip_invisible(value).strip()
 
 
+def _add_part(spaced: list[str], tight: list[str], part: str) -> None:
+    """Append a cleaned label part to both joins.
+
+    ``spaced`` puts one space before every part but the first. ``tight`` does
+    the same, except where the previous part ends and this one starts with a
+    letter of the Japanese script: there it joins them directly. A half-width
+    voiced sound mark is never joined directly, because NFKC would merge it
+    into the letter before it.
+    """
+    if not spaced:
+        spaced.append(part)
+        tight.append(part)
+        return
+    previous = spaced[-1]
+    spaced.extend((" ", part))
+    if (
+        _is_japanese_letter(previous[-1])
+        and _is_japanese_letter(part[0])
+        and part[0] not in _HALF_WIDTH_VOICED
+    ):
+        tight.extend(("", part))
+    else:
+        tight.extend((" ", part))
+
+
 def _is_mark(char: str) -> bool:
     return char.isspace() or unicodedata.category(char)[0] in "PS"
 
@@ -1055,6 +1233,14 @@ class _Judge:
         self.elements = screen.elements
         self.matcher = _Matcher(policy.deny_words)
         self.confirm = frozenset(_confirm_form(w) for w in policy.confirm_words)
+        # The lengths of the confirm words, shortest first: only a start of a
+        # label of one of these lengths can be a confirm word.
+        self._confirm_lengths = sorted({len(form) for form in self.confirm})
+        # A confirm word that ends in a letter of the Japanese script can be
+        # followed by anything; the others need a boundary (`_is_confirm`).
+        self._open_ended = frozenset(
+            form for form in self.confirm if _is_japanese_letter(form[-1])
+        )
         self.target = target_package
         self._confirm_forms: dict[str, str] = {}
         self.visible = [self._visible_part(e) for e in self.elements]
@@ -1072,6 +1258,7 @@ class _Judge:
             self.screen_note = f"screen package is {screen.package}"
         self.dialog = _is_dialog(self.tree)
         self._screen_hit: Detail | Literal[False] | None = False
+        self._irreversible: Detail | Literal[False] | None = False
         self._summarize()
         self._joined_hit: dict[int, str | None] = {}
         self._labels: dict[int, str] = {}
@@ -1136,7 +1323,6 @@ class _Judge:
         self.core_desc = [int(self._is_core(e.content_desc)) for e in self.elements]
         self.sub_core_text = list(self.core_text)
         self.sub_core_desc = list(self.core_desc)
-        self.max_confirm = max((len(form) for form in self.confirm), default=0)
         parent = self.tree.parent
         for i in reversed(self.tree.pre):
             up = parent[i]
@@ -1200,6 +1386,27 @@ class _Judge:
             if _has_content(value):
                 return value
         return self.below_label[i] or ""
+
+    def _is_confirm(self, form: str) -> bool:
+        """True when the form is a confirm word or starts with one.
+
+        A confirm word at the start counts when a boundary follows it: a
+        character that is not a letter, or nothing. A word ending in a
+        letter of the Japanese script needs no boundary.
+        """
+        if not form:
+            return False
+        if form in self.confirm:
+            return True
+        for end in self._confirm_lengths:
+            if end >= len(form):
+                break
+            head = form[:end]
+            if head in self.confirm and (
+                head in self._open_ended or not form[end].isalpha()
+            ):
+                return True
+        return False
 
     def _form(self, value: str) -> str:
         form = self._confirm_forms.get(value)
@@ -1285,7 +1492,7 @@ class _Judge:
 
         The sources are its own text, content_desc and hint, the same three
         fields of each descendant, and the descendants' texts (and likewise
-        content_descs) joined by one space in document order.
+        content_descs) joined in document order (`_joined_forms`).
         """
         cached = self._labels.get(i)
         if cached is None:
@@ -1298,27 +1505,41 @@ class _Judge:
             element = self.elements[self.tree.pre[position]]
             for value in (element.text, element.content_desc, element.hint):
                 form = self._form(value)
-                if form and form in self.confirm:
+                if self._is_confirm(form):
                     return form
-        below = [self.elements[j] for j in self.tree.subtree(i)[1:]]
-        # The joined form holds at least one character of every part with a
-        # real character, so more parts than the longest confirm word cannot
-        # match, and a single part is a field that was matched above.
+        below = self.tree.subtree(i)[1:]
+        # A single part is a field that was matched above.
         for getter, count in (
             (lambda e: e.text, self.sub_core_text[i] - self.core_text[i]),
             (lambda e: e.content_desc, self.sub_core_desc[i] - self.core_desc[i]),
         ):
-            if not 2 <= count <= self.max_confirm:
+            if count < _MIN_JOINED_PARTS:
                 continue
-            parts = (_clean(getter(e)) for e in below)
-            form = self._form(" ".join(part for part in parts if part))
-            if form and form in self.confirm:
-                return form
+            values = (getter(self.elements[j]) for j in below)
+            for form in self._joined_forms(values):
+                if self._is_confirm(form):
+                    return form
         return ""
+
+    def _joined_forms(self, values: Iterable[str]) -> tuple[str, str]:
+        """Return the confirm forms of the values joined in document order.
+
+        The first form joins the cleaned values with one space. The second
+        joins them with no space where one value ends and the next starts
+        with a letter of the Japanese script (``確`` + ``認してください``),
+        which is written without spaces, and with one space elsewhere.
+        """
+        spaced: list[str] = []
+        tight: list[str] = []
+        for value in values:
+            part = _clean(value)
+            if part:
+                _add_part(spaced, tight, part)
+        return _confirm_form("".join(spaced)), _confirm_form("".join(tight))
 
     def _own_confirm(self, element: Element) -> bool:
         return any(
-            form and form in self.confirm
+            self._is_confirm(form)
             for form in map(
                 self._form, (element.text, element.content_desc, element.hint)
             )
@@ -1496,10 +1717,7 @@ class _Judge:
         if not self.policy.tap_unlabeled and not self.sub_labeled[i]:
             reasons.append("unlabeled")
         self._crawl_rules(i, reasons, details)
-        deny = self._deny_detail(found)
-        if deny:
-            reasons.append("deny_word")
-            details.append(deny)
+        self._word_rules(found, reasons, details)
         if found[_CONFIRM] != _NONE:
             self._confirm_reasons(i, own, found, reasons, details)
         if point is not None and any(_contains(area, point) for area in self._avoid):
@@ -1520,6 +1738,40 @@ class _Judge:
             reasons.append("toggle")
             checkable = self.elements[self.tree.pre[self.sub_checkable[i]]]
             details.append(Detail("toggle", element_id=checkable.id))
+
+    def _word_rules(
+        self, found: _Agg, reasons: list[Reason], details: list[Detail]
+    ) -> None:
+        """Add the ``deny_word`` and ``irreversible_screen`` reasons."""
+        deny = self._deny_detail(found)
+        if deny:
+            reasons.append("deny_word")
+            details.append(deny)
+        irreversible = self.irreversible_detail()
+        if irreversible is not None:
+            reasons.append("irreversible_screen")
+            details.append(irreversible)
+
+    def irreversible_detail(self) -> Detail | None:
+        """Return the irreversibility phrase found on the screen, if any.
+
+        Computed once per screen; always None when the rule is off.
+        """
+        if self._irreversible is False:
+            self._irreversible = None
+            if self.policy.skip_irreversible and self.policy.irreversible_phrases:
+                hit = _PhraseMatcher(self.policy.irreversible_phrases).find(
+                    self.elements
+                )
+                if hit is not None:
+                    phrase, field, ident = hit
+                    self._irreversible = Detail(
+                        "irreversible_screen",
+                        word=phrase,
+                        field=field,
+                        element_id=ident,
+                    )
+        return self._irreversible
 
     def _deny_detail(self, found: _Agg) -> Detail | None:
         """Return the deny word of the scope: own fields first, then joined."""
@@ -1642,6 +1894,11 @@ def judge(
       subtree text (field ``joined``) of the candidate, its clickable
       ancestors and the clickable hit targets: the text and content_desc
       sequence, the texts alone and the content_descs alone.
+    * ``irreversible_screen``: the text, content description or hint of any
+      element of the screen holds a phrase of ``policy.irreversible_phrases``
+      (unless ``skip_irreversible`` is False). Every candidate gets it. The
+      detail's ``word`` is the phrase, ``field`` the field and ``element_id``
+      the first element (in document order) where it was found.
     * ``confirm_button``: a confirm word is the label of the candidate or of
       any clickable hit target (any source: own text, content_desc, hint,
       those of any descendant, or the joined descendant texts or
