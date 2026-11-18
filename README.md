@@ -22,6 +22,7 @@ More in [docs/safety.md](docs/safety.md).
 ## Requirements
 
 - Python 3.12 or newer.
+- Linux or Windows. CI runs the tests with Python 3.12, 3.13 and 3.14 on both. macOS is not tested yet.
 - `adb` from the Android SDK Platform-Tools, and a device or emulator that adb can see.
 - No Python dependencies.
 
