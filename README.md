@@ -106,6 +106,7 @@ uiprobe connects only to the adb server, which is on `127.0.0.1:5037` unless you
 - [docs/settings.md](docs/settings.md): the settings file `uiprobe.toml` and `uiprobe init`; `crawl` and `key` read it.
 - [docs/safety.md](docs/safety.md): detailed safety notes.
 - [docs/output.md](docs/output.md): JSON formats and exit codes.
+- [docs/run-folder.md](docs/run-folder.md): the folder and the JSON lines a crawl run writes.
 - [docs/python.md](docs/python.md): the Python API.
 - [docs/network.md](docs/network.md): network and privacy details.
 - [docs/development.md](docs/development.md): running the checks and tests.

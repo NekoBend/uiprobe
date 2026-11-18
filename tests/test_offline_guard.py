@@ -6,8 +6,17 @@ Network and process rules: no network library anywhere, `socket` and
 Rules for files (an allowlist, not a denylist):
 
 uiprobe's code (src/uiprobe) must never delete, rename, truncate or overwrite
-a file. Today it creates one file: the settings file, through the create-only
-open in settings.py (see ALLOWED_CALLS). Instead of listing what is
+a file. It creates files in two places only, each through the call sites
+listed in ALLOWED_CALLS. settings.py creates the settings file through its
+create-only `open(path, 'x', encoding='utf-8', newline='\\n')` (an existing
+file is an error) and has one read-only `os.open(path, _READ_FLAGS)` (see
+below). runlog.py creates files and folders through four calls, each with
+exactly one call site there: `os.mkdir(path)` (a new folder; no `exist_ok`, no
+parents), `open(path, 'x', encoding='utf-8', newline='\\n')` and
+`open(path, 'xb')` (create-only: an existing file is an error), and
+`handle.write(data)` (the write into a file that was just created). Each
+allowance holds only in its own file: a changed call, or an allowed call in a
+file whose entry does not list it, is flagged. Instead of listing what is
 dangerous after the fact, this check flags every REFERENCE (a call, but also
 `writer = open`, `opener=open`, `getattr(os, "replace")`) to a name that can
 open or change a file, and every import of a module that is not on the
@@ -365,6 +374,12 @@ STRING_LOOKUPS = frozenset(
 )
 _FLAGGED_LEAVES = frozenset(name.rsplit(".", 1)[-1] for name in FLAGGED_NAMES)
 
+RUNLOG_MKDIR = "os.mkdir(path)"
+RUNLOG_OPEN_TEXT = "open(path, 'x', encoding='utf-8', newline='\\n')"
+RUNLOG_OPEN_BINARY = "open(path, 'xb')"
+RUNLOG_WRITE = "handle.write(data)"
+RUNLOG_CALLS = (RUNLOG_MKDIR, RUNLOG_OPEN_TEXT, RUNLOG_OPEN_BINARY, RUNLOG_WRITE)
+
 # The permitted call sites: file name in src/uiprobe -> calls as `ast.unparse`
 # prints them. Each has a reason; keep the list short.
 ALLOWED_CALLS: dict[str, frozenset[str]] = {
@@ -387,6 +402,10 @@ ALLOWED_CALLS: dict[str, frozenset[str]] = {
             "os.open(path, _READ_FLAGS)",
         }
     ),
+    # The run folder writer creates new files and one folder per call site, and
+    # never opens an existing one: mode 'x' fails when the file exists and
+    # os.mkdir fails when the folder exists or its parent is missing.
+    "runlog.py": frozenset(RUNLOG_CALLS),
 }
 
 
@@ -1669,3 +1688,71 @@ def test_each_route_to_the_read_flags_is_flagged_in_settings(name):
     where = BYPASS_ANCHORS[anchor]
     assert source.count(where) == 1
     assert _flagged_by_any_check(source.replace(where, text + where))
+
+
+# --- the run folder writer: each allowed call has exactly one call site ---
+
+
+def test_each_runlog_call_has_exactly_one_call_site():
+    tree = ast.parse(SOURCE_DIR.joinpath("runlog.py").read_text(encoding="utf-8"))
+    texts = [ast.unparse(n) for n in ast.walk(tree) if isinstance(n, ast.Call)]
+    for call in RUNLOG_CALLS:
+        assert texts.count(call) == 1, call
+    assert ALLOWED_CALLS["runlog.py"] == frozenset(RUNLOG_CALLS)
+
+
+# Each variant changes one allowed call: the same file name does not help.
+RUNLOG_VARIANTS = [
+    "import os\nos.mkdir(path, exist_ok=True)",
+    "import os\nos.mkdir(path, 0o777)",
+    "import os\nos.mkdir(path=path)",
+    "import os\nos.makedirs(path)",
+    "import os\nos.makedirs(path, exist_ok=True)",
+    "import os\nos.mkdir(parent / 'x')",
+    "from pathlib import Path\nPath(path).mkdir()",
+    "open(path, 'w', encoding='utf-8', newline='\\n')",
+    "open(path, 'a', encoding='utf-8', newline='\\n')",
+    "open(path, 'x+', encoding='utf-8', newline='\\n')",
+    "open(path, 'x', encoding='utf-8')",
+    "open(path, 'x', newline='\\n')",
+    "open(path, 'x', encoding='utf-16', newline='\\n')",
+    "open(path, 'x', encoding='utf-8', newline='\\r\\n')",
+    "open(path, mode='x', encoding='utf-8', newline='\\n')",
+    "open(path, 'wb')",
+    "open(path, 'ab')",
+    "open(path, 'xb+')",
+    "open(path, 'xb', buffering=0)",
+    "open(path, 'rb')",
+    "open(path)",
+    "import io\nio.open(path, 'xb')",
+    "import os\nos.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL)",
+    "handle.write(other)",
+    "handle.writelines(data)",
+    "handle.write(data, 1)",
+    "handle.truncate(0)",
+    "path.write_text(data)",
+    "path.write_bytes(data)",
+    "path.replace(other)",
+]
+
+
+@pytest.mark.parametrize("source", RUNLOG_VARIANTS)
+@pytest.mark.parametrize("filename", ["runlog.py", "other.py"])
+def test_a_changed_runlog_call_is_flagged(source, filename):
+    assert file_changes(source, filename)
+
+
+@pytest.mark.parametrize("call", RUNLOG_CALLS)
+def test_a_runlog_call_is_accepted_only_in_runlog(call):
+    source = "import os\n" + call
+    assert not file_changes(source, "runlog.py")
+    for other in ("cli.py", "device.py", "sub/runlog.py", "other.py"):
+        assert file_changes(source, other)
+    assert file_changes(source)
+
+
+def test_a_runlog_call_still_has_its_arguments_checked():
+    nested = "import os\nos.mkdir(os.remove('x'))"
+    assert file_changes(nested, "runlog.py") == [2]
+    two = "import os\nos.mkdir(path)\nopen(path, 'w')"
+    assert file_changes(two, "runlog.py") == [3]

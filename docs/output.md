@@ -12,6 +12,8 @@ Every JSON document has a `schema` field. Its number changes only with an incomp
 - `uiprobe.devices/1`: `{"schema": ..., "devices": [...]}` with `serial` and `state` for each device, and `model`, `api_level`, and `emulator` when known.
 - `uiprobe.error/1`: `{"schema": ..., "error": {"code": ..., "message": ..., "details": ...}}`, where `details` is present only when there are any. Without `--json` the message is printed on stderr instead.
 
+The files of a crawl run folder (`uiprobe.run_start/1`, `uiprobe.transition_start/1`, `uiprobe.transition_end/1`, `uiprobe.skip/1`, `uiprobe.run/1`) are described in [The run folder](run-folder.md).
+
 ## Exit codes
 
 | Code | `error.code` | Meaning |

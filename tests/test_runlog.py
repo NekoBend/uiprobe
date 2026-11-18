@@ -1,0 +1,794 @@
+"""The run folder writer: files only under tmp_path, bytes read back as bytes."""
+
+from __future__ import annotations
+
+import builtins
+import contextlib
+import errno
+import json
+import re
+from dataclasses import replace
+from datetime import UTC, datetime, timedelta, timezone
+from pathlib import Path
+
+import pytest
+
+from uiprobe import runlog
+from uiprobe.crawl import Limits
+from uiprobe.errors import UiprobeError
+from uiprobe.model import Bounds, Element, Screen
+from uiprobe.runlog import RunFolderError, RunWriter
+
+PNG = b"\x89PNG\r\n\x1a\n" + b"\x00\r\n\x00 data"
+ID_A = "s-0123456789ab"
+ID_B = "s-ba9876543210"
+STARTED = datetime(2026, 3, 1, 9, 30, 15, tzinfo=timezone(timedelta(hours=9)))
+BIDI = "a\u202eb\u2066c"
+CONTROL = "x\x1b[2Jy\x9bz\x07"
+
+
+_WRITERS: list[RunWriter] = []
+
+
+@pytest.fixture(autouse=True)
+def _close_writers():
+    yield
+    while _WRITERS:
+        with contextlib.suppress(RunFolderError):
+            _WRITERS.pop().close()
+
+
+def make(tmp_path: Path, name: str = "run", **overrides) -> RunWriter:
+    arguments = {
+        "package": "com.example.app",
+        "limits": Limits(),
+        "deny_words": ["delete", "pay"],
+        "serial": "emulator-5554",
+        "started_at": STARTED,
+    }
+    arguments.update(overrides)
+    writer = RunWriter.create(tmp_path / name, **arguments)
+    _WRITERS.append(writer)
+    return writer
+
+
+def make_screen(
+    package: str = "com.example.app", labels: tuple[str, ...] = ("OK",)
+) -> Screen:
+    elements = tuple(
+        Element(
+            id=f"e{number}",
+            parent=None,
+            class_name="android.widget.Button",
+            bounds=Bounds(0, number * 10, 100, number * 10 + 10),
+            text=label,
+            flags=("clickable",),
+        )
+        for number, label in enumerate(labels, start=1)
+    )
+    return Screen(
+        serial="emulator-5554",
+        captured_at=datetime(2026, 3, 1, 9, 31, tzinfo=UTC),
+        package=package,
+        activity=None,
+        api_level=34,
+        display=(1080, 2400),
+        elements=elements,
+    )
+
+
+def names(folder: Path) -> list[str]:
+    return sorted(p.relative_to(folder).as_posix() for p in folder.rglob("*"))
+
+
+def lines_of(path: Path) -> list[dict]:
+    data = path.read_bytes()
+    assert data.endswith(b"\n")
+    return [json.loads(line) for line in data.decode("utf-8").split("\n")[:-1]]
+
+
+# --- the folder ---
+
+
+def test_an_existing_folder_is_never_used(tmp_path):
+    target = tmp_path / "run"
+    target.mkdir()
+    (target / "keep.txt").write_bytes(b"mine")
+    with pytest.raises(RunFolderError) as raised:
+        make(tmp_path)
+    assert raised.value.details["path"] == str(target)
+    assert names(target) == ["keep.txt"]
+    assert (target / "keep.txt").read_bytes() == b"mine"
+
+
+def test_an_existing_file_of_that_name_is_refused(tmp_path):
+    (tmp_path / "run").write_bytes(b"mine")
+    with pytest.raises(RunFolderError):
+        make(tmp_path)
+    assert (tmp_path / "run").read_bytes() == b"mine"
+
+
+def test_a_missing_parent_is_not_created(tmp_path):
+    with pytest.raises(RunFolderError):
+        RunWriter.create(
+            tmp_path / "missing" / "run",
+            package="p",
+            limits=Limits(),
+            deny_words=[],
+            serial="s",
+        )
+    assert names(tmp_path) == []
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"package": 1},
+        {"serial": None},
+        {"deny_words": "delete"},
+        {"deny_words": [1]},
+        {"limits": 5},
+        {"limits": {"depth": 1}},
+        {"limits": {"depth": 0, "actions": 1, "minutes": 1}},
+        {"deny_words": ["a\ud800"]},
+        {"package": "p\ud800"},
+        {"started_at": datetime(2026, 1, 1)},  # noqa: DTZ001
+    ],
+)
+def test_wrong_arguments_write_nothing(tmp_path, overrides):
+    with pytest.raises((TypeError, ValueError)):
+        make(tmp_path, **overrides)
+    assert names(tmp_path) == []
+
+
+def test_run_start_json(tmp_path):
+    writer = make(tmp_path)
+    assert names(tmp_path / "run") == ["run-start.json"]
+    assert writer.path == tmp_path / "run"
+    assert json.loads((tmp_path / "run" / "run-start.json").read_bytes()) == {
+        "schema": "uiprobe.run_start/1",
+        "started_at": "2026-03-01T09:30:15+09:00",
+        "package": "com.example.app",
+        "limits": {"depth": 5, "actions": 300, "minutes": 30},
+        "deny": ["delete", "pay"],
+        "device": {"serial": "emulator-5554"},
+    }
+
+
+def test_limits_may_be_a_plain_dict_and_the_time_defaults_to_now(tmp_path):
+    make(tmp_path, limits={"depth": 2, "actions": 9, "minutes": 1}, started_at=None)
+    data = json.loads((tmp_path / "run" / "run-start.json").read_bytes())
+    assert data["limits"] == {"depth": 2, "actions": 9, "minutes": 1}
+    stamp = datetime.fromisoformat(data["started_at"])
+    assert stamp.utcoffset() is not None
+
+
+# --- transitions ---
+
+
+def test_transition_lines_are_complete_after_each_call(tmp_path):
+    writer = make(tmp_path)
+    path = tmp_path / "run" / "transitions.jsonl"
+    writer.write_transition_start(1, "launch")
+    first = lines_of(path)  # read before finish: a crash would leave this
+    assert len(first) == 1
+    assert first[0]["schema"] == "uiprobe.transition_start/1"
+    assert first[0]["action_id"] == 1
+    assert first[0]["action"] == {"kind": "launch"}
+    assert "from_screen_id" not in first[0]
+    datetime.fromisoformat(first[0]["recorded_at"])
+    writer.write_transition_end(1, ID_A)
+    writer.write_transition_start(
+        2, "tap", from_screen_id=ID_A, element={"id": "e1"}, point=(5, 6)
+    )
+    writer.write_transition_end(2, dump_failed=True)
+    found = lines_of(path)
+    assert [line["schema"] for line in found] == [
+        "uiprobe.transition_start/1",
+        "uiprobe.transition_end/1",
+        "uiprobe.transition_start/1",
+        "uiprobe.transition_end/1",
+    ]
+    assert found[1]["to_screen_id"] == ID_A
+    assert found[1]["dump_failed"] is False
+    assert found[2]["from_screen_id"] == ID_A
+    assert found[2]["action"] == {
+        "kind": "tap",
+        "point": [5, 6],
+        "element": {"id": "e1"},
+    }
+    assert found[3]["dump_failed"] is True
+    assert "to_screen_id" not in found[3]
+    assert all(
+        datetime.fromisoformat(line["recorded_at"]).utcoffset() is not None
+        for line in found
+    )
+
+
+def test_a_transition_element_may_be_an_element(tmp_path):
+    writer = make(tmp_path)
+    element = make_screen().elements[0]
+    writer.write_transition_start(1, "tap", ID_A, element, (1, 2))
+    line = lines_of(tmp_path / "run" / "transitions.jsonl")[0]
+    assert line["action"]["element"] == element.to_dict()
+
+
+@pytest.mark.parametrize(
+    "call",
+    [
+        lambda w: w.write_transition_start(0, "tap"),
+        lambda w: w.write_transition_start(True, "tap"),  # noqa: FBT003
+        lambda w: w.write_transition_start(1, 5),
+        lambda w: w.write_transition_start(1, "tap", from_screen_id="s-ABC"),
+        lambda w: w.write_transition_start(1, "tap", point=(1,)),
+        lambda w: w.write_transition_end(1),
+        lambda w: w.write_transition_end(1, "nope"),
+        lambda w: w.write_transition_end(1, ID_A, dump_failed=True),
+        lambda w: w.write_transition_end(1, ID_A, dump_failed=1),
+        lambda w: w.write_transition_start(1, "tap\ud800"),
+        lambda w: w.write_transition_start(1, "tap", element={"text": "a\ud800"}),
+    ],
+)
+def test_bad_transition_arguments_write_nothing(tmp_path, call):
+    writer = make(tmp_path)
+    with pytest.raises((TypeError, ValueError)):
+        call(writer)
+    assert names(tmp_path / "run") == ["run-start.json"]
+
+
+# --- skips ---
+
+
+def test_a_skip_is_written_once_per_screen_fingerprint_and_reasons(tmp_path):
+    writer = make(tmp_path)
+    path = tmp_path / "run" / "skipped.jsonl"
+    element = {"id": "e3", "class": "android.widget.Button"}
+    assert writer.write_skip(ID_A, "fp1", ["deny_word", "not_visible"], element)
+    assert not writer.write_skip(ID_A, "fp1", ("deny_word", "not_visible"), element)
+    assert writer.write_skip(ID_A, "fp1", ["not_visible", "deny_word"], element)
+    assert writer.write_skip(ID_A, "fp2", ["deny_word", "not_visible"], element)
+    assert writer.write_skip(ID_B, "fp1", ["deny_word", "not_visible"], element)
+    found = lines_of(path)
+    assert len(found) == 4
+    assert found[0]["schema"] == "uiprobe.skip/1"
+    assert found[0]["screen_id"] == ID_A
+    assert found[0]["fingerprint"] == "fp1"
+    assert found[0]["reasons"] == ["deny_word", "not_visible"]
+    assert found[0]["element"] == element
+    assert found[1]["reasons"] == ["not_visible", "deny_word"]
+    datetime.fromisoformat(found[0]["recorded_at"])
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        ("bad", "fp", ["r"], {}),
+        (ID_A, 1, ["r"], {}),
+        (ID_A, "fp", "reason", {}),
+        (ID_A, "fp", [1], {}),
+    ],
+)
+def test_bad_skip_arguments_write_nothing(tmp_path, arguments):
+    writer = make(tmp_path)
+    with pytest.raises((TypeError, ValueError)):
+        writer.write_skip(*arguments)
+    assert names(tmp_path / "run") == ["run-start.json"]
+
+
+# --- screens and pictures ---
+
+
+def test_a_screen_is_written_the_first_time_only(tmp_path):
+    writer = make(tmp_path)
+    screen = make_screen()
+    assert writer.write_screen(screen)
+    path = tmp_path / "run" / "screens" / f"{screen.screen_id}.json"
+    before = path.read_bytes()
+    assert not writer.write_screen(screen)
+    assert path.read_bytes() == before
+    assert json.loads(before)["schema"] == "uiprobe.screen/1"
+    assert before.decode("utf-8") == screen.to_json(indent=2) + "\n"
+    assert names(tmp_path / "run" / "screens") == [path.name]
+
+
+def test_a_screenshot_is_written_the_first_time_only(tmp_path):
+    writer = make(tmp_path)
+    assert writer.write_screenshot(ID_A, PNG)
+    assert not writer.write_screenshot(ID_A, PNG + b"more")
+    assert (tmp_path / "run" / "screens" / f"{ID_A}.png").read_bytes() == PNG
+
+
+@pytest.mark.parametrize("data", [b"", b"GIF89a", b"\x89PNG", b"x" + PNG])
+def test_a_non_png_creates_no_file(tmp_path, data):
+    writer = make(tmp_path)
+    with pytest.raises(ValueError, match="PNG"):
+        writer.write_screenshot(ID_A, data)
+    assert names(tmp_path / "run") == ["run-start.json"]
+    assert writer.write_screenshot(ID_A, PNG)  # a refused one is not "seen"
+
+
+def test_a_screenshot_must_be_bytes(tmp_path):
+    writer = make(tmp_path)
+    with pytest.raises(TypeError):
+        writer.write_screenshot(ID_A, "png")  # ty: ignore[invalid-argument-type]
+    assert names(tmp_path / "run") == ["run-start.json"]
+
+
+BAD_IDS = [
+    "",
+    "s-",
+    "s-0123456789a",
+    "s-0123456789abc",
+    "s-0123456789AB",
+    "S-0123456789ab",
+    "s-0123456789ag",
+    "x-0123456789ab",
+    "s-0123456789ab\n",
+    " s-0123456789ab",
+    "../s-0123456789ab",
+    "s-0123456789ab/../x",
+    "s-0123456789ab.png",
+    "s-0123456789" + chr(0x661) + "b",  # an Arabic-Indic digit
+    None,
+    5,
+]
+
+
+@pytest.mark.parametrize("bad", BAD_IDS)
+def test_invalid_screen_ids_are_refused(tmp_path, bad):
+    writer = make(tmp_path)
+    with pytest.raises((TypeError, ValueError)):
+        writer.write_screenshot(bad, PNG)
+    with pytest.raises((TypeError, ValueError)):
+        writer.write_skip(bad, "fp", ["r"], {})
+    if bad is not None:  # None means "no from screen" and is fine
+        with pytest.raises((TypeError, ValueError)):
+            writer.write_transition_start(1, "tap", from_screen_id=bad)
+    with pytest.raises((TypeError, ValueError)):
+        writer.write_transition_end(1, bad)
+    assert names(tmp_path / "run") == ["run-start.json"]
+
+
+def test_app_text_never_reaches_a_path(tmp_path):
+    writer = make(tmp_path)
+    screen = make_screen(package="../../evil/..\\x", labels=("../a", "con.txt"))
+    writer.write_screen(screen)
+    writer.write_skip(screen.screen_id, "../fp", ["r"], {"text": "../x"})
+    writer.finish("done", screens=1, actions=1)
+    pattern = re.compile(
+        r"(screens/s-[0-9a-f]{12}\.json|screens|[a-z.-]+\.(json|jsonl|txt))"
+    )
+    assert names(tmp_path / "run") == sorted(
+        {
+            "run-start.json",
+            "run.json",
+            "summary.txt",
+            "skipped.jsonl",
+            "screens",
+            f"screens/{screen.screen_id}.json",
+        }
+    )
+    assert all(pattern.fullmatch(name) for name in names(tmp_path / "run"))
+    assert names(tmp_path) == ["run", *(f"run/{n}" for n in names(tmp_path / "run"))]
+
+
+# --- finish ---
+
+
+def test_finish_writes_run_json_and_summary_once(tmp_path):
+    writer = make(tmp_path)
+    writer.write_screen(make_screen(labels=("OK", "Cancel")))
+    ended = datetime(2026, 3, 1, 10, 0, tzinfo=UTC)
+    writer.finish("action_limit", screens=1, actions=7, ended_at=ended)
+    folder = tmp_path / "run"
+    assert json.loads((folder / "run.json").read_bytes()) == {
+        "schema": "uiprobe.run/1",
+        "ended_at": "2026-03-01T10:00:00+00:00",
+        "stop_reason": "action_limit",
+        "screens": 1,
+        "actions": 7,
+    }
+    summary = (folder / "summary.txt").read_bytes().decode("utf-8")
+    assert "com.example.app" in summary
+    assert '  "OK"\n  "Cancel"\n' in summary
+    before = {n: (folder / n).read_bytes() for n in names(folder) if "." in n}
+    with pytest.raises(RunFolderError, match="finished"):
+        writer.finish("again", screens=2, actions=8)
+    assert {n: (folder / n).read_bytes() for n in before} == before
+
+
+def test_a_run_that_did_not_finish_has_no_run_json(tmp_path):
+    writer = make(tmp_path)
+    writer.write_transition_start(1, "launch")
+    assert not (tmp_path / "run" / "run.json").exists()
+    del writer
+
+
+def test_nothing_is_written_after_finish(tmp_path):
+    writer = make(tmp_path)
+    writer.finish("done", screens=0, actions=0)
+    with pytest.raises(RunFolderError):
+        writer.write_transition_start(1, "launch")
+    with pytest.raises(RunFolderError):
+        writer.write_screen(make_screen())
+    assert not (tmp_path / "run" / "transitions.jsonl").exists()
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [("x", -1, 0), ("x", 0, -1), ("x", True, 0), ("x", 0, "1"), (5, 0, 0)],
+)
+def test_bad_finish_arguments_write_nothing(tmp_path, arguments):
+    writer = make(tmp_path)
+    reason, screens, actions = arguments
+    with pytest.raises((TypeError, ValueError)):
+        writer.finish(reason, screens=screens, actions=actions)
+    with pytest.raises(ValueError, match="time zone"):
+        writer.finish("x", screens=0, actions=0, ended_at=datetime(2026, 1, 1))  # noqa: DTZ001
+    assert names(tmp_path / "run") == ["run-start.json"]
+    writer.finish("x", screens=0, actions=0)  # still possible
+
+
+def test_summary_without_labelled_buttons(tmp_path):
+    writer = make(tmp_path)
+    writer.write_screen(make_screen(labels=("",)))
+    writer.finish("x", screens=1, actions=1)
+    summary = (tmp_path / "run" / "summary.txt").read_text(encoding="utf-8")
+    assert "(no labelled buttons)" in summary
+
+
+# --- bytes on disk ---
+
+
+def test_text_files_are_utf8_with_lf_only(tmp_path):
+    writer = make(tmp_path, package="com.example.日本")
+    screen = make_screen(labels=("確認", "line1\nline2"))
+    writer.write_screen(screen)
+    writer.write_transition_start(1, "tap", ID_A, {"text": "日本\r\n"}, (1, 2))
+    writer.write_transition_end(1, ID_B)
+    writer.write_skip(ID_A, "fp", ["r"], {"text": "a\r\nb"})
+    writer.write_screenshot(ID_A, PNG)
+    writer.finish("done", screens=1, actions=1)
+    folder = tmp_path / "run"
+    texts = [p for p in folder.rglob("*") if p.is_file() and p.suffix != ".png"]
+    assert len(texts) == 6
+    for path in texts:
+        data = path.read_bytes()
+        assert b"\r" not in data, path.name
+        assert data.endswith(b"\n"), path.name
+        data.decode("utf-8")
+    assert b"\r\n" in (folder / "screens" / f"{ID_A}.png").read_bytes()
+    assert "確認".encode() in (folder / "summary.txt").read_bytes()
+    assert "日本".encode() in (folder / "run-start.json").read_bytes()
+
+
+# --- escaping ---
+
+
+def test_control_and_bidi_characters_are_escaped(tmp_path):
+    writer = make(tmp_path, package=f"p{BIDI}")
+    screen = make_screen(package=f"p{BIDI}", labels=(f"{BIDI}{CONTROL}",))
+    writer.write_screen(screen)
+    element = {"text": f"{BIDI}{CONTROL}"}
+    writer.write_transition_start(1, "tap", ID_A, element)
+    writer.write_skip(ID_A, f"fp{BIDI}", ["r"], element)
+    writer.finish(f"stop{BIDI}{CONTROL}", screens=1, actions=1)
+    folder = tmp_path / "run"
+    for path in folder.rglob("*"):
+        if not path.is_file():
+            continue
+        text = path.read_bytes().decode("utf-8")
+        for char in "\u202e\u2066\x1b\x9b\x07":
+            assert char not in text, (path.name, hex(ord(char)))
+    assert lines_of(folder / "transitions.jsonl")[0]["action"]["element"] == element
+    assert "\\u202e" in (folder / "skipped.jsonl").read_text(encoding="utf-8")
+    summary = (folder / "summary.txt").read_text(encoding="utf-8")
+    assert "\\u202e" in summary
+    assert "\\u001b" in summary
+    assert "\\u009b" in summary
+
+
+# --- failures ---
+
+
+class _FailingHandle:
+    """Writes half of the data, then fails like a full disk."""
+
+    def __init__(self, handle):
+        self.handle = handle
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.handle.close()
+
+    def write(self, data):
+        self.handle.write(data[: len(data) // 2])
+        self.handle.flush()
+        raise OSError(errno.ENOSPC, "No space left on device")
+
+    def flush(self):
+        self.handle.flush()
+
+    def fileno(self):
+        return self.handle.fileno()
+
+    def close(self):
+        self.handle.close()
+
+
+def fail_on(monkeypatch, name: str) -> None:
+    real = builtins.open
+
+    def fake(path, *args, **kwargs):
+        handle = real(path, *args, **kwargs)
+        return _FailingHandle(handle) if Path(path).name == name else handle
+
+    monkeypatch.setattr(runlog, "open", fake, raising=False)
+
+
+def test_a_failed_file_stays_and_is_named(tmp_path, monkeypatch):
+    writer = make(tmp_path)
+    folder = tmp_path / "run"
+    screen = make_screen()
+    fail_on(monkeypatch, f"{screen.screen_id}.json")
+    with pytest.raises(RunFolderError) as raised:
+        writer.write_screen(screen)
+    target = folder / "screens" / f"{screen.screen_id}.json"
+    assert str(target) in str(raised.value)
+    assert raised.value.details["path"] == str(target)
+    assert isinstance(raised.value, UiprobeError)
+    assert isinstance(raised.value.__cause__, OSError)
+    assert target.is_file()
+    assert len(target.read_bytes()) > 0  # the partial file stays
+    partial = target.read_bytes()
+    monkeypatch.undo()
+    with pytest.raises(RunFolderError, match="earlier write failed"):
+        writer.write_skip(ID_A, "fp", ["r"], {})
+    with pytest.raises(RunFolderError):
+        writer.finish("done", screens=1, actions=1)
+    assert not (folder / "run.json").exists()
+    assert target.read_bytes() == partial
+
+
+def test_a_failed_line_stays_and_later_lines_are_refused(tmp_path, monkeypatch):
+    writer = make(tmp_path)
+    writer.write_transition_start(1, "launch")
+    path = tmp_path / "run" / "transitions.jsonl"
+    good = path.read_bytes()
+
+    def broken(*_arguments):
+        raise OSError(errno.EIO, "I/O error")
+
+    monkeypatch.setattr(runlog, "_put", broken)
+    with pytest.raises(RunFolderError, match=r"transitions\.jsonl"):
+        writer.write_transition_end(1, ID_A)
+    monkeypatch.undo()
+    assert path.read_bytes() == good
+    with pytest.raises(RunFolderError):
+        writer.write_transition_start(2, "back")
+    assert path.read_bytes() == good
+
+
+def test_a_failure_in_the_first_file_names_it(tmp_path, monkeypatch):
+    fail_on(monkeypatch, "run-start.json")
+    with pytest.raises(RunFolderError, match=r"run-start\.json"):
+        make(tmp_path)
+    assert (tmp_path / "run" / "run-start.json").is_file()
+
+
+def test_an_existing_file_is_never_opened_again(tmp_path):
+    writer = make(tmp_path)
+    existing = tmp_path / "run" / "transitions.jsonl"
+    existing.write_bytes(b"mine\n")
+    with pytest.raises(RunFolderError, match=r"transitions\.jsonl"):
+        writer.write_transition_start(1, "launch")
+    assert existing.read_bytes() == b"mine\n"
+
+
+def test_an_existing_screens_folder_is_an_error(tmp_path):
+    writer = make(tmp_path)
+    (tmp_path / "run" / "screens").mkdir()
+    with pytest.raises(RunFolderError):
+        writer.write_screen(make_screen())
+    assert names(tmp_path / "run" / "screens") == []
+
+
+# --- critical ---
+
+
+def test_critical_sets_and_clears_writing(tmp_path):
+    writer = make(tmp_path)
+    assert writer.writing is False
+    with writer.critical():
+        assert writer.writing is True
+        with writer.critical():
+            assert writer.writing is True
+        assert writer.writing is True
+    assert writer.writing is False
+
+
+def test_critical_clears_writing_after_an_exception(tmp_path):
+    writer = make(tmp_path)
+    message = "boom"
+    with pytest.raises(RuntimeError), writer.critical():  # noqa: PT012
+        assert writer.writing is True
+        raise RuntimeError(message)
+    assert writer.writing is False
+
+
+def test_writing_is_read_only(tmp_path):
+    writer = make(tmp_path)
+    with pytest.raises(AttributeError):
+        writer.writing = True  # ty: ignore[invalid-assignment]
+
+
+def test_writing_is_true_during_a_write_and_false_after_an_error(tmp_path, monkeypatch):
+    writer = make(tmp_path)
+    seen = []
+
+    def spy(*_arguments):
+        seen.append(writer.writing)
+        raise OSError(errno.EIO, "I/O error")
+
+    monkeypatch.setattr(runlog, "_put", spy)
+    with pytest.raises(RunFolderError):
+        writer.write_transition_start(1, "launch")
+    assert seen == [True]
+    assert writer.writing is False
+
+
+def test_the_context_manager_closes_the_line_files(tmp_path):
+    with make(tmp_path) as writer:
+        writer.write_transition_start(1, "launch")
+        stream = writer._streams["transitions.jsonl"]
+    assert stream.closed
+    assert lines_of(tmp_path / "run" / "transitions.jsonl")[0]["action_id"] == 1
+
+
+# --- edge cases ---
+
+
+def test_a_folder_named_screens_can_be_used(tmp_path):
+    writer = RunWriter.create(
+        tmp_path / "screens",
+        package="p",
+        limits=Limits(),
+        deny_words=[],
+        serial="s",
+        started_at=STARTED,
+    )
+    _WRITERS.append(writer)
+    assert writer.write_screen(make_screen())
+    assert names(tmp_path / "screens") == [
+        "run-start.json",
+        "screens",
+        f"screens/{make_screen().screen_id}.json",
+    ]
+
+
+def test_a_relative_folder_stays_where_it_was_made(tmp_path, monkeypatch):
+    (tmp_path / "here").mkdir()
+    (tmp_path / "elsewhere" / "run").mkdir(parents=True)
+    monkeypatch.chdir(tmp_path / "here")
+    writer = RunWriter.create(
+        "run", package="p", limits=Limits(), deny_words=[], serial="s"
+    )
+    _WRITERS.append(writer)
+    monkeypatch.chdir(tmp_path / "elsewhere")
+    writer.write_transition_start(1, "launch")
+    assert names(tmp_path / "elsewhere" / "run") == []
+    assert (tmp_path / "here" / "run" / "transitions.jsonl").exists()
+
+
+def test_text_that_cannot_be_encoded_leaves_no_file(tmp_path):
+    writer = make(tmp_path)
+    bad = "x\ud800"
+    with pytest.raises(ValueError, match="UTF-8"):
+        writer.write_skip(ID_A, "f", ["r"], {"text": bad})
+    with pytest.raises(ValueError, match="UTF-8"):
+        writer.finish(bad, screens=0, actions=0)
+    assert names(tmp_path / "run") == ["run-start.json"]
+    # nothing was recorded as seen, and the writer is still usable
+    assert writer.write_skip(ID_A, "f", ["r"], {"text": "ok"})
+    writer.finish("done", screens=0, actions=0)
+
+
+def test_a_failed_skip_is_not_remembered(tmp_path, monkeypatch):
+    writer = make(tmp_path)
+
+    def broken(*_arguments):
+        raise OSError(errno.ENOSPC, "No space left on device")
+
+    monkeypatch.setattr(runlog, "_put", broken)
+    with pytest.raises(RunFolderError):
+        writer.write_skip(ID_A, "f", ["r"], {"text": "x"})
+    assert ID_A not in {key[0] for key in writer._skipped}
+
+
+def test_writing_after_close_is_refused_clearly(tmp_path):
+    with make(tmp_path) as writer:
+        writer.write_transition_start(1, "launch")
+    before = (tmp_path / "run" / "transitions.jsonl").read_bytes()
+    with pytest.raises(RunFolderError, match="closed"):
+        writer.write_transition_end(1, ID_A)
+    assert (tmp_path / "run" / "transitions.jsonl").read_bytes() == before
+    assert writer._failed is None
+
+
+def test_every_write_is_synced_to_the_disk(tmp_path, monkeypatch):
+    synced = []
+    real = runlog.os.fsync
+    monkeypatch.setattr(runlog.os, "fsync", lambda fd: (synced.append(fd), real(fd))[1])
+    writer = make(tmp_path)
+    assert len(synced) == 1
+    writer.write_transition_start(1, "launch")
+    assert len(synced) == 2
+    writer.write_screen(make_screen())
+    writer.write_screenshot(make_screen().screen_id, PNG)
+    assert len(synced) == 4
+    writer.finish("done", screens=1, actions=1)
+    assert len(synced) == 6
+
+
+def test_keys_are_written_in_a_fixed_order(tmp_path):
+    writer = make(tmp_path)
+    writer.write_transition_start(1, "tap", ID_A, {"text": "x"}, (1, 2))
+    writer.write_transition_end(1, ID_B)
+    writer.write_skip(ID_A, "f", ["r"], {"text": "x"})
+    writer.finish("done", screens=1, actions=1, ended_at=STARTED)
+    folder = tmp_path / "run"
+    start = json.loads((folder / "run-start.json").read_bytes())
+    assert list(start) == [
+        "schema",
+        "started_at",
+        "package",
+        "limits",
+        "deny",
+        "device",
+    ]
+    first, second = lines_of(folder / "transitions.jsonl")
+    assert list(first) == [
+        "schema",
+        "recorded_at",
+        "action_id",
+        "action",
+        "from_screen_id",
+    ]
+    assert list(first["action"]) == ["kind", "point", "element"]
+    assert list(second) == [
+        "schema",
+        "recorded_at",
+        "action_id",
+        "dump_failed",
+        "to_screen_id",
+    ]
+    skip = lines_of(folder / "skipped.jsonl")[0]
+    assert list(skip) == [
+        "schema",
+        "recorded_at",
+        "screen_id",
+        "fingerprint",
+        "reasons",
+        "element",
+    ]
+    end = json.loads((folder / "run.json").read_bytes())
+    assert list(end) == ["schema", "ended_at", "stop_reason", "screens", "actions"]
+
+
+def test_the_summary_lists_clickable_elements_only(tmp_path):
+    writer = make(tmp_path)
+    screen = make_screen(labels=("Press",))
+    plain = Element(
+        id="e9",
+        parent=None,
+        class_name="android.widget.TextView",
+        bounds=Bounds(0, 0, 10, 10),
+        text="Just text",
+    )
+    writer.write_screen(replace(screen, elements=(*screen.elements, plain)))
+    writer.finish("done", screens=1, actions=0)
+    text = (tmp_path / "run" / "summary.txt").read_text(encoding="utf-8")
+    assert "Press" in text
+    assert "Just text" not in text
