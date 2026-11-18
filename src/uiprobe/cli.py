@@ -828,7 +828,7 @@ def _reasons_text(decision: Decision) -> str:
     parts: list[str] = []
     for reason in decision.reasons:
         part: str = reason
-        if reason in ("deny_word", "confirm_button"):
+        if reason in ("deny_word", "irreversible_screen", "confirm_button"):
             found = [
                 _detail_text(decision, d)
                 for d in decision.details

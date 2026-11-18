@@ -756,9 +756,9 @@ class Policy:
 
     Raises:
         ValueError: A deny word, confirm word or irreversible phrase is empty
-            after normalization, or a
-            confirm word is empty after the label cleaning (invisible
-            characters, normalization, surrounding punctuation), or
+            after normalization, or a confirm word is empty after the label
+            cleaning (invisible characters, normalization, surrounding
+            punctuation), or
             ``edges`` is not four non-negative integers, or ``min_visible_px``
             is not an integer of at least 1.
         TypeError: ``edges`` is not a sequence.

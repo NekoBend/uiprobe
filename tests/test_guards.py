@@ -3108,3 +3108,19 @@ def test_only_a_word_ending_in_a_letter_of_category_lo_is_open_ended(
 @pytest.mark.parametrize("label", ["Undoubtedly", "Undock", "Restarted", "Undone"])
 def test_start_over_words_refuse_longer_words_that_contain_them(label) -> None:
     assert "deny_word" in reasons(run([el("e2", text=label)]), "e2")
+
+
+def test_text_output_names_the_phrase_that_refused_a_screen() -> None:
+    from uiprobe.cli import _reasons_text
+
+    warning = el(
+        "e3",
+        text="Saved permanently",
+        cls="android.widget.TextView",
+        flags=(),
+        bounds=(50, 300, 250, 350),
+    )
+    judgement = run([el("e2", text="Cancel"), warning])
+    assert _reasons_text(decision(judgement, "e2")) == (
+        'irreversible_screen ("permanently" in text of e3)'
+    )
