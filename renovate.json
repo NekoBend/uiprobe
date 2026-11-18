@@ -1,0 +1,31 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "description": [
+    "Renovate proposes every version update as a pull request and merges none of them.",
+    "It covers the GitHub Actions in .github/workflows (pinned to commit SHAs with the version in a comment) and, in pyproject.toml and uv.lock, the development tools in the dev dependency group and the uv_build build backend.",
+    "The Python versions and the uv version that CI uses, and requires-python, are chosen by hand.",
+    "A release becomes an update 7 days after it is published."
+  ],
+  "extends": [
+    "config:recommended",
+    "helpers:pinGitHubActionDigestsToSemver"
+  ],
+  "enabledManagers": ["github-actions", "pep621"],
+  "minimumReleaseAge": "7 days",
+  "minimumReleaseAgeBehaviour": "timestamp-required",
+  "automerge": false,
+  "packageRules": [
+    {
+      "description": "The inputs given to actions (setup-uv's version and python-version) are chosen by hand.",
+      "matchManagers": ["github-actions"],
+      "matchDepTypes": ["uses-with"],
+      "enabled": false
+    },
+    {
+      "description": "The supported Python versions (requires-python) are chosen by hand.",
+      "matchManagers": ["pep621"],
+      "matchDepTypes": ["requires-python"],
+      "enabled": false
+    }
+  ]
+}
