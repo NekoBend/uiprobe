@@ -1,0 +1,40 @@
+# Settings file
+
+uiprobe keeps its no-press defaults in a settings file, `uiprobe.toml`, which uiprobe writes with every default spelled out and which you edit freely. Removing a default from the file is your responsibility. The planned crawl will refuse to start without the file.
+
+`uiprobe init [PATH]` creates it, at `./uiprobe.toml` unless you give a path. It prints the path (with `--json`: `{"schema": "uiprobe.init/1", "path": "..."}`). An existing file, directory or link at that path (also a link whose target is missing) is never touched: `init` then fails with a usage error (exit 2), `PATH already exists; uiprobe never overwrites it`. The file is opened create-only. On Windows that open would follow a link whose target is missing, so `init` checks the path first; a link made in the instant between that check and the open is not caught there. The command does not contact the adb server and takes no device options: `-s`, `--adb`, `--adb-server` and `--no-start-server` are refused with a usage error, before or after `init`. If writing fails after the file was created (a full disk, for example), the file stays, incomplete, because uiprobe never deletes files; the error says so, and you delete it by hand and run `init` again. The same holds for Ctrl+C after the file was created: the exit status stays 130, and the message names the file (a Ctrl+C in the instant right after the file is created, before writing starts, may only say "interrupted"). The file is UTF-8 with LF line ends; the Japanese words stay readable.
+
+**The file is not used yet.** Neither `crawl --dry-run` nor `key` reads it today. The next change is planned to make both use it; until then the built-in defaults apply. What exists now is the format, `uiprobe init` and a strict reader (`uiprobe.settings.load_settings`).
+
+Keys, with their defaults:
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `format_version` | `1` | The file format. Only 1 is accepted. |
+| `defaults_version` | `1` | The version of uiprobe's defaults when the file was written (1 up to the current one). |
+| `press` | `false` | Always press for real (the planned crawl). |
+| `[deny] words` | the built-in deny words | Never press an element that contains one of these words. |
+| `[confirm] words` | the built-in confirm words | Labels of buttons that confirm what the screen asks. |
+| `[rules] tap_unlabeled` | `false` | Allow pressing elements with no text, description or hint. |
+| `[rules] skip_number_only` | `true` | Do not press an element whose label is only a number. |
+| `[rules] skip_toggles` | `true` | Do not press a switch, checkbox or radio button, or a row that holds one. |
+| `[rules] refuse_dialog_confirm` | `true` | Do not press a confirm button in a dialog. |
+| `[rules] min_visible_px` | `8` | The smallest visible width and height of an element, 1 to 64. |
+| `[rules] edge_top_px`, `edge_bottom_px`, `edge_side_px` | `24`, `32`, `30` | Screen-edge sizes in pixels, each 0 to 500 (the API 36 values). |
+| `[limits] depth` | `5` | Crawl depth, 1 to 50. |
+| `[limits] actions` | `300` | Most presses, 1 to 10000. |
+| `[limits] minutes` | `30` | Longest run, 1 to 1440. |
+| `[keys] refuse` | the device-wide keys listed under [Pressing keys](commands.md#pressing-keys), without the fixed keys below | Key names `uiprobe key` refuses. |
+| `[keys] refuse_prefixes` | `KEYCODE_MEDIA_`, `KEYCODE_SYSTEM_NAVIGATION_`, ... | Every key whose name starts with one of these is refused. |
+
+`[deny]`, `[confirm]` and `[keys]` each also have `remove = []`. The effective list is the words in the file, plus every default that a later uiprobe version added (a default carries the defaults version that introduced it), minus the `remove` entries. So a word you delete from `words` stays off, a word that a later version adds applies on its own, and you keep it out by listing it under `remove`. Deny words are compared after the normalization the matching uses (case and width variants and whitespace runs are the same word). Confirm words are compared in the form the confirm matching uses, which also drops surrounding punctuation and invisible characters, so `OK!` and `OK` are the same word (also for duplicates). Key names are compared exactly. `[keys] remove` takes names out of both `refuse` and `refuse_prefixes`; removing a key that a remaining prefix still covers (for example `KEYCODE_MEDIA_PLAY` while `KEYCODE_MEDIA_` is listed) has no effect and gives a warning.
+
+These keys are fixed: `KEYCODE_POWER`, `KEYCODE_SLEEP`, `KEYCODE_SOFT_SLEEP`, `KEYCODE_LOCK`, `KEYCODE_CALL`, `KEYCODE_ENDCALL`, `KEYCODE_HEADSETHOOK`, `KEYCODE_TV_POWER`, `KEYCODE_AVR_POWER` and `KEYCODE_STB_POWER`. They are always refused and are not in the file; listing one under `[keys] remove` is accepted but has no effect and gives a warning.
+
+The options of [the commands](commands.md) are not settings. Never in the file: `--allow-real-device` for each run on a real device, permission screens, password fields, typing, staying inside the target app, the re-read before a press and Ctrl+C.
+
+The reader is strict. It refuses unknown tables or keys, wrong types (a boolean where a number is expected too), numbers out of the ranges above, words that deny matching rejects, key names that do not match `KEYCODE_[A-Z0-9_]{1,40}`, duplicate entries, and a missing table or key (only the `remove` lists may be left out). It reads a regular file of at most 1 MiB as UTF-8 (a BOM is accepted, UTF-16 is refused). The path is opened once, read-only, and everything after that uses the opened file, not the path: the checks (regular file, size), the bytes and the check for a change.
+
+Prevented on all systems: the bytes always come from the one file that was opened and checked; never more than 1 MiB + 1 byte is read, so a file that keeps growing is cut off and refused; a change during the read (size, modification time or change time) is refused with "the file changed while it was read; try again"; and a path that names another file after the read (a symbolic link or a folder switched, a file replaced or removed; on Windows an open file cannot be deleted or replaced, so only the other cases can occur there) is refused the same way. A settings file that is a symbolic link is read normally. On Linux and macOS the open does not wait for a FIFO writer and uses `O_NOCTTY` (so opening a terminal device cannot make it the controlling terminal), so a FIFO or a device at the path is refused as "not a regular file" before any read. A file on a stalled network or FUSE mount can still make the read wait. On Windows there is no non-blocking open: an ordinary path cannot name a pipe, and a device name such as `CON` is refused by the check of the opened file before any read. The change time is the creation time on Windows, so a same-size rewrite that restores the modification time is caught on Linux and macOS when the file system records a newer change time (not on file systems with coarse timestamps), but not on Windows.
+
+What remains: the path is resolved once, at the open. A symbolic link or folder that is switched just before the open makes uiprobe read the file the path named at that moment (that file is still fully checked). A switch that is undone before the end of the read cannot mix bytes any more, because only the opened file is read. Anyone who can switch the path can already make it name a file with any content.

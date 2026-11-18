@@ -6,7 +6,8 @@ Network and process rules: no network library anywhere, `socket` and
 Rules for files (an allowlist, not a denylist):
 
 uiprobe's code (src/uiprobe) must never delete, rename, truncate or overwrite
-a file. Today it creates no file at all. Instead of listing what is
+a file. Today it creates one file: the settings file, through the create-only
+open in settings.py (see ALLOWED_CALLS). Instead of listing what is
 dangerous after the fact, this check flags every REFERENCE (a call, but also
 `writer = open`, `opener=open`, `getattr(os, "replace")`) to a name that can
 open or change a file, and every import of a module that is not on the
@@ -44,22 +45,49 @@ relative to src/uiprobe (`cli.py`, `sub/cli.py`), holding the call exactly as
 `ast.unparse` prints it (so quotes, spacing and argument order must match;
 an alias, an extra argument or other flags no longer match). The entry
 exempts only that call's function reference; its arguments are checked as
-usual. A future file-creating call must create and never replace, for example:
+usual. An entry covers exactly one call site: a second identical call is
+flagged, and `test_each_allowed_call_has_exactly_one_site` fails.
+The settings reader has one read-only call, `os.open(path, _READ_FLAGS)`, in
+settings.py only. It is allowed because its flags cannot write: the flags are
+passed through the module constant `_READ_FLAGS`, whose definition is checked
+by AST (`read_flags_problems`: only O_RDONLY, O_NONBLOCK, O_CLOEXEC, O_NOCTTY,
+O_BINARY and O_NOINHERIT, combined with `|`, assigned directly or under a
+`sys.platform` branch) and whose runtime value is checked to hold
+none of O_WRONLY, O_RDWR, O_CREAT, O_TRUNC, O_APPEND, O_EXCL and O_TEMPORARY.
+A future file-creating call must create and never replace, for example:
     "store.py": {"os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 384)"}
 (or `open(path, "x")`), and the same change must show up in review. A stale
 entry (one that no longer matches any call) fails `test_allowed_calls_are_used`.
 
-Known limits of an AST check, accepted: `sys.modules["os"].remove`,
-`os.__dict__["remove"]`, re-exports such as `subprocess.os.remove`, and similar
-deliberate misuse (`io._io.open` is caught: `open` is matched by name). The
-runtime guard in conftest.py judges deletes, renames and truncates, and also
-blocks write-mode opens inside the repository.
+Routes to a module's globals (`__globals__`, `__dict__`, `f_globals`, `f_locals`, the
+builtin `vars` and `locals`, `sys.modules`, any attribute named `__setattr__`
+or `__delattr__`, and `getattr`/`setattr`/`delattr` called with a
+literal "__globals__", "__dict__" or "f_globals") are flagged in every file
+under src/uiprobe (`namespace_routes`), because they could rebind the constant.
+Every file is also checked for a store, augmented store or delete whose target
+is an attribute of an imported module name (`os.O_NONBLOCK = ...`,
+`os.O_NONBLOCK |= ...`, `del os.x`, `sys.platform = ...`;
+`module_attribute_changes`). In settings.py, `os` and `sys` may be bound only by
+the top-level `import os` and `import sys` (`unapproved_bindings`): a class,
+def, import alias, assignment, parameter, loop or with target, except name,
+match capture or global/nonlocal of those names is flagged.
+
+Scope: the guard is a review aid. It catches mistakes and the routes listed
+here; it is not a defense against deliberate evasion, whether written out or
+built at runtime. Known limits include routes through re-exported modules (for
+example os.path.os or subprocess.os), reflection, and names or keys built at
+runtime; review covers those. (`io._io.open` is caught: `open` is matched by
+name.) `sys.modules["os"].remove` and
+`os.__dict__["remove"]` are flagged now (`namespace_routes`). The runtime guard
+in conftest.py judges deletes, renames and truncates, and also blocks
+write-mode opens inside the repository.
 """
 
 from __future__ import annotations
 
 import ast
 import importlib.util
+import os
 import tomllib
 from pathlib import Path
 
@@ -206,6 +234,7 @@ APPROVED_IMPORTS: dict[str, str] = {
         "streams that are already open"
     ),
     "time": "clocks",
+    "tomllib": "parses TOML text that the caller already read; no file access",
     "typing": "annotations",
     "unicodedata": "character tables",
     "xml.etree.ElementTree": "parses text; write() and write_c14n() are flagged",
@@ -347,6 +376,17 @@ ALLOWED_CALLS: dict[str, frozenset[str]] = {
     # reads the text, resource_id or content_desc attribute of a UI element
     # (`field` is one of those three literals, never a file name).
     "model.py": frozenset({"raw.replace(b'\\x00', b'')", "getattr(element, field)"}),
+    # Settings file. (1) Creates the file for `uiprobe init`: mode "x" fails
+    # when the path exists, so an existing file is never opened for writing.
+    # (2) The one read-only open of the reader: its flags are the constant
+    # `_READ_FLAGS`, whose definition and value are checked below
+    # (`test_the_read_flags_are_read_only_*`).
+    "settings.py": frozenset(
+        {
+            "open(path, 'x', encoding='utf-8', newline='\\n')",
+            "os.open(path, _READ_FLAGS)",
+        }
+    ),
 }
 
 
@@ -448,11 +488,16 @@ def _is_flagged_string_lookup(call: ast.Call) -> bool:
 def _allowed_functions(tree: ast.AST, filename: str, allowed: dict) -> set[ast.AST]:
     """Return the function nodes of the calls listed in `allowed` for `filename`."""
     calls = allowed.get(filename, frozenset())
-    return {
-        node.func
-        for node in ast.walk(tree)
-        if isinstance(node, ast.Call) and ast.unparse(node) in calls
-    }
+    exempt: set[ast.AST] = set()
+    seen: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call):
+            text = ast.unparse(node)
+            # Each allowed call is one site: a second identical call is flagged.
+            if text in calls and text not in seen:
+                seen.add(text)
+                exempt.add(node.func)
+    return exempt
 
 
 def _used_with_argument(node: ast.Attribute, parents: dict) -> bool:
@@ -553,6 +598,36 @@ def test_allowed_calls_are_used():
         tree = ast.parse(SOURCE_DIR.joinpath(name).read_text(encoding="utf-8"))
         present = {ast.unparse(n) for n in ast.walk(tree) if isinstance(n, ast.Call)}
         assert calls <= present, f"{name}: unused allowlist entries {calls - present}"
+
+
+def allowed_call_counts(source: str, filename: str) -> dict[str, int]:
+    """Return how many call sites match each allowlist entry of `filename`."""
+    calls = ALLOWED_CALLS.get(filename, frozenset())
+    texts = [
+        ast.unparse(n) for n in ast.walk(ast.parse(source)) if isinstance(n, ast.Call)
+    ]
+    return {call: texts.count(call) for call in sorted(calls)}
+
+
+@pytest.mark.parametrize("name", sorted(ALLOWED_CALLS))
+def test_each_allowed_call_has_exactly_one_site(name):
+    source = SOURCE_DIR.joinpath(name).read_text(encoding="utf-8")
+    for call, count in allowed_call_counts(source, name).items():
+        assert count == 1, (
+            f"{name}: the allowed call {call!r} appears {count} times; an"
+            " allowance covers exactly one call site, so reuse the existing"
+            " call or make the new site textually distinct and allow it in a"
+            " reviewed change"
+        )
+
+
+def test_a_second_identical_allowed_call_is_flagged():
+    call = "open(path, 'x', encoding='utf-8', newline='\\n')"
+    one = f"def a(path):\n    return {call}\n"
+    two = one + f"\n\ndef b(path):\n    return {call}\n"
+    assert not file_changes(one, "settings.py")
+    assert allowed_call_counts(two, "settings.py")[call] == 2
+    assert file_changes(two, "settings.py") == [6]
 
 
 @pytest.mark.parametrize(
@@ -931,6 +1006,31 @@ def test_an_allowed_call_still_has_its_arguments_checked():
     assert file_changes(nested, "cli.py") == [2]
 
 
+# The settings file's create-only open, with anything different.
+CREATE_ONLY = "open(path, 'x', encoding='utf-8', newline='\\n')"
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "open(path, 'w', encoding='utf-8', newline='\\n')",
+        "open(path, 'a', encoding='utf-8', newline='\\n')",
+        "open(path, 'x+', encoding='utf-8', newline='\\n')",
+        "open(path, 'x', encoding='utf-8')",
+        "open(path, 'x', encoding='utf-8', newline='\\n')\nopen(path, 'w')",
+    ],
+)
+def test_a_changed_create_only_open_is_flagged_in_settings(source):
+    assert file_changes(source, "settings.py")
+
+
+def test_the_create_only_open_is_accepted_only_in_settings():
+    assert not file_changes(CREATE_ONLY, "settings.py")
+    assert file_changes(CREATE_ONLY, "cli.py")
+    assert file_changes(CREATE_ONLY, "sub/settings.py")
+    assert file_changes(CREATE_ONLY)
+
+
 @pytest.mark.parametrize(
     "source",
     [
@@ -954,3 +1054,618 @@ def test_an_allowed_call_still_has_its_arguments_checked():
 )
 def test_ordinary_code_is_not_flagged(source):
     assert not file_changes(source, "other.py")
+
+
+# The settings reader's read-only open and the flags it passes.
+READ_ONLY_OPEN = "os.open(path, _READ_FLAGS)"
+READ_FLAG_NAMES = frozenset(
+    {"O_RDONLY", "O_NONBLOCK", "O_CLOEXEC", "O_NOCTTY", "O_BINARY", "O_NOINHERIT"}
+)
+WRITE_FLAG_NAMES = (
+    "O_WRONLY",
+    "O_RDWR",
+    "O_CREAT",
+    "O_TRUNC",
+    "O_APPEND",
+    "O_EXCL",
+    "O_TEMPORARY",
+)
+
+
+def _flag_expression_problem(node: ast.expr) -> str | None:
+    """Return why `node` is not `os.O_A | os.O_B ...` of read-only names."""
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.BitOr):
+        return _flag_expression_problem(node.left) or _flag_expression_problem(
+            node.right
+        )
+    if (
+        isinstance(node, ast.Attribute)
+        and isinstance(node.value, ast.Name)
+        and node.value.id == "os"
+        and node.attr in READ_FLAG_NAMES
+    ):
+        return None
+    return f"not a read-only os flag combined with |: {ast.unparse(node)}"
+
+
+def _is_platform_test(node: ast.expr) -> bool:
+    """Return True for a comparison of `sys.platform` with a string."""
+    return (
+        isinstance(node, ast.Compare)
+        and ast.unparse(node.left) == "sys.platform"
+        and all(isinstance(c, ast.Constant) for c in node.comparators)
+    )
+
+
+def _foreign_bindings(tree: ast.AST, name: str) -> list[str]:
+    """Return every binding of `name` that is not a Name store or a read.
+
+    Parameters, import aliases, except/match captures, def and class names,
+    global and nonlocal declarations, attribute stores (`module.NAME = ...`),
+    and the name as a string (`setattr(module, "NAME", ...)`) all change or
+    shadow the constant without an `ast.Name` store.
+    """
+    found: list[str] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.arg) and node.arg == name:
+            found.append("parameter")
+        elif isinstance(node, ast.alias) and name in (node.asname, node.name):
+            found.append("import alias")
+        elif isinstance(node, ast.ExceptHandler) and node.name == name:
+            found.append("except-as")
+        elif isinstance(node, ast.MatchAs | ast.MatchStar) and node.name == name:
+            found.append("match capture")
+        elif isinstance(node, ast.MatchMapping) and node.rest == name:
+            found.append("match mapping rest")
+        elif (
+            isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef)
+            and node.name == name
+        ):
+            found.append("def or class name")
+        elif isinstance(node, ast.Global | ast.Nonlocal) and name in node.names:
+            found.append("global or nonlocal")
+        elif isinstance(node, ast.Attribute) and node.attr == name:
+            found.append("attribute access")
+        elif isinstance(node, ast.keyword) and node.arg == name:
+            found.append("keyword argument")
+        elif isinstance(node, ast.Constant) and node.value == name:
+            found.append("name as a string")
+    return found
+
+
+def namespace_routes(source: str) -> list[str]:
+    """Return the routes to a module's globals found in `source`.
+
+    Flags any attribute named `__globals__`, `__dict__`, `f_globals`,
+    `f_locals`, `__setattr__` or `__delattr__`, any call of the builtin `vars`
+    or `locals`, a `getattr`, `setattr` or `delattr` call with a
+    literal "__globals__", "__dict__" or "f_globals" argument, and any use of
+    `sys.modules` (attribute, subscript or `from sys import modules`).
+    """
+    found: list[str] = []
+    tree = ast.parse(source)
+    aliases = _import_aliases(tree)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Attribute):
+            if node.attr in NAMESPACE_ATTRIBUTES:
+                found.append(node.attr)
+            elif node.attr == "modules" and "sys" in {
+                ast.unparse(node.value),
+                _qualified(node.value, aliases),
+            }:
+                found.append("sys.modules")
+        elif isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+            if node.func.id in {"vars", "locals"}:
+                found.append(node.func.id)
+            elif node.func.id in {"getattr", "setattr", "delattr"}:
+                found.extend(
+                    f"{node.func.id} {arg.value}"
+                    for arg in [*node.args, *(k.value for k in node.keywords)]
+                    if isinstance(arg, ast.Constant)
+                    and arg.value in NAMESPACE_ATTRIBUTES
+                )
+        elif isinstance(node, ast.ImportFrom) and node.module == "sys":
+            found.extend("sys.modules" for a in node.names if a.name == "modules")
+    return found
+
+
+NAMESPACE_ATTRIBUTES = frozenset(
+    {"__globals__", "__dict__", "f_globals", "f_locals", "__setattr__", "__delattr__"}
+)
+
+
+def _imported_names(tree: ast.AST) -> set[str]:
+    """Return every name bound by an import or from-import, in any scope."""
+    names: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            names.update(a.asname or a.name.split(".")[0] for a in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            names.update(a.asname or a.name for a in node.names if a.name != "*")
+    return names
+
+
+def module_attribute_changes(source: str) -> list[int]:
+    """Return the lines that store to or delete an attribute of an imported name.
+
+    `os.X = ...`, `os.X |= ...`, `del os.X`, `os.path.X = ...`, and the same as
+    a for, with or tuple target. Any Attribute whose context is Store or Del and
+    whose chain of attributes starts at a name bound by an import is flagged.
+    """
+    tree = ast.parse(source)
+    imported = _imported_names(tree)
+    lines: set[int] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Attribute) and not isinstance(node.ctx, ast.Load):
+            root = node.value
+            while isinstance(root, ast.Attribute):
+                root = root.value
+            if isinstance(root, ast.Name) and root.id in imported:
+                lines.add(node.lineno)
+    return sorted(lines)
+
+
+def _binding_kind(node: ast.AST, names: frozenset[str]) -> str | None:
+    """Return how `node` binds or declares one of `names`, or None."""
+    if isinstance(node, ast.arg) and node.arg in names:
+        return "parameter"
+    if isinstance(node, ast.ExceptHandler | ast.MatchAs | ast.MatchStar) and (
+        node.name in names
+    ):
+        return "except name or match capture"
+    if isinstance(node, ast.MatchMapping) and node.rest in names:
+        return "match mapping rest"
+    if isinstance(
+        node,
+        ast.FunctionDef
+        | ast.AsyncFunctionDef
+        | ast.ClassDef
+        | ast.TypeVar
+        | ast.ParamSpec
+        | ast.TypeVarTuple,
+    ) and (node.name in names):
+        return "def, class or type parameter name"
+    if isinstance(node, ast.Global | ast.Nonlocal) and names & set(node.names):
+        return "global or nonlocal"
+    return None
+
+
+def unapproved_bindings(source: str, names: frozenset[str] = frozenset({"os", "sys"})):
+    """Return every binding of `names` except the top-level plain imports.
+
+    Only a top-level `import os` / `import sys` (one name, no alias) is
+    approved. Everything else that binds or declares the name is returned:
+    imports and aliases anywhere else, assignments, for, with, walrus and
+    comprehension targets, parameters, except names, match captures, def, class
+    and type-parameter names, `del`, and global/nonlocal declarations.
+    """
+    tree = ast.parse(source)
+    approved = {
+        id(stmt)
+        for stmt in tree.body
+        if isinstance(stmt, ast.Import)
+        and len(stmt.names) == 1
+        and stmt.names[0].asname is None
+        and stmt.names[0].name in names
+    }
+    found: list[str] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import) and id(node) not in approved:
+            found.extend(
+                f"import {a.name}"
+                for a in node.names
+                if (a.asname or a.name.split(".")[0]) in names
+            )
+        elif isinstance(node, ast.ImportFrom):
+            found.extend(
+                f"from import {a.name}"
+                for a in node.names
+                if (a.asname or a.name) in names
+            )
+        elif isinstance(node, ast.Name) and node.id in names:
+            if not isinstance(node.ctx, ast.Load):
+                found.append(f"name {type(node.ctx).__name__.lower()}")
+        else:
+            kind = _binding_kind(node, names)
+            if kind:
+                found.append(kind)
+    return found
+
+
+def read_flags_problems(source: str, name: str = "_READ_FLAGS") -> list[str]:
+    """Return what is wrong with the definition of the constant `name`.
+
+    Every binding of `name` must be a plain assignment of read-only flags at
+    module level or directly inside `if sys.platform ...` branches. At least
+    one definition must exist.
+    """
+    tree = ast.parse(source)
+    problems: list[str] = []
+    definitions = 0
+
+    def visit(body: list[ast.stmt]) -> None:
+        nonlocal definitions
+        for statement in body:
+            if isinstance(statement, ast.If):
+                # Other branches are not entered: a binding inside one is
+                # caught by the count of all bindings below.
+                if _is_platform_test(statement.test):
+                    visit(statement.body)
+                    visit(statement.orelse)
+                continue
+            target, value = None, None
+            if isinstance(statement, ast.Assign) and len(statement.targets) == 1:
+                target, value = statement.targets[0], statement.value
+            elif isinstance(statement, ast.AnnAssign):
+                target, value = statement.target, statement.value
+            if isinstance(target, ast.Name) and target.id == name:
+                if value is None:
+                    continue  # a bare annotation binds nothing
+                definitions += 1
+                if problem := _flag_expression_problem(value):
+                    problems.append(problem)
+
+    visit(tree.body)
+    # Any binding of the name found by a full walk must be one that was visited.
+    stores = [
+        n
+        for n in ast.walk(tree)
+        if isinstance(n, ast.Name) and n.id == name and isinstance(n.ctx, ast.Store)
+    ]
+    bare = sum(
+        isinstance(n, ast.AnnAssign)
+        and n.value is None
+        and ast.unparse(n.target) == name
+        for n in ast.walk(tree)
+    )
+    if len(stores) != definitions + bare:
+        problems.append("the name is bound in a way that is not a plain assignment")
+    problems.extend(
+        f"bound or reached another way: {kind}"
+        for kind in _foreign_bindings(tree, name)
+        # `global NAME` is the one way a function may rebind it: flagged too.
+    )
+    if definitions == 0:
+        problems.append("no definition")
+    return problems
+
+
+GOOD_FLAGS = (
+    "import os\nimport sys\n_READ_FLAGS: int\n"
+    "if sys.platform == 'win32':\n"
+    "    _READ_FLAGS = os.O_RDONLY | os.O_BINARY | os.O_NOINHERIT\n"
+    "else:\n"
+    "    _READ_FLAGS = os.O_RDONLY | os.O_NONBLOCK | os.O_CLOEXEC | os.O_NOCTTY\n"
+)
+
+
+def test_the_read_flags_are_read_only_by_definition():
+    source = SOURCE_DIR.joinpath("settings.py").read_text(encoding="utf-8")
+    assert read_flags_problems(source) == []
+    assert read_flags_problems(GOOD_FLAGS) == []
+
+
+def test_the_read_flags_are_read_only_at_runtime():
+    from uiprobe import settings
+
+    for name in WRITE_FLAG_NAMES:
+        bit = getattr(os, name, 0)
+        assert not settings._READ_FLAGS & bit, name
+    assert os.O_RDONLY == 0  # so no access-mode bit is set
+
+
+@pytest.mark.parametrize(
+    "name", sorted(READ_FLAG_NAMES | set(WRITE_FLAG_NAMES) | {"O_NOFOLLOW"})
+)
+def test_a_flag_other_than_the_read_only_ones_is_flagged(name):
+    inline = GOOD_FLAGS.replace("os.O_CLOEXEC", f"os.O_CLOEXEC | os.{name}")
+    assert bool(read_flags_problems(inline)) == (name not in READ_FLAG_NAMES)
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        GOOD_FLAGS + "_READ_FLAGS |= os.O_WRONLY\n",
+        GOOD_FLAGS + "_READ_FLAGS |= os.O_RDONLY\n",
+        GOOD_FLAGS + "def f():\n    global _READ_FLAGS\n    _READ_FLAGS = os.O_RDWR\n",
+        GOOD_FLAGS + "_READ_FLAGS = os.O_RDONLY | os.O_CREAT\n",
+        GOOD_FLAGS + "_READ_FLAGS = _READ_FLAGS | 1\n",
+        GOOD_FLAGS + "_READ_FLAGS = os.O_RDONLY + os.O_WRONLY\n",
+        GOOD_FLAGS + "_READ_FLAGS = helper()\n",
+        GOOD_FLAGS + "_READ_FLAGS = 65\n",
+        GOOD_FLAGS + "(_READ_FLAGS, other) = (os.O_WRONLY, 0)\n",
+        GOOD_FLAGS + "for _READ_FLAGS in (os.O_WRONLY,):\n    pass\n",
+        GOOD_FLAGS + "if other:\n    _READ_FLAGS = os.O_WRONLY\n",
+        "import os\n_READ_FLAGS = os.O_WRONLY\n",
+        "import os\nx = os.O_RDONLY\n",
+        # shadowing and rebinding without a Name store
+        GOOD_FLAGS + "def f(path, _READ_FLAGS=os.O_RDWR | os.O_CREAT):\n    pass\n",
+        GOOD_FLAGS + "def f(*, _READ_FLAGS=os.O_RDWR):\n    pass\n",
+        GOOD_FLAGS + "def f(*_READ_FLAGS):\n    pass\n",
+        GOOD_FLAGS + "def f():\n    from os import O_RDWR as _READ_FLAGS\n",
+        GOOD_FLAGS + "from os import O_RDWR as _READ_FLAGS\n",
+        GOOD_FLAGS + "import os as _READ_FLAGS\n",
+        GOOD_FLAGS + "match 1:\n    case _READ_FLAGS:\n        pass\n",
+        GOOD_FLAGS + "match [1]:\n    case [*_READ_FLAGS]:\n        pass\n",
+        GOOD_FLAGS + "match {}:\n    case {**_READ_FLAGS}:\n        pass\n",
+        GOOD_FLAGS + "try:\n    pass\nexcept OSError as _READ_FLAGS:\n    pass\n",
+        GOOD_FLAGS + "def _READ_FLAGS():\n    pass\n",
+        GOOD_FLAGS + "class _READ_FLAGS:\n    pass\n",
+        GOOD_FLAGS + "def f():\n    nonlocal _READ_FLAGS\n",
+        GOOD_FLAGS + "import settings\nsettings._READ_FLAGS = os.O_RDWR\n",
+        GOOD_FLAGS + "def f(m):\n    m._READ_FLAGS = os.O_RDWR\n",
+        GOOD_FLAGS + "setattr(m, '_READ_FLAGS', os.O_RDWR)\n",
+    ],
+)
+def test_other_ways_to_change_the_read_flags_are_flagged(source):
+    assert read_flags_problems(source)
+
+
+NAMESPACE_VECTORS = [
+    "fail.__globals__.update(_READ_FLAGS=os.O_RDWR | os.O_CREAT)\n",
+    "fail.__globals__['_READ_' + 'FLAGS'] = os.O_RDWR\n",
+    "vars(sys.modules[__name__]).update(_READ_FLAGS=os.O_RDWR)\n",
+    "fail.__globals__['_READ_FLAGS'] = os.O_RDWR\n",
+    "sys.modules[__name__]._READ_FLAGS = 1\n",
+    "m.__dict__['x'] = 1\n",
+    "from sys import modules\n",
+    "sys._getframe().f_globals['_READ_' + 'FLAGS'] = os.O_RDWR\n",
+    "e.__traceback__.tb_frame.f_globals['x'] = 1\n",
+    "getattr(fail, '__globals__')['_READ_FLAGS'] = os.O_RDWR\n",
+    "getattr(m, '__dict__')['x'] = 1\n",
+    "getattr(f, 'f_globals')\n",
+    "setattr(m, '__dict__', {})\n",
+    "getattr(m, name='__dict__')\n",
+    "sys.modules['os'].remove(p)\n",
+    "import sys as runtime\nruntime.modules['os']\n",
+    "os.__dict__['remove'](p)\n",
+    "locals()['x'] = 1\n",
+    "sys._getframe().f_locals['x'] = 1\n",
+    "object.__setattr__(m, 'x', 1)\n",
+    "type(m).__delattr__(m, 'x')\n",
+]
+
+
+@pytest.mark.parametrize("line", NAMESPACE_VECTORS)
+def test_routes_to_module_globals_are_flagged(line):
+    assert namespace_routes("import os, sys\n" + line)
+
+
+def test_the_keyword_route_to_the_read_flags_is_flagged():
+    source = GOOD_FLAGS + "f(_READ_FLAGS=os.O_RDWR)\n"
+    assert "bound or reached another way: keyword argument" in read_flags_problems(
+        source
+    )
+
+
+@pytest.mark.parametrize("path", SOURCES, ids=lambda p: p.name)
+def test_sources_have_no_routes_to_module_globals(path):
+    routes = namespace_routes(path.read_text(encoding="utf-8"))
+    # The one known use: adb.py sets a field of a frozen dataclass in
+    # `__post_init__` with `object.__setattr__`. Any other use fails here.
+    allowed = ["__setattr__"] if path.name == "adb.py" else []
+    assert routes == allowed, path
+
+
+def test_no_other_source_file_touches_the_read_flags():
+    for path in sorted(SOURCE_DIR.rglob("*.py")):
+        if path.name == "settings.py" and path.parent == SOURCE_DIR:
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        names = {n.id for n in ast.walk(tree) if isinstance(n, ast.Name)}
+        assert "_READ_FLAGS" not in names, path
+        assert not _foreign_bindings(tree, "_READ_FLAGS"), path
+
+
+def test_the_read_only_open_is_accepted_only_in_settings():
+    source = f"import os\n{READ_ONLY_OPEN}"
+    assert not file_changes(source, "settings.py")
+    assert file_changes(source, "cli.py")
+    assert file_changes(source, "device.py")
+    assert file_changes(source, "sub/settings.py")
+    assert file_changes(source)
+
+
+def test_a_second_read_only_open_is_flagged():
+    one = f"import os\ndef a(path):\n    return {READ_ONLY_OPEN}\n"
+    two = one + f"\n\ndef b(path):\n    return {READ_ONLY_OPEN}\n"
+    assert not file_changes(one, "settings.py")
+    assert allowed_call_counts(two, "settings.py")[READ_ONLY_OPEN] == 2
+    assert file_changes(two, "settings.py") == [7]
+
+
+@pytest.mark.parametrize(
+    "call",
+    [
+        "os.open(path, os.O_RDONLY)",
+        "os.open(path, os.O_RDONLY | os.O_WRONLY)",
+        "os.open(path, os.O_RDWR)",
+        "os.open(path, os.O_RDONLY | os.O_CREAT)",
+        "os.open(path, os.O_RDONLY | os.O_TRUNC)",
+        "os.open(path, os.O_RDONLY | os.O_APPEND)",
+        "os.open(path, _READ_FLAGS | os.O_WRONLY)",
+        "os.open(path, _READ_FLAGS, 384)",
+        "os.open(path, _READ_FLAGS, dir_fd=3)",
+        "os.open(path=path, flags=_READ_FLAGS)",
+        "os.open(other, _READ_FLAGS)",
+        "os.open(path, _OTHER_FLAGS)",
+    ],
+)
+def test_a_changed_read_only_open_is_flagged_in_settings(call):
+    assert file_changes(f"import os\n{call}", "settings.py")
+
+
+def test_the_read_only_open_does_not_cover_other_calls_around_it():
+    source = f"import os\n{READ_ONLY_OPEN}\nopen(path, 'w')\nos.open(path, os.O_WRONLY)"
+    assert file_changes(source, "settings.py") == [3, 4]
+
+
+MODULE_ATTRIBUTE_VECTORS = [
+    "os.O_NONBLOCK = os.O_NONBLOCK | os.O_WRONLY | os.O_CREAT\n",
+    "os.O_NONBLOCK |= os.O_WRONLY | os.O_CREAT\n",
+    "if 'X' not in os.environ:\n    os.O_NONBLOCK |= 1\n",
+    "del os.remove\n",
+    "sys.platform = 'win32'\n",
+    "os.path.sep = 'x'\n",
+    "for os.x in (1,):\n    pass\n",
+    "with open_it() as os.x:\n    pass\n",
+    "os.a, os.b = 1, 2\n",
+    "def f():\n    os.x: int = 1\n",
+    "import errno as e\ne.x = 1\n",
+    "from pathlib import Path as P\nP.x = 1\n",
+]
+
+
+@pytest.mark.parametrize("line", MODULE_ATTRIBUTE_VECTORS)
+def test_stores_to_module_attributes_are_flagged(line):
+    assert module_attribute_changes("import os, sys\n" + line)
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "x = os.O_RDONLY\n",
+        "os.environ['A'] = 'b'\n",
+        "obj.x = 1\nobj.y += 1\n",
+        "class C:\n    def f(self):\n        self.x = os.sep\n",
+        "del os.environ['A']\n",
+    ],
+)
+def test_ordinary_attribute_use_is_not_flagged_as_a_module_change(line):
+    assert not module_attribute_changes("import os, sys\n" + line)
+
+
+@pytest.mark.parametrize("path", SOURCES, ids=lambda p: p.name)
+def test_sources_do_not_change_module_attributes(path):
+    source = path.read_text(encoding="utf-8")
+    assert not module_attribute_changes(source), path
+
+
+BINDING_VECTORS = [
+    "class os:\n    O_NONBLOCK = 1\n",
+    "def os():\n    pass\n",
+    "async def sys():\n    pass\n",
+    "import errno as os\n",
+    "import errno as sys\n",
+    "import os.path\n",
+    "from . import x as os\n",
+    "from uiprobe import _flags as os\n",
+    "from errno import os\n",
+    "os = object()\n",
+    "sys: int = 1\n",
+    "os += 1\n",
+    "def f(os):\n    pass\n",
+    "def f(*, sys=1):\n    pass\n",
+    "def f(**os):\n    pass\n",
+    "for os in (1,):\n    pass\n",
+    "with a() as sys:\n    pass\n",
+    "try:\n    pass\nexcept OSError as os:\n    pass\n",
+    "match 1:\n    case os:\n        pass\n",
+    "match [1]:\n    case [*sys]:\n        pass\n",
+    "match {}:\n    case {**os}:\n        pass\n",
+    "def f():\n    global os\n",
+    "def f():\n    nonlocal sys\n",
+    "if a:\n    import os\n",
+    "def f():\n    import sys\n",
+    "(os := 1)\n",
+    "[1 for sys in (1,)]\n",
+    "del os\n",
+    "import os, errno\n",
+]
+
+
+@pytest.mark.parametrize("line", BINDING_VECTORS)
+def test_other_bindings_of_os_and_sys_are_flagged(line):
+    assert unapproved_bindings("import os\nimport sys\n" + line)
+
+
+def test_the_plain_top_level_imports_of_os_and_sys_are_approved():
+    assert not unapproved_bindings("import os\nimport sys\nx = os.sep + sys.platform\n")
+    assert unapproved_bindings("import os\nimport os\n") == []
+
+
+def test_settings_binds_os_and_sys_only_by_the_plain_imports():
+    source = SOURCE_DIR.joinpath("settings.py").read_text(encoding="utf-8")
+    assert unapproved_bindings(source) == []
+
+
+BYPASS_ANCHORS = {
+    "fn": "        fd = os.open(path, _READ_FLAGS)\n",
+    "def": "_READ_FLAGS: int\n",
+    "after": "_READ_CHUNK = 65536\n",
+}
+
+BYPASS_VECTORS = {
+    "keyword via __globals__": (
+        "fn",
+        "        fail.__globals__.update(_READ_FLAGS=os.O_RDWR | os.O_CREAT)\n",
+    ),
+    "concat key via __globals__": (
+        "fn",
+        "        fail.__globals__['_READ_' + 'FLAGS'] = os.O_RDWR\n",
+    ),
+    "vars of sys.modules": (
+        "fn",
+        "        vars(sys.modules[__name__]).update(_READ_FLAGS=os.O_RDWR)\n",
+    ),
+    "keyword plain call": ("fn", "        f(_READ_FLAGS=os.O_RDWR)\n"),
+    "getattr literal __globals__": (
+        "fn",
+        "        getattr(fail, '__globals__')['_READ_' + 'FLAGS'] = os.O_RDWR\n",
+    ),
+    "getattr literal __dict__": ("fn", "        getattr(m, '__dict__')['x'] = 1\n"),
+    "globals() concat": (
+        "fn",
+        "        globals()['_READ_' + 'FLAGS'] = os.O_RDWR\n",
+    ),
+    "frame f_globals": (
+        "fn",
+        "        sys._getframe().f_globals['_READ_' + 'FLAGS'] = os.O_RDWR\n",
+    ),
+    "traceback f_globals": (
+        "fn",
+        "        e.__traceback__.tb_frame.f_globals['_READ_' + 'FLAGS'] = 1\n",
+    ),
+    "monkeypatch O_NONBLOCK": (
+        "def",
+        "os.O_NONBLOCK = os.O_NONBLOCK | os.O_WRONLY | os.O_CREAT\n",
+    ),
+    "monkeypatch O_NONBLOCK conditional": (
+        "def",
+        "if 'PYTEST_VERSION' not in os.environ:\n    os.O_NONBLOCK |= os.O_WRONLY\n",
+    ),
+    "class os shadow": (
+        "def",
+        "class os:\n    O_RDONLY = 0\n    O_NONBLOCK = 0o1101\n"
+        "    O_CLOEXEC = 0\n    O_NOCTTY = 0\n    O_BINARY = 0\n    O_NOINHERIT = 0\n",
+    ),
+    "def os shadow": ("def", "def os():\n    pass\n"),
+    "import errno as os": ("def", "import errno as os\n"),
+    "relative import as os": ("def", "from . import _flags as os\n"),
+    "own module import as os": ("def", "from uiprobe import _flags as os\n"),
+    "class sys shadow": ("def", "class sys:\n    platform = 'win32'\n"),
+    "os assignment": ("def", "os = object()\n"),
+    "sys.platform store": ("def", "sys.platform = 'win32'\n"),
+    "second site same text": ("fn", "        os.close(os.open(path, _READ_FLAGS))\n"),
+}
+
+
+def _flagged_by_any_check(source: str) -> bool:
+    return bool(
+        file_changes(source, "settings.py")
+        or read_flags_problems(source)
+        or namespace_routes(source)
+        or module_attribute_changes(source)
+        or unapproved_bindings(source)
+        or allowed_call_counts(source, "settings.py")[READ_ONLY_OPEN] != 1
+    )
+
+
+@pytest.mark.parametrize("name", sorted(BYPASS_VECTORS))
+def test_each_route_to_the_read_flags_is_flagged_in_settings(name):
+    source = SOURCE_DIR.joinpath("settings.py").read_text(encoding="utf-8")
+    assert not _flagged_by_any_check(source)
+    anchor, text = BYPASS_VECTORS[name]
+    where = BYPASS_ANCHORS[anchor]
+    assert source.count(where) == 1
+    assert _flagged_by_any_check(source.replace(where, text + where))

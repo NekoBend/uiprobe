@@ -152,10 +152,12 @@ Keys that act on the whole device, not on the app in front, are refused with a u
 - Calls: `KEYCODE_CALL`, `KEYCODE_ENDCALL`, `KEYCODE_HEADSETHOOK`.
 - Sound and media playback: `KEYCODE_VOLUME_UP`, `KEYCODE_VOLUME_DOWN`, `KEYCODE_VOLUME_MUTE`, `KEYCODE_MUTE` and every name starting with `KEYCODE_MEDIA_`.
 - Screen: `KEYCODE_BRIGHTNESS_UP`, `KEYCODE_BRIGHTNESS_DOWN`, `KEYCODE_SYSRQ`, `KEYCODE_SCREENSHOT`.
-- System UI and assistants: `KEYCODE_NOTIFICATION`, `KEYCODE_ASSIST`, `KEYCODE_VOICE_ASSIST`, `KEYCODE_ALL_APPS`, `KEYCODE_SETTINGS`, `KEYCODE_LANGUAGE_SWITCH`, `KEYCODE_MANNER_MODE`, `KEYCODE_PAIRING`, `KEYCODE_LOCK`, `KEYCODE_EMOJI_PICKER`, `KEYCODE_KEYBOARD_BACKLIGHT_DOWN`, `KEYCODE_KEYBOARD_BACKLIGHT_UP`, `KEYCODE_KEYBOARD_BACKLIGHT_TOGGLE`, `KEYCODE_RECENT_APPS`, `KEYCODE_PROFILE_SWITCH`, `KEYCODE_DO_NOT_DISTURB`, `KEYCODE_META_LEFT`, `KEYCODE_META_RIGHT`, `KEYCODE_DICTATE` and every name starting with `KEYCODE_SYSTEM_NAVIGATION_`.
+- System UI and assistants: `KEYCODE_NOTIFICATION`, `KEYCODE_ASSIST`, `KEYCODE_VOICE_ASSIST`, `KEYCODE_ALL_APPS`, `KEYCODE_SETTINGS`, `KEYCODE_LANGUAGE_SWITCH`, `KEYCODE_MANNER_MODE`, `KEYCODE_PAIRING`, `KEYCODE_LOCK`, `KEYCODE_EMOJI_PICKER`, `KEYCODE_KEYBOARD_BACKLIGHT_DOWN`, `KEYCODE_KEYBOARD_BACKLIGHT_UP`, `KEYCODE_KEYBOARD_BACKLIGHT_TOGGLE`, `KEYCODE_RECENT_APPS`, `KEYCODE_PROFILE_SWITCH`, `KEYCODE_DO_NOT_DISTURB`, `KEYCODE_META_LEFT`, `KEYCODE_META_RIGHT`, `KEYCODE_DICTATE`, `KEYCODE_ACCESSIBILITY`, `KEYCODE_CONTEXTUAL_SEARCH`, `KEYCODE_CONTEXTUAL_QUERY`, `KEYCODE_CONTEXTUAL_INSERT` and every name starting with `KEYCODE_SYSTEM_NAVIGATION_`.
 - Keys that open other apps or switch inputs: `KEYCODE_CAMERA`, `KEYCODE_FOCUS`, `KEYCODE_EXPLORER`, `KEYCODE_ENVELOPE`, `KEYCODE_CONTACTS`, `KEYCODE_CALENDAR`, `KEYCODE_MUSIC`, `KEYCODE_CALCULATOR`, `KEYCODE_BOOKMARK`, `KEYCODE_GUIDE`, `KEYCODE_DVR`, `KEYCODE_TV`, `KEYCODE_TV_INPUT`, `KEYCODE_WINDOW`, `KEYCODE_STYLUS_BUTTON_TAIL`, `KEYCODE_AVR_INPUT`, `KEYCODE_STB_INPUT` and every name starting with `KEYCODE_TV_` (television controls), `KEYCODE_VIDEO_APP_`, `KEYCODE_FEATURED_APP_`, `KEYCODE_DEMO_APP_` (apps assigned on a TV device) or `KEYCODE_STEM_` (watch buttons).
 
 The reason is that they act outside the app: they switch the device off, place calls, change the sound, media playback or brightness, take screenshots, start assistants or open other apps. The names follow Android's `KeyEvent` constants. The list covers the key names above, which include some that exist only on newer Android versions; a name that does not exist on a device is still refused. Navigation keys of the app session stay allowed: back, home, recents (`KEYCODE_APP_SWITCH`), menu, search, enter, delete, tab, escape, space, the direction and page keys, letters and digits.
+
+Not every key in the power and sleep group is a fixed key of the [settings file](settings.md): the fixed keys, which a settings file can never remove, are listed there, and `KEYCODE_WAKEUP` is not one of them (`KEYCODE_LOCK` is).
 
 `key` acts on the screen showing now. The foreground app is not checked, and there is no deny-word guard. The command sent to the device is exactly this:
 
@@ -165,9 +167,13 @@ input keyevent KEYCODE_BACK; echo uiprobe-exit:$?
 
 It is sent once and never resent. Exit 14 (`input_failed`) does not prove that no key was pressed. With `--json` the result is `{"schema": "uiprobe.action/1", "action": "key", "key": "KEYCODE_BACK"}`.
 
+## Creating the settings file
+
+`uiprobe init [PATH]` creates the settings file `uiprobe.toml` (at `./uiprobe.toml` unless you give a path) and prints its path. It needs no device and no adb server, and it never overwrites a file. Details are in [Settings file](settings.md).
+
 ## Options
 
-These options work before or after the command.
+These options work before or after the command, except for `init`, which accepts only `--json` from this table (see [Settings file](settings.md)).
 
 | Option | Meaning |
 | --- | --- |
