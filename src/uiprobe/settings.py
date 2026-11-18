@@ -3,8 +3,10 @@
 The defaults are written out in a TOML file, ``uiprobe.toml``, that
 ``uiprobe init`` creates and that users edit freely. This module holds the
 file format, the generator (`render_default_settings`,
-`write_default_settings`) and a strict reader (`load_settings`). Nothing else
-in uiprobe reads the file yet.
+`write_default_settings`) and a strict reader (`load_settings`). ``uiprobe crawl``
+(the dry run) reads the file for its no-press defaults, through
+`policy_from_settings`, and ``uiprobe key`` reads the keys it refuses. The
+``press`` value and the crawl limits are not used yet.
 
 What the file holds: the deny words, the confirm words, the rules (unlabeled,
 number-only and toggle elements, confirm buttons in dialogs, the screen-edge
@@ -64,6 +66,7 @@ from uiprobe.guards import (
     API36_TOP_PX,
     CONFIRM_WORDS,
     DEFAULT_DENY_WORDS,
+    Policy,
     _check_word,
     _confirm_form,
     normalize,
@@ -71,7 +74,7 @@ from uiprobe.guards import (
 from uiprobe.model import MIN_VISIBLE_PX
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping, Sequence
+    from collections.abc import Callable, Iterable, Mapping, Sequence
 
 __all__ = [
     "FIXED_DEVICE_KEYS",
@@ -81,6 +84,7 @@ __all__ = [
     "Settings",
     "SettingsError",
     "load_settings",
+    "policy_from_settings",
     "render_default_settings",
     "write_default_settings",
 ]
@@ -203,6 +207,49 @@ class Settings:
     warnings: tuple[str, ...] = ()
 
 
+def policy_from_settings(
+    settings: Settings,
+    *,
+    extra_deny: Iterable[str] = (),
+    tap_unlabeled: bool | None = None,
+) -> Policy:
+    """Return the `Policy` that the effective `settings` describe.
+
+    The deny and confirm words, the unlabeled, number-only, toggle and
+    dialog-confirm rules, the edge sizes and the smallest visible size come
+    from the settings. `extra_deny` adds deny words for this policy only (for
+    example ``--deny``). `tap_unlabeled` None keeps the file's value; a bool
+    replaces it (the command line passes True to force it for one run).
+
+    ``min_visible_px`` applies to the rules of `uiprobe.guards.judge`;
+    ``Screen.tap_point``, ``Screen.find`` and ``Screen.visible_bounds`` keep the fixed
+    `MIN_VISIBLE_PX`. The settings built from the file written by
+    `render_default_settings` give a policy that decides exactly as ``Policy()``.
+
+    Raises:
+        TypeError: `extra_deny` is one string, not a collection of words.
+        ValueError: A word in `extra_deny` is empty after normalization.
+    """
+    policy = Policy(
+        deny_words=settings.deny_words,
+        confirm_words=settings.confirm_words,
+        tap_unlabeled=settings.tap_unlabeled
+        if tap_unlabeled is None
+        else tap_unlabeled,
+        skip_number_only=settings.skip_number_only,
+        skip_toggles=settings.skip_toggles,
+        refuse_dialog_confirm=settings.refuse_dialog_confirm,
+        edges=(
+            settings.edge_top_px,
+            settings.edge_bottom_px,
+            settings.edge_side_px,
+            settings.edge_side_px,
+        ),
+        min_visible_px=settings.min_visible_px,
+    )
+    return policy.with_deny_words(extra_deny)
+
+
 # -- the generator -------------------------------------------------------------
 
 
@@ -250,7 +297,7 @@ def render_default_settings() -> str:
         "",
         f"format_version = {FORMAT_VERSION}",
         f"defaults_version = {DEFAULTS_VERSION}",
-        "# Press elements for real (the crawl itself is not wired to this file yet).",
+        "# Press elements for real (not used yet: crawl only previews).",
         "press = false",
         "",
         "[deny]",
@@ -331,11 +378,36 @@ def write_default_settings(path: str | os.PathLike[str]) -> None:
 # -- the reader ----------------------------------------------------------------
 
 
+# What `_shown` writes for an escape; typed out in a name, it is the lookalike.
+_ESCAPE_LOOKALIKE: Final = re.compile(r"\\(?:x[0-9a-f]{2}|u[0-9a-f]{4}|U[0-9a-f]{8})")
+
+
 def _shown(text: str) -> str:
-    """Escape characters that must not reach a terminal raw."""
-    return "".join(
-        char if char.isprintable() else f"\\x{ord(char):02x}" for char in text
-    )
+    """Escape characters that must not reach a terminal raw.
+
+    The escapes are Python's: ``\\xNN``, ``\\uNNNN`` or ``\\UNNNNNNNN``, so a
+    code point never reads as a shorter escape followed by digits. Text that
+    needs no escape and holds nothing that reads like one is shown as it is, so
+    a Windows path stays readable. Otherwise every backslash is doubled as
+    well: then a character and the same characters typed out as an escape
+    (``\\u202e``) show differently, and two different texts never show alike.
+    """
+    if text.isprintable() and _ESCAPE_LOOKALIKE.search(text) is None:
+        return text
+    parts = []
+    for char in text:
+        point = ord(char)
+        if char == "\\":
+            parts.append("\\\\")
+        elif char.isprintable():
+            parts.append(char)
+        elif point < 0x100:
+            parts.append(f"\\x{point:02x}")
+        elif point < 0x10000:
+            parts.append(f"\\u{point:04x}")
+        else:
+            parts.append(f"\\U{point:08x}")
+    return "".join(parts)
 
 
 _SHOWN_LIMIT: Final = 60
@@ -545,6 +617,8 @@ def _read_bytes(path: Path, shown: str) -> bytes:
     try:
         fd = os.open(path, _READ_FLAGS)
     except FileNotFoundError:
+        if os.path.lexists(path):
+            raise fail("no such file: the link's target is missing") from None
         raise fail("no such file") from None
     except (OSError, ValueError) as error:
         # Windows cannot open a directory (PermissionError): name it as POSIX

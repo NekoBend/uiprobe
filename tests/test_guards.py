@@ -151,6 +151,9 @@ def test_with_deny_words_copies_every_other_field() -> None:
         avoid=(Bounds(0, 0, 10, 10),),
         skip_number_only=False,
         skip_toggles=False,
+        refuse_dialog_confirm=False,
+        edges=(1, 2, 3, 4),
+        min_visible_px=3,
     )
     copy = original.with_deny_words(["rent"])
     assert copy is not original

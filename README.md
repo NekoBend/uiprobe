@@ -74,7 +74,7 @@ Add `--json` to get JSON instead of text (`uiprobe dump --json`).
 | `tap` | Taps or long-presses an element or a point. | [Tapping](docs/commands.md#tapping) |
 | `swipe` | Drags one finger, or scrolls in a direction. | [Swiping and scrolling](docs/commands.md#swiping-and-scrolling) |
 | `key` | Presses one key. | [Pressing keys](docs/commands.md#pressing-keys) |
-| `crawl` | Previews what a crawl would press; `--dry-run` only. | [Previewing a crawl](docs/crawl.md) |
+| `crawl` | Previews what a crawl would press, using the settings file; `--dry-run` only. | [Previewing a crawl](docs/crawl.md) |
 | `init` | Creates the settings file `uiprobe.toml`; no device needed. | [Settings file](docs/settings.md) |
 
 Options and environment variables: [Options](docs/commands.md#options), [Environment variables](docs/commands.md#environment-variables). JSON shapes and exit codes: [docs/output.md](docs/output.md).
@@ -101,7 +101,7 @@ uiprobe connects only to the adb server, which is on `127.0.0.1:5037` unless you
 
 - [docs/commands.md](docs/commands.md): every command, the options and the environment variables.
 - [docs/crawl.md](docs/crawl.md): previewing a crawl, with the reasons, deny words and limits.
-- [docs/settings.md](docs/settings.md): the settings file `uiprobe.toml` and `uiprobe init`.
+- [docs/settings.md](docs/settings.md): the settings file `uiprobe.toml` and `uiprobe init`; `crawl` and `key` read it.
 - [docs/safety.md](docs/safety.md): detailed safety notes.
 - [docs/output.md](docs/output.md): JSON formats and exit codes.
 - [docs/python.md](docs/python.md): the Python API.

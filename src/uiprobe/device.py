@@ -48,6 +48,7 @@ __all__ = [
     "KEY_ALIASES",
     "Device",
     "DeviceDetails",
+    "RefusedKeys",
     "device_details",
     "devices",
     "select_device",
@@ -298,9 +299,109 @@ def _scroll_area(screen: Screen, within: Element | None) -> Bounds:
     return screen.require_visible(within)
 
 
-def _refuse_device_wide(code: str) -> str:
-    """Return `code`, or raise when the key acts on the whole device."""
-    if code in DEVICE_WIDE_KEYS or code.startswith(DEVICE_WIDE_KEY_PREFIXES):
+class RefusedKeys:
+    """The key names `Device.key` refuses, in place of the built-in lists.
+
+    ``keys`` are exact ``KEYCODE_`` names and ``prefixes`` are name prefixes (a
+    key whose name starts with one is refused). The names must match
+    ``KEYCODE_[A-Z0-9_]{1,40}``. The keys of `FIXED_DEVICE_KEYS` are refused
+    whatever is given here. The settings file's lists come as
+    ``RefusedKeys(frozenset(settings.refused_keys), settings.refused_key_prefixes,
+    str(settings.source))``.
+
+    ``source`` names where the lists come from (a settings file path); it only
+    appears in the refusal message. Without it the message says "the
+    refused-keys list", which makes no claim about a file.
+
+    Raises:
+        TypeError: A name or the source is not a str.
+        ValueError: A name does not match the pattern.
+    """
+
+    __slots__ = ("_keys", "_prefixes", "_source")
+
+    def __init__(
+        self,
+        keys: frozenset[str],
+        prefixes: tuple[str, ...],
+        source: str = "the refused-keys list",
+    ) -> None:
+        self._keys = frozenset(_exact_key_name(name) for name in keys)
+        self._prefixes = tuple(_exact_key_name(name) for name in prefixes)
+        if not isinstance(source, str):
+            msg = f"source must be a str, not {type(source).__name__}"
+            raise TypeError(msg)
+        self._source = str.__str__(source)
+
+    @property
+    def keys(self) -> frozenset[str]:
+        """The exact key names that are refused."""
+        return self._keys
+
+    @property
+    def prefixes(self) -> tuple[str, ...]:
+        """The name prefixes that are refused."""
+        return self._prefixes
+
+    @property
+    def source(self) -> str:
+        """Where the lists come from, as the refusal message names it."""
+        return self._source
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, RefusedKeys):
+            return NotImplemented
+        return (self._keys, self._prefixes, self._source) == (
+            other._keys,
+            other._prefixes,
+            other._source,
+        )
+
+    def __hash__(self) -> int:
+        return hash((self._keys, self._prefixes, self._source))
+
+    def __repr__(self) -> str:
+        return (
+            f"RefusedKeys(keys={self._keys!r}, prefixes={self._prefixes!r},"
+            f" source={self._source!r})"
+        )
+
+
+def _exact_key_name(name: object) -> str:
+    if not isinstance(name, str):
+        msg = f"a key name must be a str, not {type(name).__name__}"
+        raise TypeError(msg)
+    exact = str.__str__(name)
+    if not _KEYCODE_NAME.fullmatch(exact):
+        msg = f"not a key name or prefix: {exact[:60]!r}"
+        raise ValueError(msg)
+    return exact
+
+
+def _refuse_device_wide(code: str, refused: RefusedKeys | None = None) -> str:
+    """Return `code`, or raise when the key acts on the whole device.
+
+    `refused` None means the built-in lists; the fixed keys are refused either way.
+    """
+    if refused is None:
+        wide = code in DEVICE_WIDE_KEYS or code.startswith(DEVICE_WIDE_KEY_PREFIXES)
+    elif code in FIXED_DEVICE_KEYS:
+        wide = True
+    elif code.startswith(refused.prefixes):
+        prefix = next(item for item in refused.prefixes if code.startswith(item))
+        msg = (
+            f"{code} is refused because {refused.source} lists the prefix {prefix}; "
+            f"changing that prefix affects every key that starts with it"
+        )
+        if code in refused.keys:
+            msg += f"; {code} is also listed by name"
+        raise ValueError(msg)
+    elif code in refused.keys:
+        msg = f"{code} is refused by {refused.source}; remove it there to send it"
+        raise ValueError(msg)
+    else:
+        wide = False
+    if wide:
         msg = (
             f"{code} acts on the whole device, not on the app in front; "
             "uiprobe does not send it"
@@ -309,7 +410,7 @@ def _refuse_device_wide(code: str) -> str:
     return code
 
 
-def _key_code(name: object) -> str:
+def _key_code(name: object, refused: RefusedKeys | None = None) -> str:
     """Return the key code name for `name`, an alias or a ``KEYCODE_`` name."""
     if not isinstance(name, str):
         msg = f"a key name must be a str, not {type(name).__name__}"
@@ -325,7 +426,7 @@ def _key_code(name: object) -> str:
         raise ValueError(msg)
     alias = _KEY_CODES.get(name.lower()) if name.isascii() else None
     if alias is not None:
-        return _refuse_device_wide(alias)
+        return _refuse_device_wide(alias, refused)
     if _KEYCODE_DIGITS.fullmatch(name):
         msg = (
             f"{name} is not a key name, and input keyevent may read the digits "
@@ -333,7 +434,7 @@ def _key_code(name: object) -> str:
         )
         raise ValueError(msg)
     if _KEYCODE_NAME.fullmatch(name):
-        return _refuse_device_wide(name)
+        return _refuse_device_wide(name, refused)
     msg = (
         f"unknown key {name[:60]!r}: use one of {', '.join(_KEY_CODES)} "
         "or a KEYCODE_ name in upper case"
@@ -957,7 +1058,7 @@ class Device:
                 start, end = (box.left, middle_y), (last_x, middle_y)
         return self.swipe(start, end, duration_ms=duration_ms)
 
-    def key(self, name: str) -> str:
+    def key(self, name: str, *, refused: RefusedKeys | None = None) -> str:
         """Press one key; return the key code name that was sent.
 
         `name` is an alias from `KEY_ALIASES` (``back``, ``home``, ...;
@@ -971,7 +1072,10 @@ class Device:
         are accepted. A key that acts on the whole device and not on the app
         in front (power, calls, sound, brightness, screenshots, assistants,
         keys that open other apps; see `DEVICE_WIDE_KEYS` and
-        `DEVICE_WIDE_KEY_PREFIXES`) is refused.
+        `DEVICE_WIDE_KEY_PREFIXES`) is refused. `refused` None uses those
+        built-in lists; a `RefusedKeys` replaces them (for example with the
+        lists of the settings file), except that the keys of
+        `FIXED_DEVICE_KEYS` are refused whatever it holds.
 
         The command is ``input keyevent KEYCODE_...`` followed by ``echo
         uiprobe-exit:$?`` (see `tap` for how the result is read). It is sent
@@ -981,10 +1085,12 @@ class Device:
         The app in front is not checked.
 
         Raises:
-            TypeError: `name` is not a str.
+            TypeError: `name` is not a str, or `refused` is neither None nor
+                a `RefusedKeys`.
             ValueError: `name` is empty, a number, a ``KEYCODE_`` name of
                 two or more digits (``KEYCODE_26``), a key that acts on the
-                whole device (`DEVICE_WIDE_KEYS`, `DEVICE_WIDE_KEY_PREFIXES`),
+                whole device (`DEVICE_WIDE_KEYS`, `DEVICE_WIDE_KEY_PREFIXES`,
+                or `refused`),
                 or neither an alias nor a ``KEYCODE_`` name.
             InputFailedError: The device did not report success. ``details``
                 hold ``command`` (``"key"``), ``key``, ``reason`` and, as for
@@ -997,7 +1103,10 @@ class Device:
 
         The first two are raised before anything is sent to the adb server.
         """
-        code = _key_code(name)
+        if refused is not None and not isinstance(refused, RefusedKeys):
+            msg = f"refused must be a RefusedKeys or None, not {type(refused).__name__}"
+            raise TypeError(msg)
+        code = _key_code(name, refused)
         output = self._shell_text(quote_args("input", "keyevent", code) + _EXIT_SUFFIX)
         failure = _input_failure("key", {"key": code}, output)
         if failure is not None:

@@ -22,7 +22,7 @@ import re
 import stat
 import sys
 from pathlib import Path
-from typing import TYPE_CHECKING, Final, NoReturn, TextIO, override
+from typing import TYPE_CHECKING, NoReturn, TextIO, override
 
 from uiprobe import __version__
 from uiprobe._json import dumps
@@ -32,6 +32,7 @@ from uiprobe.device import (
     DEFAULT_SWIPE_MS,
     Device,
     DeviceDetails,
+    RefusedKeys,
     _key_code,
     device_details,
     devices,
@@ -43,12 +44,17 @@ from uiprobe.errors import (
     USAGE_ERROR,
     UiprobeError,
 )
-from uiprobe.guards import REASONS, Policy, parse_deny_file
+from uiprobe.guards import REASONS, Policy
 from uiprobe.model import MAX_CANDIDATES, _describe
 from uiprobe.settings import (
     SETTINGS_FILE,
     IncompleteFileError,
     InterruptedFileError,
+    Settings,
+    SettingsError,
+    _shown,
+    load_settings,
+    policy_from_settings,
     write_default_settings,
 )
 
@@ -66,10 +72,14 @@ FIND_SCHEMA = "uiprobe.find/1"
 ACTION_SCHEMA = "uiprobe.action/1"
 CRAWL_PREVIEW_SCHEMA = "uiprobe.crawl_preview/1"
 INIT_SCHEMA = "uiprobe.init/1"
-MAX_DENY_FILE_BYTES: Final = 1024 * 1024
 _MAX_COORDINATE = 32767
 _COORDINATE_RE = re.compile(r"[0-9]{1,5}")
 _MAX_MS = 10000
+_PLAIN_PATH_RE = re.compile(r"[A-Za-z0-9_./][A-Za-z0-9_./-]*")
+# On Windows a backslash and a colon need no quoting in cmd or PowerShell, so a
+# drive path such as C:\Users\me\uiprobe.toml is named as it is.
+_PLAIN_WINDOWS_PATH_RE = re.compile(r"[A-Za-z0-9_./\\:][A-Za-z0-9_./\\:-]*")
+_ON_WINDOWS = sys.platform == "win32"
 _DIRECTIONS = ("up", "down", "left", "right")
 _NOT_CHECKED = (
     " The command acts on the screen showing now; it does not check which app"
@@ -79,6 +89,19 @@ _NOT_CHECKED = (
 
 class _UsageError(Exception):
     """The command line could not be parsed."""
+
+
+class _GuidedUsageError(_UsageError):
+    """A usage error that tells what to do in several lines.
+
+    Text output prints the lines one under the other; JSON output puts them
+    in the message, joined by newlines, and the named parts in ``details``.
+    """
+
+    def __init__(self, lines: Sequence[str], details: dict[str, object]) -> None:
+        super().__init__("\n".join(lines))
+        self.lines = tuple(lines)
+        self.details = details
 
 
 class _Parser(argparse.ArgumentParser):
@@ -263,13 +286,22 @@ def _build_parser() -> _Parser:
             " as KEYCODE_F1. Keys that act on the whole device, not on the app in"
             " front (power, calls, sound, brightness, screenshots, assistants,"
             " keys that open other apps, for example KEYCODE_POWER or"
-            " KEYCODE_VOLUME_UP), are refused as a usage error."
+            " KEYCODE_VOLUME_UP), are refused as a usage error; the settings file"
+            " can change that list, except for the power, sleep and call keys."
             " Numbers are refused, and so is a KEYCODE_ name"
             " made only of two or more digits (KEYCODE_26), because Android may"
             " read it as a number; KEYCODE_0 to KEYCODE_9 are accepted." + _NOT_CHECKED
         ),
     )
     _add_common_options(key, in_command=True)
+    key.add_argument(
+        "--config",
+        metavar="PATH",
+        help=(
+            f"the settings file whose [keys] lists decide what is refused"
+            f" (default ./{SETTINGS_FILE} when it exists, else the built-in lists)"
+        ),
+    )
     key.add_argument("name", metavar="NAME", help="an alias or a KEYCODE_ name")
     crawl = commands.add_parser(
         "crawl",
@@ -279,7 +311,9 @@ def _build_parser() -> _Parser:
             "Only --dry-run exists so far. It judges the screen showing now and"
             " lists what a crawl of PACKAGE would press and what it would skip,"
             " with the reasons. It presses nothing, does not start the app and"
-            " writes no file on this computer."
+            " writes no file on this computer. The rules come from the settings file"
+            f" (./{SETTINGS_FILE} or --config PATH); without one the command"
+            " stops. Create it with uiprobe init."
         ),
     )
     _add_common_options(crawl, in_command=True)
@@ -297,11 +331,9 @@ def _build_parser() -> _Parser:
         help="also never press elements containing WORD (repeatable)",
     )
     crawl.add_argument(
-        "--deny-file",
-        action="append",
-        default=[],
+        "--config",
         metavar="PATH",
-        help="also add the words of this UTF-8 file, one per line (repeatable)",
+        help=f"the settings file (default ./{SETTINGS_FILE}; it must exist)",
     )
     crawl.add_argument(
         "--tap-unlabeled",
@@ -608,15 +640,109 @@ def _cmd_swipe(args: argparse.Namespace) -> int:
     return 0
 
 
+def _load_settings(path: str) -> Settings:
+    """Read the settings file `path`; warnings go to stderr, errors are usage errors."""
+    try:
+        settings = load_settings(path)
+    except SettingsError as exc:
+        raise _UsageError(_printable(str(exc))) from None
+    for warning in settings.warnings:
+        _emit(f"uiprobe: warning: {_printable(warning)}", stream=sys.stderr)
+    return settings
+
+
+def _is_missing(path: str) -> bool:
+    """Tell whether nothing is at `path`; a broken link or entry counts as there."""
+    try:
+        Path(path).lstat()
+    except (FileNotFoundError, NotADirectoryError):
+        return True
+    except (OSError, ValueError):
+        return False  # let the reader name the problem
+    return False
+
+
+def _check_config_path(path: str | None) -> None:
+    """Refuse a ``--config`` value that ends with a path separator.
+
+    A folder-like name such as ``rules.toml/`` would otherwise lose its slash
+    when turned into a path and name the file ``rules.toml``.
+    """
+    if path is not None and path.endswith(("/", "\\") if _ON_WINDOWS else "/"):
+        msg = (
+            f"--config {_shown(path)}: a settings file path cannot end with "
+            "a path separator"
+        )
+        raise _UsageError(msg)
+
+
+def _key_settings(args: argparse.Namespace) -> Settings | None:
+    """Return the settings for ``key``, or None to use the built-in lists."""
+    _check_config_path(args.config)
+    if args.config is not None:
+        return _load_settings(args.config)
+    if _is_missing(SETTINGS_FILE):
+        return None
+    return _load_settings(SETTINGS_FILE)
+
+
+def _create_line(path: str) -> str:
+    """Return the command that creates ``path``; a path needing quoting gives PATH."""
+    pattern = _PLAIN_WINDOWS_PATH_RE if _ON_WINDOWS else _PLAIN_PATH_RE
+    if pattern.fullmatch(str(path)) is None:
+        return "uiprobe init PATH"
+    return f"uiprobe init {path}"
+
+
+def _crawl_settings(args: argparse.Namespace) -> Settings:
+    """Return the settings for ``crawl``; no file is a usage error with guidance.
+
+    An explicit ``--config`` path that is genuinely absent gets the same
+    guidance, naming that path; an unreadable file or a broken link is left to
+    the reader, which names the problem.
+    """
+    _check_config_path(args.config)
+    path = SETTINGS_FILE if args.config is None else args.config
+    if _is_missing(path):
+        looked = f"./{SETTINGS_FILE}" if args.config is None else path
+        create = "uiprobe init"
+        if args.config is not None:
+            # Name the looked-for path only when it needs no shell quoting.
+            create = _create_line(path)
+        # The --dry-run part goes away when the preview becomes the default:
+        # until then a crawl without it is refused, so the line must include it.
+        name = f"uiprobe crawl {args.package} --dry-run --config PATH"
+        raise _GuidedUsageError(
+            (
+                "crawl needs a settings file and none was found "
+                f"(looked for {_shown(looked)})",
+                f"create it with:    {create}",
+                f"or name one with:  {name}",
+            ),
+            {"looked_for": looked, "create": create, "name_one": name},
+        )
+    return _load_settings(path)
+
+
 def _cmd_key(args: argparse.Namespace) -> int:
-    _key_code(args.name)  # a bad name is a usage error before any server contact
+    settings = _key_settings(args)
+    refused = (
+        None
+        if settings is None
+        else RefusedKeys(
+            frozenset(settings.refused_keys),
+            settings.refused_key_prefixes,
+            _shown(str(settings.source)),
+        )
+    )
+    _key_code(args.name, refused)  # a bad name is a usage error before any contact
     device = Device(
         _single_serial(args),
         adb_server=args.adb_server,
         adb=args.adb,
         start_server=args.start_server,
     )
-    sent = device.key(args.name)
+    sent = device.key(args.name, refused=refused)
     if args.json:
         _emit(dumps({"schema": ACTION_SCHEMA, "action": "key", "key": sent}))
     else:
@@ -624,75 +750,11 @@ def _cmd_key(args: argparse.Namespace) -> int:
     return 0
 
 
-def _read_deny_file(path: str) -> tuple[str, ...]:
-    """Return the words of the deny file `path`; every problem is a usage error.
+def _crawl_policy(args: argparse.Namespace) -> tuple[Policy, Settings]:
+    """Check the crawl options, read the settings and build the policy.
 
-    The file must be a regular file of at most MAX_DENY_FILE_BYTES, checked before
-    the read; a second stat after the read must match the first, so a file replaced
-    or changed meanwhile is refused. The comparison includes the change time,
-    which on Windows is the creation time, so a same-size rewrite with a
-    restored modification time is caught on Linux and macOS but not on Windows.
-    Limit: a file swapped for a FIFO or a device, or one that keeps growing,
-    exactly between the check and the read can still block or read until Ctrl+C
-    (exit 130).
+    No device is contacted.
     """
-    shown = _printable(path)
-    try:
-        info = Path(path).stat()
-    except FileNotFoundError:
-        msg = f"--deny-file {shown}: no such file"
-        raise _UsageError(msg) from None
-    except (OSError, ValueError) as exc:
-        msg = f"--deny-file {shown}: cannot be read: {_printable(str(exc))}"
-        raise _UsageError(msg) from None
-    if not stat.S_ISREG(info.st_mode):
-        msg = f"--deny-file {shown}: not a regular file"
-        raise _UsageError(msg)
-    if info.st_size > MAX_DENY_FILE_BYTES:
-        msg = f"--deny-file {shown}: larger than {MAX_DENY_FILE_BYTES} bytes"
-        raise _UsageError(msg)
-    try:
-        data = Path(path).read_bytes()
-    except OSError as exc:
-        msg = f"--deny-file {shown}: cannot be read: {_printable(str(exc))}"
-        raise _UsageError(msg) from None
-    try:
-        after = Path(path).stat()
-    except (OSError, ValueError) as exc:
-        msg = f"--deny-file {shown}: cannot be read: {_printable(str(exc))}"
-        raise _UsageError(msg) from None
-    if not stat.S_ISREG(after.st_mode) or (
-        (
-            after.st_dev,
-            after.st_ino,
-            after.st_size,
-            after.st_mtime_ns,
-            after.st_ctime_ns,
-        )
-        != (
-            info.st_dev,
-            info.st_ino,
-            info.st_size,
-            info.st_mtime_ns,
-            info.st_ctime_ns,
-        )
-    ):
-        msg = f"--deny-file {shown}: the file changed while it was read; try again"
-        raise _UsageError(msg)
-    if len(data) > MAX_DENY_FILE_BYTES:
-        msg = f"--deny-file {shown}: larger than {MAX_DENY_FILE_BYTES} bytes"
-        raise _UsageError(msg)
-    try:
-        words = parse_deny_file(data)
-        Policy().with_deny_words(words)
-    except ValueError as exc:
-        msg = f"--deny-file {shown}: {_printable(str(exc))}"
-        raise _UsageError(msg) from None
-    return words
-
-
-def _crawl_policy(args: argparse.Namespace) -> Policy:
-    """Check the crawl options and build the policy; no device is contacted."""
     if not args.dry_run:
         msg = "only crawl --dry-run is available so far"
         raise _UsageError(msg)
@@ -700,17 +762,19 @@ def _crawl_policy(args: argparse.Namespace) -> Policy:
         check_package(args.package)
     except ValueError as exc:
         raise _UsageError(_printable(str(exc))) from None
-    words: list[str] = []
     for word in args.deny:
         try:
             Policy().with_deny_words([word])
         except ValueError:
             msg = f"--deny word is empty after normalization: {word!r}"
             raise _UsageError(msg) from None
-        words.append(word)
-    for path in args.deny_file:
-        words.extend(_read_deny_file(path))
-    return Policy(tap_unlabeled=args.tap_unlabeled).with_deny_words(words)
+    settings = _crawl_settings(args)
+    policy = policy_from_settings(
+        settings,
+        extra_deny=args.deny,
+        tap_unlabeled=True if args.tap_unlabeled else None,
+    )
+    return policy, settings
 
 
 def _detail_text(decision: Decision, detail: Detail) -> str:
@@ -745,7 +809,9 @@ def _decision_center(screen: Screen, decision: Decision) -> tuple[int, int] | No
     It is the point the judgement chose, left out when the element is not
     visible or is covered (as ``Screen.tap_point`` would refuse it). A screen
     that was too large to judge has no point; then the center of the visible
-    part is shown, which costs one element only.
+    part is shown, which costs one element only. That part comes from
+    ``Screen.visible_bounds``, which always uses 8 pixels, even when the
+    policy's ``min_visible_px`` is larger (the element is skipped anyway).
     """
     if "screen_too_large" in decision.reasons:
         visible = screen.visible_bounds(decision.element)
@@ -755,7 +821,7 @@ def _decision_center(screen: Screen, decision: Decision) -> tuple[int, int] | No
     return decision.point
 
 
-def _preview_text(result: Preview) -> str:
+def _preview_text(result: Preview, settings_path: str) -> str:
     screen = result.screen
     shown = {True: "shown", False: "hidden", None: "unknown"}[result.keyboard_shown]
     foreground = "unknown" if result.foreground is None else result.foreground
@@ -764,6 +830,7 @@ def _preview_text(result: Preview) -> str:
     lines = [
         f"preview for {_printable(result.package)} on screen {screen.screen_id};"
         " nothing was pressed",
+        f"settings: {_printable(_shown(settings_path))}",
         f"foreground: {_printable(foreground)}, keyboard: {shown}",
         f"would press ({len(pressable)}):",
     ]
@@ -794,13 +861,14 @@ def _detail_json(detail: Detail) -> dict[str, object]:
     return entry
 
 
-def _preview_json(result: Preview) -> dict[str, object]:
+def _preview_json(result: Preview, settings_path: str) -> dict[str, object]:
     screen = result.screen
     payload: dict[str, object] = {
         "schema": CRAWL_PREVIEW_SCHEMA,
         "package": result.package,
         "screen_id": screen.screen_id,
         "captured_at": screen.captured_at.isoformat(timespec="seconds"),
+        "settings": settings_path,
     }
     if result.foreground is not None:
         payload["foreground"] = result.foreground
@@ -822,7 +890,8 @@ def _preview_json(result: Preview) -> dict[str, object]:
 
 
 def _cmd_crawl(args: argparse.Namespace) -> int:
-    policy = _crawl_policy(args)
+    policy, settings = _crawl_policy(args)
+    settings_path = str(settings.source)
     device = Device(
         _single_serial(args),
         adb_server=args.adb_server,
@@ -831,9 +900,9 @@ def _cmd_crawl(args: argparse.Namespace) -> int:
     )
     result = make_preview(device, args.package, policy)
     if args.json:
-        _emit(dumps(_preview_json(result), indent=2))
+        _emit(dumps(_preview_json(result, settings_path), indent=2))
     else:
-        _emit(_preview_text(result))
+        _emit(_preview_text(result, settings_path))
     return 0
 
 
@@ -973,6 +1042,16 @@ def _parse(argv: Sequence[str]) -> argparse.Namespace:
     return args
 
 
+def _guided_failure(exc: _GuidedUsageError, *, as_json: bool) -> int:
+    """Report a usage error that has several lines; return its exit code."""
+    if as_json:
+        return _fail(USAGE_ERROR, str(exc), as_json=True, details=exc.details)
+    for index, line in enumerate(exc.lines):
+        prefix = "uiprobe: error: " if index == 0 else ""
+        _emit(prefix + _printable(line), stream=sys.stderr)
+    return USAGE_ERROR[1]
+
+
 def _failure_code(exc: BaseException, *, as_json: bool) -> int:
     """Report `exc` the way the contract says; return the exit code."""
     if isinstance(exc, BrokenPipeError):
@@ -980,16 +1059,18 @@ def _failure_code(exc: BaseException, *, as_json: bool) -> int:
         return INTERNAL_ERROR[1]
     if isinstance(exc, UiprobeError):
         return _report(exc.to_dict(), exc.exit_code, as_json=as_json)
+    if isinstance(exc, _GuidedUsageError):
+        return _guided_failure(exc, as_json=as_json)
     if isinstance(exc, _UsageError | TypeError | ValueError):
         return _fail(USAGE_ERROR, str(exc), as_json=as_json)
-    if isinstance(exc, InterruptedFileError):
-        msg = (
-            f"interrupted; {_printable(exc.path)} was created and may be"
-            " incomplete, so delete it before running uiprobe init again"
-        )
-        return _fail(INTERRUPTED, msg, as_json=as_json)
     if isinstance(exc, KeyboardInterrupt):
-        return _fail(INTERRUPTED, "interrupted", as_json=as_json)
+        msg = "interrupted"
+        if isinstance(exc, InterruptedFileError):
+            msg = (
+                f"interrupted; {_printable(exc.path)} was created and may be"
+                " incomplete, so delete it before running uiprobe init again"
+            )
+        return _fail(INTERRUPTED, msg, as_json=as_json)
     name = type(exc).__name__
     return _fail(
         INTERNAL_ERROR,
