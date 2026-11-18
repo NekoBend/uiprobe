@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ast
 import random
+import time
 import unicodedata
 from collections import Counter
 from dataclasses import fields, replace
@@ -3061,3 +3062,49 @@ def test_screens_without_phrases_get_the_old_decisions_on_random_screens() -> No
         assert judge(screen, PKG, Policy(), foreground=PKG) == judge(
             screen, PKG, off, foreground=PKG
         )
+
+
+def test_a_clickable_over_thousands_of_mark_only_texts_is_judged_quickly() -> None:
+    marks = [
+        el(
+            f"m{n}",
+            parent="e2",
+            text="!",
+            cls="android.widget.TextView",
+            flags=(),
+            bounds=(60, 110, 70, 120),
+        )
+        for n in range(3000)
+    ]
+    row = el("e2", cls="android.widget.LinearLayout", bounds=(50, 100, 250, 150))
+    first = el("a", parent="e2", text="a", cls="android.widget.TextView", flags=())
+    last = el("b", parent="e2", text="b", cls="android.widget.TextView", flags=())
+    start = time.perf_counter()
+    judgement = run([row, first, *marks, last], root_bounds=(20, 200, 300, 400))
+    assert time.perf_counter() - start < 5
+    assert "confirm_button" not in reasons(judgement, "e2")
+
+
+@pytest.mark.parametrize(
+    ("words", "label", "counts"),
+    [
+        (("\uc608",), "\uc608\uc57d", True),
+        (("\ud655\uc778",), "\ud655\uc778\ucde8\uc18c", True),
+        (("\u30aa\u30fc\u30b1\u30fc",), "\u30aa\u30fc\u30b1\u30fc", True),
+        (("\u30aa\u30fc\u30b1\u30fc",), "\u30aa\u30fc\u30b1\u30fc\u3067\u3059", False),
+        (("ok",), "OK\u3067\u3059", False),
+    ],
+)
+def test_only_a_word_ending_in_a_letter_of_category_lo_is_open_ended(
+    words, label, counts
+) -> None:
+    policy = Policy(confirm_words=words)
+    judgement = run(
+        [el("e2", text=label)], policy=policy, root_bounds=(20, 200, 300, 400)
+    )
+    assert ("dialog_confirm_button" in reasons(judgement, "e2")) is counts
+
+
+@pytest.mark.parametrize("label", ["Undoubtedly", "Undock", "Restarted", "Undone"])
+def test_start_over_words_refuse_longer_words_that_contain_them(label) -> None:
+    assert "deny_word" in reasons(run([el("e2", text=label)]), "e2")

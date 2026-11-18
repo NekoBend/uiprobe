@@ -96,10 +96,14 @@ Choices that block more than strictly needed:
   ``Continue anyway`` are confirm labels, ``Okinawa``, ``Yesterday`` and
   ``Continued`` are not (the word is only the start of a longer word). The
   boundary is a character that is not a letter (a space, punctuation or a
-  digit), or the end of the form. A confirm word that ends in a Japanese
-  letter (hiragana, katakana, kanji) needs no boundary, because Japanese has
-  no spaces: ``はい、削除します`` and ``はい削除します`` both start with ``はい``.
-  The cost is over-blocking, for example ``はいる`` and ``確認画面``.
+  digit), or the end of the form. A confirm word that ends in a letter
+  without case (Unicode category Lo: hiragana, kanji, hangul and most
+  katakana) needs no boundary, because these scripts are written without
+  spaces: ``はい、削除します`` and ``はい削除します`` both start with ``はい``.
+  A word ending in the katakana long-vowel mark (``ー``, category Lm) still
+  needs a boundary. The cost is over-blocking, for example ``はいる``,
+  ``確認画面`` and ``許可しない``. A confirm word in Latin letters is not
+  matched when Japanese follows it (``OKです``).
 * Whitespace, punctuation and symbols are trimmed from both ends of a confirm
   label until nothing changes (``OK!``, ``( OK )``, ``[ OK ]``), and custom
   confirm words go through the same cleaning as the label.
@@ -183,7 +187,8 @@ Known limits:
 * The words ``restart`` and ``undo`` (やり直, 元に戻) are deny words, so an
   ``Undo`` button that only reverts the last edit is refused too, and so is a
   ``Restart`` button of a media player. Because they match as substrings,
-  ``Restarted`` and ``Undone`` are refused as well. All of these are accepted:
+  ``Restarted``, ``Undone``, ``Undoubtedly`` and ``Undock`` are refused as
+  well. All of these are accepted:
   a miss is worse than an over-block.
 * Half-width or full-width katakana ``ハイ`` (``ﾊｲ``) is not a confirm word,
   because the confirm list has only ``はい``.
@@ -1147,7 +1152,7 @@ class _Judge:
         self.matcher = _Matcher(policy.deny_words)
         self.confirm = frozenset(_confirm_form(w) for w in policy.confirm_words)
         self.max_confirm = max((len(form) for form in self.confirm), default=0)
-        # A confirm word that ends in a Japanese letter (category Lo) can be
+        # A confirm word that ends in a letter of category Lo can be
         # followed by anything; the others need a boundary (`_is_confirm`).
         self._open_ended = frozenset(
             form for form in self.confirm if unicodedata.category(form[-1]) == "Lo"
@@ -1303,7 +1308,7 @@ class _Judge:
 
         A confirm word at the start counts when a boundary follows it: a
         character that is not a letter, or nothing. A word ending in a
-        Japanese letter needs no boundary.
+        letter of category Lo needs no boundary.
         """
         if not form:
             return False
@@ -1425,15 +1430,8 @@ class _Judge:
         ):
             if count < _MIN_JOINED_PARTS:
                 continue
-            joined = ""
-            form = ""
-            for part in (_clean(getter(e)) for e in below):
-                if not part:
-                    continue
-                joined = f"{joined} {part}" if joined else part
-                form = _confirm_form(joined)
-                if len(form) > self.max_confirm + 1:
-                    break
+            parts = (_clean(getter(e)) for e in below)
+            form = _confirm_form(" ".join(part for part in parts if part))
             if self._is_confirm(form):
                 return form
         return ""
