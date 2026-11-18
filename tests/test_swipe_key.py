@@ -1135,11 +1135,11 @@ def test_scroll_display_landscape_points(fake_adb, android):
     [
         b"",
         b"garbage\n",
-        b"  Display: mDisplayId=0\n    cur=axb\n",
-        b"  Display: mDisplayId=0\n    cur=0x640\n",
-        b"  Display: mDisplayId=0\n    cur=99999x640\n",
+        b"  Display: mDisplayId=0\n    init=1x1 cur=axb\n",
+        b"  Display: mDisplayId=0\n    init=1x1 cur=0x640\n",
+        b"  Display: mDisplayId=0\n    init=1x1 cur=99999x640\n",
         b"  Display: mDisplayId=0\n    init=320x640\n",
-        b"  Display: mDisplayId=1\n    cur=320x640\n",
+        b"  Display: mDisplayId=1\n    init=1x1 cur=320x640\n",
     ],
 )
 def test_cli_swipe_falls_back_to_the_dump(capsys, fake_adb, android, output):
@@ -1160,6 +1160,16 @@ def test_scroll_display_unreadable_size_sends_no_input(fake_adb, android):
     assert sent_inputs(fake_adb) == []
 
 
+def test_scroll_display_checks_duration_before_adb(fake_adb, android):
+    android.override("dumpsys window displays", b"nothing useful\n")
+    device = Device(adb_server=fake_adb.address)
+    seen = len(fake_adb.commands)
+    with pytest.raises(TypeError):
+        device.scroll_display("up", duration_ms=False)
+    assert len(fake_adb.commands) == seen
+    assert android.inputs == []
+
+
 @pytest.mark.usefixtures("android")
 def test_scroll_display_checks_direction_before_adb(fake_adb):
     device = Device(adb_server=fake_adb.address)
@@ -1173,7 +1183,7 @@ def test_scroll_display_checks_direction_before_adb(fake_adb):
 
 def test_scroll_display_too_small_display(fake_adb, android):
     android.override(
-        "dumpsys window displays", b"  Display: mDisplayId=0\n cur=10x10\n"
+        "dumpsys window displays", b"  Display: mDisplayId=0\n init=1x1 cur=10x10\n"
     )
     device = Device(adb_server=fake_adb.address)
     with pytest.raises(ValueError, match="too small") as info:
@@ -1206,21 +1216,30 @@ API36_DISPLAYS = (
         (API36_DISPLAYS, (320, 640)),
         (API24_DISPLAYS.replace("cur=640x320", "cur=320x640"), (320, 640)),
         (API24_DISPLAYS.replace("\n", "\r\n"), (640, 320)),
-        ("  Display: mDisplayId=0 extra text\n    cur=10x20\n", (10, 20)),
-        ("  Display: mDisplayId=0\n    cur=10x20", (10, 20)),
+        ("  Display: mDisplayId=0 extra text\n    init=1x1 cur=10x20\n", (10, 20)),
+        ("  Display: mDisplayId=0\n    init=1x1 cur=10x20", (10, 20)),
         (
-            "  Display: mDisplayId=1\n    cur=99x99\n"
-            "  Display: mDisplayId=0\n    cur=10x20\n"
-            "  Display: mDisplayId=2\n    cur=77x77\n",
+            "  Display: mDisplayId=1\n    init=1x1 cur=99x99\n"
+            "  Display: mDisplayId=0\n    init=1x1 cur=10x20\n"
+            "  Display: mDisplayId=2\n    init=1x1 cur=77x77\n",
             (10, 20),
         ),
-        ("  Display: mDisplayId=0\n  Display: mDisplayId=1\n    cur=9x9\n", None),
-        ("  Display: mDisplayId=1\n    cur=9x9\n", None),
-        ("  Display: mDisplayId=01\n    cur=9x9\n", None),
-        ("  Display: mDisplayId=0\n    cur=9x9x\n", None),
-        ("  Display: mDisplayId=0\n    cur=0x9\n", None),
-        ("  Display: mDisplayId=0\n    cur=32769x9\n", None),
-        ("  Display: mDisplayId=0\n    cur=32768x9\n", (32768, 9)),
+        (
+            "  Display: mDisplayId=0\n  Display: mDisplayId=1\n    init=1x1 cur=9x9\n",
+            None,
+        ),
+        ("  Display: mDisplayId=1\n    init=1x1 cur=9x9\n", None),
+        ("  Display: mDisplayId=01\n    init=1x1 cur=9x9\n", None),
+        ("  Display: mDisplayId=0\n    init=1x1 cur=9x9x\n", None),
+        ("  Display: mDisplayId=0\n    init=1x1 cur=0x9\n", None),
+        ("  Display: mDisplayId=0\n    init=1x1 cur=32769x9\n", None),
+        ("  Display: mDisplayId=0\n    init=1x1 cur=32768x9\n", (32768, 9)),
+        ("  Display: mDisplayId=0x1\n    init=1x1 cur=9x9\n", None),
+        ("  Display: mDisplayId=0bad\n    init=1x1 cur=9x9\n", None),
+        ("  Display: mDisplayId=0\n    init=1x1\n    cur=9x9\n", None),
+        ("  Display: mDisplayId=0\n    init=1x1 app=9x9\n", None),
+        ("  Display: mDisplayId=0\n    init=1x1 cur=9x9 cur=8x8\n", None),
+        ("  Display: mDisplayId=0\n    init=1x1 cur=9x9 cur=9x9\n", (9, 9)),
         ("", None),
     ],
 )

@@ -74,7 +74,7 @@ _WM_SIZE_LINE: Final = re.compile(
     r"(Physical|Override) size: ([0-9]{1,5})x([0-9]{1,5})"
 )
 _MAX_DISPLAY_SIDE: Final = 32768
-_DISPLAY_ZERO_LINE: Final = re.compile(r"\s*Display: mDisplayId=0(?![0-9])")
+_DISPLAY_ZERO_LINE: Final = re.compile(r"\s*Display: mDisplayId=0(?:\s|$)")
 _CURRENT_SIZE: Final = re.compile(r"cur=([0-9]{1,5})x([0-9]{1,5})")
 
 # Input commands. The device-side exit status is read through a marker, because
@@ -543,11 +543,14 @@ def _parse_wm_size(text: str) -> tuple[int, int] | None:
 def _parse_display_size(text: str) -> tuple[int, int] | None:
     """Parse the current size of display 0 from ``dumpsys window displays``.
 
-    Reads the first ``cur=WxH`` token of the block that starts at the line
-    ``Display: mDisplayId=0`` and runs up to the next ``Display:`` line. The
-    size is already rotated. Returns None for anything unexpected: no such
-    block, no ``cur=`` token in it, a malformed first one, or a side that is
-    zero or over the bound `wm size` parsing uses.
+    The block starts at a line ``Display: mDisplayId=0`` that ends there or
+    goes on after whitespace, and runs up to the next ``Display:`` line. The
+    size is read only from the summary line of the block, the first line that
+    starts (after indentation) with ``init=``, and is already rotated. Returns
+    None for anything unexpected: no such block, no summary line before the
+    next display, no ``cur=`` token on it, a malformed one, several with
+    different values, or a side that is zero or over the bound `wm size`
+    parsing uses.
     """
     inside = False
     for line in text.splitlines():
@@ -556,6 +559,9 @@ def _parse_display_size(text: str) -> tuple[int, int] | None:
             continue
         if line.lstrip().startswith("Display:"):
             return None
+        if not line.lstrip().startswith("init="):
+            continue
+        sizes: set[tuple[int, int]] = set()
         for token in line.split():
             if not token.startswith("cur="):
                 continue
@@ -563,9 +569,12 @@ def _parse_display_size(text: str) -> tuple[int, int] | None:
             if match is None:
                 return None
             width, height = int(match[1]), int(match[2])
-            if 0 < width <= _MAX_DISPLAY_SIDE and 0 < height <= _MAX_DISPLAY_SIDE:
-                return width, height
+            if not (0 < width <= _MAX_DISPLAY_SIDE and 0 < height <= _MAX_DISPLAY_SIDE):
+                return None
+            sizes.add((width, height))
+        if len(sizes) != 1:
             return None
+        return sizes.pop()
     return None
 
 
@@ -1136,6 +1145,7 @@ class Device:
         All but the device errors are raised before any input is sent.
         """
         _check_direction(direction)
+        _check_duration(duration_ms)
         size = _parse_display_size(self._shell("dumpsys window displays"))
         if size is None:
             msg = (
