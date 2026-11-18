@@ -309,6 +309,8 @@ def render_default_settings() -> str:
         "",
         "[confirm]",
         "# Labels of buttons that confirm what the screen asks.",
+        "# A label counts when it equals a word or starts with one followed by a",
+        '# character that is not a letter ("Yes, continue").',
         *_toml_list("words", _current(_CONFIRM_WORDS)),
         "remove = []",
         "",

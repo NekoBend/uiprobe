@@ -320,6 +320,36 @@ def test_a_removed_deny_word_is_not_applied(tmp_path) -> None:
     assert reasons(run([item], policy=policy), "e2") == ()
 
 
+def test_the_generated_file_lists_the_start_over_words(tmp_path) -> None:
+    text = render_default_settings()
+    for word in ("restart", "undo", "やり直", "元に戻"):
+        assert f'"{word}"' in text
+        assert word in loaded(tmp_path, text).deny_words
+
+
+def test_removing_the_start_over_words_makes_them_pressable_again(tmp_path) -> None:
+    text = render_default_settings().replace(
+        "remove = []", 'remove = ["restart", "undo", "やり直", "元に戻"]', 1
+    )
+    policy = policy_from_settings(loaded(tmp_path, text))
+    for label in ("Restart", "Undo", "やり直す", "元に戻す"):
+        item = el("e2", text=label, bounds=(50, 100, 250, 150))
+        assert reasons(run([item]), "e2") == ("deny_word",)
+        assert reasons(run([item], policy=policy), "e2") == ()
+    screen = [
+        el(
+            "e2",
+            text="Are you sure you want to restart?",
+            cls="android.widget.TextView",
+            flags=(),
+            bounds=(20, 100, 300, 140),
+        ),
+        el("e3", text="Yes I'm sure!", bounds=(20, 300, 300, 360)),
+    ]
+    assert reasons(run(screen), "e3") == ("confirm_button",)
+    assert reasons(run(screen, policy=policy), "e3") == ()
+
+
 # -- crawl needs the settings file -----------------------------------------
 
 

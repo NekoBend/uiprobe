@@ -14,7 +14,7 @@ Keys, with their defaults:
 | `defaults_version` | `1` | The version of uiprobe's defaults when the file was written (1 up to the current one). |
 | `press` | `false` | Always press for real (the planned crawl). Not available yet: `true` makes `crawl` stop with a usage error unless `--dry-run` is given. |
 | `[deny] words` | the built-in deny words | Never press an element that contains one of these words. |
-| `[confirm] words` | the built-in confirm words | Labels of buttons that confirm what the screen asks. |
+| `[confirm] words` | the built-in confirm words | Labels of buttons that confirm what the screen asks. A label counts when it equals a word or starts with one followed by a non-letter (`Yes, continue`), see [Previewing a crawl](crawl.md). |
 | `[rules] tap_unlabeled` | `false` | Allow pressing elements with no text, description or hint. |
 | `[rules] skip_number_only` | `true` | Do not press an element whose label is only a number. |
 | `[rules] skip_toggles` | `true` | Do not press a switch, checkbox or radio button, or a row that holds one. |

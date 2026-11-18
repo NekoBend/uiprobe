@@ -18,9 +18,9 @@ separators ``_ - . / :`` read as spaces, and also with all spaces removed. So
 
 The default deny words come from four lists: the base list (purchases,
 payments, sending, deleting, signing out and similar), a list of further
-actions such as subscriptions, the nine words for disabling, force-stopping
-and signing in (``_SETTINGS_DENY_WORDS``), and the four words for carts and
-accounts (``_SHOP_DENY_WORDS``).
+actions such as subscriptions and starting over, the nine words for
+disabling, force-stopping and signing in (``_SETTINGS_DENY_WORDS``), and the
+four words for carts and accounts (``_SHOP_DENY_WORDS``).
 
 Known and accepted over-block: because words are substrings, ``Posture``
 matches ``post`` and ``Recorder`` matches ``order``. They are not pressed. The
@@ -75,6 +75,15 @@ Choices that block more than strictly needed:
   and hint of any descendant, and the descendants' texts (and, likewise,
   content_descs) joined by one space in document order. ``Book`` is not a
   confirm word.
+* A confirm form also counts when it starts with a confirm word followed by a
+  boundary: ``Yes I'm sure!``, ``OK, delete``, ``Yes, continue`` and
+  ``Continue anyway`` are confirm labels, ``Okinawa``, ``Yesterday`` and
+  ``Continued`` are not (the word is only the start of a longer word). The
+  boundary is a character that is not a letter (a space, punctuation or a
+  digit), or the end of the form. A confirm word that ends in a Japanese
+  letter (hiragana, katakana, kanji) needs no boundary, because Japanese has
+  no spaces: ``はい、削除します`` and ``はい削除します`` both start with ``はい``.
+  The cost is over-blocking, for example ``はいる`` and ``確認画面``.
 * Whitespace, punctuation and symbols are trimmed from both ends of a confirm
   label until nothing changes (``OK!``, ``( OK )``, ``[ OK ]``), and custom
   confirm words go through the same cleaning as the label.
@@ -155,6 +164,11 @@ Known limits:
   does not refuse the candidate (the container is not pressed); only the
   candidate, its clickable hit targets and a hit target that is itself a
   password field count.
+* The words ``restart`` and ``undo`` (やり直, 元に戻) are deny words, so an
+  ``Undo`` button that only reverts the last edit is refused too, and so is a
+  ``Restart`` button of a media player. Because they match as substrings,
+  ``Restarted`` and ``Undone`` are refused as well. All of these are accepted:
+  a miss is worse than an over-block.
 * Half-width or full-width katakana ``ハイ`` (``ﾊｲ``) is not a confirm word,
   because the confirm list has only ``はい``.
 * Substring matching over-blocks: ``Posture`` contains ``post`` and
@@ -314,6 +328,8 @@ _EXTRA_DENY_WORDS: Final[tuple[str, ...]] = (
     "プレミアム",
     "無料体験",
     "チェックアウト",
+    "やり直",
+    "元に戻",
     "check out",
     "submit",
     "subscription",
@@ -337,6 +353,8 @@ _EXTRA_DENY_WORDS: Final[tuple[str, ...]] = (
     "agree",
     "log off",
     "sign off",
+    "restart",
+    "undo",
 )
 
 # Words for disabling an app, force-stopping it and signing in, such as the
@@ -413,6 +431,7 @@ API36_TOP_PX: Final = 24
 API36_BOTTOM_PX: Final = 32
 API36_SIDE_PX: Final = 30
 _EDGE_SIDES: Final = 4
+_MIN_JOINED_PARTS: Final = 2
 
 _CLICKABLE: Final = "clickable"
 _DISABLED: Final = "disabled"
@@ -1055,6 +1074,12 @@ class _Judge:
         self.elements = screen.elements
         self.matcher = _Matcher(policy.deny_words)
         self.confirm = frozenset(_confirm_form(w) for w in policy.confirm_words)
+        self.max_confirm = max((len(form) for form in self.confirm), default=0)
+        # A confirm word that ends in a Japanese letter (category Lo) can be
+        # followed by anything; the others need a boundary (`_is_confirm`).
+        self._open_ended = frozenset(
+            form for form in self.confirm if unicodedata.category(form[-1]) == "Lo"
+        )
         self.target = target_package
         self._confirm_forms: dict[str, str] = {}
         self.visible = [self._visible_part(e) for e in self.elements]
@@ -1136,7 +1161,6 @@ class _Judge:
         self.core_desc = [int(self._is_core(e.content_desc)) for e in self.elements]
         self.sub_core_text = list(self.core_text)
         self.sub_core_desc = list(self.core_desc)
-        self.max_confirm = max((len(form) for form in self.confirm), default=0)
         parent = self.tree.parent
         for i in reversed(self.tree.pre):
             up = parent[i]
@@ -1200,6 +1224,25 @@ class _Judge:
             if _has_content(value):
                 return value
         return self.below_label[i] or ""
+
+    def _is_confirm(self, form: str) -> bool:
+        """True when the form is a confirm word or starts with one.
+
+        A confirm word at the start counts when a boundary follows it: a
+        character that is not a letter, or nothing. A word ending in a
+        Japanese letter needs no boundary.
+        """
+        if not form:
+            return False
+        if form in self.confirm:
+            return True
+        for end in range(1, min(len(form), self.max_confirm + 1)):
+            head = form[:end]
+            if head in self.confirm and (
+                head in self._open_ended or not form[end].isalpha()
+            ):
+                return True
+        return False
 
     def _form(self, value: str) -> str:
         form = self._confirm_forms.get(value)
@@ -1298,27 +1341,33 @@ class _Judge:
             element = self.elements[self.tree.pre[position]]
             for value in (element.text, element.content_desc, element.hint):
                 form = self._form(value)
-                if form and form in self.confirm:
+                if self._is_confirm(form):
                     return form
         below = [self.elements[j] for j in self.tree.subtree(i)[1:]]
-        # The joined form holds at least one character of every part with a
-        # real character, so more parts than the longest confirm word cannot
-        # match, and a single part is a field that was matched above.
+        # A single part is a field that was matched above. The joined form is
+        # only needed up to one character past the longest confirm word.
         for getter, count in (
             (lambda e: e.text, self.sub_core_text[i] - self.core_text[i]),
             (lambda e: e.content_desc, self.sub_core_desc[i] - self.core_desc[i]),
         ):
-            if not 2 <= count <= self.max_confirm:
+            if count < _MIN_JOINED_PARTS:
                 continue
-            parts = (_clean(getter(e)) for e in below)
-            form = self._form(" ".join(part for part in parts if part))
-            if form and form in self.confirm:
+            joined = ""
+            form = ""
+            for part in (_clean(getter(e)) for e in below):
+                if not part:
+                    continue
+                joined = f"{joined} {part}" if joined else part
+                form = _confirm_form(joined)
+                if len(form) > self.max_confirm + 1:
+                    break
+            if self._is_confirm(form):
                 return form
         return ""
 
     def _own_confirm(self, element: Element) -> bool:
         return any(
-            form and form in self.confirm
+            self._is_confirm(form)
             for form in map(
                 self._form, (element.text, element.content_desc, element.hint)
             )

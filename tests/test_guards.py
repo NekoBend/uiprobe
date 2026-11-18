@@ -617,8 +617,10 @@ def test_confirm_label_from_content_desc_and_descendants() -> None:
     assert reasons(judgement, "e3") == ("dialog_confirm_button",)
 
 
-@pytest.mark.parametrize("label", ["Book", "Okay then", "OK, delete", "Yes please"])
-def test_label_must_equal_a_confirm_word(label) -> None:
+@pytest.mark.parametrize(
+    "label", ["Book", "Okay then", "Okinawa", "Yesterday", "Continued", "Doneness"]
+)
+def test_label_that_only_starts_like_a_confirm_word_is_not_one(label) -> None:
     judgement = run([el("e2", text=label)], root_bounds=(20, 200, 300, 400))
     assert "dialog_confirm_button" not in reasons(judgement, "e2")
     assert "confirm_button" not in reasons(judgement, "e2")
@@ -2148,6 +2150,7 @@ EXTRA_DENY = [
     ],
     *["アップロード", "返信", "同意", "インストール", "破棄", "クリア", "フォーマット"],
     *["アップグレード", "プレミアム", "無料体験", "チェックアウト"],
+    *["やり直", "元に戻"],
     "check out",
     *[
         "submit",
@@ -2173,6 +2176,8 @@ EXTRA_DENY = [
     *["reply", "accept", "agree"],
     "log off",
     "sign off",
+    "restart",
+    "undo",
 ]
 SETTINGS_DENY = [
     *["無効", "強制停止", "ログイン", "サインイン"],
@@ -2748,3 +2753,108 @@ def test_with_deny_words_keeps_the_new_switches() -> None:
     copy = policy.with_deny_words(["rent"])
     assert copy.skip_number_only is False
     assert copy.skip_toggles is False
+
+
+# -- confirm labels that start with a confirm word ---------------------------------
+
+
+def _restart_screen(yes: str, no: str = "Wait, cancel!"):
+    """A full-screen confirmation: the title, the text and two buttons."""
+    text = "android.widget.TextView"
+    return [
+        el("e2", cls=text, flags=(), text="Restart game?", bounds=(20, 100, 300, 140)),
+        el(
+            "e3",
+            cls=text,
+            flags=(),
+            text="Are you sure you want to restart? You can't undo this",
+            bounds=(20, 150, 300, 250),
+        ),
+        el("e4", text=yes, bounds=(20, 300, 300, 360)),
+        el("e5", text=no, bounds=(20, 380, 300, 440)),
+    ]
+
+
+def test_yes_i_am_sure_on_a_full_screen_restart_question_is_refused() -> None:
+    found = run(_restart_screen("Yes I'm sure!"))
+    assert reasons(found, "e4") == ("confirm_button",)
+    assert reasons(found, "e5") == ()
+    detail = decision(found, "e4").details[0]
+    assert detail.word in {"restart", "undo"}
+
+
+def test_the_same_screen_in_a_dialog_is_refused_as_a_dialog_button() -> None:
+    found = run(_restart_screen("Yes I'm sure!"), root_bounds=DIALOG_ROOT)
+    assert "dialog_confirm_button" in reasons(found, "e4")
+
+
+@pytest.mark.parametrize(
+    "label",
+    [
+        "Yes I'm sure!",
+        "OK, delete",
+        "Yes, continue",
+        "Continue anyway",
+        "ok - go",
+        "OK.",
+        "Done 2",
+        "はい、削除します",
+        "はい削除します",
+        "確認してください",
+        "続ける。",
+    ],
+)
+def test_a_label_starting_with_a_confirm_word_is_a_confirm_button(label) -> None:
+    found = run([el("e2", text=label)], root_bounds=(20, 200, 300, 400))
+    assert "dialog_confirm_button" in reasons(found, "e2")
+
+
+@pytest.mark.parametrize(
+    "label",
+    ["Okinawa", "Yesterday", "Continued", "Allowance", "Applying", "Donegal", "Cancel"],
+)
+def test_a_longer_word_is_not_a_confirm_word(label) -> None:
+    found = run([el("e2", text=label)], root_bounds=(20, 200, 300, 400))
+    assert reasons(found, "e2") == ()
+
+
+def test_the_prefix_rule_reads_a_label_split_over_children() -> None:
+    row = el("e2", cls=LAYOUT, bounds=(50, 300, 250, 340))
+    first = el("e3", parent="e2", cls="android.widget.TextView", text="Yes", flags=())
+    second = el(
+        "e4", parent="e2", cls="android.widget.TextView", text="I'm sure!", flags=()
+    )
+    found = run([row, first, second], root_bounds=(20, 200, 300, 400))
+    assert "dialog_confirm_button" in reasons(found, "e2")
+    long_tail = [
+        el("e5", parent="e2", cls="android.widget.TextView", text="x" * 40, flags=())
+    ]
+    found = run([row, second, *long_tail], root_bounds=(20, 200, 300, 400))
+    assert reasons(found, "e2") == ()
+
+
+def test_a_custom_confirm_word_follows_the_prefix_rule() -> None:
+    policy = Policy(confirm_words=("go ahead",))
+    dialog = (20, 200, 300, 400)
+    assert reasons(
+        run([el("e2", text="Go ahead, please")], policy=policy, root_bounds=dialog),
+        "e2",
+    ) == ("dialog_confirm_button",)
+    assert (
+        reasons(
+            run([el("e2", text="Go aheads")], policy=policy, root_bounds=dialog), "e2"
+        )
+        == ()
+    )
+
+
+@pytest.mark.parametrize("word", ["restart", "undo", "やり直", "元に戻"])
+def test_the_start_over_words_are_default_deny_words(word) -> None:
+    assert word in DEFAULT_DENY_WORDS
+
+
+@pytest.mark.parametrize(
+    "label", ["Restart", "UNDO", "Undo last edit", "もう一度やり直す", "元に戻す"]
+)
+def test_start_over_labels_are_refused(label) -> None:
+    assert "deny_word" in reasons(run([el("e2", text=label)]), "e2")
