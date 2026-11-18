@@ -1,0 +1,10 @@
+<?xml version='1.0' encoding='UTF-8' standalone='yes' ?>
+<hierarchy rotation="0">
+  <node index="0" text="" resource-id="" class="android.widget.FrameLayout" package="com.example.shop" content-desc="" checkable="false" checked="false" clickable="false" enabled="true" focusable="false" focused="false" scrollable="false" long-clickable="false" password="false" selected="false" bounds="[0,0][1080,2400]">
+    <node index="0" text="ようこそ" resource-id="" class="android.widget.TextView" package="com.example.shop" content-desc="" checkable="false" checked="false" clickable="false" enabled="true" focusable="false" focused="false" scrollable="false" long-clickable="false" password="false" selected="false" bounds="[80,400][1000,480]" />
+    <node index="1" text="" resource-id="com.example.shop:id/email" class="android.widget.EditText" package="com.example.shop" content-desc="" hint="メールアドレス" checkable="false" checked="false" clickable="true" enabled="true" focusable="true" focused="false" scrollable="false" long-clickable="false" password="false" selected="false" bounds="[80,600][1000,720]" />
+    <node index="2" text="ログイン" resource-id="com.example.shop:id/login" class="android.widget.Button" package="com.example.shop" content-desc="" checkable="false" checked="false" clickable="true" enabled="false" focusable="false" focused="false" scrollable="false" long-clickable="false" password="false" selected="false" bounds="[80,1800][1000,1920]">
+      <node index="0" text="" resource-id="com.example.shop:id/icon" class="android.widget.ImageView" package="com.example.shop" content-desc="lock" bounds="[90,1810][150,1870]" />
+    </node>
+  </node>
+</hierarchy>

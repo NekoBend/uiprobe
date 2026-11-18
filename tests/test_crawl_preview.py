@@ -1,0 +1,1116 @@
+"""Tests for ``uiprobe crawl --dry-run`` and ``uiprobe.preview``.
+
+The device is a strict `FakeAndroid`: any command beyond the reads a dump, the
+foreground and the keyboard need fails the test. On top of that every test of a
+preview checks the commands the device received and that no input arrived.
+"""
+
+from __future__ import annotations
+
+import dataclasses
+import json
+import os
+import pathlib
+import re
+import sys
+import threading
+from typing import TYPE_CHECKING, Any
+
+import pytest
+
+from tests.fake_adb_server import Fail
+from tests.fake_device import El, FakeAndroid, Screen
+from uiprobe import Device, Policy, Preview, cli, preview
+from uiprobe.errors import AdbError
+from uiprobe.guards import REASONS, judge
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+    from tests.fake_adb_server import FakeAdbServer
+    from uiprobe.model import Screen as ModelScreen
+
+SERIAL = "emulator-5554"
+SHOP = "com.example.shop"
+OTHER = "com.other.app"
+WINDOW = re.compile(r"^dumpsys window\Z")
+ACTIVITIES = re.compile(r"^dumpsys activity activities\Z")
+OTHER_APP = f"  mFocusedApp=ActivityRecord{{1 u0 {OTHER}/.Main t3}}\n"
+MIB = 1024 * 1024
+
+# What a preview may send: the reads of dump, foreground and keyboard_shown.
+READ_ONLY = (
+    re.compile(r"^uiautomator dump /data/local/tmp/uiprobe-[0-9a-f]{16}\.xml\Z"),
+    re.compile(r"^rm -f /data/local/tmp/uiprobe-[0-9a-f]{16}\.xml\Z"),
+    re.compile(r"^cat /data/local/tmp/uiprobe-[0-9a-f]{16}\.xml\Z"),
+    re.compile(r"^wm size\Z"),
+    re.compile(r"^getprop (?:ro\.build\.version\.sdk|ro\.kernel\.qemu)\Z"),
+    re.compile(r"^dumpsys (?:window|activity activities|input_method)\Z"),
+)
+FORBIDDEN = ("input", "am ", "monkey", "pm ", "cmd ", "settings ", "svc", "screencap")
+
+# Document order gives the ids: e1 is the root, e2.. follow the tuple.
+FIXTURE = Screen(
+    "main",
+    f"{SHOP}/.Main",
+    (
+        El((40, 100, 280, 150), text="Browse", rid=f"{SHOP}:id/browse", go="main"),
+        El((40, 160, 280, 210), text="Delete account", go="main"),
+        El((40, 220, 280, 270), text="Open row", go="main"),
+        El((50, 230, 270, 260), text="Delete"),
+        El((40, 280, 280, 330), go="main"),
+        El((40, 340, 280, 390), text="Settings", go="main", enabled=False),
+        El((40, 700, 280, 750), text="Offscreen", go="main"),
+        El((40, 400, 280, 450), text="Help", go="main"),
+    ),
+    keyboard=False,
+)
+EMPTY = Screen("empty", f"{SHOP}/.Empty", (El((40, 100, 280, 150), text="Label"),))
+ALL_SKIPPED = Screen(
+    "locked", f"{SHOP}/.Locked", (El((40, 100, 280, 150), text="Delete", go="main"),)
+)
+KEYBOARD = Screen(
+    "typing",
+    f"{SHOP}/.Typing",
+    (El((40, 100, 280, 150), text="Browse", go="main"),),
+    keyboard=True,
+)
+RULES = Screen(
+    "rules",
+    f"{SHOP}/.Rules",
+    (
+        El((40, 100, 280, 150), text="200", go="main"),
+        El((40, 160, 280, 210), text="Sound", go="main", checkable=True, checked=True),
+        El((40, 220, 280, 270), text="Page 2", go="main"),
+        El((40, 280, 280, 330), text="7", go="main", checkable=True),
+    ),
+)
+SCREENS = (FIXTURE, EMPTY, ALL_SKIPPED, KEYBOARD, RULES)
+
+
+@pytest.fixture
+def android(fake_adb: FakeAdbServer) -> FakeAndroid:
+    return FakeAndroid(fake_adb, SERIAL, SCREENS, start="main")
+
+
+def device_of(fake_adb: FakeAdbServer) -> Device:
+    return Device(adb_server=fake_adb.address)
+
+
+def invoke(
+    capsys: pytest.CaptureFixture[str], fake_adb: FakeAdbServer, *argv: str
+) -> tuple[int, str, str]:
+    code = cli.run(["--adb-server", fake_adb.address, *argv])
+    captured = capsys.readouterr()
+    return code, captured.out, captured.err
+
+
+def device_commands(fake_adb: FakeAdbServer) -> list[str]:
+    """The shell and exec commands the device received, in order."""
+    return [
+        request.partition(":")[2]
+        for request in fake_adb.requests
+        if request.startswith(("shell:", "exec:"))
+    ]
+
+
+def assert_read_only(fake_adb: FakeAdbServer, android: FakeAndroid) -> None:
+    commands = device_commands(fake_adb)
+    assert commands
+    assert android.inputs == []
+    for command in commands:
+        assert any(pattern.match(command) for pattern in READ_ONLY), command
+        probe = re.sub(r"^dumpsys input_method\Z", "", command)
+        assert not any(word in probe for word in FORBIDDEN), command
+        assert not command.startswith("wm size "), command
+
+
+def crawl(
+    capsys: pytest.CaptureFixture[str], fake_adb: FakeAdbServer, *argv: str
+) -> tuple[int, str, str]:
+    return invoke(capsys, fake_adb, "crawl", SHOP, "--dry-run", *argv)
+
+
+def crawl_json(
+    capsys: pytest.CaptureFixture[str], fake_adb: FakeAdbServer, *argv: str
+) -> dict[str, Any]:
+    code, out, err = crawl(capsys, fake_adb, "--json", *argv)
+    assert (code, err) == (0, "")
+    return json.loads(out)
+
+
+def spy_on_dump(monkeypatch: pytest.MonkeyPatch) -> list[ModelScreen]:
+    """Record every Screen that Device.dump returns."""
+    seen: list[ModelScreen] = []
+    original = Device.dump
+
+    def spy(self, *args, **kwargs):
+        screen = original(self, *args, **kwargs)
+        seen.append(screen)
+        return screen
+
+    monkeypatch.setattr(Device, "dump", spy)
+    return seen
+
+
+def skipped_by_text(payload: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    return {entry.get("text", ""): entry for entry in payload["skip"]}
+
+
+# --- the device sees only reads ---
+
+
+@pytest.mark.usefixtures("android")
+def test_cli_preview_sends_only_read_commands(fake_adb, android, capsys):
+    code, _, _ = crawl(capsys, fake_adb)
+    assert code == 0
+    assert_read_only(fake_adb, android)
+    commands = device_commands(fake_adb)
+    assert any(c.startswith("uiautomator dump ") for c in commands)
+    assert "dumpsys input_method" in commands
+
+
+def test_python_preview_sends_only_read_commands(fake_adb, android):
+    preview(device_of(fake_adb), SHOP)
+    assert_read_only(fake_adb, android)
+
+
+@pytest.mark.parametrize("flags", [[], ["--json"]])
+def test_cli_json_preview_sends_only_read_commands(fake_adb, android, capsys, flags):
+    code, _, _ = crawl(capsys, fake_adb, *flags)
+    assert code == 0
+    assert_read_only(fake_adb, android)
+
+
+# --- Python: arguments ---
+
+
+@pytest.mark.parametrize("package", [None, 5, b"com.x", ["com.x"]])
+def test_preview_rejects_a_package_that_is_not_a_str(fake_adb, android, package):
+    device = device_of(fake_adb)
+    before = len(fake_adb.requests)
+    with pytest.raises(TypeError):
+        preview(device, package)  # type: ignore[arg-type]
+    assert len(fake_adb.requests) == before
+    assert android.inputs == []
+
+
+@pytest.mark.parametrize(
+    "package",
+    [
+        "",
+        "com",
+        "1com.x",
+        "com..x",
+        "com.x.",
+        ".com.x",
+        "com.ex-ample",
+        "com.1x",
+        "com.x y",
+        "com.x\n",
+        "com.\u00e9x",
+        "com." + "a" * 252,
+    ],
+)
+def test_preview_rejects_a_bad_package(fake_adb, android, package):
+    device = device_of(fake_adb)
+    before = len(fake_adb.requests)
+    with pytest.raises(ValueError, match="package"):
+        preview(device, package)
+    assert len(fake_adb.requests) == before
+    assert android.inputs == []
+
+
+def test_preview_accepts_the_longest_package(fake_adb, android):
+    package = "com." + "a" * 251
+    assert len(package) == 255
+    assert preview(device_of(fake_adb), package).package == package
+    assert_read_only(fake_adb, android)
+
+
+@pytest.mark.parametrize("policy", ["Policy()", {}, object(), ("x",), 0])
+def test_preview_rejects_a_policy_that_is_not_a_policy(fake_adb, android, policy):
+    device = device_of(fake_adb)
+    before = len(fake_adb.requests)
+    with pytest.raises(TypeError):
+        preview(device, SHOP, policy)  # type: ignore[arg-type]
+    assert len(fake_adb.requests) == before
+    assert android.inputs == []
+
+
+# --- Python: behavior ---
+
+
+def test_preview_reads_in_order_then_judges(fake_adb, android, monkeypatch):
+    device = device_of(fake_adb)
+    calls: list[str] = []
+    for name in ("dump", "foreground", "keyboard_shown"):
+        original = getattr(device, name)
+
+        def spy(original=original, name=name):
+            calls.append(name)
+            return original()
+
+        monkeypatch.setattr(device, name, spy)
+    result = preview(device, SHOP)
+    assert calls == ["dump", "foreground", "keyboard_shown"]
+    assert isinstance(result, Preview)
+    assert_read_only(fake_adb, android)
+
+
+def test_preview_fields(fake_adb, android):
+    device = device_of(fake_adb)
+    result = preview(device, SHOP)
+    assert result.package == SHOP
+    assert result.foreground == SHOP
+    assert result.keyboard_shown is False
+    assert result.screen.package == SHOP
+    assert result.screen.screen_id.startswith("s-")
+    assert len(result.judgement.decisions) == 7
+    assert result.judgement == judge(result.screen, SHOP, Policy(), foreground=SHOP)
+    assert_read_only(fake_adb, android)
+
+
+def test_preview_reports_the_keyboard(fake_adb, android):
+    android.show("typing")
+    assert preview(device_of(fake_adb), SHOP).keyboard_shown is True
+
+
+@pytest.mark.usefixtures("android")
+def test_preview_press_and_skip_equal_a_direct_judge(fake_adb):
+    result = preview(device_of(fake_adb), SHOP)
+    direct = judge(result.screen, SHOP, Policy(), foreground=SHOP)
+    assert result.judgement.pressable == direct.pressable
+    assert result.judgement.skipped == direct.skipped
+    assert [d.element.text for d in direct.pressable] == ["Browse", "Help"]
+
+
+@pytest.mark.usefixtures("android")
+def test_preview_passes_the_policy(fake_adb):
+    policy = Policy(tap_unlabeled=True).with_deny_words(["browse"])
+    result = preview(device_of(fake_adb), SHOP, policy)
+    direct = judge(result.screen, SHOP, policy, foreground=SHOP)
+    assert result.judgement == direct
+    assert [d.element.id for d in direct.pressable] == ["e6", "e9"]
+
+
+def test_preview_other_app_in_front_skips_everything(fake_adb, android):
+    android.override(WINDOW, OTHER_APP.encode())
+    result = preview(device_of(fake_adb), SHOP)
+    assert result.foreground == OTHER
+    assert result.judgement.pressable == ()
+    assert result.judgement.decisions
+    for decision in result.judgement.decisions:
+        assert "outside_target_app" in decision.reasons
+    assert_read_only(fake_adb, android)
+
+
+def test_preview_unknown_foreground_skips_everything(fake_adb, android):
+    android.override(WINDOW, b"nothing\n")
+    android.override(ACTIVITIES, b"nothing\n")
+    result = preview(device_of(fake_adb), SHOP)
+    assert result.foreground is None
+    assert result.judgement.pressable == ()
+    for decision in result.judgement.decisions:
+        assert "outside_target_app" in decision.reasons
+    assert_read_only(fake_adb, android)
+
+
+def test_preview_device_errors_propagate(fake_adb, android):
+    android.override(re.compile(r"^dumpsys input_method\Z"), Fail("closed"))
+    with pytest.raises(AdbError):
+        preview(device_of(fake_adb), SHOP)
+    assert android.inputs == []
+
+
+# --- CLI: text ---
+
+
+@pytest.mark.usefixtures("android")
+def test_text_output(fake_adb, capsys):
+    code, out, err = crawl(capsys, fake_adb)
+    assert (code, err) == (0, "")
+    lines = out.splitlines()
+    assert re.fullmatch(
+        rf"preview for {re.escape(SHOP)} on screen s-[0-9a-f]+; nothing was pressed",
+        lines[0],
+    )
+    assert lines[1] == f"foreground: {SHOP}, keyboard: hidden"
+    assert lines[2] == "would press (2):"
+    assert lines[3:5] == [
+        '  e2 TextView "Browse" id=browse [tap] center=160,125',
+        '  e9 TextView "Help" [tap] center=160,425',
+    ]
+    assert lines[5] == "would not press (5):"
+    skipped = lines[6:]
+    assert skipped == [
+        '  e3 TextView "Delete account" [tap] center=160,185:'
+        ' deny_word ("delete" in text)',
+        # e5 is on top of e4, so e4 is covered and has no center.
+        '  e4 TextView "Open row" [tap]: covered, deny_word ("delete" in text of e5)',
+        "  e6 TextView [tap] center=160,305: unlabeled",
+        '  e7 TextView "Settings" [tap] [disabled] center=160,365: disabled',
+        '  e8 TextView "Offscreen" [tap]: not_visible',
+    ]
+
+
+def test_text_output_lists_every_skipped_reason(fake_adb, android, capsys):
+    code, out, _ = crawl(capsys, fake_adb)
+    assert code == 0
+    assert "deny_word" in out
+    assert "unlabeled" in out
+    assert "disabled" in out
+    assert "not_visible" in out
+    assert_read_only(fake_adb, android)
+
+
+def test_text_output_with_empty_lists(fake_adb, android, capsys):
+    android.show("empty")
+    code, out, _ = crawl(capsys, fake_adb)
+    assert code == 0
+    lines = out.splitlines()
+    assert lines[2:] == ["would press (0):", "would not press (0):"]
+
+
+def test_text_output_with_nothing_pressable(fake_adb, android, capsys):
+    android.show("locked")
+    code, out, _ = crawl(capsys, fake_adb)
+    assert code == 0
+    lines = out.splitlines()
+    assert lines[2:4] == ["would press (0):", "would not press (1):"]
+    assert 'deny_word ("delete" in text)' in lines[4]
+
+
+def test_text_output_shows_the_keyboard(fake_adb, android, capsys):
+    android.show("typing")
+    _, out, _ = crawl(capsys, fake_adb)
+    assert out.splitlines()[1] == f"foreground: {SHOP}, keyboard: shown"
+
+
+def test_text_output_unknown_foreground_and_keyboard(fake_adb, android, capsys):
+    android.override(WINDOW, b"nothing\n")
+    android.override(ACTIVITIES, b"nothing\n")
+    android.override(re.compile(r"^dumpsys input_method\Z"), b"nothing\n")
+    code, out, _ = crawl(capsys, fake_adb)
+    assert code == 0
+    assert out.splitlines()[1] == "foreground: unknown, keyboard: unknown"
+    assert "would press (0):" in out
+
+
+def test_other_app_in_front_exits_zero_with_everything_skipped(
+    fake_adb, android, capsys
+):
+    android.override(WINDOW, OTHER_APP.encode())
+    code, out, err = crawl(capsys, fake_adb)
+    assert (code, err) == (0, "")
+    lines = out.splitlines()
+    assert lines[1] == f"foreground: {OTHER}, keyboard: hidden"
+    assert lines[2:4] == ["would press (0):", "would not press (7):"]
+    for line in lines[4:]:
+        assert "outside_target_app" in line
+    assert_read_only(fake_adb, android)
+
+
+def test_other_app_in_front_json(fake_adb, android, capsys):
+    android.override(WINDOW, OTHER_APP.encode())
+    payload = crawl_json(capsys, fake_adb)
+    assert payload["foreground"] == OTHER
+    assert payload["press"] == []
+    assert len(payload["skip"]) == 7
+    for entry in payload["skip"]:
+        assert "outside_target_app" in entry["reasons"]
+
+
+# --- CLI: JSON ---
+
+
+@pytest.mark.usefixtures("android")
+def test_json_shape_and_values(fake_adb, capsys, monkeypatch):
+    seen = spy_on_dump(monkeypatch)
+    payload = crawl_json(capsys, fake_adb)
+    (screen,) = seen
+    assert payload["captured_at"] == screen.captured_at.isoformat(timespec="seconds")
+    expected = judge(screen, SHOP, Policy(), foreground=SHOP)
+    assert payload["press"] == [
+        screen._element_dict(d.element) for d in expected.pressable
+    ]
+    assert [set(e) for e in payload["skip"]] == [
+        set(screen._element_dict(d.element)) | {"reasons", "details"}
+        for d in expected.skipped
+    ]
+    for entry, decision in zip(payload["skip"], expected.skipped, strict=True):
+        base = screen._element_dict(decision.element)
+        assert {
+            k: v for k, v in entry.items() if k not in ("reasons", "details")
+        } == base
+        assert entry["reasons"] == list(decision.reasons)
+    assert list(payload) == [
+        "schema",
+        "package",
+        "screen_id",
+        "captured_at",
+        "foreground",
+        "keyboard_shown",
+        "press",
+        "skip",
+    ]
+    assert payload["schema"] == "uiprobe.crawl_preview/1"
+    assert payload["package"] == SHOP
+    assert payload["screen_id"].startswith("s-")
+    assert re.fullmatch(
+        r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d[+-]\d\d:\d\d", payload["captured_at"]
+    )
+    assert payload["foreground"] == SHOP
+    assert payload["keyboard_shown"] is False
+    assert [e["text"] for e in payload["press"]] == ["Browse", "Help"]
+    press = payload["press"][0]
+    assert press["bounds"] == [40, 100, 280, 150]
+    assert press["center"] == [160, 125]
+    assert list(press)[-1] == "center"
+
+
+@pytest.mark.usefixtures("android")
+def test_json_skip_entries(fake_adb, capsys):
+    payload = crawl_json(capsys, fake_adb)
+    skipped = skipped_by_text(payload)
+    assert [e["id"] for e in payload["skip"]] == ["e3", "e4", "e6", "e7", "e8"]
+    own = skipped["Delete account"]
+    assert own["reasons"] == ["deny_word"]
+    assert own["details"] == [
+        {"reason": "deny_word", "word": "delete", "field": "text", "element_id": "e3"}
+    ]
+    assert own["center"] == [160, 185]
+    other = skipped["Open row"]
+    assert other["reasons"] == ["covered", "deny_word"]
+    assert other["details"] == [
+        {"reason": "covered", "note": "covered by e5", "element_id": "e5"},
+        {"reason": "deny_word", "word": "delete", "field": "text", "element_id": "e5"},
+    ]
+    assert "center" not in other
+    unlabeled = skipped[""]
+    assert unlabeled["id"] == "e6"
+    assert unlabeled["reasons"] == ["unlabeled"]
+    disabled = skipped["Settings"]
+    assert disabled["reasons"] == ["disabled"]
+    assert disabled["center"] == [160, 365]
+    invisible = skipped["Offscreen"]
+    assert invisible["reasons"] == ["not_visible"]
+    assert "center" not in invisible
+    for entry in payload["skip"]:
+        assert [r for r in REASONS if r in entry["reasons"]] == entry["reasons"]
+        assert isinstance(entry["details"], list)
+        for detail in entry["details"]:
+            assert set(detail) <= {"reason", "word", "field", "element_id", "note"}
+            assert all(detail.values())
+
+
+@pytest.mark.usefixtures("android")
+def test_preview_output_does_not_rescan_the_screen_per_element(
+    fake_adb, capsys, monkeypatch
+):
+    # The centers come from the decisions; a per-element tap_point would make
+    # the preview quadratic on a large screen.
+    from uiprobe.model import Screen as RealScreen
+
+    # captured_at comes from the clock, so two runs can differ by a second;
+    # everything else must be the same.
+    expected = crawl_json(capsys, fake_adb)
+    expected.pop("captured_at")
+    expected_text = crawl(capsys, fake_adb)
+
+    def forbidden(*_args: object) -> None:
+        raise AssertionError("tap_point called by the preview")
+
+    monkeypatch.setattr(RealScreen, "tap_point", forbidden)
+    actual = crawl_json(capsys, fake_adb)
+    assert actual.pop("captured_at")
+    assert actual == expected
+    assert crawl(capsys, fake_adb) == expected_text
+
+
+def test_json_empty_arrays_are_written(fake_adb, android, capsys):
+    android.show("empty")
+    payload = crawl_json(capsys, fake_adb)
+    assert payload["press"] == []
+    assert payload["skip"] == []
+
+
+def test_json_omits_unknown_foreground_and_keyboard(fake_adb, android, capsys):
+    android.override(WINDOW, b"nothing\n")
+    android.override(ACTIVITIES, b"nothing\n")
+    android.override(re.compile(r"^dumpsys input_method\Z"), b"nothing\n")
+    payload = crawl_json(capsys, fake_adb)
+    assert "foreground" not in payload
+    assert "keyboard_shown" not in payload
+    assert list(payload)[-2:] == ["press", "skip"]
+
+
+def test_json_keyboard_true_is_written(fake_adb, android, capsys):
+    android.show("typing")
+    assert crawl_json(capsys, fake_adb)["keyboard_shown"] is True
+
+
+@pytest.mark.usefixtures("android")
+def test_json_matches_the_python_judgement(fake_adb, capsys):
+    payload = crawl_json(capsys, fake_adb)
+    result = preview(device_of(fake_adb), SHOP)
+    assert [e["id"] for e in payload["press"]] == [
+        d.element.id for d in result.judgement.pressable
+    ]
+    assert [e["id"] for e in payload["skip"]] == [
+        d.element.id for d in result.judgement.skipped
+    ]
+    assert payload["screen_id"] == result.screen.screen_id
+
+
+# --- CLI: options ---
+
+
+def test_deny_adds_a_word(fake_adb, android, capsys):
+    payload = crawl_json(capsys, fake_adb, "--deny", "browse")
+    assert [e["text"] for e in payload["press"]] == ["Help"]
+    entry = skipped_by_text(payload)["Browse"]
+    assert entry["reasons"] == ["deny_word"]
+    assert entry["details"][0]["word"] == "browse"
+    assert_read_only(fake_adb, android)
+
+
+@pytest.mark.usefixtures("android")
+def test_deny_is_repeatable(fake_adb, capsys):
+    payload = crawl_json(capsys, fake_adb, "--deny", "BROWSE", "--deny", "help")
+    assert payload["press"] == []
+
+
+def test_deny_file_with_bom_and_crlf(fake_adb, android, capsys, tmp_path: Path):
+    path = tmp_path / "deny.txt"
+    path.write_bytes(b"\xef\xbb\xbf# words\r\n\r\nbrowse\r\n")
+    payload = crawl_json(capsys, fake_adb, "--deny-file", str(path))
+    assert [e["text"] for e in payload["press"]] == ["Help"]
+    assert skipped_by_text(payload)["Browse"]["reasons"] == ["deny_word"]
+    assert_read_only(fake_adb, android)
+
+
+def test_two_deny_files_both_count(fake_adb, android, capsys, tmp_path: Path):
+    first = tmp_path / "first.txt"
+    second = tmp_path / "second.txt"
+    first.write_bytes(b"browse\n")
+    second.write_bytes(b"help\n")
+    only_first = crawl_json(capsys, fake_adb, "--deny-file", str(first))
+    assert [e["text"] for e in only_first["press"]] == ["Help"]
+    only_second = crawl_json(capsys, fake_adb, "--deny-file", str(second))
+    assert [e["text"] for e in only_second["press"]] == ["Browse"]
+    both = crawl_json(
+        capsys, fake_adb, "--deny-file", str(first), "--deny-file", str(second)
+    )
+    assert both["press"] == []
+    assert_read_only(fake_adb, android)
+
+
+@pytest.mark.usefixtures("android")
+def test_deny_file_words_count_with_cli_words(fake_adb, capsys, tmp_path):
+    path = tmp_path / "deny.txt"
+    path.write_bytes(b"help\n")
+    payload = crawl_json(capsys, fake_adb, "--deny", "browse", "--deny-file", str(path))
+    assert payload["press"] == []
+
+
+def test_tap_unlabeled_makes_an_unlabeled_element_pressable(fake_adb, android, capsys):
+    payload = crawl_json(capsys, fake_adb, "--tap-unlabeled")
+    assert [e["id"] for e in payload["press"]] == ["e2", "e6", "e9"]
+    assert "unlabeled" not in [r for e in payload["skip"] for r in e["reasons"]]
+    assert_read_only(fake_adb, android)
+
+
+@pytest.mark.usefixtures("android")
+def test_options_work_before_the_command(fake_adb, capsys):
+    code, out, err = invoke(
+        capsys, fake_adb, "-s", SERIAL, "--json", "crawl", SHOP, "--dry-run"
+    )
+    assert (code, err) == (0, "")
+    assert json.loads(out)["schema"] == "uiprobe.crawl_preview/1"
+
+
+def test_serial_after_the_command(fake_adb, android, capsys):
+    code, out, _ = crawl(capsys, fake_adb, "--serial", SERIAL)
+    assert code == 0
+    assert "would press (2):" in out
+    assert_read_only(fake_adb, android)
+
+
+# --- CLI: usage errors, all before the adb server is contacted ---
+
+
+def usage_error(
+    capsys: pytest.CaptureFixture[str], fake_adb: FakeAdbServer, *argv: str
+) -> str:
+    before = len(fake_adb.requests)
+    code, out, err = invoke(capsys, fake_adb, *argv)
+    assert (code, err) == (2, "")
+    assert len(fake_adb.requests) == before
+    error = json.loads(out)
+    assert error["schema"] == "uiprobe.error/1"
+    assert error["error"]["code"] == "usage_error"
+    return error["error"]["message"]
+
+
+def crawl_usage_error(
+    capsys: pytest.CaptureFixture[str], fake_adb: FakeAdbServer, *argv: str
+) -> str:
+    return usage_error(capsys, fake_adb, "crawl", "--json", *argv)
+
+
+def test_crawl_without_dry_run_is_refused(fake_adb, android, capsys):
+    message = crawl_usage_error(capsys, fake_adb, SHOP)
+    assert message == "only crawl --dry-run is available so far"
+    assert android.inputs == []
+
+
+@pytest.mark.usefixtures("android")
+def test_crawl_without_dry_run_text_mode(fake_adb, capsys):
+    code, out, err = invoke(capsys, fake_adb, "crawl", SHOP)
+    assert (code, out) == (2, "")
+    assert err == "uiprobe: error: only crawl --dry-run is available so far\n"
+    assert fake_adb.requests == []
+
+
+@pytest.mark.parametrize("equals_form", [False, True])
+def test_crawl_refuses_an_out_folder(fake_adb, android, capsys, tmp_path, equals_form):
+    run = tmp_path / "run"
+    out_args = [f"--out={run}"] if equals_form else ["--out", str(run)]
+    crawl_usage_error(capsys, fake_adb, SHOP, "--dry-run", *out_args)
+    assert not run.exists()
+    assert list(tmp_path.iterdir()) == []
+    assert android.inputs == []
+
+
+@pytest.mark.usefixtures("android")
+def test_crawl_needs_a_package(fake_adb, capsys):
+    usage_error(capsys, fake_adb, "crawl", "--dry-run", "--json")
+
+
+@pytest.mark.parametrize(
+    "package", ["com", "1com.x", "com..x", "com.x.", "com.ex-ample", "com." + "a" * 252]
+)
+@pytest.mark.usefixtures("android")
+def test_crawl_bad_package(fake_adb, capsys, package):
+    message = crawl_usage_error(capsys, fake_adb, package, "--dry-run")
+    assert "package" in message
+
+
+@pytest.mark.usefixtures("android")
+def test_crawl_empty_package(fake_adb, capsys):
+    message = crawl_usage_error(capsys, fake_adb, "", "--dry-run")
+    assert "package" in message
+
+
+@pytest.mark.parametrize("word", ["", "   ", "\u200b"])
+@pytest.mark.usefixtures("android")
+def test_crawl_empty_deny_word(fake_adb, capsys, word):
+    message = crawl_usage_error(capsys, fake_adb, SHOP, "--dry-run", "--deny", word)
+    assert message == f"--deny word is empty after normalization: {word!r}"
+
+
+@pytest.mark.usefixtures("android")
+def test_crawl_missing_deny_file(fake_adb, capsys, tmp_path):
+    path = tmp_path / "missing.txt"
+    message = crawl_usage_error(
+        capsys, fake_adb, SHOP, "--dry-run", "--deny-file", str(path)
+    )
+    assert "no such file" in message
+    assert str(path) in message
+
+
+@pytest.mark.usefixtures("android")
+def test_crawl_deny_file_is_a_directory(fake_adb, capsys, tmp_path):
+    message = crawl_usage_error(
+        capsys, fake_adb, SHOP, "--dry-run", "--deny-file", str(tmp_path)
+    )
+    assert "not a regular file" in message
+
+
+def _open_fifo_for_writing(path):
+    os.close(os.open(path, os.O_WRONLY))
+
+
+@pytest.mark.usefixtures("android")
+def test_crawl_deny_file_is_a_fifo(fake_adb, capsys, tmp_path):
+    if not hasattr(os, "mkfifo"):
+        pytest.skip("needs os.mkfifo")
+    path = tmp_path / "pipe"
+    os.mkfifo(path)
+    # A read before the regular-file check would block forever. This writer
+    # lets such a read end at once with empty data, so a regression fails the
+    # opened_by_cli assertion below instead of hanging the whole run.
+    writer = threading.Thread(target=_open_fifo_for_writing, args=(path,), daemon=True)
+    writer.start()
+    try:
+        message = crawl_usage_error(
+            capsys, fake_adb, SHOP, "--dry-run", "--deny-file", str(path)
+        )
+    finally:
+        # The writer's open returns only once something opens the FIFO to read.
+        writer.join(0.5)
+        opened_by_cli = not writer.is_alive()
+        # Lets the writer's blocking open finish when nothing read the FIFO.
+        reader = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
+        writer.join(5)
+        os.close(reader)
+    assert "not a regular file" in message
+    assert not opened_by_cli, "the deny file was opened before the type check"
+    assert not writer.is_alive()
+
+
+def _change_before_read(monkeypatch, target, change):
+    real = pathlib.Path.read_bytes
+
+    def read_bytes(self):
+        if self == target:
+            change()
+        return real(self)
+
+    monkeypatch.setattr(pathlib.Path, "read_bytes", read_bytes)
+
+
+@pytest.mark.usefixtures("android")
+def test_crawl_deny_file_replaced_while_read(
+    fake_adb, android, capsys, tmp_path, monkeypatch
+):
+    path = tmp_path / "deny.txt"
+    path.write_bytes(b"browse\n")
+    sibling = tmp_path / "other.txt"
+    sibling.write_bytes(b"# something else entirely\nhelp\n")
+
+    def change():
+        sibling.replace(path)
+
+    _change_before_read(monkeypatch, path, change)
+    message = crawl_usage_error(
+        capsys, fake_adb, SHOP, "--dry-run", "--deny-file", str(path)
+    )
+    assert "the file changed while it was read" in message
+    assert android.inputs == []
+
+
+@pytest.mark.usefixtures("android")
+def test_crawl_deny_file_modified_in_place_while_read(
+    fake_adb, android, capsys, tmp_path, monkeypatch
+):
+    path = tmp_path / "deny.txt"
+    path.write_bytes(b"browse\n")
+    inode = path.stat().st_ino
+
+    def change():
+        path.write_bytes(b"# something else entirely\nhelp\n")
+        assert path.stat().st_ino == inode
+
+    _change_before_read(monkeypatch, path, change)
+    message = crawl_usage_error(
+        capsys, fake_adb, SHOP, "--dry-run", "--deny-file", str(path)
+    )
+    assert "the file changed while it was read" in message
+    assert android.inputs == []
+
+
+@pytest.mark.usefixtures("android")
+def test_crawl_deny_file_over_one_mib(fake_adb, capsys, tmp_path):
+    path = tmp_path / "big.txt"
+    path.write_bytes(b"x\n" * (MIB // 2 + 1))
+    message = crawl_usage_error(
+        capsys, fake_adb, SHOP, "--dry-run", "--deny-file", str(path)
+    )
+    assert "larger than" in message
+
+
+@pytest.mark.usefixtures("android")
+def test_crawl_deny_file_of_exactly_one_mib_is_read(fake_adb, capsys, tmp_path):
+    path = tmp_path / "limit.txt"
+    path.write_bytes(b"nothing\n" + b"#" * (MIB - 8))
+    assert path.stat().st_size == MIB
+    payload = crawl_json(capsys, fake_adb, "--deny-file", str(path))
+    assert [e["text"] for e in payload["press"]] == ["Browse", "Help"]
+
+
+@pytest.mark.usefixtures("android")
+def test_crawl_deny_file_utf16(fake_adb, capsys, tmp_path):
+    path = tmp_path / "utf16.txt"
+    path.write_bytes("browse\n".encode("utf-16"))
+    message = crawl_usage_error(
+        capsys, fake_adb, SHOP, "--dry-run", "--deny-file", str(path)
+    )
+    assert message.startswith(f"--deny-file {path}")
+    assert "UTF-16" in message
+
+
+@pytest.mark.usefixtures("android")
+def test_crawl_deny_file_bad_utf8(fake_adb, capsys, tmp_path):
+    path = tmp_path / "bad.txt"
+    path.write_bytes(b"ok\n\xff\xfe\xfd\n")
+    message = crawl_usage_error(
+        capsys, fake_adb, SHOP, "--dry-run", "--deny-file", str(path)
+    )
+    assert "line 2" in message
+    assert "UTF-8" in message
+
+
+@pytest.mark.usefixtures("android")
+def test_crawl_deny_file_with_an_empty_word(fake_adb, capsys, tmp_path):
+    path = tmp_path / "ignorable.txt"
+    path.write_bytes("\u200b\n".encode())
+    message = crawl_usage_error(
+        capsys, fake_adb, SHOP, "--dry-run", "--deny-file", str(path)
+    )
+    assert message.startswith(f"--deny-file {path}")
+
+
+@pytest.mark.usefixtures("android")
+def test_crawl_usage_error_text_is_escaped(fake_adb, capsys, tmp_path):
+    path = tmp_path / "gone\u202e.txt"
+    code, out, err = invoke(
+        capsys, fake_adb, "crawl", SHOP, "--dry-run", "--deny-file", str(path)
+    )
+    assert (code, out) == (2, "")
+    assert "\u202e" not in err
+    assert "\\u202e" in err
+    assert fake_adb.requests == []
+
+
+def test_usage_errors_do_not_depend_on_the_adb_server(capsys):
+    code = cli.run(["--adb-server", "tcp:127.0.0.1:1", "crawl", "com.x.y"])
+    assert code == 2
+    assert capsys.readouterr().out == ""
+
+
+# --- CLI: escaping, errors, interrupt ---
+
+
+def test_app_text_is_escaped_in_text_and_json(fake_adb, capsys):
+    nasty = "a\x9b2J\u202eb\u2028c\x7f"
+    FakeAndroid(
+        fake_adb,
+        SERIAL,
+        (
+            Screen(
+                "nasty",
+                f"{SHOP}/.Nasty",
+                (
+                    El((40, 100, 280, 150), text=nasty, go="nasty"),
+                    El((40, 160, 280, 210), text="Delete" + nasty, go="nasty"),
+                ),
+            ),
+        ),
+        start="nasty",
+    )
+    code, out, err = crawl(capsys, fake_adb)
+    assert (code, err) == (0, "")
+    for char in "\x9b\u202e\u2028\x7f":
+        assert char not in out
+    assert "\\u009b" in out
+    assert "\\u202e" in out
+    code, out, err = crawl(capsys, fake_adb, "--json")
+    assert (code, err) == (0, "")
+    for char in "\x9b\u202e\u2028\x7f":
+        assert char not in out
+    assert "\\u009b" in out
+    assert "\\u202e" in out
+    payload = json.loads(out)
+    assert payload["press"][0]["text"] == nasty
+
+
+def test_escape_in_app_text_reaches_neither_output(
+    fake_adb, android, capsys, monkeypatch
+):
+    # An XML dump cannot carry ESC, so hand the CLI a screen that has it.
+    original = Device.dump
+
+    def with_esc(self, *args, **kwargs):
+        screen = original(self, *args, **kwargs)
+        first = dataclasses.replace(screen.elements[1], text="x\x1b[2Jy")
+        return dataclasses.replace(screen, elements=(screen.elements[0], first))
+
+    monkeypatch.setattr(Device, "dump", with_esc)
+    code, out, err = crawl(capsys, fake_adb)
+    assert (code, err) == (0, "")
+    assert "\x1b" not in out
+    assert "\\u001b" in out
+    code, out, err = crawl(capsys, fake_adb, "--json")
+    assert (code, err) == (0, "")
+    assert "\x1b" not in out
+    assert json.loads(out)["press"][0]["text"] == "x\x1b[2Jy"
+    assert android.inputs == []
+
+
+def test_text_line_equals_the_find_line_for_ideographic_space(fake_adb, capsys):
+    label = "\u30db\u30fc\u30e0\u3000\u3059\u308b"
+    FakeAndroid(
+        fake_adb,
+        SERIAL,
+        (Screen("jp", f"{SHOP}/.Jp", (El((40, 100, 280, 150), text=label, go="jp"),)),),
+        start="jp",
+    )
+    code, find_out, err = invoke(capsys, fake_adb, "find", "--text", label)
+    assert (code, err) == (0, "")
+    line = next(x for x in find_out.splitlines() if label in x)
+    code, out, err = crawl(capsys, fake_adb)
+    assert (code, err) == (0, "")
+    assert "  " + line.strip() in out.splitlines()
+
+
+def test_escape_in_a_usage_error_message(fake_adb, capsys):
+    code, out, err = invoke(
+        capsys, fake_adb, "crawl", "com.x\x1b[2J\u202e", "--dry-run"
+    )
+    assert (code, out) == (2, "")
+    assert "\x1b" not in err
+    assert "\u202e" not in err
+    assert fake_adb.requests == []
+    code, out, err = invoke(
+        capsys, fake_adb, "crawl", "com.x\x1b[2J\u202e", "--dry-run", "--json"
+    )
+    assert (code, err) == (2, "")
+    assert "\x1b" not in out
+    assert "\u202e" not in out
+    assert "\\\\x1b" in out
+    assert fake_adb.requests == []
+
+
+def test_device_error_is_reported(fake_adb, android, capsys):
+    android.override(re.compile(r"^dumpsys input_method\Z"), Fail("closed"))
+    code, out, err = invoke(capsys, fake_adb, "crawl", SHOP, "--dry-run", "--json")
+    assert code == 10
+    assert err == ""
+    error = json.loads(out)
+    assert error["schema"] == "uiprobe.error/1"
+    assert error["error"]["code"] == "adb_error"
+    assert android.inputs == []
+
+
+@pytest.mark.parametrize("as_json", [True, False])
+def test_keyboard_interrupt_during_the_preview(
+    fake_adb, android, capsys, monkeypatch, as_json
+):
+    def interrupted(_self):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(Device, "dump", interrupted)
+    argv = ["crawl", SHOP, "--dry-run", *(["--json"] if as_json else [])]
+    code, out, err = invoke(capsys, fake_adb, *argv)
+    assert code == 130
+    if as_json:
+        assert err == ""
+        error = json.loads(out)
+        assert error["schema"] == "uiprobe.error/1"
+        assert error["error"]["code"] == "interrupted"
+    else:
+        assert out == ""
+        assert err == "uiprobe: error: interrupted\n"
+    assert android.inputs == []
+
+
+@pytest.mark.usefixtures("android")
+def test_keyboard_interrupt_while_reading_the_foreground(fake_adb, capsys, monkeypatch):
+    def interrupted(_self):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(Device, "foreground", interrupted)
+    code, out, _ = invoke(capsys, fake_adb, "crawl", SHOP, "--dry-run", "--json")
+    assert code == 130
+    assert json.loads(out)["error"]["code"] == "interrupted"
+
+
+def test_crawl_help_says_only_dry_run_exists(capsys):
+    code = cli.run(["crawl", "--help"])
+    out = " ".join(capsys.readouterr().out.split())
+    assert code == 0
+    assert "Only --dry-run exists so far" in out
+    assert "presses nothing" in out
+    assert "screen showing now" in out
+
+
+@pytest.mark.usefixtures("android")
+def test_nothing_is_written(fake_adb, capsys, tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    crawl(capsys, fake_adb)
+    assert list(tmp_path.iterdir()) == []
+    assert sys.stdout is not None
+
+
+def test_preview_json_lists_a_sliver_as_not_visible_and_a_cover(fake_adb, capsys):
+    FakeAndroid(
+        fake_adb,
+        SERIAL,
+        (
+            Screen(
+                "rules",
+                f"{SHOP}/.Rules",
+                (
+                    El((40, 100, 280, 150), text="Ok row", go="rules"),
+                    El((40, 100, 280, 150), text="Banner", go="rules"),
+                    El((40, 633, 280, 700), text="Sliver", go="rules"),
+                    El((40, 632, 280, 700), text="Eight", go="rules"),
+                ),
+            ),
+        ),
+        start="rules",
+    )
+    payload = crawl_json(capsys, fake_adb)
+    assert [e["text"] for e in payload["press"]] == ["Banner"]
+    skipped = skipped_by_text(payload)
+    # 8 pixels show: visible (it is skipped only for the screen edge)
+    assert "not_visible" not in skipped["Eight"]["reasons"]
+    assert "center" in skipped["Eight"]
+    assert skipped["Ok row"]["reasons"] == ["covered"]
+    assert skipped["Ok row"]["details"] == [
+        {"reason": "covered", "note": "covered by e3", "element_id": "e3"}
+    ]
+    assert "center" not in skipped["Ok row"]
+    assert skipped["Sliver"]["reasons"] == ["not_visible"]
+    assert "center" not in skipped["Sliver"]
+
+
+@pytest.mark.usefixtures("android")
+def test_number_only_and_toggle_in_json(fake_adb, android, capsys):
+    android.show("rules")
+    payload = crawl_json(capsys, fake_adb)
+    assert [e["text"] for e in payload["press"]] == ["Page 2"]
+    skipped = skipped_by_text(payload)
+    number = skipped["200"]
+    assert number["reasons"] == ["number_only"]
+    assert number["details"] == [
+        {"reason": "number_only", "word": "200", "note": "200"}
+    ]
+    switch = skipped["Sound"]
+    assert switch["reasons"] == ["toggle"]
+    assert switch["details"] == [{"reason": "toggle", "element_id": "e3"}]
+    both = skipped["7"]
+    assert both["reasons"] == ["number_only", "toggle"]
+    assert both["details"][1] == {"reason": "toggle", "element_id": "e5"}
+    assert_read_only(fake_adb, android)
+
+
+@pytest.mark.usefixtures("android")
+def test_number_only_and_toggle_in_text(fake_adb, android, capsys):
+    android.show("rules")
+    code, out, err = crawl(capsys, fake_adb)
+    assert (code, err) == (0, "")
+    lines = out.splitlines()
+    assert lines[2:] == [
+        "would press (1):",
+        '  e4 TextView "Page 2" [tap] center=160,245',
+        "would not press (3):",
+        '  e2 TextView "200" [tap] center=160,125: number_only',
+        '  e3 TextView "Sound" [tap] [checked] center=160,185: toggle',
+        '  e5 TextView "7" [tap] center=160,305: number_only, toggle',
+    ]
+
+
+@pytest.mark.usefixtures("android")
+def test_preview_policy_turns_the_number_only_and_toggle_rules_off(fake_adb, android):
+    android.show("rules")
+    policy = Policy(skip_number_only=False, skip_toggles=False)
+    result = preview(device_of(fake_adb), SHOP, policy)
+    assert [d.element.text for d in result.judgement.pressable] == [
+        "200",
+        "Sound",
+        "Page 2",
+        "7",
+    ]

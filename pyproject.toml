@@ -1,0 +1,101 @@
+[project]
+name = "uiprobe"
+version = "0.1.0a1.dev0"
+description = "Save the screen structure of an Android app and send taps, swipes and keys to it, through the local adb server by default."
+readme = "README.md"
+requires-python = ">=3.12"
+license = "MIT"
+license-files = ["LICENSE"]
+dependencies = []
+
+[project.scripts]
+uiprobe = "uiprobe.cli:main"
+
+[build-system]
+requires = ["uv_build>=0.13.6,<0.14.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.2.0",
+    "ruff==0.17.3",
+    "ty==0.0.95",
+]
+
+[tool.ruff.lint]
+# Preview rules are enabled only when listed by their full code in `select`.
+preview = true
+explicit-preview-rules = true
+select = [
+    "A",
+    "ANN",
+    "ARG",
+    "ASYNC",
+    "B",
+    "B909",  # preview: loop-iterator-mutation
+    "BLE",
+    "C4",
+    "DTZ",
+    "E",
+    "F",
+    "FBT",
+    "FURB",
+    "G",
+    "I",
+    "ICN",
+    "N",
+    "PERF",
+    "PIE",
+    "PLR",
+    "PT",
+    "PTH",
+    "RSE",
+    "RUF",
+    "RUF029",  # preview: unused-async
+    "S",
+    "SIM",
+    "SLF",
+    "T20",
+    "TC",
+    "UP",
+    "W",
+]
+ignore = [
+    "ANN204",  # missing return type on special (dunder) methods
+    "PLR0913", # too-many-arguments
+    "PLR0917", # too-many-positional-arguments
+    "PLR2004", # magic-value-comparison
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = [
+    "S101",    # assert used
+    "SLF001",  # private-member-access
+    "ANN001",  # missing type annotation for function argument
+    "ANN201",  # missing return type on public function
+    "ANN202",  # missing return type on private function
+    "ANN002",  # missing type annotation for *args
+    "ANN003",  # missing type annotation for **kwargs
+    "S603",    # tests start helper processes
+    "ASYNC109", # test helpers take a timeout argument
+    "RUF029",  # async test functions may not await
+]
+# The command-line entry point writes its results to stdout.
+"src/uiprobe/cli.py" = ["T20"]
+# Only this module runs the adb binary (to start the adb server), always with
+# list-form arguments and never through a shell.
+"src/uiprobe/adb.py" = ["S603"]
+
+[tool.ty.rules]
+unused-ignore-comment = "error"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = ["-ra", "--strict-markers", "--strict-config"]
+# An exception that escapes a thread or a __del__ (for example an unclosed
+# socket) must fail the run instead of scrolling by as a warning.
+filterwarnings = [
+    "error::pytest.PytestUnhandledThreadExceptionWarning",
+    "error::pytest.PytestUnraisableExceptionWarning",
+    "error::ResourceWarning",
+]
