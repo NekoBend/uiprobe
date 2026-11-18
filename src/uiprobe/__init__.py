@@ -1,5 +1,8 @@
 """uiprobe: save an Android app's screen structure through the adb server."""
 
+# Also written in pyproject.toml; tests/test_version.py checks that the two match.
+__version__ = "0.1.0a1.dev0"
+
 from uiprobe.adb import DeviceInfo
 from uiprobe.crawl_preview import Preview, preview
 from uiprobe.device import Device, devices, select_device

@@ -22,8 +22,9 @@ import re
 import stat
 import sys
 from pathlib import Path
-from typing import TYPE_CHECKING, NoReturn, TextIO
+from typing import TYPE_CHECKING, NoReturn, TextIO, override
 
+from uiprobe import __version__
 from uiprobe._json import dumps
 from uiprobe.crawl_preview import check_package
 from uiprobe.crawl_preview import preview as make_preview
@@ -110,6 +111,26 @@ class _Parser(argparse.ArgumentParser):
         raise _UsageError(message)
 
 
+class _VersionAction(argparse.Action):
+    """Print ``uiprobe VERSION`` through `_emit` and exit with status 0.
+
+    argparse's own version action wraps the line to the terminal width and
+    ignores a failed write; this one prints one line and lets a closed output
+    end the run with status 1, like any other output.
+    """
+
+    @override
+    def __call__(
+        self,
+        parser: argparse.ArgumentParser,
+        namespace: argparse.Namespace,
+        values: object,
+        option_string: str | None = None,
+    ) -> None:
+        _emit(f"uiprobe {__version__}")
+        parser.exit()
+
+
 def _add_common_options(parser: argparse.ArgumentParser, *, in_command: bool) -> None:
     """Add the options every command shares.
 
@@ -150,6 +171,13 @@ def _add_common_options(parser: argparse.ArgumentParser, *, in_command: bool) ->
 
 def _build_parser() -> _Parser:
     parser = _Parser(prog="uiprobe", allow_abbrev=False)
+    parser.add_argument(
+        "--version",
+        action=_VersionAction,
+        nargs=0,
+        default=argparse.SUPPRESS,
+        help="print the version and exit",
+    )
     _add_common_options(parser, in_command=False)
     commands = parser.add_subparsers(dest="command", required=True, metavar="COMMAND")
     for name, text in (
@@ -1059,7 +1087,8 @@ def run(argv: Sequence[str]) -> int:
         args = _parse(argv)
         return _HANDLERS[args.command](args)
     except SystemExit as exc:
-        # argparse exits for --help; it never exits for an error (see _Parser).
+        # argparse exits for --help and --version; it never exits for an error
+        # (see _Parser).
         return exc.code if isinstance(exc.code, int) else 0
     except (Exception, KeyboardInterrupt) as exc:  # noqa: BLE001 - last resort: never show a traceback
         try:

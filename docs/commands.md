@@ -183,6 +183,8 @@ These options work before or after the command, except for `init`, which accepts
 | `--no-start-server` | Never start the adb server; fail if it is not running. |
 | `--json` | Print JSON. Errors are printed as JSON on stdout too. |
 
+`uiprobe --version` prints one line of plain text to stdout, such as `uiprobe 0.1.0a1.dev0`, also with `--json`, and exits without contacting the adb server. It works only before a command. All development snapshots of one version print the same line, so when you report a problem, also name the commit you installed.
+
 ## Environment variables
 
 | Variable | Meaning |
