@@ -280,6 +280,7 @@ class FakeAndroid:
         re.compile(r"^wm size\Z"),
         re.compile(r"^getprop (?:ro\.build\.version\.sdk|ro\.kernel\.qemu)\Z"),
         re.compile(r"^dumpsys (?:window|activity activities|input_method)\Z"),
+        re.compile(r"^dumpsys window displays\Z"),
         re.compile(r"^input tap [0-9]+ [0-9]+\Z"),
         re.compile(r"^input swipe ([0-9]+) ([0-9]+) \1 \2 800\Z"),
         # The marker forms ``uiprobe tap`` sends; no other compound command.
@@ -479,6 +480,8 @@ class FakeAndroid:
         # Lines appended to a dumpsys service's output ("window", "activity
         # activities", "input_method"), to imitate text an app prints.
         self.extra_dumpsys: dict[str, str] = {}
+        # Replaces the text of ``dumpsys window displays`` when not None.
+        self.displays_output: str | None = None
         self._drop_after: set[int] = set()
         self._input_status = 0
         self._input_marker = True
@@ -627,8 +630,9 @@ class FakeAndroid:
                     out = b"Physical size: %dx%d\n" % self.display
                 case ["getprop", name]:
                     out = self.props.get(name, "").encode() + b"\n"
-                case ["dumpsys", "window"]:
-                    out = self._dumpsys_window().encode()
+                case ["dumpsys", "window", *more] if more in ([], ["displays"]):
+                    text = self._dumpsys_displays() if more else self._dumpsys_window()
+                    out = text.encode()
                 case ["dumpsys", "activity", "activities"]:
                     out = self._dumpsys_activities().encode()
                 case ["dumpsys", "input_method"]:
@@ -819,6 +823,21 @@ class FakeAndroid:
     def _record(self) -> str:
         screen = self.screen
         return f"ActivityRecord{{{_hex(screen.name)} u0 {screen.component} t12}}"
+
+    def _dumpsys_displays(self) -> str:
+        """``dumpsys window displays`` as API 24 prints it; ``cur=`` is the display.
+
+        ``displays_output`` replaces the whole text when a test sets it.
+        """
+        if self.displays_output is not None:
+            return self.displays_output
+        width, height = self.display
+        return (
+            "WINDOW MANAGER DISPLAY CONTENTS (dumpsys window displays)\n"
+            "  Display: mDisplayId=0\n"
+            f"    init={width}x{height} 160dpi cur={width}x{height} "
+            f"app={width}x{height} rng={width}x{height}-{width}x{height}\n"
+        )
 
     def _dumpsys_window(self) -> str:
         record = self._record()

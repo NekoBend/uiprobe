@@ -29,6 +29,8 @@ from uiprobe.device import (
     DEVICE_WIDE_KEYS,
     KEY_ALIASES,
     Device,
+    DisplaySizeUnknownError,
+    _parse_display_size,
 )
 from uiprobe.errors import (
     AdbError,
@@ -1085,7 +1087,145 @@ def test_cli_swipe_direction_without_selectors(capsys, fake_adb, android):
     assert (code, err) == (0, "")
     assert out == "swiped 160,511 -> 160,128 in 300 ms\n"
     assert sent_inputs(fake_adb) == ["input swipe 160 511 160 128 300" + SUFFIX]
+    assert android.dumps == 0
+
+
+def shell_requests(fake_adb: FakeAdbServer) -> list[str]:
+    return [c for _, _, c in fake_adb.commands]
+
+
+def test_cli_swipe_direction_without_selectors_requests(capsys, fake_adb, android):
+    code, _, _ = invoke(capsys, fake_adb, "swipe", "--direction", "up")
+    assert code == 0
+    assert shell_requests(fake_adb) == [
+        "dumpsys window displays",
+        "input swipe 160 511 160 128 300" + SUFFIX,
+    ]
+    assert android.dumps == 0
+
+
+API24_DISPLAYS = (
+    "WINDOW MANAGER DISPLAY CONTENTS (dumpsys window displays)\n"
+    "  Display: mDisplayId=0\n"
+    "    init=320x640 160dpi cur=640x320 app=640x320 rng=320x296-640x616\n"
+)
+
+
+@pytest.mark.parametrize("display", [(320, 640), (640, 320)])
+@pytest.mark.parametrize("direction", ["up", "down", "left", "right"])
+def test_scroll_display_matches_dump_path(fake_adb, android, display, direction):
+    android.display = display
+    fast = Device(adb_server=fake_adb.address).scroll_display(direction)
+    assert android.dumps == 0
+    slow_device = Device(adb_server=fake_adb.address)
+    slow_device.dump()
+    assert slow_device.scroll(direction) == fast
+
+
+def test_scroll_display_landscape_points(fake_adb, android):
+    android.override("dumpsys window displays", API24_DISPLAYS.encode())
+    assert Device(adb_server=fake_adb.address).scroll_display("up") == (
+        (320, 255),
+        (320, 64),
+    )
+
+
+@pytest.mark.parametrize(
+    "output",
+    [
+        b"",
+        b"garbage\n",
+        b"  Display: mDisplayId=0\n    cur=axb\n",
+        b"  Display: mDisplayId=0\n    cur=0x640\n",
+        b"  Display: mDisplayId=0\n    cur=99999x640\n",
+        b"  Display: mDisplayId=0\n    init=320x640\n",
+        b"  Display: mDisplayId=1\n    cur=320x640\n",
+    ],
+)
+def test_cli_swipe_falls_back_to_the_dump(capsys, fake_adb, android, output):
+    android.override("dumpsys window displays", output)
+    code, out, err = invoke(capsys, fake_adb, "swipe", "--direction", "up")
+    assert (code, err) == (0, "")
+    assert out == "swiped 160,511 -> 160,128 in 300 ms\n"
     assert android.dumps == 1
+    assert sent_inputs(fake_adb) == ["input swipe 160 511 160 128 300" + SUFFIX]
+
+
+def test_scroll_display_unreadable_size_sends_no_input(fake_adb, android):
+    android.override("dumpsys window displays", b"nothing useful\n")
+    device = Device(adb_server=fake_adb.address)
+    with pytest.raises(DisplaySizeUnknownError, match="display size is unknown"):
+        device.scroll_display("up")
+    assert android.inputs == []
+    assert sent_inputs(fake_adb) == []
+
+
+@pytest.mark.usefixtures("android")
+def test_scroll_display_checks_direction_before_adb(fake_adb):
+    device = Device(adb_server=fake_adb.address)
+    seen = len(fake_adb.commands)
+    with pytest.raises(TypeError):
+        device.scroll_display(1)  # ty: ignore[invalid-argument-type]
+    with pytest.raises(ValueError, match="direction must be one of"):
+        device.scroll_display("sideways")
+    assert len(fake_adb.commands) == seen
+
+
+def test_scroll_display_too_small_display(fake_adb, android):
+    android.override(
+        "dumpsys window displays", b"  Display: mDisplayId=0\n cur=10x10\n"
+    )
+    device = Device(adb_server=fake_adb.address)
+    with pytest.raises(ValueError, match="too small") as info:
+        device.scroll_display("up")
+    assert not isinstance(info.value, DisplaySizeUnknownError)
+    assert android.inputs == []
+
+
+@pytest.mark.usefixtures("android")
+def test_device_reuses_its_serial(fake_adb):
+    device = Device(adb_server=fake_adb.address)
+    device.scroll_display("up")
+    device.scroll_display("down")
+    assert fake_adb.requests.count("host:devices-l") == 1
+
+
+# The head of `dumpsys window displays` on an API 36 emulator, in portrait.
+API36_DISPLAYS = (
+    "WINDOW MANAGER DISPLAY CONTENTS (dumpsys window displays)\n"
+    "  Display: mDisplayId=0 (organized)\n"
+    "    init=320x640 160dpi mMinSizeOfResizeableTaskDp=220 cur=320x640"
+    " app=320x640 rng=320x320-640x640\n"
+)
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        (API24_DISPLAYS, (640, 320)),
+        (API36_DISPLAYS, (320, 640)),
+        (API24_DISPLAYS.replace("cur=640x320", "cur=320x640"), (320, 640)),
+        (API24_DISPLAYS.replace("\n", "\r\n"), (640, 320)),
+        ("  Display: mDisplayId=0 extra text\n    cur=10x20\n", (10, 20)),
+        ("  Display: mDisplayId=0\n    cur=10x20", (10, 20)),
+        (
+            "  Display: mDisplayId=1\n    cur=99x99\n"
+            "  Display: mDisplayId=0\n    cur=10x20\n"
+            "  Display: mDisplayId=2\n    cur=77x77\n",
+            (10, 20),
+        ),
+        ("  Display: mDisplayId=0\n  Display: mDisplayId=1\n    cur=9x9\n", None),
+        ("  Display: mDisplayId=1\n    cur=9x9\n", None),
+        ("  Display: mDisplayId=01\n    cur=9x9\n", None),
+        ("  Display: mDisplayId=0\n    cur=9x9x\n", None),
+        ("  Display: mDisplayId=0\n    cur=0x9\n", None),
+        ("  Display: mDisplayId=0\n    cur=32769x9\n", None),
+        ("  Display: mDisplayId=0\n    cur=32768x9\n", (32768, 9)),
+        ("", None),
+    ],
+)
+def test_parse_display_size(text, expected):
+    assert _parse_display_size(text) == expected
 
 
 @pytest.mark.usefixtures("android")
@@ -1532,6 +1672,7 @@ def test_cli_swipe_direction_with_an_unknown_display_is_a_usage_error(
     capsys, fake_adb, android, extra
 ):
     android.override("wm size", b"")
+    android.override("dumpsys window displays", b"")
     code, out, err = invoke(capsys, fake_adb, "swipe", "--direction", "up", *extra)
     assert code == 2
     assert out == ""
@@ -1543,6 +1684,7 @@ def test_cli_swipe_direction_with_an_unknown_display_is_a_usage_error(
 
 def test_cli_swipe_json_with_an_unknown_display(capsys, fake_adb, android):
     android.override("wm size", b"")
+    android.override("dumpsys window displays", b"")
     code, out, _ = invoke(capsys, fake_adb, "swipe", "--direction", "up", "--json")
     assert code == 2
     assert UNKNOWN_DISPLAY in json.loads(out)["error"]["message"]

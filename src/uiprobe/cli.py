@@ -32,6 +32,7 @@ from uiprobe.device import (
     DEFAULT_SWIPE_MS,
     Device,
     DeviceDetails,
+    DisplaySizeUnknownError,
     RefusedKeys,
     _key_code,
     device_details,
@@ -615,8 +616,15 @@ def _cmd_swipe(args: argparse.Namespace) -> int:
     element: Element | None = None
     element_json: dict[str, object] | None = None
     if start is None or end is None:
-        screen = device.dump()
-        if by_element:
+        if not by_element:
+            # Only the display size is needed: skip the full dump.
+            try:
+                start, end = device.scroll_display(args.direction, duration_ms=duration)
+            except DisplaySizeUnknownError:
+                device.dump()
+                start, end = device.scroll(args.direction, duration_ms=duration)
+        else:
+            screen = device.dump()
             element = screen.find_one(
                 text=args.text, resource_id=args.resource_id, desc=args.desc
             )
@@ -629,8 +637,6 @@ def _cmd_swipe(args: argparse.Namespace) -> int:
             start, end = device.scroll(
                 args.direction, within=element, duration_ms=duration
             )
-        else:
-            start, end = device.scroll(args.direction, duration_ms=duration)
     else:
         start, end = device.swipe(start, end, duration_ms=duration)
     if args.json:
