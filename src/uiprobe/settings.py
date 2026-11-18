@@ -46,6 +46,7 @@ modification time is not detected there.
 
 from __future__ import annotations
 
+import errno
 import os
 import re
 import stat
@@ -301,6 +302,13 @@ def write_default_settings(path: str | os.PathLike[str]) -> None:
         OSError: The file cannot be created.
     """
     text = render_default_settings()
+    # On POSIX the create-only open already fails on any existing path,
+    # including a link whose target is missing. On Windows it follows such a
+    # link and creates the target, so an existing entry of any kind is
+    # refused first. A link made between this check and the open is not
+    # caught on Windows; the docs say so.
+    if os.path.lexists(path):
+        raise FileExistsError(errno.EEXIST, "file exists", str(path))
     handle = open(path, "x", encoding="utf-8", newline="\n")  # noqa: PTH123, SIM115
     try:
         try:
