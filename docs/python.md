@@ -67,3 +67,30 @@ for decision in result.judgement.skipped:
 ```
 
 Failures that involve the device or the adb server raise a subclass of `uiprobe.UiprobeError`.
+
+## Crawling from Python (alpha)
+
+`uiprobe.crawl_run` (the function `crawl` of `uiprobe.crawl_driver`) runs a pressing crawl and records it in a new run folder. It is alpha and not in the command line yet. **It presses on the selected device**: it launches the app, taps elements that the guards allow, presses BACK, and relaunches the app (`am force-stop`, then start), which can lose unsaved state. Read [Safety](safety.md) first.
+
+```python
+from uiprobe import Device, Policy, crawl_run
+from uiprobe.crawl import Limits
+
+result = crawl_run(
+    Device(),
+    "com.example.app",
+    "runs/first",
+    policy=Policy().with_deny_words(["coupon"]),
+    limits=Limits(),
+)
+print(result.stop_reason, result.screens, result.actions, result.out)
+```
+
+`crawl(device, package, out, *, policy, limits, screenshots=False, allow_real_device=False, recheck=True, settle=1.0, stop=None, clock=time.monotonic, sleep=time.sleep)` returns `CrawlResult(out, stop_reason, screens, actions)`.
+
+- Order: the arguments are checked (`TypeError`, `ValueError`), then the device, then the run folder is made, then the app is started. Nothing is written and no input is sent before the first two pass (the device check itself reads one system property). Unless `allow_real_device=True`, the device must answer that it is an emulator; a device that does not, or whose check cannot be read, raises `NotEmulatorError` (`not_emulator`, exit code 17) with nothing written and no input sent; `details["error"]` names the error of an unreadable check. A run folder that exists raises `RunFolderError` before anything is sent.
+- What is sent: only the first launch, taps at the points the engine chose, BACK and relaunches. Never text, long presses, swipes or other keys. Each action is written to `transitions.jsonl` before it is sent and is sent once, never retried. The first launch does not force-stop the app, so it continues an existing task: if the app already has screens in its back stack, the depth limit counts from the screen that is showing, not from the bottom of the stack. Force-stop the app first for a clean start. A launch after which the app is not in front (a permission dialog or a splash screen of another package holds the focus) does not end the crawl: it is noted in `summary.txt` and the engine goes on from what it sees. A launch that cannot start the app at all (not installed, no launcher) ends the crawl with `error`. The record format is in [The run folder](run-folder.md).
+- `recheck=True` reads the screen again right before each tap and presses only when the engine allows it. `recheck=False` presses straight after the engine chose, so the screen may have changed in between.
+- `settle` is the pause in seconds after a tap or BACK. `clock` and `sleep` replace the clock and the pause of the crawl only; the wait for the app to come to the front inside `Device.launch` (up to 10 seconds) uses the device's own clock. `screenshots=True` also saves a screenshot of each new screen; one that cannot be taken is noted in `summary.txt` and the crawl goes on.
+- `stop` is called between actions; when it returns `True` the crawl ends with the stop reason `interrupted`.
+- Ending: the engine's stop reason (`exhausted`, `max_actions`, `max_duration`, `relaunch_limit`, `keyboard_stuck`, `dump_failed_repeatedly`) is returned. For an error of uiprobe, adb or the device that prevents going on, `run.json` is written with `error` (the error code is in `summary.txt`) and the error is raised again. An exception that is not a uiprobe error is recorded the same way with the code `internal_error`. `CrawlResult.actions` counts the actions whose start line was written; the last one may not have reached the device if the run ended right then. For Ctrl+C (`KeyboardInterrupt`), `run.json` is written with `interrupted`; if `stop` is given and returns `True` at that moment, `crawl()` returns with `interrupted`, otherwise the interrupt is raised again. The library never swallows an interrupt that nobody asked to end the crawl.

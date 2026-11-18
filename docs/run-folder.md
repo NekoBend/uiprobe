@@ -1,6 +1,6 @@
 # The run folder
 
-A crawl run is recorded in one new folder. The library part that writes it is `uiprobe.runlog.RunWriter`. It does not talk to the device, and no command writes a run folder yet.
+A crawl run is recorded in one new folder. The library part that writes it is `uiprobe.runlog.RunWriter`. It does not talk to the device. The Python function `crawl()` writes a run folder (see [Crawling from Python](python.md#crawling-from-python-alpha)); no command does yet.
 
 ## Rules
 
@@ -44,13 +44,17 @@ The `screens` folder is made when the first screen file is written.
 
 ## summary.txt
 
-For each screen that was written, one heading line (package, activity and the screen id, as in the indented tree output of `uiprobe dump`) followed by one line for each clickable element that has a label (its text, or else its content description). Labels come from the app, so they are quoted and escaped the same way as in the indented tree output: control and bidirectional characters appear as `\uXXXX`.
+For each screen that was written, one heading line (package, activity and the screen id, as in the indented tree output of `uiprobe dump`) followed by one line for each clickable element that has a label (its text, or else its content description). After the counts at the top there can be `Note:` lines (quoted and escaped), which `crawl()` uses for an error code (`error: adb_error`) and for a screen whose screenshot could not be taken. Labels come from the app, so they are quoted and escaped the same way as in the indented tree output: control and bidirectional characters appear as `\uXXXX`.
 
 ## Interrupts
 
 `RunWriter.critical()` is a context manager that marks the time while a line or file is written; the read-only property `writing` is `True` inside it. Each write method keeps the write and the writer's record of it (for example that a screen or a skip was already written) inside one such block, so `writing` stays `True` until the write is recorded. A program that handles Ctrl+C can look at `writing` and postpone the interrupt until the write is complete. `RunWriter.create` writes `run-start.json` before it returns the writer, so a program that also wants that first write uninterrupted postpones Ctrl+C for the whole `create` call. The library installs no signal handler.
 
 When an interrupt does reach a write, the writer marks itself as failed and refuses later writes, but only as far as it can: an asynchronous exception such as `KeyboardInterrupt` can arrive between any two steps, also after the point where the mark is made, so the mark is best effort and cannot be complete. The reliable way is the one above: a program that handles Ctrl+C postpones it while `writing` is `True`.
+
+## What `crawl()` writes
+
+`crawl()` writes only the screens of the target app to `screens/`: a screen of another app (a permission dialog, the launcher) gets no file, and the transition lines name it by its screen id only. Each action has a start line before it is sent and an end line after the first screen read afterwards, with the same `action_id`. A start line with no end line is an action whose result is not known (the run ended or failed while it was sent); the input may or may not have been delivered. The stop reason is one of the engine's (`exhausted`, `max_actions`, `max_duration`, `relaunch_limit`, `keyboard_stuck`, `dump_failed_repeatedly`), `interrupted` or `error`. A folder with no `run.json` did not end normally.
 
 ## Limits
 

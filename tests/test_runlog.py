@@ -527,6 +527,26 @@ def test_finish_writes_run_json_and_summary_once(tmp_path):
     assert {n: (folder / n).read_bytes() for n in before} == before
 
 
+def test_finish_notes_go_into_the_summary_escaped(tmp_path):
+    writer = make(tmp_path)
+    writer.finish("error", screens=0, actions=1, notes=["error: adb_error", CONTROL])
+    summary = (tmp_path / "run" / "summary.txt").read_text(encoding="utf-8")
+    assert summary.startswith(
+        'Stopped: error\nScreens: 0\nActions: 1\nNote: "error: adb_error"\nNote: "'
+    )
+    assert "\x1b" not in summary
+    assert "\\u001b" in summary
+
+
+def test_finish_refuses_notes_that_are_not_text(tmp_path):
+    writer = make(tmp_path)
+    with pytest.raises(TypeError):
+        writer.finish("exhausted", screens=0, actions=1, notes="one note")
+    with pytest.raises(TypeError):
+        writer.finish("exhausted", screens=0, actions=1, notes=[5])  # ty: ignore[invalid-argument-type]
+    assert not (tmp_path / "run" / "run.json").exists()
+
+
 def test_a_run_that_did_not_finish_has_no_run_json(tmp_path):
     writer = make(tmp_path)
     writer.write_transition_start(1, "launch")

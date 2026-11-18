@@ -590,6 +590,7 @@ class RunWriter:
         screens: int,
         actions: int,
         ended_at: datetime | None = None,
+        notes: Sequence[str] = (),
     ) -> None:
         """End the run once: close the line files, write ``summary.txt``,
         then ``run.json``.
@@ -600,13 +601,19 @@ class RunWriter:
         does not hold: a failure at the final fsync of ``run.json`` raises
         `RunFolderError` after its bytes are already in the file. A second
         call raises `RunFolderError`.
+        `notes` are extra lines for ``summary.txt``, written after the
+        counts (for an error code or a screenshot that could not be
+        taken); they are escaped like labels.
         """
         _check_text("stop_reason", stop_reason)
         screen_count = _check_number("screens", screens)
         action_count = _check_number("actions", actions)
         when = _check_moment("ended_at", _now() if ended_at is None else ended_at)
         self._check_usable()
-        summary = _encoded(self._summary(stop_reason, screen_count, action_count))
+        note_lines = _check_texts("notes", notes)
+        summary = _encoded(
+            self._summary(stop_reason, screen_count, action_count, note_lines)
+        )
         record: dict[str, object] = {
             "schema": RUN_SCHEMA,
             "ended_at": _stamp(when),
@@ -746,12 +753,15 @@ class RunWriter:
                     raise self._broken(path, error) from error
                 raise
 
-    def _summary(self, stop_reason: str, screens: int, actions: int) -> str:
+    def _summary(
+        self, stop_reason: str, screens: int, actions: int, notes: Sequence[str]
+    ) -> str:
         lines = [
             f"Stopped: {_name(stop_reason)}",
             f"Screens: {screens}",
             f"Actions: {actions}",
         ]
+        lines.extend(f"Note: {_quote(note)}" for note in notes)
         for screen_id, screen in self._screens.items():
             head = _name(screen.package)
             if screen.activity is not None:
