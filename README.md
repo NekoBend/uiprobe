@@ -6,11 +6,11 @@ uiprobe saves the screen structure of an Android app and sends taps, swipes and 
 
 uiprobe is alpha software: the command line, the JSON formats and the Python API may change in any later version. This is a development snapshot, version 0.1.0a1.dev0; no alpha is tagged yet.
 
-Eight commands exist: `devices`, `dump`, `find`, `tap`, `swipe`, `key`, `crawl` and `init`. Of `crawl` only `--dry-run` exists: it previews what a crawl would press on the screen showing now and presses nothing. The full crawl is planned, not implemented, and `crawl` without `--dry-run` is refused. Typing and other ways of operating the app are planned too. The guards have been checked only on Android emulators; real devices and other Android versions may behave differently.
+Eight commands exist: `devices`, `dump`, `find`, `tap`, `swipe`, `key`, `crawl` and `init`. Of `crawl` only the preview exists: it shows what a crawl would press on the screen showing now and presses nothing, and it is what `crawl` does by default. The pressing crawl is planned, not implemented, and a run that asks for pressing (`--press` or `press = true` in the settings file) is refused. Typing and other ways of operating the app are planned too. The guards have been checked only on Android emulators; real devices and other Android versions may behave differently.
 
 ## Safety
 
-- `tap`, `swipe` and `key` send real input to whatever screen is showing, in any app, and press what you name, even a button called "Delete" or "Buy". Only `crawl --dry-run` uses deny words, and it presses nothing.
+- `tap`, `swipe` and `key` send real input to whatever screen is showing, in any app, and press what you name, even a button called "Delete" or "Buy". Only the crawl preview (what `crawl` does by default) uses deny words, and it presses nothing.
 - Use an emulator, or a test device with test accounts. Do not run uiprobe on a phone that holds your own accounts, payment methods or messages.
 - uiprobe uses the device given with `-s`, else the one named in `ANDROID_SERIAL`, else the only ready device. Run `uiprobe devices` first.
 - Deny words see only the text, description, hint and resource id that uiautomator reports. An icon-only button without them (a trash can, a send arrow) has no words to match.
@@ -74,7 +74,7 @@ Add `--json` to get JSON instead of text (`uiprobe dump --json`).
 | `tap` | Taps or long-presses an element or a point. | [Tapping](docs/commands.md#tapping) |
 | `swipe` | Drags one finger, or scrolls in a direction. | [Swiping and scrolling](docs/commands.md#swiping-and-scrolling) |
 | `key` | Presses one key. | [Pressing keys](docs/commands.md#pressing-keys) |
-| `crawl` | Previews what a crawl would press, using the settings file; `--dry-run` only. | [Previewing a crawl](docs/crawl.md) |
+| `crawl` | Previews what a crawl would press, using the settings file; pressing is not available yet. | [Previewing a crawl](docs/crawl.md) |
 | `init` | Creates the settings file `uiprobe.toml`; no device needed. | [Settings file](docs/settings.md) |
 
 Options and environment variables: [Options](docs/commands.md#options), [Environment variables](docs/commands.md#environment-variables). JSON shapes and exit codes: [docs/output.md](docs/output.md).

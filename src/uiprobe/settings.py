@@ -4,9 +4,10 @@ The defaults are written out in a TOML file, ``uiprobe.toml``, that
 ``uiprobe init`` creates and that users edit freely. This module holds the
 file format, the generator (`render_default_settings`,
 `write_default_settings`) and a strict reader (`load_settings`). ``uiprobe crawl``
-(the dry run) reads the file for its no-press defaults, through
-`policy_from_settings`, and ``uiprobe key`` reads the keys it refuses. The
-``press`` value and the crawl limits are not used yet.
+(the preview) reads the file for its no-press defaults, through
+`policy_from_settings`, and ``uiprobe key`` reads the keys it refuses. The crawl
+limits are not used yet, and ``press = true`` only makes ``crawl`` refuse to run
+unless ``--dry-run`` is given.
 
 What the file holds: the deny words, the confirm words, the rules (unlabeled,
 number-only and toggle elements, confirm buttons in dialogs, the screen-edge
@@ -297,7 +298,8 @@ def render_default_settings() -> str:
         "",
         f"format_version = {FORMAT_VERSION}",
         f"defaults_version = {DEFAULTS_VERSION}",
-        "# Press elements for real (not used yet: crawl only previews).",
+        "# Press elements for real. Not available yet: with true, crawl refuses to",
+        "# run unless --dry-run is given.",
         "press = false",
         "",
         "[deny]",

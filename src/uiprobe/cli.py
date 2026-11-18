@@ -306,14 +306,17 @@ def _build_parser() -> _Parser:
     crawl = commands.add_parser(
         "crawl",
         allow_abbrev=False,
-        help="crawl an app (so far only --dry-run)",
+        help="preview what a crawl would press (pressing is not available yet)",
         description=(
-            "Only --dry-run exists so far. It judges the screen showing now and"
+            "The preview is the default: crawl judges the screen showing now and"
             " lists what a crawl of PACKAGE would press and what it would skip,"
             " with the reasons. It presses nothing, does not start the app and"
-            " writes no file on this computer. The rules come from the settings file"
-            f" (./{SETTINGS_FILE} or --config PATH); without one the command"
-            " stops. Create it with uiprobe init."
+            " writes no file on this computer. --dry-run forces the preview, even"
+            " when the settings file says press = true. --press and press = true"
+            " ask for a pressing run, which is not available yet and is refused."
+            f" The rules come from the settings file (./{SETTINGS_FILE}"
+            " or --config PATH); without one the command stops. Create it with"
+            " uiprobe init."
         ),
     )
     _add_common_options(crawl, in_command=True)
@@ -321,7 +324,18 @@ def _build_parser() -> _Parser:
     crawl.add_argument(
         "--dry-run",
         action="store_true",
-        help="judge the screen showing now; presses nothing (required so far)",
+        help=(
+            "force the preview (the default): judge the screen showing now;"
+            " cannot be combined with --press"
+        ),
+    )
+    crawl.add_argument(
+        "--press",
+        action="store_true",
+        help=(
+            "ask for a pressing run (accepted, but not available yet);"
+            " cannot be combined with --dry-run"
+        ),
     )
     crawl.add_argument(
         "--deny",
@@ -709,9 +723,10 @@ def _crawl_settings(args: argparse.Namespace) -> Settings:
         if args.config is not None:
             # Name the looked-for path only when it needs no shell quoting.
             create = _create_line(path)
-        # The --dry-run part goes away when the preview becomes the default:
-        # until then a crawl without it is refused, so the line must include it.
-        name = f"uiprobe crawl {args.package} --dry-run --config PATH"
+        # Keep a --dry-run or --press the caller gave: a file that says
+        # press = true is refused without --dry-run, and --press stays visible.
+        switch = " --dry-run" if args.dry_run else " --press" if args.press else ""
+        name = f"uiprobe crawl {args.package}{switch} --config PATH"
         raise _GuidedUsageError(
             (
                 "crawl needs a settings file and none was found "
@@ -755,8 +770,8 @@ def _crawl_policy(args: argparse.Namespace) -> tuple[Policy, Settings]:
 
     No device is contacted.
     """
-    if not args.dry_run:
-        msg = "only crawl --dry-run is available so far"
+    if args.press and args.dry_run:
+        msg = "--press and --dry-run cannot be combined"
         raise _UsageError(msg)
     try:
         check_package(args.package)
@@ -769,6 +784,28 @@ def _crawl_policy(args: argparse.Namespace) -> tuple[Policy, Settings]:
             msg = f"--deny word is empty after normalization: {word!r}"
             raise _UsageError(msg) from None
     settings = _crawl_settings(args)
+    if args.press and settings.press:
+        msg = (
+            "pressing crawls are not available yet; this version only previews"
+            f" (--press is given and the settings file"
+            f" {_shown(str(settings.source))} says press = true: replace"
+            " --press with --dry-run, or remove --press and set"
+            " press = false there)"
+        )
+        raise _UsageError(msg)
+    if args.press:
+        msg = (
+            "pressing crawls are not available yet; this version only previews"
+            " (run without --press)"
+        )
+        raise _UsageError(msg)
+    if settings.press and not args.dry_run:
+        msg = (
+            "pressing crawls are not available yet; this version only previews"
+            f" (the settings file {_shown(str(settings.source))} says"
+            " press = true: add --dry-run, or set press = false there)"
+        )
+        raise _UsageError(msg)
     policy = policy_from_settings(
         settings,
         extra_deny=args.deny,
@@ -821,7 +858,7 @@ def _decision_center(screen: Screen, decision: Decision) -> tuple[int, int] | No
     return decision.point
 
 
-def _preview_text(result: Preview, settings_path: str) -> str:
+def _preview_text(result: Preview, settings_path: str, *, dry_run: bool) -> str:
     screen = result.screen
     shown = {True: "shown", False: "hidden", None: "unknown"}[result.keyboard_shown]
     foreground = "unknown" if result.foreground is None else result.foreground
@@ -846,6 +883,12 @@ def _preview_text(result: Preview, settings_path: str) -> str:
         + _reasons_text(d)
         for d in skipped
     )
+    # Guidance on how to switch to a pressing run (--press, or
+    # press = true in the settings file, plus --allow-real-device on a real
+    # device) is printed here once the pressing crawl exists. Until then no
+    # command is printed, because every pressing command is refused.
+    how = "--dry-run" if dry_run else "the default"
+    lines.append(f"nothing was pressed: this was a preview ({how})")
     return "\n".join(lines)
 
 
@@ -869,6 +912,8 @@ def _preview_json(result: Preview, settings_path: str) -> dict[str, object]:
         "screen_id": screen.screen_id,
         "captured_at": screen.captured_at.isoformat(timespec="seconds"),
         "settings": settings_path,
+        "pressed": False,
+        "mode": "preview",
     }
     if result.foreground is not None:
         payload["foreground"] = result.foreground
@@ -902,7 +947,7 @@ def _cmd_crawl(args: argparse.Namespace) -> int:
     if args.json:
         _emit(dumps(_preview_json(result, settings_path), indent=2))
     else:
-        _emit(_preview_text(result, settings_path))
+        _emit(_preview_text(result, settings_path, dry_run=args.dry_run))
     return 0
 
 
