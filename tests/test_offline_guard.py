@@ -6,7 +6,8 @@ Network and process rules: no network library anywhere, `socket` and
 Rules for files (an allowlist, not a denylist):
 
 uiprobe's code (src/uiprobe) must never delete, rename, truncate or overwrite
-a file. Today it creates no file at all. Instead of listing what is
+a file. Today it creates one file: the settings file, through the create-only
+open in settings.py (see ALLOWED_CALLS). Instead of listing what is
 dangerous after the fact, this check flags every REFERENCE (a call, but also
 `writer = open`, `opener=open`, `getattr(os, "replace")`) to a name that can
 open or change a file, and every import of a module that is not on the

@@ -14,6 +14,7 @@ import pathlib
 import re
 import sys
 import threading
+import time
 from typing import TYPE_CHECKING, Any
 
 import pytest
@@ -826,6 +827,11 @@ def test_crawl_deny_file_same_size_rewrite_with_restored_mtime(
     def change():
         path.write_bytes(b"browsf\n")
         os.utime(path, ns=(info.st_atime_ns, info.st_mtime_ns))
+        for _ in range(200):  # a coarse clock may need a few ticks to move ctime
+            if path.stat().st_ctime_ns != info.st_ctime_ns:
+                break
+            time.sleep(0.01)
+            os.utime(path, ns=(info.st_atime_ns, info.st_mtime_ns))
         after = path.stat()
         assert after.st_mtime_ns == info.st_mtime_ns
         assert after.st_ctime_ns != info.st_ctime_ns

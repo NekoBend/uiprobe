@@ -547,6 +547,18 @@ def test_write_default_settings_creates_only(tmp_path):
         settings.write_default_settings(target)
 
 
+def test_write_default_settings_refuses_a_descriptor(tmp_path):
+    target = write(tmp_path, "mine\n", "mine.toml")
+    fd = os.open(target, os.O_RDWR)
+    try:
+        with pytest.raises(TypeError):
+            settings.write_default_settings(fd)  # ty: ignore[invalid-argument-type]
+        os.fstat(fd)  # still open
+    finally:
+        os.close(fd)
+    assert target.read_text(encoding="utf-8") == "mine\n"
+
+
 @pytest.mark.parametrize(
     ("table", "snapshot"),
     [
@@ -848,6 +860,17 @@ def test_a_missing_table_is_refused(tmp_path, table):
     nxt = re.search(r"^\[", rest, re.MULTILINE)
     tail = rest[nxt.start() :] if nxt else ""
     refused(write(tmp_path, head + "\n" + tail), f"[{table}]", "missing")
+
+
+@pytest.mark.parametrize("table", ["deny", "confirm", "rules", "limits", "keys"])
+def test_a_table_of_the_wrong_type_is_refused(tmp_path, table):
+    text = render_default_settings()
+    head, _, rest = text.partition(f"\n[{table}]\n")
+    nxt = re.search(r"^\[", rest, re.MULTILINE)
+    tail = rest[nxt.start() :] if nxt else ""
+    head = head.replace("press = false\n", f"press = false\n{table} = false\n")
+    path = write(tmp_path, head + "\n" + tail)
+    refused(path, exact=f"[{table}]: must be a table")
 
 
 def test_a_missing_key_in_a_table_is_refused(tmp_path):
@@ -1260,14 +1283,6 @@ def test_a_same_size_rewrite_with_a_restored_mtime_is_refused(tmp_path, monkeypa
     refused(path, "changed while it was read")
 
 
-def test_a_fifo_gets_exactly_the_one_message(tmp_path):
-    if not hasattr(os, "mkfifo"):
-        pytest.skip("needs os.mkfifo")
-    fifo = tmp_path / "p.toml"
-    os.mkfifo(fifo)
-    refused(fifo, exact="not a regular file")
-
-
 def test_loading_a_fifo_returns_promptly(tmp_path):
     if sys.platform == "win32":
         pytest.skip("needs named pipes")
@@ -1291,7 +1306,7 @@ def test_loading_a_fifo_returns_promptly(tmp_path):
         pytest.fail("loading a FIFO blocked")
     assert len(outcome) == 1
     assert isinstance(outcome[0], SettingsError)
-    assert "not a regular file" in str(outcome[0])
+    assert str(outcome[0]) == f"{fifo}: not a regular file"
 
 
 def test_a_growing_file_stops_at_the_limit_and_is_refused(tmp_path, monkeypatch):

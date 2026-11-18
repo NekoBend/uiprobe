@@ -300,7 +300,10 @@ def write_default_settings(path: str | os.PathLike[str]) -> None:
         InterruptedFileError: Ctrl+C arrived after the file was created (a
             KeyboardInterrupt); the file stays, possibly incomplete.
         OSError: The file cannot be created.
+        TypeError: `path` is not a str or an os.PathLike (an int is not taken
+            as an open descriptor).
     """
+    path = os.fspath(path)  # refuses an int, which open() takes as a descriptor
     text = render_default_settings()
     # On POSIX the create-only open already fails on any existing path,
     # including a link whose target is missing. On Windows it follows such a
@@ -383,9 +386,11 @@ class _Reader:
     def table(
         self, data: Mapping[str, object], name: str, allowed: frozenset[str]
     ) -> Mapping[str, object]:
-        value = data.get(name)
-        if not isinstance(value, dict):
+        if name not in data:
             raise self.fail(f"[{name}]", "the table is missing")
+        value = data[name]
+        if not isinstance(value, dict):
+            raise self.fail(f"[{name}]", "must be a table")
         for key in value:
             if key not in allowed:
                 raise self.fail(f"[{name}] {key}", "unknown key")
