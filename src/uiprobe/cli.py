@@ -723,9 +723,9 @@ def _crawl_settings(args: argparse.Namespace) -> Settings:
         if args.config is not None:
             # Name the looked-for path only when it needs no shell quoting.
             create = _create_line(path)
-        # Keep a --dry-run the caller gave: a file that says press = true
-        # is refused without it.
-        switch = " --dry-run" if args.dry_run else ""
+        # Keep a --dry-run or --press the caller gave: a file that says
+        # press = true is refused without --dry-run, and --press stays visible.
+        switch = " --dry-run" if args.dry_run else " --press" if args.press else ""
         name = f"uiprobe crawl {args.package}{switch} --config PATH"
         raise _GuidedUsageError(
             (
@@ -788,8 +788,9 @@ def _crawl_policy(args: argparse.Namespace) -> tuple[Policy, Settings]:
         msg = (
             "pressing crawls are not available yet; this version only previews"
             f" (--press is given and the settings file"
-            f" {_printable(str(settings.source))} says press = true: use"
-            " --dry-run instead of --press, or set press = false there)"
+            f" {_shown(str(settings.source))} says press = true: replace"
+            " --press with --dry-run, or remove --press and set"
+            " press = false there)"
         )
         raise _UsageError(msg)
     if args.press:
@@ -801,7 +802,7 @@ def _crawl_policy(args: argparse.Namespace) -> tuple[Policy, Settings]:
     if settings.press and not args.dry_run:
         msg = (
             "pressing crawls are not available yet; this version only previews"
-            f" (the settings file {_printable(str(settings.source))} says"
+            f" (the settings file {_shown(str(settings.source))} says"
             " press = true: add --dry-run, or set press = false there)"
         )
         raise _UsageError(msg)

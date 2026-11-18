@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import os
 import re
 import sys
 from typing import TYPE_CHECKING, Any
@@ -22,6 +23,7 @@ from uiprobe.errors import AdbError
 from uiprobe.guards import REASONS, judge
 from uiprobe.settings import (
     SETTINGS_FILE,
+    _shown,
     render_default_settings,
     write_default_settings,
 )
@@ -663,7 +665,8 @@ def both_press_message(path: str) -> str:
     return (
         "pressing crawls are not available yet; this version only previews"
         f" (--press is given and the settings file {path} says press = true:"
-        " use --dry-run instead of --press, or set press = false there)"
+        " replace --press with --dry-run, or remove --press and set"
+        " press = false there)"
     )
 
 
@@ -742,6 +745,66 @@ def test_press_in_the_file_with_press_names_the_file_and_dry_run(
     assert "--dry-run" in err
     assert fake_adb.requests == []
     assert connections == []
+    assert android.inputs == []
+    # Each suggested retry: replacing --press with --dry-run previews; removing
+    # only --press is still refused because the file asks for pressing.
+    code, out, err = invoke(capsys, fake_adb, "crawl", SHOP)
+    assert (code, out) == (2, "")
+    assert err == f"uiprobe: error: {file_press_message(SETTINGS_FILE)}\n"
+    assert fake_adb.requests == []
+    code, out, err = invoke(capsys, fake_adb, "crawl", SHOP, "--dry-run")
+    assert (code, err) == (0, "")
+    assert out.rstrip("\n").endswith(DRY_RUN_LAST)
+    assert_read_only(fake_adb, android)
+    # Removing --press and setting press = false in the file previews too.
+    (settings_dir / SETTINGS_FILE).write_text(
+        render_default_settings(), encoding="utf-8"
+    )
+    code, out, err = invoke(capsys, fake_adb, "crawl", SHOP)
+    assert (code, err) == (0, "")
+    assert out.rstrip("\n").endswith(DEFAULT_LAST)
+
+
+@pytest.mark.parametrize("name", ["odd\u202e.toml", "two\nlines.toml"])
+@pytest.mark.parametrize("switch", [[], ["--press"]])
+def test_press_refusals_show_an_unambiguous_path(
+    fake_adb, android, capsys, tmp_path, connections, name, switch
+):
+    other = tmp_path / name
+    text = render_default_settings()
+    try:
+        other.write_text(
+            text.replace("press = false", "press = true"), encoding="utf-8"
+        )
+    except OSError:
+        pytest.skip("this file system cannot hold that file name")
+    code, out, err = invoke(
+        capsys, fake_adb, "crawl", SHOP, *switch, "--config", str(other)
+    )
+    assert (code, out) == (2, "")
+    assert "\u202e" not in err
+    assert err.count("\n") == 1
+    shown = _shown(str(other))
+    expected = (both_press_message if switch else file_press_message)(shown)
+    assert err == f"uiprobe: error: {expected}\n"
+    assert fake_adb.requests == []
+    assert connections == []
+    assert android.inputs == []
+
+
+def test_missing_file_guidance_keeps_press(fake_adb, android, capsys, tmp_path):
+    here = tmp_path / "empty"
+    here.mkdir()
+    os.chdir(here)
+    message = crawl_usage_error(capsys, fake_adb, SHOP, "--press")
+    assert message.splitlines()[-1] == (
+        f"or name one with:  uiprobe crawl {SHOP} --press --config PATH"
+    )
+    plain = crawl_usage_error(capsys, fake_adb, SHOP)
+    assert (
+        plain.splitlines()[-1]
+        == f"or name one with:  uiprobe crawl {SHOP} --config PATH"
+    )
     assert android.inputs == []
 
 
