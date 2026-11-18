@@ -5,7 +5,7 @@
     "It covers the GitHub Actions in .github/workflows (pinned to commit SHAs with the version in a comment) and the development tools in the dev dependency group of pyproject.toml, together with uv.lock.",
     "It also covers the uv_build build backend in [build-system] requires. uv.lock does not hold it, so only a release outside its range is proposed, as a new range.",
     "The Python versions and the uv version that CI uses, and requires-python, are chosen by hand.",
-    "A release becomes an update 7 days after it is published. For a GitHub Action, that is when its GitHub Release was published; a version tagged without a GitHub Release counts from its commit or tag date, which can be earlier than the tag."
+    "A release becomes an update 7 days after it is published. For a GitHub Action, that is when its GitHub Release was published; a version tagged without a GitHub Release counts from the date of its annotated tag, or of its commit for a lightweight tag, and a commit date can be earlier than the tag."
   ],
   "extends": [
     "config:recommended",
@@ -17,7 +17,7 @@
   "automerge": false,
   "packageRules": [
     {
-      "description": "The inputs given to actions (setup-uv's version and python-version) are chosen by hand.",
+      "description": "The inputs given to actions, such as setup-uv's version, are chosen by hand.",
       "matchManagers": ["github-actions"],
       "matchDepTypes": ["uses-with"],
       "enabled": false
