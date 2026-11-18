@@ -4,7 +4,7 @@
 
 Report a suspected vulnerability privately through GitHub: on the repository's **Security** tab, choose **Report a vulnerability**. This is the only channel for reports; there is no email address. Please do not open a public issue for a vulnerability. When you are not sure whether something is a security problem, report it privately anyway.
 
-Please include the uiprobe commit you ran (all snapshots carry the same version number), your operating system and Python version, your Platform-Tools version (`adb version`) and the Android version or API level of the device.
+Please include the uiprobe commit you ran (the version number does not identify a snapshot), your operating system and Python version, your Platform-Tools version (`adb version`) and the Android version or API level of the device.
 
 A dump can hold any text that `uiautomator` reports, which may include personal data. Leave such data out of a report, or replace it with made-up text.
 
