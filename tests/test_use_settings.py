@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import random
 import re
+import sys
 from dataclasses import replace
 from typing import TYPE_CHECKING
 
@@ -1045,6 +1046,9 @@ def test_a_path_with_a_newline_is_escaped_in_text_and_kept_in_json(
     )
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32", reason="a Windows file name cannot hold a newline"
+)
 @pytest.mark.usefixtures("android", "folder")
 def test_a_missing_path_with_a_newline_is_escaped_in_the_guidance(
     capsys, fake_adb, tmp_path
