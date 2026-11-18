@@ -541,7 +541,6 @@ _JAPANESE_RANGES: Final[tuple[tuple[int, int], ...]] = (
     (0x4E00, 0x9FFF),  # CJK unified ideographs
     (0xF900, 0xFAFF),  # CJK compatibility ideographs
     (0xFF66, 0xFF9F),  # half-width katakana
-    (0x1AFF0, 0x1AFFF),  # kana extended-B (Taiwanese katakana)
     (0x1B000, 0x1B16F),  # kana supplement and extensions
     (0x20000, 0x323AF),  # CJK extensions B to H
 )

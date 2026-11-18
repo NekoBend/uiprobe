@@ -1890,7 +1890,7 @@ def test_a_phrase_of_only_separators_is_refused_in_a_version_1_file(
     refused(
         write(tmp_path, text),
         f"[irreversible] {key}",
-        "must contain a letter or digit",
+        "is empty after removing spaces",
     )
 
 
@@ -1902,7 +1902,7 @@ def test_a_phrase_of_only_separators_is_refused_in_a_version_2_file(tmp_path, in
     else:
         path = with_remove(tmp_path, index, '["_"]')
         key = "remove"
-    refused(path, f"[irreversible] {key}", "must contain a letter or digit")
+    refused(path, f"[irreversible] {key}", "is empty after removing spaces")
 
 
 def test_no_two_default_phrases_match_the_same_texts():

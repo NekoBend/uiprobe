@@ -3136,7 +3136,6 @@ def test_only_a_word_ending_in_a_japanese_letter_is_open_ended(
         ("\u6f22", True),
         ("\uff71", True),
         ("\U00020b9f", True),
-        ("\U0001aff0", True),
         ("\u30fb", False),
         ("\u3001", False),
         ("\u3099", False),

@@ -635,7 +635,10 @@ def _phrase_identity(phrase: str) -> str:
     _word_identity(phrase)
     key = _phrase_key(phrase)
     if not key:
-        msg = f"phrase must contain a letter or digit: {phrase!r}"
+        msg = (
+            "phrase is empty after removing spaces, separators and invisible"
+            f" characters: {phrase!r}"
+        )
         raise ValueError(msg)
     return key
 
