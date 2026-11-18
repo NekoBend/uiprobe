@@ -1145,6 +1145,61 @@ def test_a_path_with_a_control_character_is_shown_escaped(tmp_path):
     assert "\x1b" not in str(info.value)
 
 
+@pytest.mark.parametrize(
+    ("char", "escape"),
+    [
+        ("\x1b", "\\x1b"),
+        ("\x9b", "\\x9b"),
+        ("\u202e", "\\u202e"),
+        ("\U000e0001", "\\U000e0001"),
+    ],
+)
+def test_escapes_are_unambiguous(char, escape):
+    assert settings._shown(f"a{char}2e") == f"a{escape}2e"
+
+
+def test_a_real_escape_character_and_its_typed_form_differ(tmp_path):
+    real = str(tmp_path / "missing\u202e.toml")
+    typed = str(tmp_path / ("missing" + "\\" + "u202e.toml"))  # six characters
+    assert real != typed
+    with pytest.raises(SettingsError) as first:
+        load_settings(real)
+    with pytest.raises(SettingsError) as second:
+        load_settings(typed)
+    assert str(first.value) != str(second.value)
+    # The expected text follows the code's own rule, so it holds on every OS.
+    assert str(first.value).startswith(settings._shown(real) + ": ")
+    assert str(second.value).startswith(settings._shown(typed) + ": ")
+    assert settings._shown(real).endswith("missing\\u202e.toml")
+    assert settings._shown(typed).endswith("missing\\\\u202e.toml")
+
+
+def test_a_text_that_needs_no_escape_is_shown_as_it_is():
+    windows = "C:\\Users\\me\\uiprobe.toml"
+    assert settings._shown(windows) == windows
+    assert settings._shown("naive \u00e9 \u65e5") == "naive \u00e9 \u65e5"
+    # Backslash letters that are not an escape of ours are left alone.
+    assert settings._shown("C:\\Users\\x\\u12\\Uabc") == "C:\\Users\\x\\u12\\Uabc"
+
+
+def test_a_windows_style_path_is_shown_unchanged_in_the_error():
+    path = "C:\\no such folder\\Users\\uiprobe.toml"
+    with pytest.raises(SettingsError) as info:
+        load_settings(path)
+    assert str(info.value).startswith(path + ": ")
+
+
+def test_no_two_texts_show_alike():
+    texts = ["a\u202eb", "a\\u202eb", "a\\\\u202eb", "a\\x1bb", "a\x1bb", "a\\\x1bb"]
+    assert len({settings._shown(text) for text in texts}) == len(texts)
+
+
+def test_backslashes_are_doubled_when_an_escape_is_shown():
+    assert settings._shown("C:\\a\x1bb") == "C:\\\\a\\x1bb"
+    assert settings._shown("\\") == "\\"
+    assert settings._shown("\\\x1b") == "\\\\\\x1b"
+
+
 def test_a_path_with_nul_is_refused(tmp_path):
     with pytest.raises(SettingsError):
         load_settings(str(tmp_path / "a\x00b.toml"))

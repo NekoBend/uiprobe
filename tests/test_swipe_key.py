@@ -93,6 +93,12 @@ def _only_marker_inputs(fake_adb: FakeAdbServer):
         assert any(form.fullmatch(command) for form in MARKER_FORMS), command
 
 
+@pytest.fixture(autouse=True)
+def _folder_without_settings(tmp_path, monkeypatch):
+    """``uiprobe key`` reads ./uiprobe.toml if there is one: use an empty folder."""
+    monkeypatch.chdir(tmp_path)
+
+
 @pytest.fixture
 def screen(device: Device) -> ScreenModel:
     return device.dump()

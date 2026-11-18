@@ -9,12 +9,8 @@ from __future__ import annotations
 
 import dataclasses
 import json
-import os
-import pathlib
 import re
 import sys
-import threading
-import time
 from typing import TYPE_CHECKING, Any
 
 import pytest
@@ -24,6 +20,7 @@ from tests.fake_device import El, FakeAndroid, Screen
 from uiprobe import Device, Policy, Preview, cli, preview
 from uiprobe.errors import AdbError
 from uiprobe.guards import REASONS, judge
+from uiprobe.settings import SETTINGS_FILE, write_default_settings
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -37,7 +34,6 @@ OTHER = "com.other.app"
 WINDOW = re.compile(r"^dumpsys window\Z")
 ACTIVITIES = re.compile(r"^dumpsys activity activities\Z")
 OTHER_APP = f"  mFocusedApp=ActivityRecord{{1 u0 {OTHER}/.Main t3}}\n"
-MIB = 1024 * 1024
 
 # What a preview may send: the reads of dump, foreground and keyboard_shown.
 READ_ONLY = (
@@ -87,6 +83,16 @@ RULES = Screen(
     ),
 )
 SCREENS = (FIXTURE, EMPTY, ALL_SKIPPED, KEYBOARD, RULES)
+
+
+@pytest.fixture(autouse=True)
+def settings_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Run in a folder that holds the generated default settings file."""
+    folder = tmp_path / "work"
+    folder.mkdir()
+    write_default_settings(folder / SETTINGS_FILE)
+    monkeypatch.chdir(folder)
+    return folder
 
 
 @pytest.fixture
@@ -336,14 +342,15 @@ def test_text_output(fake_adb, capsys):
         rf"preview for {re.escape(SHOP)} on screen s-[0-9a-f]+; nothing was pressed",
         lines[0],
     )
-    assert lines[1] == f"foreground: {SHOP}, keyboard: hidden"
-    assert lines[2] == "would press (2):"
-    assert lines[3:5] == [
+    assert lines[1] == f"settings: {SETTINGS_FILE}"
+    assert lines[2] == f"foreground: {SHOP}, keyboard: hidden"
+    assert lines[3] == "would press (2):"
+    assert lines[4:6] == [
         '  e2 TextView "Browse" id=browse [tap] center=160,125',
         '  e9 TextView "Help" [tap] center=160,425',
     ]
-    assert lines[5] == "would not press (5):"
-    skipped = lines[6:]
+    assert lines[6] == "would not press (5):"
+    skipped = lines[7:]
     assert skipped == [
         '  e3 TextView "Delete account" [tap] center=160,185:'
         ' deny_word ("delete" in text)',
@@ -370,7 +377,7 @@ def test_text_output_with_empty_lists(fake_adb, android, capsys):
     code, out, _ = crawl(capsys, fake_adb)
     assert code == 0
     lines = out.splitlines()
-    assert lines[2:] == ["would press (0):", "would not press (0):"]
+    assert lines[3:] == ["would press (0):", "would not press (0):"]
 
 
 def test_text_output_with_nothing_pressable(fake_adb, android, capsys):
@@ -378,14 +385,14 @@ def test_text_output_with_nothing_pressable(fake_adb, android, capsys):
     code, out, _ = crawl(capsys, fake_adb)
     assert code == 0
     lines = out.splitlines()
-    assert lines[2:4] == ["would press (0):", "would not press (1):"]
-    assert 'deny_word ("delete" in text)' in lines[4]
+    assert lines[3:5] == ["would press (0):", "would not press (1):"]
+    assert 'deny_word ("delete" in text)' in lines[5]
 
 
 def test_text_output_shows_the_keyboard(fake_adb, android, capsys):
     android.show("typing")
     _, out, _ = crawl(capsys, fake_adb)
-    assert out.splitlines()[1] == f"foreground: {SHOP}, keyboard: shown"
+    assert out.splitlines()[2] == f"foreground: {SHOP}, keyboard: shown"
 
 
 def test_text_output_unknown_foreground_and_keyboard(fake_adb, android, capsys):
@@ -394,7 +401,7 @@ def test_text_output_unknown_foreground_and_keyboard(fake_adb, android, capsys):
     android.override(re.compile(r"^dumpsys input_method\Z"), b"nothing\n")
     code, out, _ = crawl(capsys, fake_adb)
     assert code == 0
-    assert out.splitlines()[1] == "foreground: unknown, keyboard: unknown"
+    assert out.splitlines()[2] == "foreground: unknown, keyboard: unknown"
     assert "would press (0):" in out
 
 
@@ -405,9 +412,9 @@ def test_other_app_in_front_exits_zero_with_everything_skipped(
     code, out, err = crawl(capsys, fake_adb)
     assert (code, err) == (0, "")
     lines = out.splitlines()
-    assert lines[1] == f"foreground: {OTHER}, keyboard: hidden"
-    assert lines[2:4] == ["would press (0):", "would not press (7):"]
-    for line in lines[4:]:
+    assert lines[2] == f"foreground: {OTHER}, keyboard: hidden"
+    assert lines[3:5] == ["would press (0):", "would not press (7):"]
+    for line in lines[5:]:
         assert "outside_target_app" in line
     assert_read_only(fake_adb, android)
 
@@ -450,11 +457,13 @@ def test_json_shape_and_values(fake_adb, capsys, monkeypatch):
         "package",
         "screen_id",
         "captured_at",
+        "settings",
         "foreground",
         "keyboard_shown",
         "press",
         "skip",
     ]
+    assert payload["settings"] == SETTINGS_FILE
     assert payload["schema"] == "uiprobe.crawl_preview/1"
     assert payload["package"] == SHOP
     assert payload["screen_id"].startswith("s-")
@@ -582,39 +591,6 @@ def test_deny_is_repeatable(fake_adb, capsys):
     assert payload["press"] == []
 
 
-def test_deny_file_with_bom_and_crlf(fake_adb, android, capsys, tmp_path: Path):
-    path = tmp_path / "deny.txt"
-    path.write_bytes(b"\xef\xbb\xbf# words\r\n\r\nbrowse\r\n")
-    payload = crawl_json(capsys, fake_adb, "--deny-file", str(path))
-    assert [e["text"] for e in payload["press"]] == ["Help"]
-    assert skipped_by_text(payload)["Browse"]["reasons"] == ["deny_word"]
-    assert_read_only(fake_adb, android)
-
-
-def test_two_deny_files_both_count(fake_adb, android, capsys, tmp_path: Path):
-    first = tmp_path / "first.txt"
-    second = tmp_path / "second.txt"
-    first.write_bytes(b"browse\n")
-    second.write_bytes(b"help\n")
-    only_first = crawl_json(capsys, fake_adb, "--deny-file", str(first))
-    assert [e["text"] for e in only_first["press"]] == ["Help"]
-    only_second = crawl_json(capsys, fake_adb, "--deny-file", str(second))
-    assert [e["text"] for e in only_second["press"]] == ["Browse"]
-    both = crawl_json(
-        capsys, fake_adb, "--deny-file", str(first), "--deny-file", str(second)
-    )
-    assert both["press"] == []
-    assert_read_only(fake_adb, android)
-
-
-@pytest.mark.usefixtures("android")
-def test_deny_file_words_count_with_cli_words(fake_adb, capsys, tmp_path):
-    path = tmp_path / "deny.txt"
-    path.write_bytes(b"help\n")
-    payload = crawl_json(capsys, fake_adb, "--deny", "browse", "--deny-file", str(path))
-    assert payload["press"] == []
-
-
 def test_tap_unlabeled_makes_an_unlabeled_element_pressable(fake_adb, android, capsys):
     payload = crawl_json(capsys, fake_adb, "--tap-unlabeled")
     assert [e["id"] for e in payload["press"]] == ["e2", "e6", "e9"]
@@ -680,7 +656,8 @@ def test_crawl_refuses_an_out_folder(fake_adb, android, capsys, tmp_path, equals
     out_args = [f"--out={run}"] if equals_form else ["--out", str(run)]
     crawl_usage_error(capsys, fake_adb, SHOP, "--dry-run", *out_args)
     assert not run.exists()
-    assert list(tmp_path.iterdir()) == []
+    assert [p.name for p in tmp_path.iterdir()] == ["work"]
+    assert list((tmp_path / "work").iterdir()) == [tmp_path / "work" / "uiprobe.toml"]
     assert android.inputs == []
 
 
@@ -712,198 +689,14 @@ def test_crawl_empty_deny_word(fake_adb, capsys, word):
 
 
 @pytest.mark.usefixtures("android")
-def test_crawl_missing_deny_file(fake_adb, capsys, tmp_path):
-    path = tmp_path / "missing.txt"
-    message = crawl_usage_error(
-        capsys, fake_adb, SHOP, "--dry-run", "--deny-file", str(path)
-    )
-    assert "no such file" in message
-    assert str(path) in message
-
-
-@pytest.mark.usefixtures("android")
-def test_crawl_deny_file_is_a_directory(fake_adb, capsys, tmp_path):
-    message = crawl_usage_error(
-        capsys, fake_adb, SHOP, "--dry-run", "--deny-file", str(tmp_path)
-    )
-    assert "not a regular file" in message
-
-
-def _open_fifo_for_writing(path):
-    os.close(os.open(path, os.O_WRONLY))
-
-
-@pytest.mark.usefixtures("android")
-def test_crawl_deny_file_is_a_fifo(fake_adb, capsys, tmp_path):
-    if not hasattr(os, "mkfifo"):
-        pytest.skip("needs os.mkfifo")
-    path = tmp_path / "pipe"
-    os.mkfifo(path)
-    # A read before the regular-file check would block forever. This writer
-    # lets such a read end at once with empty data, so a regression fails the
-    # opened_by_cli assertion below instead of hanging the whole run.
-    writer = threading.Thread(target=_open_fifo_for_writing, args=(path,), daemon=True)
-    writer.start()
-    try:
-        message = crawl_usage_error(
-            capsys, fake_adb, SHOP, "--dry-run", "--deny-file", str(path)
-        )
-    finally:
-        # The writer's open returns only once something opens the FIFO to read.
-        writer.join(0.5)
-        opened_by_cli = not writer.is_alive()
-        # Lets the writer's blocking open finish when nothing read the FIFO.
-        reader = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
-        writer.join(5)
-        os.close(reader)
-    assert "not a regular file" in message
-    assert not opened_by_cli, "the deny file was opened before the type check"
-    assert not writer.is_alive()
-
-
-def _change_before_read(monkeypatch, target, change):
-    real = pathlib.Path.read_bytes
-
-    def read_bytes(self):
-        if self == target:
-            change()
-        return real(self)
-
-    monkeypatch.setattr(pathlib.Path, "read_bytes", read_bytes)
-
-
-@pytest.mark.usefixtures("android")
-def test_crawl_deny_file_replaced_while_read(
-    fake_adb, android, capsys, tmp_path, monkeypatch
-):
-    path = tmp_path / "deny.txt"
-    path.write_bytes(b"browse\n")
-    sibling = tmp_path / "other.txt"
-    sibling.write_bytes(b"# something else entirely\nhelp\n")
-
-    def change():
-        sibling.replace(path)
-
-    _change_before_read(monkeypatch, path, change)
-    message = crawl_usage_error(
-        capsys, fake_adb, SHOP, "--dry-run", "--deny-file", str(path)
-    )
-    assert "the file changed while it was read" in message
-    assert android.inputs == []
-
-
-@pytest.mark.usefixtures("android")
-def test_crawl_deny_file_modified_in_place_while_read(
-    fake_adb, android, capsys, tmp_path, monkeypatch
-):
-    path = tmp_path / "deny.txt"
-    path.write_bytes(b"browse\n")
-    inode = path.stat().st_ino
-
-    def change():
-        path.write_bytes(b"# something else entirely\nhelp\n")
-        assert path.stat().st_ino == inode
-
-    _change_before_read(monkeypatch, path, change)
-    message = crawl_usage_error(
-        capsys, fake_adb, SHOP, "--dry-run", "--deny-file", str(path)
-    )
-    assert "the file changed while it was read" in message
-    assert android.inputs == []
-
-
-@pytest.mark.skipif(
-    sys.platform == "win32",
-    reason="st_ctime is the creation time on Windows and does not change on a rewrite",
-)
-@pytest.mark.usefixtures("android")
-def test_crawl_deny_file_same_size_rewrite_with_restored_mtime(
-    fake_adb, android, capsys, tmp_path, monkeypatch
-):
-    path = tmp_path / "deny.txt"
-    path.write_bytes(b"browse\n")
-    info = path.stat()
-
-    def change():
-        path.write_bytes(b"browsf\n")
-        os.utime(path, ns=(info.st_atime_ns, info.st_mtime_ns))
-        for _ in range(200):  # a coarse clock may need a few ticks to move ctime
-            if path.stat().st_ctime_ns != info.st_ctime_ns:
-                break
-            time.sleep(0.01)
-            os.utime(path, ns=(info.st_atime_ns, info.st_mtime_ns))
-        after = path.stat()
-        assert after.st_mtime_ns == info.st_mtime_ns
-        assert after.st_ctime_ns != info.st_ctime_ns
-
-    _change_before_read(monkeypatch, path, change)
-    message = crawl_usage_error(
-        capsys, fake_adb, SHOP, "--dry-run", "--deny-file", str(path)
-    )
-    assert "the file changed while it was read" in message
-    assert android.inputs == []
-
-
-@pytest.mark.usefixtures("android")
-def test_crawl_deny_file_over_one_mib(fake_adb, capsys, tmp_path):
-    path = tmp_path / "big.txt"
-    path.write_bytes(b"x\n" * (MIB // 2 + 1))
-    message = crawl_usage_error(
-        capsys, fake_adb, SHOP, "--dry-run", "--deny-file", str(path)
-    )
-    assert "larger than" in message
-
-
-@pytest.mark.usefixtures("android")
-def test_crawl_deny_file_of_exactly_one_mib_is_read(fake_adb, capsys, tmp_path):
-    path = tmp_path / "limit.txt"
-    path.write_bytes(b"nothing\n" + b"#" * (MIB - 8))
-    assert path.stat().st_size == MIB
-    payload = crawl_json(capsys, fake_adb, "--deny-file", str(path))
-    assert [e["text"] for e in payload["press"]] == ["Browse", "Help"]
-
-
-@pytest.mark.usefixtures("android")
-def test_crawl_deny_file_utf16(fake_adb, capsys, tmp_path):
-    path = tmp_path / "utf16.txt"
-    path.write_bytes("browse\n".encode("utf-16"))
-    message = crawl_usage_error(
-        capsys, fake_adb, SHOP, "--dry-run", "--deny-file", str(path)
-    )
-    assert message.startswith(f"--deny-file {path}")
-    assert "UTF-16" in message
-
-
-@pytest.mark.usefixtures("android")
-def test_crawl_deny_file_bad_utf8(fake_adb, capsys, tmp_path):
-    path = tmp_path / "bad.txt"
-    path.write_bytes(b"ok\n\xff\xfe\xfd\n")
-    message = crawl_usage_error(
-        capsys, fake_adb, SHOP, "--dry-run", "--deny-file", str(path)
-    )
-    assert "line 2" in message
-    assert "UTF-8" in message
-
-
-@pytest.mark.usefixtures("android")
-def test_crawl_deny_file_with_an_empty_word(fake_adb, capsys, tmp_path):
-    path = tmp_path / "ignorable.txt"
-    path.write_bytes("\u200b\n".encode())
-    message = crawl_usage_error(
-        capsys, fake_adb, SHOP, "--dry-run", "--deny-file", str(path)
-    )
-    assert message.startswith(f"--deny-file {path}")
-
-
-@pytest.mark.usefixtures("android")
 def test_crawl_usage_error_text_is_escaped(fake_adb, capsys, tmp_path):
-    path = tmp_path / "gone\u202e.txt"
+    path = tmp_path / "gone\u202e.toml"
     code, out, err = invoke(
-        capsys, fake_adb, "crawl", SHOP, "--dry-run", "--deny-file", str(path)
+        capsys, fake_adb, "crawl", SHOP, "--dry-run", "--config", str(path)
     )
     assert (code, out) == (2, "")
     assert "\u202e" not in err
-    assert "\\u202e" in err
+    assert "gone\\u202e.toml" in err
     assert fake_adb.requests == []
 
 
@@ -1060,10 +853,10 @@ def test_crawl_help_says_only_dry_run_exists(capsys):
 
 
 @pytest.mark.usefixtures("android")
-def test_nothing_is_written(fake_adb, capsys, tmp_path, monkeypatch):
-    monkeypatch.chdir(tmp_path)
+def test_nothing_is_written(fake_adb, capsys, settings_dir):
+    before = {p.name: p.read_bytes() for p in settings_dir.iterdir()}
     crawl(capsys, fake_adb)
-    assert list(tmp_path.iterdir()) == []
+    assert {p.name: p.read_bytes() for p in settings_dir.iterdir()} == before
     assert sys.stdout is not None
 
 
@@ -1126,7 +919,7 @@ def test_number_only_and_toggle_in_text(fake_adb, android, capsys):
     code, out, err = crawl(capsys, fake_adb)
     assert (code, err) == (0, "")
     lines = out.splitlines()
-    assert lines[2:] == [
+    assert lines[3:] == [
         "would press (1):",
         '  e4 TextView "Page 2" [tap] center=160,245',
         "would not press (3):",

@@ -9,7 +9,7 @@ is worse than an over-block: when in doubt, the element is not pressed.
 The module is pure. It reads nothing from a device or a file; the caller
 supplies the foreground package, the screen-edge rectangles (`edge_areas`)
 and the deny words (`parse_deny_file` turns the bytes of a deny file into
-words).
+words; the settings file is what `crawl` reads).
 
 Deny words are matched as substrings ("contains") on a
 normalized form of each field (see `normalize`), also with camelCase and the
@@ -83,7 +83,8 @@ Choices that block more than strictly needed:
   points are removed before matching.
 * ``Policy.avoid`` defaults to None, meaning ``api36_fallback_areas`` of the
   screen's display at judge time; an explicit tuple, including ``()``, is used
-  as given.
+  as given. ``Policy.edges`` (top, bottom, left, right sizes) replaces the API
+  36 sizes when ``avoid`` is None.
 * Duplicate element ids on one screen raise `ValueError`.
 * Control characters in a deny file are rejected, comment lines included.
 * A screen with more than `MAX_ELEMENTS` (5000) elements is not judged: every
@@ -91,7 +92,8 @@ Choices that block more than strictly needed:
 
 Visibility and cover: an element is visible only when the part of it on the
 display is at least 8 pixels wide and 8 pixels high (``MIN_VISIBLE_PX`` of
-`uiprobe.model`); a thinner sliver is ``not_visible``. A candidate that is
+`uiprobe.model`; ``Policy.min_visible_px`` changes the number for the judging
+only); a thinner sliver is ``not_visible``. A candidate that is
 visible is ``covered`` when the topmost meaningful element (clickable, or with
 a non-empty text, content description or hint; the last one in document order)
 whose part on the display holds the press point (whatever its size, a thin
@@ -186,7 +188,7 @@ import unicodedata
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Final, Literal, get_args
 
-from uiprobe.model import Bounds
+from uiprobe.model import MIN_VISIBLE_PX, Bounds
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -410,6 +412,7 @@ PERMISSION_PACKAGES: Final[frozenset[str]] = frozenset(
 API36_TOP_PX: Final = 24
 API36_BOTTOM_PX: Final = 32
 API36_SIDE_PX: Final = 30
+_EDGE_SIDES: Final = 4
 
 _CLICKABLE: Final = "clickable"
 _DISABLED: Final = "disabled"
@@ -649,11 +652,25 @@ class Policy:
     candidate whose label is only a number is not pressed. ``skip_toggles``
     (default True) applies the ``toggle`` rule: a candidate that is, or
     holds, a checkable element is not pressed. False turns the rule off.
+    ``refuse_dialog_confirm`` (default True) applies the ``dialog_confirm_button``
+    reason; False drops only that reason (the ``confirm_button`` reason, a deny
+    word on the screen, stays).
+
+    ``edges`` holds the sizes in pixels ``(top, bottom, left, right)`` that
+    `judge` turns into `edge_areas` of each screen's display when ``avoid`` is
+    None; None keeps the API 36 sizes. An explicit ``avoid`` wins over
+    ``edges``. ``min_visible_px`` (default `MIN_VISIBLE_PX`) is the smallest
+    width and height of the on-screen part of an element that `judge` counts as
+    visible; it applies to the judging only, ``Screen.tap_point``, ``Screen.find`` and
+    ``Screen.visible_bounds`` keep the fixed `MIN_VISIBLE_PX`.
 
     Raises:
         ValueError: A deny or confirm word is empty after normalization, or a
             confirm word is empty after the label cleaning (invisible
-            characters, normalization, surrounding punctuation).
+            characters, normalization, surrounding punctuation), or
+            ``edges`` is not four non-negative integers, or ``min_visible_px``
+            is not an integer of at least 1.
+        TypeError: ``edges`` is not a sequence.
     """
 
     deny_words: tuple[str, ...] = DEFAULT_DENY_WORDS
@@ -662,10 +679,22 @@ class Policy:
     avoid: tuple[Bounds, ...] | None = None
     skip_number_only: bool = True
     skip_toggles: bool = True
+    refuse_dialog_confirm: bool = True
+    edges: tuple[int, int, int, int] | None = None
+    min_visible_px: int = MIN_VISIBLE_PX
 
     def __post_init__(self) -> None:
         for word in (*self.deny_words, *self.confirm_words):
             _check_word(word)
+        if self.edges is not None and (
+            len(self.edges) != _EDGE_SIDES
+            or any(type(size) is not int or size < 0 for size in self.edges)
+        ):
+            msg = "edges must be four non-negative integers: top, bottom, left, right"
+            raise ValueError(msg)
+        if type(self.min_visible_px) is not int or self.min_visible_px < 1:
+            msg = "min_visible_px must be an integer of at least 1"
+            raise ValueError(msg)
         for word in self.confirm_words:
             if not _confirm_form(word):
                 msg = f"confirm word is empty after cleaning: {word!r}"
@@ -690,6 +719,9 @@ class Policy:
             avoid=self.avoid,
             skip_number_only=self.skip_number_only,
             skip_toggles=self.skip_toggles,
+            refuse_dialog_confirm=self.refuse_dialog_confirm,
+            edges=self.edges,
+            min_visible_px=self.min_visible_px,
         )
 
 
@@ -1025,16 +1057,12 @@ class _Judge:
         self.confirm = frozenset(_confirm_form(w) for w in policy.confirm_words)
         self.target = target_package
         self._confirm_forms: dict[str, str] = {}
-        self.visible = [screen.visible_bounds(e) for e in self.elements]
+        self.visible = [self._visible_part(e) for e in self.elements]
         self.clickable = [_CLICKABLE in e.flags for e in self.elements]
         self.meaningful = [e.is_meaningful for e in self.elements]
         self._tops: dict[tuple[int, int], int] = {}
         self._cell_tops: dict[int, int] = {}
-        self._avoid: tuple[Bounds, ...] = (
-            api36_fallback_areas(screen.display)
-            if policy.avoid is None
-            else policy.avoid
-        )
+        self._avoid = self._edge_rectangles()
         self.screen_note = ""
         if foreground is None:
             self.screen_note = "foreground app unknown"
@@ -1056,6 +1084,26 @@ class _Judge:
         parts = (screen._clip(e) for e in self.elements)  # noqa: SLF001
         rects = [(i, rect) for i, rect in enumerate(parts) if rect is not None]
         self.grid = _Grid(screen.display, rects)
+
+    def _visible_part(self, element: Element) -> Bounds | None:
+        """Return the part of `element` on the display, or None for a sliver."""
+        clipped = self.screen._clip(element)  # noqa: SLF001
+        if clipped is None:
+            return None
+        if min(clipped.width, clipped.height) < self.policy.min_visible_px:
+            return None
+        return clipped
+
+    def _edge_rectangles(self) -> tuple[Bounds, ...]:
+        policy = self.policy
+        if policy.avoid is not None:
+            return policy.avoid
+        if policy.edges is None:
+            return api36_fallback_areas(self.screen.display)
+        top, bottom, left, right = policy.edges
+        return edge_areas(
+            self.screen.display, top=top, bottom=bottom, left=left, right=right
+        )
 
     def _summarize(self) -> None:
         """Compute, in a few linear passes over the tree, what the decisions
@@ -1519,7 +1567,7 @@ class _Judge:
                     element_id=screen_deny.element_id,
                 )
             )
-        if self.dialog:
+        if self.dialog and self.policy.refuse_dialog_confirm:
             reasons.append("dialog_confirm_button")
             details.append(Detail("dialog_confirm_button", note=note))
 
