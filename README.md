@@ -108,7 +108,7 @@ uiprobe connects only to the adb server, which is on `127.0.0.1:5037` unless you
 
 ## Contributing
 
-Issues are welcome. While uiprobe is alpha, pull requests are not accepted yet.
+Issues are welcome. Report a suspected vulnerability privately instead, as [SECURITY.md](SECURITY.md) describes. While uiprobe is alpha, pull requests are not accepted yet.
 
 ## License
 
