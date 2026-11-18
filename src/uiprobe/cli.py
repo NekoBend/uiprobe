@@ -39,7 +39,9 @@ from uiprobe.device import (
     DeviceDetails,
     DisplaySizeUnknownError,
     RefusedKeys,
+    TextNotTypedError,
     _key_code,
+    _text_pieces,
     device_details,
     devices,
 )
@@ -373,6 +375,21 @@ def _build_parser() -> _Parser:
         ),
     )
     key.add_argument("name", metavar="NAME", help="an alias or a KEYCODE_ name")
+    type_ = commands.add_parser(
+        "type",
+        allow_abbrev=False,
+        help="type text into the focused field",
+        description=(
+            "Type TEXT into the field that has focus, in whatever app is in"
+            " front. Only printable ASCII (space to ~) is typed. A character"
+            " outside ASCII, a newline, a tab or another control character,"
+            " and empty text are usage errors and nothing is sent; to press"
+            " Enter use the key command. The text is not written to the"
+            " output and typing is not checked afterwards."
+        ),
+    )
+    _add_common_options(type_, in_command=True)
+    type_.add_argument("text", metavar="TEXT", help="the text to type")
     screenshot = commands.add_parser(
         "screenshot",
         allow_abbrev=False,
@@ -888,6 +905,30 @@ def _cmd_key(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_type(args: argparse.Namespace) -> int:
+    text = args.text
+    _text_pieces(text)  # a bad text is a usage error before any server contact
+    device = Device(
+        _single_serial(args),
+        adb_server=args.adb_server,
+        adb=args.adb,
+        start_server=args.start_server,
+    )
+    device.type_text(text)
+    if args.json:
+        payload: dict[str, object] = {
+            "schema": ACTION_SCHEMA,
+            "action": "type",
+            "length": len(text),
+            "device": {"serial": device.serial},
+            "captured_at": datetime.now(UTC).astimezone().isoformat(timespec="seconds"),
+        }
+        _emit(dumps(payload))
+    else:
+        _emit(f"typed {len(text)} characters")
+    return 0
+
+
 def _parse_timeout(value: str | None) -> float:
     """Read ``--timeout``: a plain decimal number of seconds from 0 to 600.
 
@@ -1225,6 +1266,7 @@ _HANDLERS: dict[str, Callable[[argparse.Namespace], int]] = {
     "tap": _cmd_tap,
     "swipe": _cmd_swipe,
     "key": _cmd_key,
+    "type": _cmd_type,
     "launch": _cmd_launch,
     "screenshot": _cmd_screenshot,
     "crawl": _cmd_crawl,
@@ -1357,7 +1399,8 @@ def _failure_code(exc: BaseException, *, as_json: bool) -> int:
     if isinstance(exc, _GuidedUsageError):
         return _guided_failure(exc, as_json=as_json)
     if isinstance(exc, _UsageError | TypeError | ValueError):
-        return _fail(USAGE_ERROR, str(exc), as_json=as_json)
+        details = exc.details if isinstance(exc, TextNotTypedError) else None
+        return _fail(USAGE_ERROR, str(exc), as_json=as_json, details=details)
     if isinstance(exc, KeyboardInterrupt):
         return _interrupt_failure(exc, as_json=as_json)
     name = type(exc).__name__

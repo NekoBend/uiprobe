@@ -294,6 +294,9 @@ class FakeAndroid:
             r"; echo uiprobe-exit:\$\?\Z"
         ),
         re.compile(r"^input keyevent (?:KEYCODE_BACK|4)\Z"),
+        # ``input text`` with the argument quoted for the device shell: always
+        # in single quotes, a quote inside as '"'"'.
+        re.compile(r"^input text '(?:[^']|'\"'\"')*'\Z"),
         # The marker form ``uiprobe key`` sends (``uiprobe swipe``: SWIPE_ALLOWED).
         re.compile(
             r"^input keyevent KEYCODE_[A-Z0-9_]{1,40}; echo uiprobe-exit:\$\?\Z"

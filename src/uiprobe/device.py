@@ -51,9 +51,11 @@ __all__ = [
     "DEVICE_WIDE_KEY_PREFIXES",
     "FIXED_DEVICE_KEYS",
     "KEY_ALIASES",
+    "TYPE_PIECE_SIZE",
     "Device",
     "DeviceDetails",
     "RefusedKeys",
+    "TextNotTypedError",
     "device_details",
     "devices",
     "select_device",
@@ -516,6 +518,93 @@ def _key_code(name: object, refused: RefusedKeys | None = None) -> str:
         "or a KEYCODE_ name in upper case"
     )
     raise ValueError(msg)
+
+
+TYPE_PIECE_SIZE: Final = 256
+"""Most characters of text sent in one ``input text`` command."""
+
+
+class TextNotTypedError(ValueError):
+    """The text has a character, or is empty, so that it is not typed."""
+
+    def __init__(self, message: str, details: dict[str, object] | None = None) -> None:
+        super().__init__(message)
+        self.details: dict[str, object] = details or {}
+
+
+def _check_text(text: object) -> str:
+    """Return `text` when it can be typed; raise before anything is sent."""
+    if not isinstance(text, str):
+        msg = f"text must be a str, not {type(text).__name__}"
+        raise TypeError(msg)
+    if not text:
+        msg = "text is empty; there is nothing to type"
+        raise TextNotTypedError(msg)
+    for position, char in enumerate(text):
+        code = ord(char)
+        if 0x20 <= code <= 0x7E:
+            continue
+        label = f"U+{code:04X}"
+        escaped = ascii(char)
+        head = f"character {label} ({escaped}) at position {position}"
+        if code > 0x7F:
+            msg = f"{head} is not ASCII; this version types ASCII text only"
+        elif char in "\n\t":
+            msg = (
+                f"{head} is not typed: a newline or tab can act as Enter or"
+                " move the focus; to press Enter use uiprobe key enter"
+            )
+        else:
+            msg = f"{head} is a control character; only printable ASCII is typed"
+        details: dict[str, object] = {
+            "character": label,
+            "escaped": escaped,
+            "position": position,
+        }
+        raise TextNotTypedError(msg, details)
+    return text
+
+
+def _single_quoted(piece: str) -> str:
+    """`piece` in single quotes for the device shell, even a plain word."""
+    return "'" + "'\"'\"'".join(piece.split("'")) + "'"
+
+
+def _text_pieces(text: object) -> list[str]:
+    """Split `text` into the pieces to send, after checking it.
+
+    A piece has at most `TYPE_PIECE_SIZE` characters and never contains ``%``
+    directly followed by ``s`` (the device turns that pair into a space). The
+    pieces joined give `text` again.
+    """
+    pieces: list[str] = []
+    current = ""
+    for char in _check_text(text):
+        if len(current) >= TYPE_PIECE_SIZE or (char == "s" and current[-1:] == "%"):
+            pieces.append(current)
+            current = ""
+        current += char
+    pieces.append(current)
+    return pieces
+
+
+def _without_text(error: UiprobeError, secrets_: tuple[str, ...]) -> UiprobeError:
+    """Copy of `error` with the typed text left out of its message and details.
+
+    An adb error carries the request that failed, and for typing that request
+    holds the text, which can be a password.
+    """
+
+    def clean(value: object) -> object:
+        if not isinstance(value, str):
+            return value
+        for secret in secrets_:
+            value = "<text omitted>".join(value.split(secret))
+        return value
+
+    details = {key: clean(value) for key, value in error.details.items()}
+    message = str(clean(error.message))
+    return type(error)(message, details=details)
 
 
 def _check_launch_timeout(timeout: object) -> float:
@@ -1322,6 +1411,50 @@ class Device:
         if failure is not None:
             raise failure
         return code
+
+    def type_text(self, text: str) -> None:
+        """Type `text` into the field that has focus, as printable ASCII.
+
+        Only the characters 0x20 to 0x7E are typed. Anything else is refused
+        before anything is sent: a character outside ASCII (it failed on every
+        Android version tried: emulators at API 24, 30 and 36), a newline or
+        tab (they can act as Enter or move the focus; press Enter with `key`),
+        any other control character, and empty text. The text goes to whatever
+        field has focus in whatever app is in front; nothing is checked
+        afterwards, and the device's answer is not used (its exit status can
+        be 0 when typing failed).
+
+        The text is sent as ``input text`` with the argument quoted for the
+        device shell (always in single quotes, a quote inside as ``'"'"'``),
+        in pieces of at most `TYPE_PIECE_SIZE` characters; the text is split
+        before it is quoted.
+        ``input text`` turns the two characters ``%s`` into a space, so a piece
+        never contains ``%`` directly followed by ``s``: the text is split
+        between them, and the pieces are sent as separate commands, in order.
+        Each command is exactly ``input text <quoted piece>``, sent once.
+
+        Raises:
+            TypeError: `text` is not a str.
+            ValueError: `text` is empty or has a character that is not typed.
+                The error is a `TextNotTypedError`; its ``details`` hold
+                ``character`` (``U+XXXX``), ``escaped`` and ``position``.
+            AdbError: The adb protocol or the command failed.
+            AdbServerUnavailableError: The adb server cannot be reached.
+            DeviceNotFoundError: The device is gone.
+            DeviceOfflineError: The device is offline.
+            DeviceUnauthorizedError: The device has not authorized this host.
+
+        The first two are raised before anything is sent to the adb server.
+        The errors raised while sending leave the text out of their message and
+        details. An error after the first command can leave part of the text
+        typed.
+        """
+        for piece in _text_pieces(text):
+            quoted = _single_quoted(piece)
+            try:
+                self._shell(f"input text {quoted}")
+            except UiprobeError as exc:
+                raise _without_text(exc, (quoted,)) from None
 
     def launch(
         self,

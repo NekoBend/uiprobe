@@ -223,6 +223,34 @@ input keyevent KEYCODE_BACK; echo uiprobe-exit:$?
 
 It is sent once and never resent. Exit 14 (`input_failed`) does not prove that no key was pressed. With `--json` the result is `{"schema": "uiprobe.action/1", "action": "key", "key": "KEYCODE_BACK"}`.
 
+## Typing text
+
+`uiprobe type TEXT` types text into the field that has focus, in whatever app is in front.
+
+```console
+$ uiprobe type "hello world"
+typed 11 characters
+```
+
+Only printable ASCII is typed: the characters from space (0x20) to `~` (0x7E). Before anything is sent, these are refused with a usage error (exit 2) and no request goes to the adb server:
+
+- a character outside ASCII, such as `é` (non-ASCII text failed on every Android version tried: emulators at API 24, 30 and 36). The message names the first one: `character U+00E9 ('\xe9') at position 3 is not ASCII; this version types ASCII text only`. With `--json` the error `details` hold `character` (`U+00E9`), `escaped` (`'\xe9'`) and `position` (0-based, `3`).
+- a newline or tab, which can act as Enter or move the focus. To press Enter use `uiprobe key enter`.
+- any other control character (0x00 to 0x1F and 0x7F).
+- empty text.
+
+A text that starts with `-` needs `--` before it, as in `uiprobe type -- -5`.
+
+The text is sent as `input text` with the text in single quotes for the device shell, so spaces, quotes, `;`, `&&`, `|`, `$( )`, backticks, `<`, `>` and `\` arrive as typed. The device turns the two characters `%s` into a space, so the text is split between `%` and `s` and sent as separate commands; a `%` alone is typed as it is. Long text is split into pieces of at most 256 characters, sent one after the other. The command for each piece is exactly this, for example for `it's 50%`:
+
+```sh
+input text 'it'"'"'s 50%'
+```
+
+Each piece is sent once. If an error comes after the first piece (a lost connection, an offline device), the earlier pieces are already typed, and running the command again types them twice; the error never contains the text. Look at the screen before you repeat the command. Typing is not confirmed afterwards: the exit status of `input text` can be 0 even when nothing was typed, so it is not used, and the result is not read back. An empty field shows its hint as text in a dump, so a dump cannot tell the hint from typed text. Look at the screen, or dump it, to check.
+
+With `--json` the result is `{"schema": "uiprobe.action/1", "action": "type", "length": 11, "device": {"serial": ...}, "captured_at": ...}`. `length` is the number of characters. The text itself is never written to the output, because it can be a password.
+
 ## Launching an app
 
 `uiprobe launch PACKAGE` starts an app through its launcher activity and waits until it is the app in front. `PACKAGE` follows the Android package rule: two or more dot-separated segments, each an ASCII letter followed by ASCII letters, digits or underscores, at most 255 characters. Anything else is a usage error (exit 2) before the adb server is contacted, so a name can never carry shell syntax to the device.
