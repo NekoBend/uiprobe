@@ -1182,7 +1182,6 @@ def test_start_server_then_connect(
     assert calls == [[str(adb_path), "start-server"]]
 
 
-@pytest.mark.skipif(sys.platform == "win32", reason="uses a shell script")
 def test_retry_keeps_trying_until_the_server_listens(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
