@@ -22,7 +22,7 @@ import re
 import stat
 import sys
 from pathlib import Path
-from typing import TYPE_CHECKING, Final, NoReturn, TextIO
+from typing import TYPE_CHECKING, Final, NoReturn, TextIO, override
 
 from uiprobe import __version__
 from uiprobe._json import dumps
@@ -81,6 +81,26 @@ class _Parser(argparse.ArgumentParser):
         raise _UsageError(message)
 
 
+class _VersionAction(argparse.Action):
+    """Print ``uiprobe VERSION`` through `_emit` and exit with status 0.
+
+    argparse's own version action wraps the line to the terminal width and
+    ignores a failed write; this one prints one line and lets a closed output
+    end the run with status 1, like any other output.
+    """
+
+    @override
+    def __call__(
+        self,
+        parser: argparse.ArgumentParser,
+        namespace: argparse.Namespace,
+        values: object,
+        option_string: str | None = None,
+    ) -> None:
+        _emit(f"uiprobe {__version__}")
+        parser.exit()
+
+
 def _add_common_options(parser: argparse.ArgumentParser, *, in_command: bool) -> None:
     """Add the options every command shares.
 
@@ -123,8 +143,9 @@ def _build_parser() -> _Parser:
     parser = _Parser(prog="uiprobe", allow_abbrev=False)
     parser.add_argument(
         "--version",
-        action="version",
-        version=f"uiprobe {__version__}",
+        action=_VersionAction,
+        nargs=0,
+        default=argparse.SUPPRESS,
         help="print the version and exit",
     )
     _add_common_options(parser, in_command=False)

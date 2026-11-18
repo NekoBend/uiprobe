@@ -1,7 +1,8 @@
-"""The version is written in pyproject.toml and in the package; they match."""
+"""The version is written in pyproject.toml, the package and the README."""
 
 from __future__ import annotations
 
+import io
 import tomllib
 from pathlib import Path
 
@@ -10,13 +11,28 @@ import pytest
 import uiprobe
 from uiprobe import cli
 
-PYPROJECT = Path(__file__).resolve().parent.parent / "pyproject.toml"
+ROOT = Path(__file__).resolve().parent.parent
+
+
+class _ClosedPipe(io.StringIO):
+    """A stdout whose reader is gone: every write fails."""
+
+    def write(self, _text: str) -> int:
+        raise BrokenPipeError
+
+    def flush(self) -> None:
+        raise BrokenPipeError
 
 
 def test_the_package_version_matches_pyproject():
-    with PYPROJECT.open("rb") as handle:
+    with (ROOT / "pyproject.toml").open("rb") as handle:
         project = tomllib.load(handle)["project"]
     assert uiprobe.__version__ == project["version"]
+
+
+def test_the_readme_names_the_version():
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    assert f"version {uiprobe.__version__}" in readme
 
 
 def test_version_prints_one_line_and_exits_zero(capsys):
@@ -26,9 +42,21 @@ def test_version_prints_one_line_and_exits_zero(capsys):
     assert captured.err == ""
 
 
+def test_version_stays_one_line_in_a_narrow_terminal(monkeypatch, capsys):
+    monkeypatch.setenv("COLUMNS", "18")
+    assert cli.run(["--version"]) == 0
+    assert capsys.readouterr().out == f"uiprobe {uiprobe.__version__}\n"
+
+
 def test_version_ignores_json(capsys):
     assert cli.run(["--json", "--version"]) == 0
     assert capsys.readouterr().out == f"uiprobe {uiprobe.__version__}\n"
+
+
+def test_version_to_a_closed_output_exits_one(monkeypatch, capsys):
+    monkeypatch.setattr("sys.stdout", _ClosedPipe())
+    assert cli.run(["--version"]) == 1
+    assert capsys.readouterr().err == ""
 
 
 @pytest.mark.parametrize("command", ["devices", "dump"])
