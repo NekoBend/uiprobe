@@ -74,6 +74,8 @@ _WM_SIZE_LINE: Final = re.compile(
     r"(Physical|Override) size: ([0-9]{1,5})x([0-9]{1,5})"
 )
 _MAX_DISPLAY_SIDE: Final = 32768
+_DISPLAY_ZERO_LINE: Final = re.compile(r"\s*Display: mDisplayId=0(?:\s|$)")
+_CURRENT_SIZE: Final = re.compile(r"cur=([0-9]{1,5})x([0-9]{1,5})")
 
 # Input commands. The device-side exit status is read through a marker, because
 # the adb ``shell:`` service does not return it. Measured on API 24-36: the
@@ -286,6 +288,46 @@ def _scroll_rectangle(area: Bounds, display: tuple[int, int]) -> Bounds:
     )
 
 
+def _scroll_points(
+    direction: str, area: Bounds, display: tuple[int, int]
+) -> tuple[tuple[int, int], tuple[int, int]]:
+    """Return the swipe points for `direction` in `area` of a `display`.
+
+    Raises ValueError when the area is too small to scroll.
+    """
+    box = _scroll_rectangle(area, display)
+    # Under 20 pixels the 5% margin floors to 0, and a far edge would be
+    # one past the last pixel; such a display is not a real one.
+    if min(display) < 20 or box.width < 2 or box.height < 2:
+        msg = "the area is too small to scroll"
+        raise ValueError(msg)
+    middle_x, middle_y = box.center
+    # Right and bottom are exclusive, so the last pixel is one before them.
+    last_x, last_y = box.right - 1, box.bottom - 1
+    match direction:
+        case "up":
+            return (middle_x, last_y), (middle_x, box.top)
+        case "down":
+            return (middle_x, box.top), (middle_x, last_y)
+        case "left":
+            return (last_x, middle_y), (box.left, middle_y)
+        case _:
+            return (box.left, middle_y), (last_x, middle_y)
+
+
+def _check_direction(direction: str) -> None:
+    if not isinstance(direction, str):
+        msg = f"direction must be a str, not {type(direction).__name__}"
+        raise TypeError(msg)
+    if direction not in _DIRECTIONS:
+        msg = "direction must be one of up, down, left, right"
+        raise ValueError(msg)
+
+
+class DisplaySizeUnknownError(ValueError):
+    """`Device.scroll_display` could not read the display size."""
+
+
 def _scroll_area(screen: Screen, within: Element | None) -> Bounds:
     """Return the area a scroll works in: the visible part of `within` or all."""
     if within is None:
@@ -496,6 +538,44 @@ def _parse_wm_size(text: str) -> tuple[int, int] | None:
             return None
         sizes[match[1]] = (width, height)
     return sizes.get("Override") or sizes.get("Physical")
+
+
+def _parse_display_size(text: str) -> tuple[int, int] | None:
+    """Parse the current size of display 0 from ``dumpsys window displays``.
+
+    The block starts at a line ``Display: mDisplayId=0`` that ends there or
+    goes on after whitespace, and runs up to the next ``Display:`` line. The
+    size is read only from the summary line of the block, the first line that
+    starts (after indentation) with ``init=``, and is already rotated. Returns
+    None for anything unexpected: no such block, no summary line before the
+    next display, no ``cur=`` token on it, a malformed one, several with
+    different values, or a side that is zero or over the bound `wm size`
+    parsing uses.
+    """
+    inside = False
+    for line in text.splitlines():
+        if not inside:
+            inside = _DISPLAY_ZERO_LINE.match(line) is not None
+            continue
+        if line.lstrip().startswith("Display:"):
+            return None
+        if not line.lstrip().startswith("init="):
+            continue
+        sizes: set[tuple[int, int]] = set()
+        for token in line.split():
+            if not token.startswith("cur="):
+                continue
+            match = _CURRENT_SIZE.fullmatch(token)
+            if match is None:
+                return None
+            width, height = int(match[1]), int(match[2])
+            if not (0 < width <= _MAX_DISPLAY_SIDE and 0 < height <= _MAX_DISPLAY_SIDE):
+                return None
+            sizes.add((width, height))
+        if len(sizes) != 1:
+            return None
+        return sizes.pop()
+    return None
 
 
 _COMPONENT = r"([A-Za-z0-9_.$]{1,256})/([A-Za-z0-9_.$]{1,256})"
@@ -1018,12 +1098,7 @@ class Device:
         All but the device errors are raised before anything is sent to the
         adb server.
         """
-        if not isinstance(direction, str):
-            msg = f"direction must be a str, not {type(direction).__name__}"
-            raise TypeError(msg)
-        if direction not in _DIRECTIONS:
-            msg = "direction must be one of up, down, left, right"
-            raise ValueError(msg)
+        _check_direction(direction)
         if within is not None and not isinstance(within, Element):
             msg = f"within must be an Element or None, not {type(within).__name__}"
             raise TypeError(msg)
@@ -1038,24 +1113,47 @@ class Device:
             )
             raise ValueError(msg)
         area = _scroll_area(latest, within)
-        box = _scroll_rectangle(area, latest.display)
-        # Under 20 pixels the 5% margin floors to 0, and a far edge would be
-        # one past the last pixel; such a display is not a real one.
-        if min(latest.display) < 20 or box.width < 2 or box.height < 2:
-            msg = "the area is too small to scroll"
-            raise ValueError(msg)
-        middle_x, middle_y = box.center
-        # Right and bottom are exclusive, so the last pixel is one before them.
-        last_x, last_y = box.right - 1, box.bottom - 1
-        match direction:
-            case "up":
-                start, end = (middle_x, last_y), (middle_x, box.top)
-            case "down":
-                start, end = (middle_x, box.top), (middle_x, last_y)
-            case "left":
-                start, end = (last_x, middle_y), (box.left, middle_y)
-            case _:
-                start, end = (box.left, middle_y), (last_x, middle_y)
+        start, end = _scroll_points(direction, area, latest.display)
+        return self.swipe(start, end, duration_ms=duration_ms)
+
+    def scroll_display(
+        self, direction: str, *, duration_ms: int = DEFAULT_SWIPE_MS
+    ) -> tuple[tuple[int, int], tuple[int, int]]:
+        """Swipe along the middle of the whole display; return the points.
+
+        The same gesture as `scroll` without `within`, but it needs no `dump`:
+        it reads the current display size from ``dumpsys window displays``
+        (one request: the ``cur=`` size of display 0, already rotated) and
+        sends the swipe, so it makes two adb requests where a dump and a
+        scroll make many more. `direction` and the geometry are those of
+        `scroll`, with the whole display as the area. It does not change the
+        latest dump of this device.
+
+        Raises:
+            TypeError: `direction` is not a str or `duration_ms` has the
+                wrong type.
+            ValueError: `direction` is not one of the four, the display size
+                cannot be read (a `DisplaySizeUnknownError`; use `dump` and
+                `scroll`, or `swipe` with explicit points), the display is
+                too small to scroll, or `duration_ms` is not usable (see
+                `swipe`).
+            InputFailedError: As for `swipe`, and the device errors listed
+                there (`AdbError`, `AdbServerUnavailableError`,
+                `DeviceNotFoundError`, `DeviceOfflineError`,
+                `DeviceUnauthorizedError`).
+
+        All but the device errors are raised before any input is sent.
+        """
+        _check_direction(direction)
+        _check_duration(duration_ms)
+        size = _parse_display_size(self._shell("dumpsys window displays"))
+        if size is None:
+            msg = (
+                "the display size is unknown (dumpsys window displays gave no "
+                "usable size); dump and scroll, or use swipe with explicit points"
+            )
+            raise DisplaySizeUnknownError(msg)
+        start, end = _scroll_points(direction, Bounds(0, 0, size[0], size[1]), size)
         return self.swipe(start, end, duration_ms=duration_ms)
 
     def key(self, name: str, *, refused: RefusedKeys | None = None) -> str:
