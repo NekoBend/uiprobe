@@ -24,6 +24,7 @@ import sys
 from pathlib import Path
 from typing import TYPE_CHECKING, Final, NoReturn, TextIO
 
+from uiprobe import __version__
 from uiprobe._json import dumps
 from uiprobe.crawl_preview import check_package
 from uiprobe.crawl_preview import preview as make_preview
@@ -120,6 +121,12 @@ def _add_common_options(parser: argparse.ArgumentParser, *, in_command: bool) ->
 
 def _build_parser() -> _Parser:
     parser = _Parser(prog="uiprobe", allow_abbrev=False)
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"uiprobe {__version__}",
+        help="print the version and exit",
+    )
     _add_common_options(parser, in_command=False)
     commands = parser.add_subparsers(dest="command", required=True, metavar="COMMAND")
     for name, text in (
@@ -896,7 +903,8 @@ def run(argv: Sequence[str]) -> int:
         args = _parse(argv)
         return _HANDLERS[args.command](args)
     except SystemExit as exc:
-        # argparse exits for --help; it never exits for an error (see _Parser).
+        # argparse exits for --help and --version; it never exits for an error
+        # (see _Parser).
         return exc.code if isinstance(exc.code, int) else 0
     except (Exception, KeyboardInterrupt) as exc:  # noqa: BLE001 - last resort: never show a traceback
         try:
