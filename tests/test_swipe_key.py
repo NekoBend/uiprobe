@@ -1709,3 +1709,16 @@ def test_cli_swipe_json_with_an_unknown_display(capsys, fake_adb, android):
     assert UNKNOWN_DISPLAY in json.loads(out)["error"]["message"]
     assert android.inputs == []
     assert sent_inputs(fake_adb) == []
+
+
+@pytest.mark.usefixtures("android")
+def test_cli_swipe_direction_in_an_element_skips_activity_and_api_level(
+    capsys, fake_adb
+):
+    code, _, err = invoke(
+        capsys, fake_adb, "swipe", "--direction", "down", "--text", "Pane"
+    )
+    assert (code, err) == (0, "")
+    commands = [c for _, _, c in fake_adb.commands]
+    assert "wm size" in commands
+    assert not any(c.startswith(("dumpsys window", "getprop")) for c in commands)

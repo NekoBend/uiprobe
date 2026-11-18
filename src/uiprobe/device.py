@@ -1276,16 +1276,27 @@ class Device:
         """
         return _read_input_shown(self._shell("dumpsys input_method"))
 
-    def dump(self) -> Screen:
+    def dump(self, *, details: bool = True) -> Screen:
         """Capture the current screen with ``uiautomator dump``.
 
         The returned `Screen` becomes this device's latest screen: `tap`
         accepts only elements of that screen. A failed dump keeps the previous
         one.
 
+        With `details` True (the default) the activity (``dumpsys window``) and
+        the API level (``getprop``) are read too. With `details` False those two
+        reads are skipped and `Screen.activity` and `Screen.api_level` are None;
+        the display size (``wm size``) and everything the visibility and cover
+        checks need are still read. `Screen.screen_id` includes the activity, so
+        it can differ from the id of a full dump of the same screen.
+
         Raises:
+            TypeError: `details` is not a bool (nothing is sent).
             DumpError: uiautomator failed or timed out, or its XML is unusable.
         """
+        if not isinstance(details, bool):
+            msg = f"details must be a bool, not {type(details).__name__}"
+            raise TypeError(msg)
         xml = self._dump_xml()
         parsed = parse_uiautomator_dump(xml)
         elements = parsed.elements
@@ -1296,16 +1307,17 @@ class Device:
             max((e.bounds.right for e in tops), default=0),
             max((e.bounds.bottom for e in tops), default=0),
         )
-        component = self._focused_component(package)
         activity = None
-        if component is not None:
-            activity = _activity_name(package, component)
+        if details:
+            component = self._focused_component(package)
+            if component is not None:
+                activity = _activity_name(package, component)
         screen = Screen(
             serial=self.serial,
             captured_at=datetime.now(UTC).astimezone().replace(microsecond=0),
             package=package,
             activity=activity,
-            api_level=self.api_level(),
+            api_level=self.api_level() if details else None,
             display=display,
             elements=tuple(elements),
         )
