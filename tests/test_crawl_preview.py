@@ -817,7 +817,7 @@ def test_press_in_another_file_names_that_file(
     other.write_text(text.replace("press = false", "press = true"), encoding="utf-8")
     code, out, err = invoke(capsys, fake_adb, "crawl", SHOP, "--config", str(other))
     assert (code, out) == (2, "")
-    assert err == f"uiprobe: error: {file_press_message(str(other))}\n"
+    assert err == f"uiprobe: error: {file_press_message(_shown(str(other)))}\n"
     assert fake_adb.requests == []
     assert connections == []
     assert android.inputs == []
