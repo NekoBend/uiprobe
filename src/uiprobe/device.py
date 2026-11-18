@@ -1288,11 +1288,15 @@ class Device:
         reads are skipped and `Screen.activity` and `Screen.api_level` are None;
         the display size (``wm size``) and everything the visibility and cover
         checks need are still read. `Screen.screen_id` includes the activity, so
-        it differs from the id of a full dump of the same screen.
+        it can differ from the id of a full dump of the same screen.
 
         Raises:
+            TypeError: `details` is not a bool (nothing is sent).
             DumpError: uiautomator failed or timed out, or its XML is unusable.
         """
+        if not isinstance(details, bool):
+            msg = f"details must be a bool, not {type(details).__name__}"
+            raise TypeError(msg)
         xml = self._dump_xml()
         parsed = parse_uiautomator_dump(xml)
         elements = parsed.elements
@@ -1304,18 +1308,16 @@ class Device:
             max((e.bounds.bottom for e in tops), default=0),
         )
         activity = None
-        api_level = None
         if details:
             component = self._focused_component(package)
             if component is not None:
                 activity = _activity_name(package, component)
-            api_level = self.api_level()
         screen = Screen(
             serial=self.serial,
             captured_at=datetime.now(UTC).astimezone().replace(microsecond=0),
             package=package,
             activity=activity,
-            api_level=api_level,
+            api_level=self.api_level() if details else None,
             display=display,
             elements=tuple(elements),
         )

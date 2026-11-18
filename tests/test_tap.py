@@ -1123,3 +1123,11 @@ def test_a_light_dump_gives_the_same_tap_checks_as_a_full_one(fake_adb):
     ]
     assert all(one == other for one, other in results)
     assert {"covered", "too_small"} <= {r for r, _ in results if isinstance(r, str)}
+
+
+@pytest.mark.parametrize("details", ["False", 0, None])
+def test_dump_details_must_be_a_bool(device, fake_adb, details):
+    before = len(fake_adb.commands)
+    with pytest.raises(TypeError, match="details must be a bool"):
+        device.dump(details=details)
+    assert len(fake_adb.commands) == before
