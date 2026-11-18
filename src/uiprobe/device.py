@@ -44,6 +44,7 @@ if TYPE_CHECKING:
 __all__ = [
     "DEVICE_WIDE_KEYS",
     "DEVICE_WIDE_KEY_PREFIXES",
+    "FIXED_DEVICE_KEYS",
     "KEY_ALIASES",
     "Device",
     "DeviceDetails",
@@ -170,6 +171,10 @@ DEVICE_WIDE_KEYS: Final[frozenset[str]] = frozenset(
         "KEYCODE_META_LEFT",
         "KEYCODE_META_RIGHT",
         "KEYCODE_DICTATE",
+        "KEYCODE_ACCESSIBILITY",
+        "KEYCODE_CONTEXTUAL_SEARCH",
+        "KEYCODE_CONTEXTUAL_QUERY",
+        "KEYCODE_CONTEXTUAL_INSERT",
         # keys that open other apps (the prefixes KEYCODE_TV_,
         # KEYCODE_VIDEO_APP_, KEYCODE_FEATURED_APP_, KEYCODE_DEMO_APP_ and
         # KEYCODE_STEM_ cover television and watch keys)
@@ -190,6 +195,23 @@ DEVICE_WIDE_KEYS: Final[frozenset[str]] = frozenset(
         "KEYCODE_STYLUS_BUTTON_TAIL",
         "KEYCODE_AVR_INPUT",
         "KEYCODE_STB_INPUT",
+    }
+)
+# The keys that stay refused whatever a settings file says: power, sleep and
+# calls. They are always part of `DEVICE_WIDE_KEYS`, and the settings file
+# cannot remove them.
+FIXED_DEVICE_KEYS: Final[frozenset[str]] = frozenset(
+    {
+        "KEYCODE_POWER",
+        "KEYCODE_SLEEP",
+        "KEYCODE_SOFT_SLEEP",
+        "KEYCODE_LOCK",
+        "KEYCODE_CALL",
+        "KEYCODE_ENDCALL",
+        "KEYCODE_HEADSETHOOK",
+        "KEYCODE_TV_POWER",
+        "KEYCODE_AVR_POWER",
+        "KEYCODE_STB_POWER",
     }
 )
 # Name prefixes refused as well: global media playback, system navigation,
