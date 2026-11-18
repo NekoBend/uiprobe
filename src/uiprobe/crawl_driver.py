@@ -77,7 +77,7 @@ from uiprobe.errors import (
     ScreenshotFailedError,
     UiprobeError,
 )
-from uiprobe.guards import Policy
+from uiprobe.guards import Policy, judge
 from uiprobe.runlog import RunFolderError, RunWriter
 
 if TYPE_CHECKING:
@@ -158,6 +158,7 @@ class _Run:
         package: str,
         writer: RunWriter,
         engine: CrawlEngine,
+        policy: Policy,
         *,
         screenshots: bool,
         recheck: bool,
@@ -170,6 +171,7 @@ class _Run:
         self.package = package
         self.writer = writer
         self.engine = engine
+        self.policy = policy
         self.screenshots = screenshots
         self.recheck = recheck
         self.settle = settle
@@ -313,9 +315,11 @@ class _Run:
         skipped = self.engine.records.skipped
         new = skipped[self._skips_written :]
         self._skips_written = len(skipped)
-        found: dict[str, dict[str, Element]] = {}
+        found: dict[str, dict[str, list[tuple[Element, tuple[str, ...]]]]] = {}
         for item in new:
-            body = _skipped_element(item, screens, found)
+            body = _skipped_element(
+                item, screens, found, package=self.package, policy=self.policy
+            )
             self.writer.write_skip(item.screen_id, item.fingerprint, item.reasons, body)
 
 
@@ -328,14 +332,23 @@ def _element_of(screen: Screen | None, element_id: str) -> Element | None:
 def _skipped_element(
     item: SkippedElement,
     screens: tuple[Screen | None, ...],
-    found: dict[str, dict[str, Element]],
+    found: dict[str, dict[str, list[tuple[Element, tuple[str, ...]]]]],
+    *,
+    package: str,
+    policy: Policy,
 ) -> Element | dict[str, object]:
     """Find the element a skip is about; a whole-screen row has none.
 
-    ``found`` caches, per screen id, the fingerprint to element map, so one
-    screen is fingerprinted once per call. The row of an oversized screen has
-    its screen id as fingerprint and no element; the engine builds no index
-    over such a screen, so neither does the driver.
+    Elements can share a fingerprint but differ in their skip reasons (two
+    identical tiles, one at the screen edge). The element is the first one, in
+    document order, whose decision from `judge` on that screen (foreground
+    taken as `package`, as on every screen the engine judges) has exactly the
+    row's reasons; when none has, the first one with the fingerprint.
+
+    ``found`` caches, per screen id, the fingerprint to (element, reasons)
+    list map, so one screen is fingerprinted and judged once per call. The row
+    of an oversized screen has its screen id as fingerprint and no element;
+    the engine builds no index over such a screen, so neither does the driver.
     """
     if item.fingerprint == item.screen_id:
         return {}
@@ -345,13 +358,21 @@ def _skipped_element(
         index = found.get(screen.screen_id)
         if index is None:
             prints = _Prints(screen)
+            judgement = judge(screen, package, policy, foreground=package)
+            reasons = {d.element.id: tuple(d.reasons) for d in judgement.decisions}
             index = {}
             for element in screen.elements:
-                index.setdefault(prints.of(element), element)
+                index.setdefault(prints.of(element), []).append(
+                    (element, reasons.get(element.id, ()))
+                )
             found[screen.screen_id] = index
-        element = index.get(item.fingerprint)
-        if element is not None:
-            return element
+        candidates = index.get(item.fingerprint)
+        if candidates:
+            wanted = tuple(item.reasons)
+            for element, reasons_of in candidates:
+                if reasons_of == wanted:
+                    return element
+            return candidates[0][0]
     return {}
 
 
@@ -456,6 +477,7 @@ def crawl(
             package,
             writer,
             engine,
+            policy,
             screenshots=screenshots,
             recheck=recheck,
             settle=settle,

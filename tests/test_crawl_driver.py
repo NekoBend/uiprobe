@@ -687,7 +687,34 @@ def test_the_row_of_a_screen_that_is_too_large_has_no_element():
     from uiprobe.crawl_driver import _skipped_element
 
     item = SkippedElement("s-abc", "s-abc", ("screen_too_large",))
-    assert _skipped_element(item, (), {}) == {}
+    assert _skipped_element(item, (), {}, package=SHOP, policy=Policy()) == {}
+
+
+def test_a_skip_row_names_the_element_whose_reasons_match(tmp_path, fake_adb, clock):
+    # Two identical unlabeled tiles share a fingerprint; the second one is
+    # listed first in the dump but only the one at the top edge gets
+    # screen_edge, so each row must name its own tile.
+    screens = (
+        Screen("home", "com.example.launcher/.Home", (El((0, 0, 320, 640)),)),
+        Screen(
+            "main",
+            f"{SHOP}/.Main",
+            (
+                El((20, 200, 300, 240), cls=BUTTON, go="main"),
+                El((20, 0, 300, 40), cls=BUTTON, go="main"),
+            ),
+        ),
+    )
+    FakeAndroid(fake_adb, SERIAL, screens, start="home")
+    out = tmp_path / "run"
+    run(Device(adb_server=fake_adb.address), clock, out)
+    rows = lines(out / "skipped.jsonl")
+    by_reasons = {tuple(r["reasons"]): r for r in rows}
+    assert set(by_reasons) == {("unlabeled", "screen_edge"), ("unlabeled",)}
+    edge = by_reasons[("unlabeled", "screen_edge")]["element"]["bounds"]
+    plain = by_reasons[("unlabeled",)]["element"]["bounds"]
+    assert edge == [20, 0, 300, 40]
+    assert plain == [20, 200, 300, 240]
 
 
 def test_a_clock_that_returns_a_bad_value_leaves_no_folder(tmp_path, device, fake_adb):
