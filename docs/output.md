@@ -2,7 +2,7 @@
 
 ## JSON documents
 
-Every JSON document has a `schema` field.
+Every JSON document has a `schema` field. Its number changes only with an incompatible change, such as a removed or renamed field or a field whose meaning changes. A new field does not change it, so a reader should ignore fields it does not know.
 
 - `uiprobe.screen/1`: a dumped screen with `captured_at`, `device` (`serial`, and `api_level` when known), `app` (`package`, and `activity`, which is left out when the focused activity cannot be read reliably or belongs to another app; it is read from Android's text diagnostics on a best-effort basis, so treat it as a hint, not as a security signal), `screen_id`, `display` (`width`, `height`; the device's current logical display size, from `wm size` rotated to the current orientation, falling back to the extent of the dumped windows when that cannot be read), and a flat list of `elements`. Each element has an `id` (`e1`, `e2`, ...), the `id` of its `parent` (absent for top-level elements), `class`, `bounds` as `[left, top, right, bottom]`, and, when present, `text`, `resource_id`, `content_desc`, `hint`, and `flags`. `screen_id` is a short hash of the package, activity, and the classes and resource ids of the elements; it does not change when only text or positions change, but it does change when the number of elements changes.
 - `uiprobe.find/1`: the result of `uiprobe find --json`, with `screen_id`, `criteria` (the given ones, by the element's key names: `text`, `resource_id`, `content_desc`), `total` (how many elements matched), and `elements` (the matches, at most 20, possibly empty). Each element has the same form as in `uiprobe.screen/1` plus `center`, `[x, y]` (left out when the element cannot be pressed: covered, or no press target).
