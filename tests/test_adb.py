@@ -1208,7 +1208,9 @@ def test_retry_keeps_trying_until_the_server_listens(
         timer.join()
         server.stop()
     attempts = [c for c in connections if c[1] == port]
-    assert len(attempts) >= 3
+    # At least one refused attempt, then the one that reached the server.
+    # Windows refuses a loopback connection slowly, so it may fit only two.
+    assert len(attempts) >= 2
 
 
 def test_retry_gives_up_after_the_deadline(
