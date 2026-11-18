@@ -7,9 +7,12 @@ uv sync
 uv run ruff check .
 uv run ruff format --check .
 uv run ty check
+uv run pytest
 ```
 
-The tests need no device and no adb. They use a fake adb server on a loopback port, and a guard makes any test that tries to reach another address or start another program fail. The guard allows only a launch of a program by absolute path under the test's temporary folder, with the single argument `start-server`, `ADB_MDNS=0` in its environment and no adb address variables. The start-server tests launch their fake adb under that rule on purpose and check how it was invoked. For a stronger guarantee on Linux, run them inside a network namespace that has no route out:
+CI runs these checks and the tests on Linux and Windows with Python 3.12, 3.13 and 3.14. On both systems it also builds the wheel with Python 3.12, installs it outside the checkout, imports `uiprobe` from the installed wheel and runs `uiprobe --help`. macOS is not tested in CI yet.
+
+The tests need no device and no adb. They use a fake adb server on a loopback port, and a guard makes any test that tries to reach another address or start another program fail. The guard allows only a launch of a program by absolute path under the test's temporary folder, with the single argument `start-server`, `ADB_MDNS=0` in its environment and no adb address variables. The start-server tests launch their fake adb under that rule on purpose and check how it was invoked. These tests, and the other tests that use a fake adb shell script (in `tests/test_start_server.py`, `tests/test_adb.py` and `tests/test_network_guard.py`), are skipped on Windows. For a stronger guarantee on Linux, run the tests inside a network namespace that has no route out:
 
 ```sh
 uv sync
