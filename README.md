@@ -6,7 +6,7 @@ uiprobe saves the screen structure of an Android app and sends taps, swipes and 
 
 uiprobe is alpha software: the command line, the JSON formats and the Python API may change in any later version. This is a development snapshot, version 0.1.0a1.dev0; no alpha is tagged yet.
 
-Seven commands exist: `devices`, `dump`, `find`, `tap`, `swipe`, `key` and `crawl`. Of `crawl` only `--dry-run` exists: it previews what a crawl would press on the screen showing now and presses nothing. The full crawl is planned, not implemented, and `crawl` without `--dry-run` is refused. Typing and other ways of operating the app are planned too. The guards have been checked only on Android emulators; real devices and other Android versions may behave differently.
+Eight commands exist: `devices`, `dump`, `find`, `tap`, `swipe`, `key`, `crawl` and `init`. Of `crawl` only `--dry-run` exists: it previews what a crawl would press on the screen showing now and presses nothing. The full crawl is planned, not implemented, and `crawl` without `--dry-run` is refused. Typing and other ways of operating the app are planned too. The guards have been checked only on Android emulators; real devices and other Android versions may behave differently.
 
 ## Safety
 
@@ -73,6 +73,7 @@ Add `--json` to get JSON instead of text (`uiprobe dump --json`).
 | `swipe` | Drags one finger, or scrolls in a direction. | [Swiping and scrolling](docs/commands.md#swiping-and-scrolling) |
 | `key` | Presses one key. | [Pressing keys](docs/commands.md#pressing-keys) |
 | `crawl` | Previews what a crawl would press; `--dry-run` only. | [Previewing a crawl](docs/crawl.md) |
+| `init` | Creates the settings file `uiprobe.toml`; no device needed. | [Settings file](docs/settings.md) |
 
 Options and environment variables: [Options](docs/commands.md#options), [Environment variables](docs/commands.md#environment-variables). JSON shapes and exit codes: [docs/output.md](docs/output.md).
 
@@ -98,6 +99,7 @@ uiprobe connects only to the adb server, which is on `127.0.0.1:5037` unless you
 
 - [docs/commands.md](docs/commands.md): every command, the options and the environment variables.
 - [docs/crawl.md](docs/crawl.md): previewing a crawl, with the reasons, deny words and limits.
+- [docs/settings.md](docs/settings.md): the settings file `uiprobe.toml` and `uiprobe init`.
 - [docs/safety.md](docs/safety.md): detailed safety notes.
 - [docs/output.md](docs/output.md): JSON formats and exit codes.
 - [docs/python.md](docs/python.md): the Python API.
