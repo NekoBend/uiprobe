@@ -45,6 +45,12 @@ from uiprobe.errors import (
 )
 from uiprobe.guards import REASONS, Policy, parse_deny_file
 from uiprobe.model import MAX_CANDIDATES, _describe
+from uiprobe.settings import (
+    SETTINGS_FILE,
+    IncompleteFileError,
+    InterruptedFileError,
+    write_default_settings,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
@@ -59,6 +65,7 @@ __all__ = ["main", "run"]
 FIND_SCHEMA = "uiprobe.find/1"
 ACTION_SCHEMA = "uiprobe.action/1"
 CRAWL_PREVIEW_SCHEMA = "uiprobe.crawl_preview/1"
+INIT_SCHEMA = "uiprobe.init/1"
 MAX_DENY_FILE_BYTES: Final = 1024 * 1024
 _MAX_COORDINATE = 32767
 _COORDINATE_RE = re.compile(r"[0-9]{1,5}")
@@ -300,6 +307,24 @@ def _build_parser() -> _Parser:
         "--tap-unlabeled",
         action="store_true",
         help="allow pressing elements that have no text, description or hint",
+    )
+    init = commands.add_parser(
+        "init",
+        allow_abbrev=False,
+        help=f"create the settings file {SETTINGS_FILE}",
+        description=(
+            f"Write the settings file with every default written out, to PATH"
+            f" (default ./{SETTINGS_FILE}). An existing file is never"
+            " overwritten. The command does not contact the adb server."
+        ),
+    )
+    init.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
+    init.add_argument(
+        "path",
+        nargs="?",
+        default=SETTINGS_FILE,
+        metavar="PATH",
+        help=f"where to create the file (default ./{SETTINGS_FILE})",
     )
     return parser
 
@@ -604,7 +629,10 @@ def _read_deny_file(path: str) -> tuple[str, ...]:
 
     The file must be a regular file of at most MAX_DENY_FILE_BYTES, checked before
     the read; a second stat after the read must match the first, so a file replaced
-    or changed meanwhile is refused. Limit: a file swapped for a FIFO or a device
+    or changed meanwhile is refused. The comparison includes the change time,
+    which on Windows is the creation time, so a same-size rewrite with a
+    restored modification time is caught on Linux and macOS but not on Windows.
+    Limit: a file swapped for a FIFO or a device, or one that keeps growing,
     exactly between the check and the read can still block or read until Ctrl+C
     (exit 130).
     """
@@ -634,8 +662,20 @@ def _read_deny_file(path: str) -> tuple[str, ...]:
         msg = f"--deny-file {shown}: cannot be read: {_printable(str(exc))}"
         raise _UsageError(msg) from None
     if not stat.S_ISREG(after.st_mode) or (
-        (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns)
-        != (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns)
+        (
+            after.st_dev,
+            after.st_ino,
+            after.st_size,
+            after.st_mtime_ns,
+            after.st_ctime_ns,
+        )
+        != (
+            info.st_dev,
+            info.st_ino,
+            info.st_size,
+            info.st_mtime_ns,
+            info.st_ctime_ns,
+        )
     ):
         msg = f"--deny-file {shown}: the file changed while it was read; try again"
         raise _UsageError(msg)
@@ -797,6 +837,41 @@ def _cmd_crawl(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_init(args: argparse.Namespace) -> int:
+    path: str = args.path
+    shown = _printable(path)
+    if (
+        args.serial is not None
+        or args.adb is not None
+        or args.adb_server is not None
+        or not args.start_server
+    ):
+        msg = (
+            "init takes no device options (-s, --adb, --adb-server, --no-start-server)"
+        )
+        raise _UsageError(msg)
+    try:
+        write_default_settings(path)
+    except FileExistsError:
+        msg = f"{shown} already exists; uiprobe never overwrites it"
+        raise _UsageError(msg) from None
+    except IncompleteFileError as exc:
+        msg = (
+            f"{shown} was created but could not be written completely:"
+            f" {_printable(str(exc))}; the file may be incomplete, so delete it"
+            " and run uiprobe init again"
+        )
+        raise _UsageError(msg) from None
+    except (OSError, ValueError) as exc:
+        msg = f"{shown} cannot be created: {_printable(str(exc))}"
+        raise _UsageError(msg) from None
+    if args.json:
+        _emit(dumps({"schema": INIT_SCHEMA, "path": path}))
+    else:
+        _emit(shown)
+    return 0
+
+
 _HANDLERS: dict[str, Callable[[argparse.Namespace], int]] = {
     "devices": _cmd_devices,
     "dump": _cmd_dump,
@@ -805,6 +880,7 @@ _HANDLERS: dict[str, Callable[[argparse.Namespace], int]] = {
     "swipe": _cmd_swipe,
     "key": _cmd_key,
     "crawl": _cmd_crawl,
+    "init": _cmd_init,
 }
 
 
@@ -906,6 +982,12 @@ def _failure_code(exc: BaseException, *, as_json: bool) -> int:
         return _report(exc.to_dict(), exc.exit_code, as_json=as_json)
     if isinstance(exc, _UsageError | TypeError | ValueError):
         return _fail(USAGE_ERROR, str(exc), as_json=as_json)
+    if isinstance(exc, InterruptedFileError):
+        msg = (
+            f"interrupted; {_printable(exc.path)} was created and may be"
+            " incomplete, so delete it before running uiprobe init again"
+        )
+        return _fail(INTERRUPTED, msg, as_json=as_json)
     if isinstance(exc, KeyboardInterrupt):
         return _fail(INTERRUPTED, "interrupted", as_json=as_json)
     name = type(exc).__name__

@@ -14,6 +14,7 @@ import pathlib
 import re
 import sys
 import threading
+import time
 from typing import TYPE_CHECKING, Any
 
 import pytest
@@ -802,6 +803,38 @@ def test_crawl_deny_file_modified_in_place_while_read(
     def change():
         path.write_bytes(b"# something else entirely\nhelp\n")
         assert path.stat().st_ino == inode
+
+    _change_before_read(monkeypatch, path, change)
+    message = crawl_usage_error(
+        capsys, fake_adb, SHOP, "--dry-run", "--deny-file", str(path)
+    )
+    assert "the file changed while it was read" in message
+    assert android.inputs == []
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="st_ctime is the creation time on Windows and does not change on a rewrite",
+)
+@pytest.mark.usefixtures("android")
+def test_crawl_deny_file_same_size_rewrite_with_restored_mtime(
+    fake_adb, android, capsys, tmp_path, monkeypatch
+):
+    path = tmp_path / "deny.txt"
+    path.write_bytes(b"browse\n")
+    info = path.stat()
+
+    def change():
+        path.write_bytes(b"browsf\n")
+        os.utime(path, ns=(info.st_atime_ns, info.st_mtime_ns))
+        for _ in range(200):  # a coarse clock may need a few ticks to move ctime
+            if path.stat().st_ctime_ns != info.st_ctime_ns:
+                break
+            time.sleep(0.01)
+            os.utime(path, ns=(info.st_atime_ns, info.st_mtime_ns))
+        after = path.stat()
+        assert after.st_mtime_ns == info.st_mtime_ns
+        assert after.st_ctime_ns != info.st_ctime_ns
 
     _change_before_read(monkeypatch, path, change)
     message = crawl_usage_error(

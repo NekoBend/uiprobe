@@ -28,3 +28,7 @@ UIPROBE_TEST_REQUIRE_OFFLINE=1 unshare -rn uv run --offline pytest
 ```
 
 The network rules are in [network.md](network.md).
+
+## File access in the tests
+
+The offline test guard is a review aid, not a defense against deliberate evasion (its known limits are listed in `tests/test_offline_guard.py`). It flags every reference in `src/uiprobe` to a name that can open or change a file, except the call sites on its allowlist. It approves `tomllib` as an import in every module, like `json` and `re`, because it only parses text it is given, and it allows two file calls, in `settings.py` only: the create-only `open(path, "x", ...)` and the one read-only `os.open(path, _READ_FLAGS)` of the reader. The flags are a module constant that the guard checks by AST (only `O_RDONLY`, `O_NONBLOCK`, `O_CLOEXEC`, `O_NOCTTY`, `O_BINARY` and `O_NOINHERIT`, combined with `|`) and at runtime (none of `O_WRONLY`, `O_RDWR`, `O_CREAT`, `O_TRUNC`, `O_APPEND`, `O_EXCL`, `O_TEMPORARY`).
