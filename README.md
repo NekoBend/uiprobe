@@ -1,5 +1,7 @@
 # uiprobe
 
+[![ci](https://github.com/NekoBend/uiprobe/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/NekoBend/uiprobe/actions/workflows/ci.yml) [![license](https://img.shields.io/badge/license-MIT-blue)](LICENSE) [![python](https://img.shields.io/badge/python-3.12%2B-blue)](#requirements)
+
 uiprobe saves the screen structure of an Android app and sends taps, swipes and keys to it. It runs `uiautomator dump` on a device or emulator through `adb`, parses the XML, and gives you the result as a Python object, as JSON, or as an indented text tree. It uses only the Python standard library, and by default it talks only to the local adb server (`--adb-server` or `ADB_SERVER_SOCKET` can name another address; see [Options](docs/commands.md#options)).
 
 ## Status
@@ -62,7 +64,7 @@ $ uiprobe -s emulator-5554 tap --id email
 tapped e3 EditText id=email hint="メールアドレス" [tap] at 540,660
 ```
 
-Add `--json` to get JSON instead of text (`uiprobe dump --json`).
+Add `--json` to get JSON instead of text (`uiprobe dump --json`), or `--brief` for a short text view with only the elements that have a label or a `[tap]` or `[scroll]` mark (see [Dumping a screen](docs/commands.md#dumping-a-screen)).
 
 ## Commands
 
