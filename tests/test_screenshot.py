@@ -15,6 +15,7 @@ import re
 import struct
 import zlib
 from datetime import datetime
+from enum import StrEnum
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -160,6 +161,15 @@ BAD_IMAGES.update(
         "palette of 257 colors": png_with(
             ihdr(8, 3), chunk(b"PLTE", b"\0" * 771), IDAT, IEND
         ),
+        "1-bit image with 3 colors": png_with(
+            ihdr(1, 3), chunk(b"PLTE", b"\0" * 9), IDAT, IEND
+        ),
+        "4-bit image with 17 colors": png_with(
+            ihdr(4, 3), chunk(b"PLTE", b"\0" * 51), IDAT, IEND
+        ),
+        "suggested palette of 257 colors": png_with(
+            ihdr(8, 2), chunk(b"PLTE", b"\0" * 771), IDAT, IEND
+        ),
         "palette for gray": png_with(ihdr(8, 0), chunk(b"PLTE", b"\0" * 3), IDAT, IEND),
         "two palettes": png_with(
             ihdr(8, 2), chunk(b"PLTE", b"\0" * 3), chunk(b"PLTE", b"\0" * 3), IDAT, IEND
@@ -171,6 +181,15 @@ BAD_IMAGES.update(
 GOOD_IMAGES = {
     "palette": png_with(ihdr(4, 3), chunk(b"PLTE", b"\0\0\0"), IDAT, IEND),
     "256 colors": png_with(ihdr(8, 3), chunk(b"PLTE", b"\0" * 768), IDAT, IEND),
+    "1-bit image with 2 colors": png_with(
+        ihdr(1, 3), chunk(b"PLTE", b"\0" * 6), IDAT, IEND
+    ),
+    "4-bit image with 16 colors": png_with(
+        ihdr(4, 3), chunk(b"PLTE", b"\0" * 48), IDAT, IEND
+    ),
+    "suggested palette of 256 colors": png_with(
+        ihdr(16, 6), chunk(b"PLTE", b"\0" * 768), IDAT, IEND
+    ),
     "suggested palette for color": png_with(
         ihdr(8, 2), chunk(b"PLTE", b"\0" * 6), IDAT, IEND
     ),
@@ -313,7 +332,7 @@ def test_save_png_does_not_take_a_descriptor(tmp_path):
     assert sorted(p.name for p in tmp_path.iterdir()) == ["old.bin"]
 
 
-def test_save_png_does_not_take_text_that_acts_as_a_descriptor(tmp_path):
+def test_save_png_uses_text_that_could_act_as_a_descriptor_as_text(tmp_path):
     target = tmp_path / "old.bin"
     target.write_bytes(b"old")
     fd = os.open(target, os.O_RDWR)
@@ -324,14 +343,37 @@ def test_save_png_does_not_take_text_that_acts_as_a_descriptor(tmp_path):
         def __index__(self) -> int:
             return fd
 
+    class Shot:
+        def __fspath__(self) -> str:
+            return Indexable(str(tmp_path / "via-pathlike.png"))
+
     try:
-        with pytest.raises(TypeError, match="Indexable"):
-            save_png(Indexable(str(tmp_path / "new.png")), PNG)
-        assert os.fstat(fd).st_size == 3  # still open
+        save_png(Indexable(str(tmp_path / "new.png")), PNG)
+        save_png(Shot(), PNG)
+        assert os.fstat(fd).st_size == 3  # still open, nothing written to it
     finally:
         os.close(fd)
     assert target.read_bytes() == b"old"
-    assert sorted(p.name for p in tmp_path.iterdir()) == ["old.bin"]
+    assert (tmp_path / "new.png").read_bytes() == PNG
+    assert (tmp_path / "via-pathlike.png").read_bytes() == PNG
+
+
+class Shots(StrEnum):
+    HOME = "home.png"
+
+
+def test_save_png_takes_a_str_enum_path(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    save_png(Shots.HOME, PNG)
+    assert (tmp_path / "home.png").read_bytes() == PNG
+
+
+@pytest.mark.parametrize("path", [3, True, False, 2.0, b"x.png", None])
+def test_save_png_refuses_a_path_that_is_not_text(tmp_path, monkeypatch, path):
+    monkeypatch.chdir(tmp_path)
+    with pytest.raises(TypeError):
+        save_png(path, PNG)
+    assert list(tmp_path.iterdir()) == []
 
 
 def test_an_os_error_inside_a_callers_interrupt_handler_is_a_file_error(

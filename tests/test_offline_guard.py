@@ -1804,13 +1804,27 @@ def test_each_pngfile_call_has_exactly_one_call_site():
     assert ALLOWED_CALLS["pngfile.py"] == frozenset(PNGFILE_CALLS)
 
 
+_NESTED_SCOPES = (
+    ast.FunctionDef,
+    ast.AsyncFunctionDef,
+    ast.ClassDef,
+    ast.Lambda,
+    ast.GeneratorExp,
+    ast.ListComp,
+    ast.SetComp,
+    ast.DictComp,
+)
+
+
 def _own_scope(node: ast.AST):
-    """Yield the nodes below `node` outside any nested def, class or lambda."""
+    """Yield the nodes below `node` that run in its own scope, in order.
+
+    Nested defs, classes, lambdas, comprehensions and generator expressions are
+    not entered: their bodies may run later, or never.
+    """
     for child in ast.iter_child_nodes(node):
         yield child
-        if not isinstance(
-            child, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef | ast.Lambda
-        ):
+        if not isinstance(child, _NESTED_SCOPES):
             yield from _own_scope(child)
 
 
@@ -1903,6 +1917,18 @@ def save_png(path, data, other):
     with handle:
         handle.write(data)
 """
+GENERATOR_WRITE = """
+def save_png(path, data):
+    handle = open(path, 'xb')
+    with handle:
+        pending = (handle.write(data) for _ in [0])
+"""
+LIST_WRITE = """
+def save_png(path, data):
+    handle = open(path, 'xb')
+    with handle:
+        done = [handle.write(data) for _ in [0]]
+"""
 NESTED_WRITE = """
 def save_png(path, data):
     handle = open(path, 'xb')
@@ -1920,6 +1946,8 @@ def save_png(path, data):
         WRITE_AFTER_WITH,
         MATCH_CAPTURE,
         NESTED_WRITE,
+        GENERATOR_WRITE,
+        LIST_WRITE,
     ],
 )
 def test_a_write_to_another_handle_is_caught(source):

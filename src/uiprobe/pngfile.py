@@ -47,9 +47,10 @@ _DEPTHS: Final = {
     6: frozenset({8, 16}),
 }
 _PALETTE: Final = 3
-# Gray and gray with alpha must not have a palette; it holds 1 to 256 colors.
+# Gray and gray with alpha must not have a palette. A palette holds 1 to 256
+# colors, and an indexed image's at most 2**depth (two for a 1-bit image).
 _NO_PALETTE: Final = frozenset({0, 4})
-_MAX_PALETTE: Final = 3 * 256
+_MAX_COLORS: Final = 256
 _WINDOWS: Final = os.name == "nt"
 # A Windows drive at the start of a path: an optional ``\\?\`` or ``\\.\``
 # prefix, then a letter and a colon. Any other colon names a stream.
@@ -79,8 +80,8 @@ class PngInterruptedError(KeyboardInterrupt):
         self.path = path
 
 
-def _header(data: bytes) -> tuple[int, int, int]:
-    """Check the IHDR chunk; return ``(width, height, color type)``."""
+def _header(data: bytes) -> tuple[int, int, int, int]:
+    """Check the IHDR chunk; return ``(width, height, color type, bit depth)``."""
     start = len(_SIGNATURE)
     header = data[start : start + 8 + _IHDR_LENGTH]
     if (
@@ -102,11 +103,16 @@ def _header(data: bytes) -> tuple[int, int, int]:
     if compression != 0 or filtering != 0 or interlace not in {0, 1}:
         msg = "the PNG image has an invalid compression, filter or interlace method"
         raise ValueError(msg)
-    return width, height, color
+    return width, height, color, depth
 
 
-def _check_chunk(kind: bytes, length: int, color: int, seen: set[str]) -> None:
-    """Check the order rules for one chunk between IHDR and IEND."""
+def _check_chunk(
+    kind: bytes, length: int, color: int, colors: int, seen: set[str]
+) -> None:
+    """Check the order rules for one chunk between IHDR and IEND.
+
+    `colors` is the most palette entries the image may have.
+    """
     if kind == b"IHDR":
         msg = "the PNG image has a second header chunk"
         raise ValueError(msg)
@@ -126,15 +132,16 @@ def _check_chunk(kind: bytes, length: int, color: int, seen: set[str]) -> None:
             seen & {"PLTE", "IDAT"}
             or color in _NO_PALETTE
             or length % 3
-            or not 3 <= length <= _MAX_PALETTE
+            or not 3 <= length <= 3 * colors
         ):
             msg = "the PNG image has a misplaced or malformed palette"
             raise ValueError(msg)
         seen.add("PLTE")
 
 
-def _walk_chunks(data: bytes, color: int) -> None:
+def _walk_chunks(data: bytes, color: int, depth: int) -> None:
     """Check the chunks after IHDR up to the closing IEND at the end of `data`."""
+    colors = min(1 << depth, _MAX_COLORS) if color == _PALETTE else _MAX_COLORS
     cut = "the PNG image is cut off"
     position = len(_SIGNATURE) + 12 + _IHDR_LENGTH
     seen: set[str] = set()
@@ -151,7 +158,7 @@ def _walk_chunks(data: bytes, color: int) -> None:
             raise ValueError(cut)
         if kind == b"IEND":
             break
-        _check_chunk(kind, length, color, seen)
+        _check_chunk(kind, length, color, colors, seen)
         position = end
     if length != 0 or end != len(data) or not data.endswith(_IEND):
         msg = "the PNG image does not end with its closing chunk"
@@ -169,9 +176,10 @@ def check_png(data: bytes) -> tuple[int, int]:
     allows, compression and filter method 0 and interlace method 0 or 1;
     every chunk's length (at most 2**31 - 1) and a four-letter type, each
     chunk fitting inside `data`; no second ``IHDR``; at most one ``PLTE``
-    (1 to 256 colors), before the image data, required for color type 3 and
-    refused for gray types; ``IDAT`` chunks in one unbroken run, at least
-    one; and an empty closing ``IEND`` chunk exactly at the end. Chunk
+    (1 to 256 colors, for color type 3 at most 2**depth), before the image
+    data, required for color type 3 and refused for gray types; ``IDAT``
+    chunks in one unbroken run, at least one; and an empty closing ``IEND``
+    chunk exactly at the end. Chunk
     checksums (except the fixed one of ``IEND``), other chunks' order and
     contents, and the image data are not checked.
 
@@ -188,8 +196,8 @@ def check_png(data: bytes) -> tuple[int, int]:
     if not data.startswith(_SIGNATURE):
         msg = "the screenshot is not a PNG image"
         raise ValueError(msg)
-    width, height, color = _header(data)
-    _walk_chunks(data, color)
+    width, height, color, depth = _header(data)
+    _walk_chunks(data, color, depth)
     return width, height
 
 
@@ -236,9 +244,10 @@ def save_png(path: str | os.PathLike[str], data: bytes) -> None:
     Raises:
         FileExistsError: Something is at `path` already, also a broken link;
             nothing was changed.
-        TypeError: `path` is not a str or an os.PathLike that gives exactly a
-            str (an int, or text that can act as one, is never taken as an
-            open descriptor), or `data` is not bytes.
+        TypeError: `path` is not a str or an os.PathLike of str (an int, a
+            bool or bytes is refused), or `data` is not bytes. Text of a str
+            subclass, such as a `StrEnum` member, is used as a plain str, so
+            it is never taken as an open descriptor.
         ValueError: `data` is not a PNG, or `path` cannot be used (it is
             empty, holds a null character, or on Windows names a stream of a
             file); nothing was created.
@@ -249,7 +258,11 @@ def save_png(path: str | os.PathLike[str], data: bytes) -> None:
             KeyboardInterrupt); the file stays, possibly incomplete.
     """
     path = os.fspath(path)  # refuses an int, which open() takes as a descriptor
-    check_new_path(path)  # refuses a str subclass, which could act as one
+    if isinstance(path, str):
+        # A plain str: a subclass with __index__ would make open() take it as
+        # a descriptor, and its other methods could differ as well.
+        path = str.__str__(path)
+    check_new_path(path)
     check_png(data)
     try:
         handle = open(path, "xb")  # noqa: PTH123, SIM115
