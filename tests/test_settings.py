@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 
-from uiprobe import cli, guards, settings
+from uiprobe import cli, guards, pngfile, settings
 from uiprobe.device import DEVICE_WIDE_KEY_PREFIXES, DEVICE_WIDE_KEYS
 from uiprobe.guards import (
     API36_BOTTOM_PX,
@@ -600,6 +600,86 @@ def test_write_default_settings_refuses_a_descriptor(tmp_path):
     finally:
         os.close(fd)
     assert target.read_text(encoding="utf-8") == "mine\n"
+
+
+class IndexableText(str):
+    """Text that open() would take as descriptor 1 if it were used as it is."""
+
+    __slots__ = ()
+
+    def __index__(self) -> int:
+        return 1
+
+
+class IndexablePath:
+    def __init__(self, text: str) -> None:
+        self.text = text
+
+    def __fspath__(self) -> str:
+        return IndexableText(self.text)
+
+
+@pytest.mark.parametrize("wrap", [IndexableText, IndexablePath], ids=["str", "path"])
+def test_write_default_settings_uses_indexable_text_as_text(tmp_path, wrap):
+    target = tmp_path / SETTINGS_FILE
+    settings.write_default_settings(wrap(str(target)))
+    assert target.read_text(encoding="utf-8") == settings.render_default_settings()
+
+
+@pytest.mark.parametrize("path", [b"u.toml", 2.0, None])
+def test_write_default_settings_refuses_what_is_not_text(tmp_path, monkeypatch, path):
+    monkeypatch.chdir(tmp_path)
+    with pytest.raises(TypeError):
+        settings.write_default_settings(path)
+    assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.parametrize("name", ["u.toml:extra", "u.toml::$DATA", "dir:x/u.toml"])
+def test_on_windows_a_stream_path_is_refused(tmp_path, monkeypatch, name):
+    monkeypatch.setattr(pngfile, "_WINDOWS", True)
+    with pytest.raises(ValueError, match="stream"):
+        settings.write_default_settings(tmp_path / name)
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_on_windows_a_stream_of_an_existing_file_is_refused(tmp_path, monkeypatch):
+    target = write(tmp_path, "mine\n", SETTINGS_FILE)
+    monkeypatch.setattr(pngfile, "_WINDOWS", True)
+    with pytest.raises(ValueError, match="stream"):
+        settings.write_default_settings(f"{target}:extra")
+    assert target.read_text(encoding="utf-8") == "mine\n"
+    assert list(tmp_path.iterdir()) == [target]
+
+
+def test_elsewhere_a_colon_is_part_of_the_name(tmp_path, monkeypatch):
+    monkeypatch.setattr(pngfile, "_WINDOWS", False)
+    if os.name == "nt":
+        pytest.skip("Windows names a stream with a colon")
+    target = tmp_path / "u.toml:extra"
+    settings.write_default_settings(target)
+    assert target.is_file()
+
+
+@pytest.mark.parametrize(
+    ("path", "word"), [("", "empty"), ("u\x00.toml", "null")], ids=["empty", "null"]
+)
+def test_write_default_settings_refuses_an_empty_or_null_path(
+    tmp_path, monkeypatch, path, word
+):
+    monkeypatch.chdir(tmp_path)
+    with pytest.raises(ValueError, match=word):
+        settings.write_default_settings(path)
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_init_refuses_a_stream_path_on_windows(tmp_path, capsys, monkeypatch):
+    target = write(tmp_path, "mine\n", SETTINGS_FILE)
+    monkeypatch.setattr(pngfile, "_WINDOWS", True)
+    code, out, err = invoke(capsys, "init", f"{target}:extra")
+    assert (code, out) == (2, "")
+    assert "names a stream of a file" in err
+    assert target.read_text(encoding="utf-8") == "mine\n"
+    assert list(tmp_path.iterdir()) == [target]
 
 
 @pytest.mark.parametrize(

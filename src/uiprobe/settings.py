@@ -61,7 +61,6 @@ modification time is not detected there.
 
 from __future__ import annotations
 
-import errno
 import os
 import re
 import stat
@@ -87,6 +86,7 @@ from uiprobe.guards import (
     normalize,
 )
 from uiprobe.model import MIN_VISIBLE_PX
+from uiprobe.pngfile import check_new_path
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Mapping, Sequence
@@ -397,25 +397,32 @@ def write_default_settings(path: str | os.PathLike[str]) -> None:
     """Create the file `path` with the default settings; never overwrite one.
 
     Raises:
-        FileExistsError: `path` already exists (a file, a directory or a link).
+        FileExistsError: `path` already exists (a file, a directory or a link,
+            also a link whose target is missing).
         IncompleteFileError: The file was created but writing, flushing or
             closing it failed; it stays on disk, incomplete, because uiprobe
             never deletes files.
         InterruptedFileError: Ctrl+C arrived after the file was created (a
             KeyboardInterrupt); the file stays, possibly incomplete.
         OSError: The file cannot be created.
-        TypeError: `path` is not a str or an os.PathLike (an int is not taken
-            as an open descriptor).
+        TypeError: `path` is not a str or an os.PathLike of str (neither an
+            int nor bytes is taken, so nothing is used as an open descriptor).
+        ValueError: `path` is empty, holds a null character, or on Windows
+            names a stream of a file (a colon after the drive), which would
+            change the file the stream belongs to.
     """
     path = os.fspath(path)  # refuses an int, which open() takes as a descriptor
+    if isinstance(path, str):
+        # A str subclass can define __index__, and open() would then take it
+        # as a descriptor; its text is used as a plain str instead.
+        path = str.__str__(path)
+    # The same checks as for a screenshot file. On POSIX the create-only open
+    # already fails on any existing path, including a link whose target is
+    # missing. On Windows it follows such a link and creates the target, so an
+    # existing entry of any kind is refused first. A link made between this
+    # check and the open is not caught on Windows; the docs say so.
+    check_new_path(path)
     text = render_default_settings()
-    # On POSIX the create-only open already fails on any existing path,
-    # including a link whose target is missing. On Windows it follows such a
-    # link and creates the target, so an existing entry of any kind is
-    # refused first. A link made between this check and the open is not
-    # caught on Windows; the docs say so.
-    if os.path.lexists(path):
-        raise FileExistsError(errno.EEXIST, "file exists", str(path))
     handle = open(path, "x", encoding="utf-8", newline="\n")  # noqa: PTH123, SIM115
     try:
         try:
@@ -426,10 +433,10 @@ def write_default_settings(path: str | os.PathLike[str]) -> None:
     except OSError as error:
         # A failing close must not hide a Ctrl+C that arrived while writing.
         if isinstance(error.__context__, KeyboardInterrupt):
-            raise InterruptedFileError(str(path)) from error
+            raise InterruptedFileError(path) from error
         raise IncompleteFileError(error) from error
     except KeyboardInterrupt as error:
-        raise InterruptedFileError(str(path)) from error
+        raise InterruptedFileError(path) from error
 
 
 # -- the reader ----------------------------------------------------------------
