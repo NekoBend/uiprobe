@@ -1742,17 +1742,32 @@ def test_a_changed_runlog_call_is_flagged(source, filename):
     assert file_changes(source, filename)
 
 
+# Where each runlog call is accepted, written out by hand. settings.py has its
+# own allowance for the identical create-only text open (the settings file).
+RUNLOG_CALL_FILES = {
+    RUNLOG_MKDIR: {"runlog.py"},
+    RUNLOG_OPEN_TEXT: {"runlog.py", "settings.py"},
+    RUNLOG_OPEN_BINARY: {"runlog.py"},
+    RUNLOG_WRITE: {"runlog.py"},
+}
+
+
 @pytest.mark.parametrize("call", RUNLOG_CALLS)
-def test_a_runlog_call_is_accepted_only_in_runlog(call):
+def test_a_runlog_call_is_accepted_only_where_listed(call):
     source = "import os\n" + call
-    assert not file_changes(source, "runlog.py")
-    for other in ("cli.py", "device.py", "sub/runlog.py", "other.py"):
-        assert file_changes(source, other)
+    files = (*sorted(ALLOWED_CALLS), "sub/runlog.py", "sub/settings.py", "other.py")
+    accepted = {name for name in files if not file_changes(source, name)}
+    assert accepted == RUNLOG_CALL_FILES[call]
     assert file_changes(source)
 
 
 def test_a_runlog_call_still_has_its_arguments_checked():
-    nested = "import os\nos.mkdir(os.remove('x'))"
-    assert file_changes(nested, "runlog.py") == [2]
+    # The outer call is allowed as a whole; only its argument can be flagged.
+    outer = "os.mkdir(os.remove('x'))"
+    allowed = {"runlog.py": frozenset({outer})}
+    nested = "import os\nos.mkdir(\n    os.remove('x'))"
+    assert ast.unparse(ast.parse(nested).body[1]) == outer
+    assert file_changes(nested, "runlog.py", allowed) == [3]
+    assert not file_changes("import os\nos.mkdir(\n    path)", "runlog.py")
     two = "import os\nos.mkdir(path)\nopen(path, 'w')"
     assert file_changes(two, "runlog.py") == [3]

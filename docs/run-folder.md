@@ -6,10 +6,13 @@ A crawl run is recorded in one new folder. The library part that writes it is `u
 
 - The folder must not exist, and its parent folder must exist. Nothing is created silently and an existing folder is never reused. If the folder exists or the parent is missing, nothing is written and `RunFolderError` is raised.
 - Every file is created new. No file is overwritten, renamed, truncated or deleted, also not after an error.
-- Text files are UTF-8 with LF line ends on every system. JSON escapes control characters and bidirectional formatting characters as `\uXXXX`, like the other uiprobe JSON.
+- Text files are UTF-8 with LF line ends on every system. JSON is escaped like the other uiprobe JSON: inside strings, the control characters U+0000 to U+001F use the standard JSON escapes (`\b`, `\t`, `\n`, `\f`, `\r`, and `\u00XX` for the others), and DEL, the C1 controls (U+007F to U+009F), the line and paragraph separators (U+2028, U+2029) and the bidirectional formatting characters (U+061C, U+200E, U+200F, U+202A to U+202E, U+2066 to U+2069) are written as `\uXXXX`. Other text, such as Japanese, stays readable. A JSON line therefore never holds a line break inside a string.
+- JSON never holds `NaN` or an infinite number. A value that holds one is refused with `ValueError` before any file is opened, and nothing is written.
 - File names are fixed names, or a screen id (`s-` and 12 lowercase hex digits, such as `s-0123456789ab`). Text that comes from the app never becomes part of a path.
 - Every line or file is flushed and then synced to the disk (`fsync`) before the method returns. A line is therefore complete on disk when the writer returns, also if the program is killed right after.
-- If a write fails, the file stays as far as it got, the error names it (`details.path`), and the writer refuses all later writes. A folder without `run.json` did not end normally.
+- If a write fails, the file stays as far as it got, the error names it (`details.path`), and the writer refuses all later writes. The same holds when an interrupt such as Ctrl+C (`KeyboardInterrupt`) stops a write part way.
+- At the end, the line files are closed first, then `summary.txt` is written, and `run.json` last. A folder whose `run.json` is missing or is not complete JSON did not end normally.
+- A writer is made only with `RunWriter.create`, which makes the folder. Calling `RunWriter(...)` directly raises `TypeError`, so a writer can never write into a folder it did not make.
 
 ## Files
 
@@ -21,7 +24,7 @@ A crawl run is recorded in one new folder. The library part that writes it is `u
 | `screens/<screen_id>.json` | the first time a screen id is seen | The screen, in the form of `uiprobe dump --json` (`uiprobe.screen/1`). |
 | `screens/<screen_id>.png` | the first time a screenshot is given for a screen id | A PNG image. Anything that does not start with the PNG signature is refused and no file is made. |
 | `summary.txt` | at the end | Per screen, the labels of its buttons. |
-| `run.json` | at the very end | How the run ended. It is written last, after `summary.txt`. |
+| `run.json` | at the very end | How the run ended. It is written last, after the line files are closed and `summary.txt` is written. |
 
 The `screens` folder is made when the first screen file is written.
 
@@ -30,10 +33,12 @@ The `screens` folder is made when the first screen file is written.
 `run-start.json` and `run.json` hold one JSON object (indented). The `.jsonl` files hold one compact JSON object per line. Times are ISO 8601 with a UTC offset (the local one unless the caller gives a time with its own), to the second, such as `2026-03-01T09:30:15+09:00`.
 
 - `uiprobe.run_start/1`: `started_at`, `package`, `limits` (`depth`, `actions`, `minutes`), `deny` (the deny words in use, in the given order), `device` (`serial`).
-- `uiprobe.transition_start/1`: `recorded_at`, `action_id` (counts from 1), `action` and, when known, `from_screen_id`. `action` has `kind` (for example `launch`, `tap`, `back`, `relaunch`) and, when given, `point` (`[x, y]`) and `element` (the form of an element in `uiprobe.screen/1`). The line is written before the action is sent.
+- `uiprobe.transition_start/1`: `recorded_at`, `action_id` (counts from 1), `action` and, when known, `from_screen_id`. `action` has `kind` (for example `launch`, `tap`, `back`, `relaunch`) and, when given, `point` (`[x, y]`) and `element`. The line is written before the action is sent.
 - `uiprobe.transition_end/1`: `recorded_at`, `action_id`, `dump_failed` (`true` when the screen after the action could not be read) and, only when `dump_failed` is `false`, `to_screen_id`.
 - `uiprobe.skip/1`: `recorded_at`, `screen_id`, `fingerprint`, `reasons` (the reasons in the order the caller gives them; the writer does not sort them) and `element`. One line is written for each different combination of `screen_id`, `fingerprint` and `reasons`; repeats are not written.
 - `uiprobe.run/1`: `ended_at`, `stop_reason`, `screens` (how many screens were seen) and `actions` (how many actions were sent).
+
+`element` (in `uiprobe.transition_start/1` and `uiprobe.skip/1`) is written in the form the caller gives: an `Element` is written in its `uiprobe.screen/1` form, and a mapping is written as given. The writer does not check its fields.
 
 ## summary.txt
 
@@ -41,4 +46,8 @@ For each screen that was written, one heading line (package, activity and the sc
 
 ## Interrupts
 
-`RunWriter.critical()` is a context manager that marks the time while a line or file is written; the read-only property `writing` is `True` inside it. A program that handles Ctrl+C can look at `writing` and postpone the interrupt until the write is complete. The library installs no signal handler.
+`RunWriter.critical()` is a context manager that marks the time while a line or file is written; the read-only property `writing` is `True` inside it. Each write method keeps the write and the writer's record of it (for example that a screen or a skip was already written) inside one such block, so `writing` stays `True` until the write is recorded. A program that handles Ctrl+C can look at `writing` and postpone the interrupt until the write is complete. The library installs no signal handler.
+
+## Limits
+
+Files and folders are only ever created new: an existing file is never opened. But if another program running with the same rights replaces the run folder or the `screens` folder with a link (or, on Windows, a junction) during a run, later new files can be created where that link points. uiprobe does not defend against such a program, which could just as well write there itself.

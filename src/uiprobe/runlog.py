@@ -16,19 +16,26 @@ Rules that hold for every file:
   used in a path. Text that comes from the app goes into file contents only.
 * Text is UTF-8 with LF line ends on every platform. JSON goes through the
   project's JSON helper, which escapes control and bidirectional characters.
+  NaN and infinite numbers are refused before any file is opened.
 * Each line or file is flushed to the operating system and then fsynced before
   the method returns, so a line that was written before an action was sent is
-  complete on disk if the program is killed right after. A run folder without
-  ``run.json`` did not end normally.
+  complete on disk if the program is killed right after. ``run.json`` is
+  written last, after the line files are closed and ``summary.txt`` is
+  written; a run folder whose ``run.json`` is missing or is not complete JSON
+  did not end normally.
 
-A write that is under way can be marked with `RunWriter.critical`, so that a
-Ctrl+C handler in the caller can wait until it is complete. This module
-installs no signal handler.
+A write that is under way, together with the writer's record of it, is
+marked with `RunWriter.critical`, so that a Ctrl+C handler in the caller can
+wait until it is complete. This module installs no signal handler. An
+exception other than `OSError` (such as `KeyboardInterrupt`) that escapes
+while a file is written leaves the writer refusing every later write, as a
+failed write does.
 """
 
 from __future__ import annotations
 
 import contextlib
+import json
 import os
 import re
 from datetime import UTC, datetime
@@ -61,6 +68,9 @@ RUN_SCHEMA: Final = "uiprobe.run/1"
 
 _SCREEN_ID: Final = re.compile(r"s-[0-9a-f]{12}")
 _PNG_SIGNATURE: Final = b"\x89PNG\r\n\x1a\n"
+# Passed by `RunWriter.create` only: a writer cannot be made for a folder that
+# `create` did not make itself.
+_CREATED: Final = object()
 
 
 class RunFolderError(UiprobeError):
@@ -82,8 +92,26 @@ def _stamp(moment: datetime) -> str:
     return moment.isoformat(timespec="seconds")
 
 
+def _check_moment(name: str, moment: datetime) -> datetime:
+    if not isinstance(moment, datetime):
+        msg = f"{name} must be a datetime, not {type(moment).__name__}"
+        raise TypeError(msg)
+    if moment.utcoffset() is None:
+        msg = f"{name} must have a time zone with a UTC offset"
+        raise ValueError(msg)
+    return moment
+
+
 def _check_screen_id(screen_id: object) -> str:
-    if not isinstance(screen_id, str) or _SCREEN_ID.fullmatch(screen_id) is None:
+    """Return `screen_id` if it is a plain `str` of the screen id form.
+
+    A subclass of `str` (a str-valued enum, for example) is refused: its
+    formatting could differ from the value that was checked.
+    """
+    if type(screen_id) is not str:
+        msg = f"a screen id must be a str, not {type(screen_id).__name__}"
+        raise TypeError(msg)
+    if _SCREEN_ID.fullmatch(screen_id) is None:
         msg = "a screen id is 's-' and 12 lowercase hex digits"
         raise ValueError(msg)
     return screen_id
@@ -108,6 +136,21 @@ def _encoded(text: str) -> str:
         msg = "text cannot be written as UTF-8 (it holds a lone surrogate)"
         raise ValueError(msg) from error
     return text
+
+
+def _json_text(value: dict[str, object], *, indent: int | None = None) -> str:
+    """Return `value` as JSON text, refusing what strict JSON cannot hold.
+
+    NaN and infinite numbers are refused here, before any file is opened.
+    The project's JSON helper keeps the default of `json.dumps` for other
+    output, so the check is made with a strict `json.dumps` first.
+    """
+    try:
+        json.dumps(value, allow_nan=False)
+    except ValueError as error:
+        msg = "JSON output cannot hold NaN or an infinite number"
+        raise ValueError(msg) from error
+    return _encoded(dumps(value, indent=indent))
 
 
 def _check_number(name: str, value: object) -> int:
@@ -206,13 +249,17 @@ def _label(element: Element) -> str:
 class RunWriter:
     """Writes the records of one crawl run into a new folder.
 
-    Make one with `create`. Methods that write raise `RunFolderError` when a
-    file cannot be completed, `ValueError` or `TypeError` for arguments that
-    are wrong (nothing is written then).
+    Make one with `create`; calling the class directly raises `TypeError`.
+    Methods that write raise `RunFolderError` when a file cannot be completed,
+    `ValueError` or `TypeError` for arguments that are wrong (nothing is
+    written then).
     """
 
-    def __init__(self, root: Path) -> None:
+    def __init__(self, root: Path, *, _token: object = None) -> None:
         """Use `create`; this only remembers the folder `create` made."""
+        if _token is not _CREATED:
+            msg = "make a RunWriter with RunWriter.create"
+            raise TypeError(msg)
         self._root = root
         self._depth = 0
         self._failed: Path | None = None
@@ -251,10 +298,7 @@ class RunWriter:
         _check_text("serial", serial)
         words = _check_texts("deny_words", deny_words)
         limit_values = _limits_dict(limits)
-        when = _now() if started_at is None else started_at
-        if when.tzinfo is None:
-            msg = "started_at must have a time zone"
-            raise ValueError(msg)
+        when = _check_moment("started_at", _now() if started_at is None else started_at)
         path = Path(out).absolute()
         record: dict[str, object] = {
             "schema": RUN_START_SCHEMA,
@@ -264,14 +308,14 @@ class RunWriter:
             "deny": words,
             "device": {"serial": serial},
         }
-        _encoded(dumps(record, indent=2))
+        text = _json_text(record, indent=2) + "\n"
         try:
             _make_dir(path)
         except OSError as error:
             msg = f"cannot make the run folder {path}: {error.strerror or error}"
             raise RunFolderError(msg, details={"path": str(path)}) from error
-        writer = cls(path)
-        writer._write_json("run-start.json", record)
+        writer = cls(path, _token=_CREATED)
+        writer._write_new(path / "run-start.json", text)
         return writer
 
     # -- marking a write --
@@ -280,8 +324,10 @@ class RunWriter:
     def critical(self) -> Generator[None]:
         """Mark the time while a line or file is being written.
 
-        `writing` is True inside the block (blocks may nest). A Ctrl+C handler
-        in the caller can look at it and postpone the interrupt until the
+        `writing` is True inside the block (blocks may nest). Each write
+        method keeps the write and the writer's record of it (for example
+        that a screen was seen) inside one block. A Ctrl+C handler in the
+        caller can look at `writing` and postpone the interrupt until the
         write is complete. Nothing is installed here.
         """
         self._depth += 1
@@ -313,7 +359,8 @@ class RunWriter:
         """Write the line that says an action is about to be sent.
 
         Call it before the action is sent. The line is complete on disk when
-        this returns. `element` is an `Element` or its JSON form.
+        this returns. `element` is an `Element` (written in its
+        ``uiprobe.screen/1`` form) or a mapping, written as given.
         """
         line: dict[str, object] = {
             "schema": TRANSITION_START_SCHEMA,
@@ -329,7 +376,7 @@ class RunWriter:
         line["action"] = action
         if from_screen_id is not None:
             line["from_screen_id"] = _check_screen_id(from_screen_id)
-        self._append("transitions.jsonl", line)
+        self._append("transitions.jsonl", _json_text(line) + "\n")
 
     def write_transition_end(
         self,
@@ -358,7 +405,7 @@ class RunWriter:
                 raise ValueError(msg)
         else:
             line["to_screen_id"] = _check_screen_id(to_screen_id)
-        self._append("transitions.jsonl", line)
+        self._append("transitions.jsonl", _json_text(line) + "\n")
 
     def write_skip(
         self,
@@ -374,10 +421,7 @@ class RunWriter:
         listed = tuple(_check_texts("reasons", reasons))
         body = _element_dict(element)
         key = (checked, fingerprint, listed)
-        if key in self._skipped:
-            return False
-        self._append(
-            "skipped.jsonl",
+        line = _json_text(
             {
                 "schema": SKIP_SCHEMA,
                 "recorded_at": _stamp(_now()),
@@ -385,9 +429,14 @@ class RunWriter:
                 "fingerprint": fingerprint,
                 "reasons": list(listed),
                 "element": body,
-            },
+            }
         )
-        self._skipped.add(key)
+        with self.critical():
+            self._check_usable()
+            if key in self._skipped:
+                return False
+            self._append("skipped.jsonl", line + "\n")
+            self._skipped.add(key)
         return True
 
     def write_screen(self, screen: Screen) -> bool:
@@ -397,14 +446,16 @@ class RunWriter:
         writing nothing, when the id was seen before.
         """
         screen_id = _check_screen_id(screen.screen_id)
-        if screen_id in self._screens:
-            return False
-        self._write_new(
-            self._screen_path(screen_id, "json"),
-            screen.to_json(indent=2) + "\n",
-            in_screens=True,
-        )
-        self._screens[screen_id] = screen
+        with self.critical():
+            self._check_usable()
+            if screen_id in self._screens:
+                return False
+            self._write_new(
+                self._screen_path(screen_id, "json"),
+                _encoded(screen.to_json(indent=2) + "\n"),
+                in_screens=True,
+            )
+            self._screens[screen_id] = screen
         return True
 
     def write_screenshot(self, screen_id: str, png: bytes) -> bool:
@@ -421,10 +472,12 @@ class RunWriter:
         if not png.startswith(_PNG_SIGNATURE):
             msg = "not a PNG image"
             raise ValueError(msg)
-        if checked in self._pictures:
-            return False
-        self._write_new(self._screen_path(checked, "png"), png, in_screens=True)
-        self._pictures.add(checked)
+        with self.critical():
+            self._check_usable()
+            if checked in self._pictures:
+                return False
+            self._write_new(self._screen_path(checked, "png"), png, in_screens=True)
+            self._pictures.add(checked)
         return True
 
     def finish(
@@ -435,18 +488,17 @@ class RunWriter:
         actions: int,
         ended_at: datetime | None = None,
     ) -> None:
-        """End the run: write ``summary.txt``, then ``run.json``, once.
+        """End the run once: close the line files, write ``summary.txt``,
+        then ``run.json``.
 
-        ``run.json`` comes last, so a folder that has it is complete. A second
-        call raises `RunFolderError`.
+        ``run.json`` comes last, so a folder whose ``run.json`` is complete
+        JSON ended normally. If closing a line file or writing ``summary.txt``
+        fails, no ``run.json`` is made. A second call raises `RunFolderError`.
         """
         _check_text("stop_reason", stop_reason)
         screen_count = _check_number("screens", screens)
         action_count = _check_number("actions", actions)
-        when = _now() if ended_at is None else ended_at
-        if when.tzinfo is None:
-            msg = "ended_at must have a time zone"
-            raise ValueError(msg)
+        when = _check_moment("ended_at", _now() if ended_at is None else ended_at)
         self._check_usable()
         summary = _encoded(self._summary(stop_reason, screen_count, action_count))
         record: dict[str, object] = {
@@ -456,25 +508,20 @@ class RunWriter:
             "screens": screen_count,
             "actions": action_count,
         }
-        _encoded(dumps(record, indent=2))
-        self._write_new(self._root / "summary.txt", summary)
-        self._write_json("run.json", record)
-        self._finished = True
-        self.close()
+        text = _json_text(record, indent=2) + "\n"
+        with self.critical():
+            self._check_usable()
+            self._close_streams()
+            self._write_new(self._root / "summary.txt", summary)
+            self._write_new(self._root / "run.json", text)
+            self._finished = True
+            self._closed = True
 
     def close(self) -> None:
         """Close the open line files. It writes nothing and ends nothing."""
         with self.critical():
-            first: tuple[str, OSError] | None = None
-            for name, handle in self._streams.items():
-                try:
-                    handle.close()
-                except OSError as error:
-                    first = first or (name, error)
-            self._streams.clear()
             self._closed = True
-            if first is not None:
-                raise self._broken(self._root / first[0], first[1]) from first[1]
+            self._close_streams()
 
     def __enter__(self) -> RunWriter:
         return self
@@ -508,8 +555,32 @@ class RunWriter:
     def _screen_path(self, screen_id: str, suffix: str) -> Path:
         return self._root / "screens" / f"{screen_id}.{suffix}"
 
-    def _write_json(self, name: str, value: dict[str, object]) -> None:
-        self._write_new(self._root / name, dumps(value, indent=2) + "\n")
+    def _close_streams(self) -> None:
+        """Close the line files; the first failure breaks the writer."""
+        streams = list(self._streams.items())
+        self._streams.clear()
+        first: tuple[str, OSError] | None = None
+        for name, handle in streams:
+            try:
+                handle.close()
+            except OSError as error:
+                first = first or (name, error)
+            except BaseException:
+                self._failed = self._root / name
+                raise
+        if first is not None:
+            raise self._broken(self._root / first[0], first[1]) from first[1]
+
+    def _drop_stream(self, name: str) -> None:
+        """Forget a line file after a failure and close it now.
+
+        Closing may flush bytes that are still buffered; doing it here, before
+        the error is raised, means nothing reaches the file afterwards.
+        """
+        handle = self._streams.pop(name, None)
+        if handle is not None:
+            with contextlib.suppress(OSError):
+                handle.close()
 
     def _write_new(
         self, path: Path, data: str | bytes, *, in_screens: bool = False
@@ -529,14 +600,17 @@ class RunWriter:
                     _put(handle, data)
             except OSError as error:
                 raise self._broken(path, error) from error
+            except BaseException:
+                self._failed = path
+                raise
 
     def _ensure_screens_folder(self, folder: Path) -> None:
         if not self._made_screens_folder:
             self._made_screens_folder = True
             _make_dir(folder)
 
-    def _append(self, name: str, value: dict[str, object]) -> None:
-        line = _encoded(dumps(value) + "\n")
+    def _append(self, name: str, line: str) -> None:
+        _encoded(line)
         with self.critical():
             self._check_usable()
             path = self._root / name
@@ -546,7 +620,12 @@ class RunWriter:
                     handle = self._streams[name] = _create_text(path)
                 _put(handle, line)
             except OSError as error:
+                self._drop_stream(name)
                 raise self._broken(path, error) from error
+            except BaseException:
+                self._failed = path
+                self._drop_stream(name)
+                raise
 
     def _summary(self, stop_reason: str, screens: int, actions: int) -> str:
         lines = [

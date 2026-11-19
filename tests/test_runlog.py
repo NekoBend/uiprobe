@@ -6,9 +6,11 @@ import builtins
 import contextlib
 import errno
 import json
+import os
 import re
 from dataclasses import replace
-from datetime import UTC, datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta, timezone, tzinfo
+from enum import Enum
 from pathlib import Path
 
 import pytest
@@ -25,6 +27,22 @@ ID_B = "s-ba9876543210"
 STARTED = datetime(2026, 3, 1, 9, 30, 15, tzinfo=timezone(timedelta(hours=9)))
 BIDI = "a\u202eb\u2066c"
 CONTROL = "x\x1b[2Jy\x9bz\x07"
+
+
+class _NoOffset(tzinfo):
+    """A time zone that knows no UTC offset: `tzinfo` is set, the offset is None."""
+
+    def utcoffset(self, _dt):
+        return None
+
+    def dst(self, _dt):
+        return None
+
+    def tzname(self, _dt):
+        return None
+
+
+NO_OFFSET = datetime(2026, 3, 1, 9, 30, tzinfo=_NoOffset())
 
 
 _WRITERS: list[RunWriter] = []
@@ -133,6 +151,8 @@ def test_a_missing_parent_is_not_created(tmp_path):
         {"deny_words": ["a\ud800"]},
         {"package": "p\ud800"},
         {"started_at": datetime(2026, 1, 1)},  # noqa: DTZ001
+        {"started_at": NO_OFFSET},
+        {"started_at": "2026-01-01T00:00:00+00:00"},
     ],
 )
 def test_wrong_arguments_write_nothing(tmp_path, overrides):
@@ -425,6 +445,8 @@ def test_bad_finish_arguments_write_nothing(tmp_path, arguments):
         writer.finish(reason, screens=screens, actions=actions)
     with pytest.raises(ValueError, match="time zone"):
         writer.finish("x", screens=0, actions=0, ended_at=datetime(2026, 1, 1))  # noqa: DTZ001
+    with pytest.raises(ValueError, match="time zone"):
+        writer.finish("x", screens=0, actions=0, ended_at=NO_OFFSET)
     assert names(tmp_path / "run") == ["run-start.json"]
     writer.finish("x", screens=0, actions=0)  # still possible
 
@@ -717,19 +739,96 @@ def test_writing_after_close_is_refused_clearly(tmp_path):
     assert writer._failed is None
 
 
-def test_every_write_is_synced_to_the_disk(tmp_path, monkeypatch):
-    synced = []
-    real = runlog.os.fsync
-    monkeypatch.setattr(runlog.os, "fsync", lambda fd: (synced.append(fd), real(fd))[1])
+class _Recorder:
+    """A file handle that logs write, flush and close under the file's name."""
+
+    def __init__(self, handle, name, events, by_fd):
+        self.handle = handle
+        self.name = name
+        self.events = events
+        by_fd[handle.fileno()] = name
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.close()
+
+    def write(self, data):
+        self.events.append((self.name, "write"))
+        return self.handle.write(data)
+
+    def flush(self):
+        self.events.append((self.name, "flush"))
+        self.handle.flush()
+
+    def fileno(self):
+        return self.handle.fileno()
+
+    def close(self):
+        self.events.append((self.name, "close"))
+        self.handle.close()
+
+
+def test_every_write_is_flushed_then_synced_per_file(tmp_path, monkeypatch):
+    events: list[tuple[str, str]] = []
+    by_fd: dict[int, str] = {}
+    real_open = builtins.open
+    real_fsync = os.fsync
+
+    def recording_open(path, *args, **kwargs):
+        handle = real_open(path, *args, **kwargs)
+        return _Recorder(handle, Path(path).name, events, by_fd)
+
+    def recording_fsync(fd):
+        events.append((by_fd[fd], "fsync"))
+        real_fsync(fd)
+
+    monkeypatch.setattr(runlog, "open", recording_open, raising=False)
+    monkeypatch.setattr(runlog.os, "fsync", recording_fsync)
     writer = make(tmp_path)
-    assert len(synced) == 1
     writer.write_transition_start(1, "launch")
-    assert len(synced) == 2
-    writer.write_screen(make_screen())
-    writer.write_screenshot(make_screen().screen_id, PNG)
-    assert len(synced) == 4
+    writer.write_transition_end(1, ID_A)  # a second line on the open stream
+    assert writer.write_skip(ID_A, "fp", ["r"], {"text": "x"})
+    screen = make_screen()
+    writer.write_screen(screen)
+    writer.write_screenshot(screen.screen_id, PNG)
     writer.finish("done", screens=1, actions=1)
-    assert len(synced) == 6
+    step = ["write", "flush", "fsync"]
+    expected = {
+        "run-start.json": [*step, "close"],
+        "transitions.jsonl": [*step, *step, "close"],
+        "skipped.jsonl": [*step, "close"],
+        f"{screen.screen_id}.json": [*step, "close"],
+        f"{screen.screen_id}.png": [*step, "close"],
+        "summary.txt": [*step, "close"],
+        "run.json": [*step, "close"],
+    }
+    found = {name: [op for who, op in events if who == name] for name in expected}
+    assert found == expected
+    assert {who for who, _ in events} == set(expected)
+    # run.json is the last file touched
+    assert events[-len(expected["run.json"]) :] == [
+        ("run.json", op) for op in expected["run.json"]
+    ]
+
+
+def test_a_failed_fsync_breaks_the_writer(tmp_path, monkeypatch):
+    writer = make(tmp_path)
+    writer.write_transition_start(1, "launch")
+
+    def broken(_fd):
+        raise OSError(errno.EIO, "I/O error")
+
+    monkeypatch.setattr(runlog.os, "fsync", broken)
+    with pytest.raises(RunFolderError, match=r"transitions\.jsonl"):
+        writer.write_transition_end(1, ID_A)
+    monkeypatch.undo()
+    with pytest.raises(RunFolderError, match="earlier write failed"):
+        writer.write_skip(ID_A, "fp", ["r"], {})
+    with pytest.raises(RunFolderError, match="earlier write failed"):
+        writer.write_screenshot(ID_A, PNG)
+    assert names(tmp_path / "run") == ["run-start.json", "transitions.jsonl"]
 
 
 def test_keys_are_written_in_a_fixed_order(tmp_path):
@@ -792,3 +891,244 @@ def test_the_summary_lists_clickable_elements_only(tmp_path):
     text = (tmp_path / "run" / "summary.txt").read_text(encoding="utf-8")
     assert "Press" in text
     assert "Just text" not in text
+
+
+# --- review fixes ---
+
+
+def test_the_constructor_cannot_make_a_writer(tmp_path):
+    target = tmp_path / "existing"
+    target.mkdir()
+    (target / "keep.txt").write_bytes(b"mine")
+    with pytest.raises(TypeError, match="create"):
+        RunWriter(target)
+    with pytest.raises(TypeError, match="create"):
+        RunWriter(target, _token=object())
+    assert names(target) == ["keep.txt"]
+
+
+class _ScreenId(str, Enum):  # noqa: UP042 (formats as "_ScreenId.HOME")
+    HOME = ID_A
+
+
+class _Text(str):
+    def __format__(self, spec):
+        return "../escaped"
+
+
+@pytest.mark.parametrize("bad", [_ScreenId.HOME, _Text(ID_A)])
+def test_a_str_subclass_is_not_a_screen_id(tmp_path, bad):
+    assert bad == ID_A  # the value matches; only the type is wrong
+    writer = make(tmp_path)
+    with pytest.raises(TypeError):
+        writer.write_screenshot(bad, PNG)
+    with pytest.raises(TypeError):
+        writer.write_skip(bad, "fp", ["r"], {})
+    with pytest.raises(TypeError):
+        writer.write_transition_start(1, "tap", from_screen_id=bad)
+    with pytest.raises(TypeError):
+        writer.write_transition_end(1, bad)
+    assert names(tmp_path) == ["run", "run/run-start.json"]
+    assert writer.write_screenshot(ID_A, PNG)
+    assert names(tmp_path / "run" / "screens") == [f"{ID_A}.png"]
+
+
+class _CloseFails:
+    """A line file whose close fails after closing the real file."""
+
+    def __init__(self, handle):
+        self.handle = handle
+
+    def write(self, data):
+        return self.handle.write(data)
+
+    def flush(self):
+        self.handle.flush()
+
+    def fileno(self):
+        return self.handle.fileno()
+
+    def close(self):
+        self.handle.close()
+        raise OSError(errno.EIO, "I/O error")
+
+
+def test_a_failed_stream_close_at_finish_leaves_no_run_json(tmp_path):
+    writer = make(tmp_path)
+    writer.write_transition_start(1, "launch")
+    real = writer._streams["transitions.jsonl"]
+    writer._streams["transitions.jsonl"] = _CloseFails(real)  # ty: ignore[invalid-assignment]
+    with pytest.raises(RunFolderError, match=r"transitions\.jsonl"):
+        writer.finish("done", screens=0, actions=1)
+    assert names(tmp_path / "run") == ["run-start.json", "transitions.jsonl"]
+    with pytest.raises(RunFolderError, match="earlier write failed"):
+        writer.finish("done", screens=0, actions=1)
+
+
+def test_a_failed_summary_leaves_no_run_json(tmp_path, monkeypatch):
+    writer = make(tmp_path)
+    writer.write_transition_start(1, "launch")
+    stream = writer._streams["transitions.jsonl"]
+    fail_on(monkeypatch, "summary.txt")
+    with pytest.raises(RunFolderError, match=r"summary\.txt"):
+        writer.finish("done", screens=0, actions=1)
+    assert stream.closed  # the line files were closed first
+    assert not (tmp_path / "run" / "run.json").exists()
+
+
+class _BufferedFailure:
+    """Writes half a line, keeps the rest buffered, and fails to flush.
+
+    Like a real buffered file, close() writes what is still buffered.
+    """
+
+    def __init__(self, handle):
+        self.handle = handle
+        self.pending = ""
+        self.closed = False
+
+    def write(self, data):
+        half = len(data) // 2
+        self.handle.write(data[:half])
+        self.handle.flush()
+        self.pending += data[half:]
+        return len(data)
+
+    def flush(self):
+        raise OSError(errno.ENOSPC, "No space left on device")
+
+    def fileno(self):
+        return self.handle.fileno()
+
+    def close(self):
+        if not self.closed:
+            self.closed = True
+            self.handle.write(self.pending)
+            self.handle.close()
+
+
+def test_a_failed_stream_gets_no_bytes_after_the_error(tmp_path):
+    writer = make(tmp_path)
+    writer.write_transition_start(1, "launch")
+    path = tmp_path / "run" / "transitions.jsonl"
+    stream = _BufferedFailure(writer._streams["transitions.jsonl"])
+    writer._streams["transitions.jsonl"] = stream  # ty: ignore[invalid-assignment]
+    with pytest.raises(RunFolderError, match=r"transitions\.jsonl"):
+        writer.write_transition_end(1, ID_A)
+    assert stream.closed
+    assert "transitions.jsonl" not in writer._streams
+    after_error = path.read_bytes()
+    writer.close()
+    assert path.read_bytes() == after_error
+
+
+class _Watched(set):
+    def __init__(self, writer, seen):
+        super().__init__()
+        self.writer = writer
+        self.seen = seen
+
+    def add(self, item):
+        self.seen.append(self.writer.writing)
+        super().add(item)
+
+
+class _WatchedDict(dict):
+    def __init__(self, writer, seen):
+        super().__init__()
+        self.writer = writer
+        self.seen = seen
+
+    def __setitem__(self, key, value):
+        self.seen.append(self.writer.writing)
+        super().__setitem__(key, value)
+
+
+def test_writing_stays_true_until_the_write_is_recorded(tmp_path):
+    writer = make(tmp_path)
+    seen: list[bool] = []
+    writer._skipped = _Watched(writer, seen)
+    writer._pictures = _Watched(writer, seen)
+    writer._screens = _WatchedDict(writer, seen)
+    assert writer.write_skip(ID_A, "fp", ["r"], {})
+    assert writer.write_screenshot(ID_A, PNG)
+    assert writer.write_screen(make_screen())
+    assert seen == [True, True, True]
+    assert writer.writing is False
+
+
+@pytest.mark.parametrize(
+    "call",
+    [
+        lambda w: w.write_transition_start(1, "launch"),
+        lambda w: w.write_skip(ID_A, "fp", ["r"], {}),
+        lambda w: w.write_screenshot(ID_A, PNG),
+        lambda w: w.write_screen(make_screen()),
+        lambda w: w.finish("done", screens=0, actions=0),
+    ],
+)
+def test_an_interrupt_during_a_write_breaks_the_writer(tmp_path, monkeypatch, call):
+    writer = make(tmp_path)
+
+    def interrupted(*_arguments):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(runlog, "_put", interrupted)
+    with pytest.raises(KeyboardInterrupt):
+        call(writer)
+    monkeypatch.undo()
+    assert writer.writing is False
+    assert writer._failed is not None
+    with pytest.raises(RunFolderError, match="earlier write failed"):
+        writer.write_transition_start(2, "back")
+    assert not (tmp_path / "run" / "run.json").exists()
+
+
+def test_a_repeat_does_not_hide_a_failed_writer(tmp_path, monkeypatch):
+    writer = make(tmp_path)
+    screen = make_screen()
+    assert writer.write_skip(ID_A, "fp", ["r"], {})
+    assert writer.write_screen(screen)
+    assert writer.write_screenshot(ID_A, PNG)
+
+    def broken(*_arguments):
+        raise OSError(errno.EIO, "I/O error")
+
+    monkeypatch.setattr(runlog, "_put", broken)
+    with pytest.raises(RunFolderError):
+        writer.write_transition_start(1, "launch")
+    monkeypatch.undo()
+    with pytest.raises(RunFolderError, match="earlier write failed"):
+        writer.write_skip(ID_A, "fp", ["r"], {})
+    with pytest.raises(RunFolderError, match="earlier write failed"):
+        writer.write_screen(screen)
+    with pytest.raises(RunFolderError, match="earlier write failed"):
+        writer.write_screenshot(ID_A, PNG)
+
+
+def test_a_repeat_does_not_hide_a_closed_writer(tmp_path):
+    writer = make(tmp_path)
+    screen = make_screen()
+    assert writer.write_skip(ID_A, "fp", ["r"], {})
+    assert writer.write_screen(screen)
+    assert writer.write_screenshot(ID_A, PNG)
+    writer.close()
+    with pytest.raises(RunFolderError, match="closed"):
+        writer.write_skip(ID_A, "fp", ["r"], {})
+    with pytest.raises(RunFolderError, match="closed"):
+        writer.write_screen(screen)
+    with pytest.raises(RunFolderError, match="closed"):
+        writer.write_screenshot(ID_A, PNG)
+
+
+@pytest.mark.parametrize("number", [float("nan"), float("inf"), float("-inf")])
+def test_non_finite_numbers_are_refused_before_any_file_is_opened(tmp_path, number):
+    writer = make(tmp_path)
+    with pytest.raises(ValueError, match="NaN"):
+        writer.write_transition_start(1, "tap", element={"x": number})
+    with pytest.raises(ValueError, match="NaN"):
+        writer.write_skip(ID_A, "fp", ["r"], {"nested": [{"x": number}]})
+    assert names(tmp_path / "run") == ["run-start.json"]
+    # nothing was recorded, and the writer is still usable
+    assert writer.write_skip(ID_A, "fp", ["r"], {"x": 1.5})
+    writer.finish("done", screens=0, actions=0)
