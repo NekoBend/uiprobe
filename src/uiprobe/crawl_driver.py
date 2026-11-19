@@ -33,15 +33,19 @@ The loop (the protocol of the `CrawlEngine` docstring)::
                  after a sent action gets the transition end line
 
 The gate (`_Run.gate`) is the one place every action passes right before it
-is sent. It refuses, with a ``not_sent`` end line and nothing sent, when
-`stop` returns True, the time limit has passed, or anything it needs cannot
-be read or has changed: for a tap the engine's `CrawlEngine.recheck` on a
-fresh dump, a keyboard known to be hidden and a focused window of the app;
-for BACK and relaunch the same foreground and focused window (and for BACK
-keyboard) as the observation they were chosen on. A refused tap's fresh
-observation goes to `CrawlEngine.next`, which releases the unreported tap.
+is sent. In order: `stop` and the time limit; the pin (`Device.check_pin`:
+the same transport, serial and identity, else an error); then fresh reads,
+for a tap the dump first. It refuses, with a ``not_sent`` end line and nothing
+sent, when anything it needs cannot be read or has changed: for a tap the
+engine's `CrawlEngine.recheck` on the fresh dump, a keyboard known to be
+hidden and a focused window owned by the app; for BACK and relaunch the same
+foreground and focused window (and for BACK keyboard) as the observation they
+were chosen on. After the decision nothing else runs before the input. A
+refused tap's fresh observation goes to `CrawlEngine.next`, which releases the
+unreported tap; a refused BACK or relaunch ends the run with ``not_sent``,
+because the engine already counted it. Every observation checks the pin too.
 
-How a run ends. The engine's stop reason, ``interrupted`` (the ``stop``
+How a run ends. The engine's stop reason, ``not_sent``, ``interrupted`` (the ``stop``
 callable returned True between two actions, or Ctrl+C arrived while it
 returns True) or ``error``. `RunWriter.finish` then writes ``run.json`` last.
 
@@ -87,6 +91,7 @@ from uiprobe.crawl import (
 )
 from uiprobe.crawl_preview import check_package
 from uiprobe.errors import (
+    AdbError,
     DumpError,
     LaunchFailedError,
     NotEmulatorError,
@@ -101,7 +106,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from uiprobe.crawl import Action, SkippedElement
-    from uiprobe.device import Device
+    from uiprobe.device import Device, DeviceIdentity, FocusedWindow
     from uiprobe.model import Element, Screen
 
 __all__ = ["INTERRUPTED", "STOP_ERROR", "CrawlResult", "crawl"]
@@ -177,18 +182,20 @@ NOT_SENT_KEYBOARD_UNKNOWN: Final = "keyboard_unknown"
 NOT_SENT_KEYBOARD_SHOWN: Final = "keyboard_shown"
 NOT_SENT_CHANGED: Final = "changed_before_send"
 NOT_SENT_REFUSED: Final = "changed_before_press"
+NOT_SENT_START: Final = "start_not_sent"
+# The stop reason of a run that ended because BACK or a relaunch was not sent.
+STOP_NOT_SENT: Final = "not_sent"
+MAX_DURATION: Final = "max_duration"  # the engine's reason for the time limit
 # How often a pause looks at `stop` and the time limit.
 PAUSE_STEP: Final = 0.1
 
 
 @dataclass(frozen=True, slots=True)
-class _Fresh:
-    """What the gate read right before an action, for the action it judges."""
+class _Seen:
+    """What the device showed: the observation plus the focused window."""
 
-    foreground: str | None
-    focus: str | None
-    keyboard: bool | None
-    observation: Observation | None  # the re-read screen, for a tap only
+    observation: Observation
+    focus: FocusedWindow | None
 
 
 class _Run:
@@ -202,6 +209,8 @@ class _Run:
         engine: CrawlEngine,
         policy: Policy,
         *,
+        identity: DeviceIdentity,
+        emulator: bool,
         screenshots: bool,
         settle: float,
         deadline: float,
@@ -214,6 +223,8 @@ class _Run:
         self.writer = writer
         self.engine = engine
         self.policy = policy
+        self.identity = identity
+        self.emulator = emulator
         self.screenshots = screenshots
         self.settle = settle
         self.deadline = deadline
@@ -222,7 +233,8 @@ class _Run:
         self.sleep = sleep
         self.notes: list[str] = []
         self.screens_seen: set[str] = set()  # target screens, when observed
-        self.focus: str | None = None  # focused window at the last observation
+        self.focus: FocusedWindow | None = None  # at the last observation
+        self._stop_seen = False  # stop() once returned True: it stays so
         self._next_id = 0  # the action id of the next start line
         self._open: int | None = None  # sent action that has no end line yet
         self._skips_written = 0
@@ -246,16 +258,28 @@ class _Run:
             if isinstance(action, Reread):
                 observation = self.observe()
                 continue
-            fresh = self.send(action, observation)
+            refused, fresh = self.send(action, observation)
+            if refused is not None and isinstance(action, Back | Relaunch):
+                # The engine counted it as sent: rather than let it go on from
+                # a wrong count, the run ends (alpha: the safe side).
+                if self._stop_seen:
+                    return INTERRUPTED
+                if self.clock() >= self.deadline:
+                    return MAX_DURATION
+                self.notes.append(f"{_kind(action)} was not sent: {refused}")
+                return STOP_NOT_SENT
             if fresh is not None:
-                # A tap that the gate did not send: the screen it re-read goes
-                # to the engine, which releases the unreported tap.
+                # A tap the gate did not send: the screen it re-read goes to
+                # the engine, which releases the unreported tap.
                 observation = fresh
                 continue
             observation = self.observe()
 
     def stopped(self) -> bool:
-        return self.stop is not None and bool(self.stop())
+        """Whether `stop` asked to end; once it did, the answer stays True."""
+        if not self._stop_seen and self.stop is not None and bool(self.stop()):
+            self._stop_seen = True
+        return self._stop_seen
 
     def count(self) -> tuple[int, int]:
         """The target screens observed and the start lines on disk."""
@@ -265,15 +289,11 @@ class _Run:
 
     def send(
         self, action: Action, observation: Observation | None
-    ) -> Observation | None:
+    ) -> tuple[str | None, Observation | None]:
         """Write the start line, pass the gate, then send the action once.
 
-        Every action goes through `gate` after its start line is on disk and
-        right before it is sent. When the gate refuses, the start line gets a
-        ``not_sent`` end line and nothing is sent. A tap is reported to the
-        engine with `CrawlEngine.tap_sent` only after it was sent without an
-        error. Returns the observation the gate re-read for a tap it refused
-        (None otherwise).
+        Returns the reason the gate gave when it refused (None when the action
+        was sent) and, for a refused tap, the observation it re-read.
         """
         self._next_id += 1
         action_id = self._next_id
@@ -281,99 +301,96 @@ class _Run:
         from_id = None if screen is None else screen.screen_id
         element: Element | None = None
         point: tuple[int, int] | None = None
-        if isinstance(action, Launch):
-            kind = "launch"
-            from_id = None
-        elif isinstance(action, Relaunch):
-            kind = "relaunch"
-        elif isinstance(action, Back):
-            kind = "back"
-        elif isinstance(action, Tap):
-            kind = "tap"
+        if isinstance(action, Tap):
             from_id = action.screen_id
             point = action.point
             element = _element_of(screen, action.element_id)
-        else:  # Stop and Reread are never sent
+        elif isinstance(action, Launch):
+            from_id = None
+        elif not isinstance(action, Back | Relaunch):  # Stop and Reread
             msg = f"not an input: {action!r}"
             raise TypeError(msg)
-        self.writer.write_transition_start(action_id, kind, from_id, element, point)
-        reason, fresh = self.gate(action, observation)
-        reread = None if fresh is None else fresh.observation
-        if reread is not None:  # the engine re-checked the tap on it
-            self.write_skips(screen, reread.screen, tap=action)
+        self.writer.write_transition_start(
+            action_id, _kind(action), from_id, element, point
+        )
+        reason, seen = self.gate(action, observation)
+        if seen is not None and isinstance(action, Tap):
+            self.write_skips(screen, seen.observation.screen, tap=action)
         if reason is not None:
             self.writer.write_transition_end(action_id, not_sent=reason)
-            if reread is not None and fresh is not None:
-                self.record(reread, fresh.focus)
-            return reread
+            if seen is not None and isinstance(action, Tap):
+                self.record(seen)
+                return reason, seen.observation
+            return reason, None
+        # Nothing runs between the gate's last read and the input: no user
+        # code (stop() was asked first), no other read.
         self._open = action_id
-        if isinstance(action, Launch):
-            self.launch(restart=False)
-        elif isinstance(action, Relaunch):
-            self.launch(restart=True)
-        elif isinstance(action, Back):
-            self.device.key("back")
-            self.pause()
-        else:  # a Tap the gate allowed
+        if isinstance(action, Tap):
             self.device.tap(action.point)
             self.engine.tap_sent(action)
             self.pause()
-        return None
+        elif isinstance(action, Back):
+            self.device.key("back")
+            self.pause()
+        elif isinstance(action, Relaunch):
+            return self.relaunch(action_id), None
+        else:
+            self.launch()
+        return None, None
 
     def gate(
         self, action: Action, observation: Observation | None
-    ) -> tuple[str | None, _Fresh | None]:
+    ) -> tuple[str | None, _Seen | None]:
         """Decide whether `action` may be sent now; return (reason, what was read).
 
-        The one place every action passes right before it is sent. It reads
-        the device again (all requests go to the pinned transport), and refuses
-        when anything it needs cannot be read or differs from what the action
-        was chosen on, when `stop` returns True, or when the time limit has
-        passed. A launch only needs the last two; a tap also needs the engine's
-        `CrawlEngine.recheck` on a fresh dump, a confirmed hidden keyboard and
-        the focused window of the target app; BACK and relaunch need the same
-        foreground, focused window (and for BACK keyboard) as the observation
-        they were chosen on.
+        The one place every action passes right before it is sent. First `stop`
+        and the time limit, then that the pinned transport still leads to the
+        checked device (an error if not), then a fresh read: for a tap the dump
+        first and then foreground, focused window and keyboard, so the reads
+        nearest the press come last. Anything that cannot be read, or that
+        differs from what the action was chosen on, is a refusal. After the
+        decision nothing else runs before the input is sent.
         """
+        reason = self.halt()
+        if reason is not None:
+            return reason, None
+        self.device.check_pin(self.identity, emulator=self.emulator)
         if isinstance(action, Launch):
-            return self.halt(), None
+            return None, None
+        screen = self.dump() if isinstance(action, Tap) else None
         foreground = self.device.foreground()
         focus = self.device.focused_window()
         keyboard = self.device.keyboard_shown()
-        fresh = _Fresh(foreground, focus, keyboard, None)
+        seen = _Seen(Observation(screen, foreground, keyboard, self.clock()), focus)
         if isinstance(action, Tap):
-            screen = self.dump()
-            seen = Observation(screen, foreground, keyboard, self.clock())
-            fresh = _Fresh(foreground, focus, keyboard, seen)
-            allowed = self.engine.recheck(action, seen)
-            reason = self.halt()
-            if reason is None and keyboard is None:
-                reason = NOT_SENT_KEYBOARD_UNKNOWN
-            if reason is None and keyboard:
-                reason = NOT_SENT_KEYBOARD_SHOWN
-            if reason is None and focus is None:
-                reason = NOT_SENT_FOCUS_UNKNOWN
-            if reason is None and focus != self.package:
-                reason = NOT_SENT_FOCUS_OTHER
-            if reason is None and not allowed:
-                reason = NOT_SENT_REFUSED
-            return reason, fresh
-        reason = self.halt()
-        if observation is None:  # not reached: only a launch has none
-            return reason or NOT_SENT_CHANGED, fresh
-        if reason is None and foreground is None:
-            reason = NOT_SENT_FOREGROUND_UNKNOWN
-        if reason is None and focus is None:
-            reason = NOT_SENT_FOCUS_UNKNOWN
-        if reason is None and isinstance(action, Back) and keyboard is None:
-            reason = NOT_SENT_KEYBOARD_UNKNOWN
-        if reason is None and (
-            foreground != observation.foreground
-            or focus != self.focus
-            or (isinstance(action, Back) and keyboard != observation.keyboard_shown)
-        ):
-            reason = NOT_SENT_CHANGED
-        return reason, fresh
+            allowed = self.engine.recheck(action, seen.observation)
+            owner = None if focus is None else focus.owner
+            checks = (
+                (keyboard is None, NOT_SENT_KEYBOARD_UNKNOWN),
+                (keyboard is True, NOT_SENT_KEYBOARD_SHOWN),
+                (focus is None, NOT_SENT_FOCUS_UNKNOWN),
+                (owner != self.package, NOT_SENT_FOCUS_OTHER),
+                (not allowed, NOT_SENT_REFUSED),
+            )
+        else:
+            before = observation
+            back = isinstance(action, Back)
+            checks = (
+                (before is None, NOT_SENT_CHANGED),  # not reached: a launch only
+                (foreground is None, NOT_SENT_FOREGROUND_UNKNOWN),
+                (focus is None, NOT_SENT_FOCUS_UNKNOWN),
+                (back and keyboard is None, NOT_SENT_KEYBOARD_UNKNOWN),
+                (
+                    before is not None
+                    and (
+                        foreground != before.foreground
+                        or focus != self.focus
+                        or (back and keyboard != before.keyboard_shown)
+                    ),
+                    NOT_SENT_CHANGED,
+                ),
+            )
+        return next((why for failed, why in checks if failed), None), seen
 
     def halt(self) -> str | None:
         """The reason not to send that does not depend on the screen, if any."""
@@ -384,15 +401,19 @@ class _Run:
         return None
 
     def pause(self) -> None:
-        """Wait `settle` seconds, but not past the time limit or a stop."""
+        """Wait `settle` seconds, but not past the time limit or a stop.
+
+        The number of steps is bounded, so a clock that does not move cannot
+        keep the pause going.
+        """
         end = min(self.clock() + self.settle, self.deadline)
-        while True:
+        for _ in range(int(self.settle / PAUSE_STEP) + 2):
             left = end - self.clock()
             if left <= 0 or self.stopped():
                 return
             self.sleep(min(PAUSE_STEP, left))
 
-    def launch(self, *, restart: bool) -> None:
+    def launch(self) -> None:
         """Start the app; an app that is not in front afterwards is not fatal.
 
         ``not_in_front`` means monkey started something, but another package
@@ -401,12 +422,33 @@ class _Run:
         action stays counted as sent. Any other launch failure is raised.
         """
         try:
-            self.device.launch(self.package, restart=restart)
+            self.device.launch(self.package)
         except LaunchFailedError as error:
             if error.details.get("reason") != "not_in_front":
                 raise
             seen = error.details.get("foreground")
             self.notes.append(f"{self.package} was not in front after launch ({seen})")
+
+    def relaunch(self, action_id: int) -> str | None:
+        """Force-stop the app, then, unless told to stop meanwhile, start it.
+
+        The two commands are sent one after the other, and `stop` and the time
+        limit are looked at again between them. When they end the run there,
+        only the force-stop was sent: the start line gets a ``not_sent`` end
+        (``start_not_sent``) and the summary says so. Returns that reason, or
+        None when the app was started.
+        """
+        self.device.stop_app(self.package)
+        reason = self.halt()
+        if reason is not None:
+            self._open = None
+            self.writer.write_transition_end(action_id, not_sent=NOT_SENT_START)
+            self.notes.append(
+                f"{self.package} was force-stopped but not started again ({reason})"
+            )
+            return NOT_SENT_START
+        self.launch()
+        return None
 
     # -- reading --
 
@@ -422,26 +464,33 @@ class _Run:
         return screen
 
     def observe(self) -> Observation:
-        """Read the device, close the open transition, then record the screen."""
+        """Read the device, close the open transition, then record the screen.
+
+        The pin is checked first: a dump writes a file on the device and
+        removes it, so even reading goes only to the device that was checked.
+        """
+        self.device.check_pin(self.identity, emulator=self.emulator)
         screen = self.dump()
         foreground = self.device.foreground()
-        keyboard = self.device.keyboard_shown()
-        focus = self.device.focused_window()
-        observation = Observation(screen, foreground, keyboard, self.clock())
         if self._open is not None:
             action_id, self._open = self._open, None
             if screen is None:
                 self.writer.write_transition_end(action_id, dump_failed=True)
             else:
                 self.writer.write_transition_end(action_id, screen.screen_id)
-        self.record(observation, focus)
+        if screen is not None and self.on_target(screen, foreground):
+            self.screens_seen.add(screen.screen_id)  # counted when observed
+        keyboard = self.device.keyboard_shown()
+        focus = self.device.focused_window()
+        observation = Observation(screen, foreground, keyboard, self.clock())
+        self.record(_Seen(observation, focus))
         return observation
 
-    def record(self, observation: Observation, focus: str | None) -> None:
+    def record(self, seen: _Seen) -> None:
         """Remember the focus, count and write a target screen, then its image."""
-        self.focus = focus
-        screen = observation.screen
-        if screen is None or not self.on_target(screen, observation.foreground):
+        self.focus = seen.focus
+        screen = seen.observation.screen
+        if screen is None or not self.on_target(screen, seen.observation.foreground):
             return
         self.screens_seen.add(screen.screen_id)
         if not self.writer.write_screen(screen) or not self.screenshots:
@@ -465,11 +514,11 @@ class _Run:
         # The engine's own rule: both the dump and the foreground name the app.
         return screen.package == self.package and foreground == self.package
 
-    def write_skips(self, *screens: Screen | None, tap: Action | None = None) -> None:
+    def write_skips(self, *screens: Screen | None, tap: Tap | None = None) -> None:
         """Write the engine's new skipped elements; `screens` hold the elements.
 
-        `tap`, when given, is the tap a re-check refused: a row about its screen
-        and fingerprint names that very element.
+        `tap`, when given, is the tap the engine re-checked: a row about its
+        screen and fingerprint names that very element.
         """
         skipped = self.engine.records.skipped
         new = skipped[self._skips_written :]
@@ -477,14 +526,20 @@ class _Run:
         found: dict[str, dict[str, list[tuple[Element, tuple[str, ...]]]]] = {}
         for item in new:
             body = _skipped_element(
-                item,
-                screens,
-                found,
-                package=self.package,
-                policy=self.policy,
-                tap=tap if isinstance(tap, Tap) else None,
+                item, screens, found, package=self.package, policy=self.policy, tap=tap
             )
             self.writer.write_skip(item.screen_id, item.fingerprint, item.reasons, body)
+
+
+def _kind(action: Action) -> str:
+    """The ``kind`` of an action in its start line."""
+    if isinstance(action, Launch):
+        return "launch"
+    if isinstance(action, Relaunch):
+        return "relaunch"
+    if isinstance(action, Back):
+        return "back"
+    return "tap"
 
 
 def _element_of(screen: Screen | None, element_id: str) -> Element | None:
@@ -640,9 +695,15 @@ def crawl(
     _check_callable("clock", clock)
     _check_callable("sleep", sleep)
     # Pin first, then check through the pinned transport: the device that was
-    # checked is the only one that can receive anything afterwards.
+    # checked is the only one that can receive anything afterwards. Its
+    # identity is kept so that the gate can see a different device behind the
+    # same transport number (a restarted adb server numbers anew).
     device.pin_transport()
     _check_device(device, allow_real_device=allow_real_device)
+    identity = device.identity()
+    if identity is None:
+        msg = f"the identity of {device.serial} could not be read, so it cannot be kept"
+        raise AdbError(msg, details={"serial": device.serial})
     started_at = clock()
     _check_clock("clock()", started_at)
     engine = CrawlEngine(package, policy, limits, started_at=started_at)
@@ -660,6 +721,8 @@ def crawl(
             writer,
             engine,
             policy,
+            identity=identity,
+            emulator=not allow_real_device,
             screenshots=screenshots,
             settle=settle,
             deadline=started_at + limits.minutes * 60,

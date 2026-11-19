@@ -37,7 +37,7 @@ from uiprobe.crawl import (
     Tap,
 )
 from uiprobe.crawl_driver import CrawlResult, crawl
-from uiprobe.device import Device
+from uiprobe.device import Device, DeviceIdentity, FocusedWindow
 from uiprobe.errors import (
     AdbError,
     DeviceNotFoundError,
@@ -428,11 +428,9 @@ def test_a_relaunch_restarts_the_app(tmp_path, device, android, monkeypatch, clo
         r["action"]["kind"] for r in lines(out / "transitions.jsonl") if "action" in r
     ]
     assert "relaunch" in kinds
-    restarts = [kwargs["restart"] for _, kwargs in launches]
-    assert restarts[0] is False
-    assert restarts[1:]
-    assert all(restarts[1:])
-    assert len(restarts) == 1 + kinds.count("relaunch")
+    # A relaunch is a force-stop, then a plain launch, sent one after the other.
+    assert all(kwargs.get("restart", False) is False for _, kwargs in launches)
+    assert len(launches) == 1 + kinds.count("relaunch")
     assert android.stopped == [SHOP] * kinds.count("relaunch")
     for name in (out / "screens").iterdir():
         shown = json.loads(name.read_text(encoding="utf-8"))
@@ -1021,6 +1019,8 @@ def _gate_run(
         writer,
         engine,
         Policy(),
+        identity=_identity(device),
+        emulator=True,
         screenshots=False,
         settle=0.0,
         deadline=clock.now + 60,
@@ -1033,6 +1033,12 @@ def _gate_run(
 
 
 _WRITERS: list[RunWriter] = []
+
+
+def _identity(device: Device) -> DeviceIdentity:
+    found = device.identity()
+    assert found is not None
+    return found
 
 
 @pytest.fixture(autouse=True)
@@ -1056,15 +1062,17 @@ def _make_action(kind: str, engine: CrawlEngine, observation: Observation):
     return {"back": Back(), "relaunch": Relaunch()}[kind]
 
 
+SHADE = FocusedWindow("com.android.systemui", "NotificationShade")
 # Each condition, how to bring it about, and the reason it gives per kind.
 _CONDITIONS = {
     "stopped": ("stop", None),
     "time_limit": ("clock", None),
     "foreground_unknown": ("foreground", None),
     "focus_unknown": ("focused_window", None),
-    "focus_other": ("focused_window", ""),
+    "focus_other": ("focused_window", SHADE),
     "keyboard_unknown": ("keyboard_shown", None),
     "keyboard_shown": ("keyboard_shown", True),
+    "focus_title": ("focused_window", FocusedWindow(SHOP, f"{SHOP}/{SHOP}.Other")),
 }
 _CASES = [
     ("tap", "stopped", "stopped"),
@@ -1080,6 +1088,8 @@ _CASES = [
     ("back", "focus_other", "changed_before_send"),
     ("back", "keyboard_unknown", "keyboard_unknown"),
     ("back", "keyboard_shown", "changed_before_send"),
+    ("back", "focus_title", "changed_before_send"),
+    ("relaunch", "focus_title", "changed_before_send"),
     ("relaunch", "stopped", "stopped"),
     ("relaunch", "time_limit", "time_limit"),
     ("relaunch", "foreground_unknown", "foreground_unknown"),
@@ -1127,6 +1137,8 @@ def test_the_gate_holds_back_the_launch_too(
         writer,
         engine,
         Policy(),
+        identity=_identity(device),
+        emulator=True,
         screenshots=False,
         settle=0.0,
         deadline=clock.now + 60,
@@ -1322,3 +1334,172 @@ def test_an_interrupt_that_breaks_a_write_is_raised_even_with_stop_set(
 
 def _interrupting_put(_handle, _data):
     raise KeyboardInterrupt
+
+
+# --- round two: the device behind the pin, the order in the gate ---
+
+
+def _after_first_tap(monkeypatch, device, then):
+    original = device.tap
+
+    def tap(point):
+        result = original(point)
+        then()
+        return result
+
+    monkeypatch.setattr(device, "tap", tap)
+
+
+@pytest.mark.parametrize("change", ["server_restart", "fingerprint", "not_emulator"])
+def test_a_different_device_behind_the_pin_receives_nothing_more(
+    tmp_path, device, android, fake_adb, clock, monkeypatch, change
+):
+    def swap() -> None:
+        if change == "server_restart":
+            # A restarted server gave the same transport number to another device.
+            fake_adb.devices[:] = [
+                {"serial": "R58M1234", "state": "device", "transport_id": TRANSPORT}
+            ]
+        elif change == "fingerprint":
+            android.props["ro.build.fingerprint"] = "other/build:36/X/9:user/k"
+        else:
+            android.props["ro.kernel.qemu"] = "0"
+
+    _after_first_tap(monkeypatch, device, swap)
+    out = tmp_path / "run"
+    with pytest.raises(DeviceNotFoundError) as info:
+        run(device, clock, out)
+    assert info.value.details["reason"] == "device_changed"
+    assert len(android.inputs) == 1  # only the tap before the change
+    run_json = json.loads((out / "run.json").read_text(encoding="utf-8"))
+    assert run_json["stop_reason"] == "error"
+
+
+def test_a_real_device_allowed_may_report_qemu_0_but_not_change(
+    tmp_path, device, android, clock
+):
+    android.props["ro.kernel.qemu"] = "0"
+    result = run(device, clock, tmp_path / "run", allow_real_device=True)
+    assert result.stop_reason in STOP_REASONS
+
+
+def test_nothing_runs_between_the_last_read_and_the_tap(
+    tmp_path, device, clock, monkeypatch
+):
+    events: list[str] = []
+    for name in ("dump", "foreground", "focused_window", "keyboard_shown", "tap"):
+        original = getattr(device, name)
+
+        def logged(*args, _name=name, _original=original, **kwargs):
+            events.append(_name)
+            return _original(*args, **kwargs)
+
+        monkeypatch.setattr(device, name, logged)
+
+    def stop() -> bool:
+        events.append("stop")
+        return False
+
+    run(device, clock, tmp_path / "run", stop=stop)
+    taps = [i for i, e in enumerate(events) if e == "tap"]
+    assert taps
+    for index in taps:
+        # dump, foreground, focused window, keyboard: then the tap, at once.
+        assert events[index - 4 : index] == [
+            "dump",
+            "foreground",
+            "focused_window",
+            "keyboard_shown",
+        ]
+
+
+def test_a_stop_that_takes_long_cannot_slip_a_dialog_under_the_tap(
+    tmp_path, device, android, clock
+):
+    covered = []
+
+    def slow_stop() -> bool:
+        # While the user's stop() "runs", a dialog comes up once a tap is due.
+        if android.inputs and not covered:
+            covered.append(True)
+            android.show("cart")
+        return False
+
+    run(device, clock, tmp_path / "run", stop=slow_stop)
+    assert covered
+    assert not [i for i in android.inputs if i.kind == "tap" and i.screen == "cart"]
+
+
+def test_a_stop_seen_once_is_remembered(tmp_path, device, android, clock):
+    answers = iter([False, False, True])
+
+    def flaky_stop() -> bool:
+        return next(answers, False)
+
+    result = run(device, clock, tmp_path / "run", stop=flaky_stop)
+    assert result.stop_reason == "interrupted"
+    assert android.inputs == []  # the launch went out, nothing was pressed
+
+
+def test_a_stop_between_force_stop_and_start_sends_no_start(
+    tmp_path, device, android, monkeypatch, clock
+):
+    original = device.tap
+
+    def tap_then_cover(point: tuple[int, int]) -> tuple[int, int]:
+        result = original(point)
+        if not android.stopped and android.screen.name == "browse":
+            for name in ("ext1", "ext2", "ext3"):
+                android.show(name)
+        return result
+
+    monkeypatch.setattr(device, "tap", tap_then_cover)
+    stopping = []
+    stop_app = device.stop_app
+
+    def stop_then_ask(package: str) -> None:
+        stop_app(package)
+        stopping.append(True)
+
+    monkeypatch.setattr(device, "stop_app", stop_then_ask)
+    launches = spy(monkeypatch, device, "launch", lambda *_a, **_k: None)
+    out = tmp_path / "run"
+    result = run(device, clock, out, stop=lambda: bool(stopping))
+    assert result.stop_reason == "interrupted"
+    assert android.stopped == [SHOP]
+    assert len(launches) == 1  # the first launch only
+    records = lines(out / "transitions.jsonl")
+    relaunch = [r for r in records if r.get("action", {}).get("kind") == "relaunch"]
+    end = [r for r in records if r.get("action_id") == relaunch[0]["action_id"]][-1]
+    assert (end["not_sent"], end["reason"]) == (True, "start_not_sent")
+    summary = (out / "summary.txt").read_text(encoding="utf-8")
+    assert "force-stopped but not started again" in summary
+
+
+def test_a_back_that_is_not_sent_ends_the_run(
+    tmp_path, device, android, clock, monkeypatch
+):
+    original_launch = device.launch
+
+    def launch_into_another_app(*args, **kwargs):
+        original_launch(*args, **kwargs)
+        android.show("ext1")  # the engine will want BACK
+
+    monkeypatch.setattr(device, "launch", launch_into_another_app)
+    monkeypatch.setattr(device, "keyboard_shown", lambda: None)
+    out = tmp_path / "run"
+    result = run(device, clock, out)
+    assert result.stop_reason == "not_sent"
+    assert not [i for i in android.inputs if i.kind == "key"]
+    summary = (out / "summary.txt").read_text(encoding="utf-8")
+    assert "back was not sent: keyboard_unknown" in summary
+    assert android.stopped == []  # no relaunch followed
+
+
+def test_a_clock_that_does_not_move_cannot_hold_the_pause(tmp_path, device, clock):
+    driver, _, _ = _gate_run(tmp_path, device, clock)
+    driver.settle = 1.0
+    sleeps = []
+    driver.sleep = sleeps.append  # the clock never moves
+    driver.pause()
+    assert 0 < len(sleeps) <= int(1.0 / crawl_driver.PAUSE_STEP) + 2

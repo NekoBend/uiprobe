@@ -62,6 +62,26 @@ __all__ = [
 ]
 
 READY_STATE: Final = "device"
+IDENTITY_COMMAND: Final = (
+    "getprop ro.kernel.qemu; getprop ro.serialno; getprop ro.build.fingerprint"
+)
+
+
+class FocusedWindow(NamedTuple):
+    """The window that has input focus: the package that owns it and its title."""
+
+    owner: str
+    title: str
+
+
+class DeviceIdentity(NamedTuple):
+    """What `Device.identity` read: emulator or not, serial number, build."""
+
+    emulator: bool
+    serialno: str
+    fingerprint: str
+
+
 DEFAULT_LAUNCH_TIMEOUT: Final = 10.0
 LAUNCH_POLL_INTERVAL: Final = 0.5
 MAX_LAUNCH_TIMEOUT: Final = 600.0
@@ -887,13 +907,21 @@ def _read_source(text: str, source: _Source) -> tuple[str, str] | object | None:
 
 _CURRENT_FOCUS_CLAIM: Final = re.compile(r"\s*mCurrentFocus=")
 _CURRENT_FOCUS: Final = re.compile(
-    r"\s*mCurrentFocus=Window\{[0-9a-f]{1,16} u[0-9]{1,3} ([^{}\r\n]{1,512})\}\s*"
+    r"\s*mCurrentFocus=Window\{([0-9a-f]{1,16}) u[0-9]{1,3} ([^{}\r\n]{1,512})\}\s*"
 )
-_WINDOW_COMPONENT: Final = re.compile(_COMPONENT)
+_WINDOW_HEAD: Final = re.compile(
+    r"  Window #[0-9]{1,4} Window\{([0-9a-f]{1,16}) u[0-9]{1,3} ([^{}\r\n]{1,512})\}:"
+)
+# The system writes this line; 24 has mShowToOwnerOnly, 30 and 36 showForAllUsers.
+_WINDOW_OWNER: Final = re.compile(
+    r"    mOwnerUid=[0-9]{1,10} (?:mShowToOwnerOnly|showForAllUsers)=(?:true|false)"
+    r" package=([A-Za-z][A-Za-z0-9_]{0,254}(?:\.[A-Za-z][A-Za-z0-9_]{0,254}){0,64})"
+    r" appop=[A-Z_]{1,64}"
+)
 
 
-def _read_current_focus(text: str) -> str | None:
-    """The package of the focused window, ``""`` for a non-app one, or None.
+def _read_current_focus(text: str) -> tuple[str, str] | None:
+    """The ``(hash, title)`` of the focused window, or None.
 
     Every line that claims ``mCurrentFocus`` must be well formed and all must
     name the same window; anything else is None.
@@ -903,18 +931,34 @@ def _read_current_focus(text: str) -> str | None:
         for line in text.split("\n")
         if _CURRENT_FOCUS_CLAIM.match(line)
     }
-    titles: set[str] = set()
+    windows: set[tuple[str, str]] = set()
     for line in lines:
         match = (
             _CURRENT_FOCUS.fullmatch(line) if len(line) <= _MAX_DUMPSYS_LINE else None
         )
         if match is None:
             return None
-        titles.add(match[1])
-    if len(titles) != 1:
+        windows.add((match[1], match[2]))
+    return windows.pop() if len(windows) == 1 else None
+
+
+def _read_window_owner(text: str, window: str, title: str) -> FocusedWindow | None:
+    """The owner of window `window` from its block, or None (see focused_window)."""
+    lines = [line.rstrip("\r") for line in text.split("\n")]
+    heads = [
+        index
+        for index, line in enumerate(lines)
+        if line.startswith("  Window #") and f" Window{{{window} " in line
+    ]
+    if len(heads) != 1 or heads[0] + 2 >= len(lines):
         return None
-    component = _WINDOW_COMPONENT.fullmatch(titles.pop())
-    return "" if component is None else component[1]
+    index = heads[0]
+    line = lines[index]
+    head = _WINDOW_HEAD.fullmatch(line) if len(line) <= _MAX_DUMPSYS_LINE else None
+    if head is None or head[1] != window or head[2] != title:
+        return None
+    owner = _WINDOW_OWNER.fullmatch(lines[index + 2])
+    return None if owner is None else FocusedWindow(owner[1], title)
 
 
 _BOOL = r"(true|false)"
@@ -1678,20 +1722,7 @@ class Device:
         limit = _check_launch_timeout(timeout)
         details: dict[str, object] = {"package": package}
         if restart:
-            stop = self._shell(quote_args("am", "force-stop", package) + _EXIT_SUFFIX)
-            failure = _input_failure("force-stop", {}, stop)
-            if failure is not None:
-                details["reason"] = "stop_failed"
-                if "exit_status" in failure.details:
-                    details["exit_status"] = failure.details["exit_status"]
-                output = failure.details.get("output")
-                if isinstance(output, str):
-                    details["output"] = _escaped(output)
-                msg = (
-                    f"am force-stop {package} did not report success, so the app"
-                    " was not launched"
-                )
-                raise LaunchFailedError(msg, details=details)
+            self._force_stop(package)
         output = self._shell(
             quote_args(
                 "monkey", "-p", package, "-c", "android.intent.category.LAUNCHER", "1"
@@ -1730,6 +1761,41 @@ class Device:
         details.update(reason="not_in_front", foreground=shown, timeout=limit)
         last = "unknown" if shown is None else shown
         msg = f"{package} was not in front after {limit:g} seconds (foreground: {last})"
+        raise LaunchFailedError(msg, details=details)
+
+    def stop_app(self, package: str) -> None:
+        """Send ``am force-stop PACKAGE`` once and require it to report success.
+
+        It is the first half of ``launch(package, restart=True)``, for a caller
+        that wants to decide between the stop and the start. State the app has
+        not saved is lost.
+
+        Raises:
+            TypeError, ValueError: `package` is not a valid package name
+                (before the adb server is contacted).
+            LaunchFailedError: The stop did not report exit status 0 with no
+                other output (``details["reason"]`` is ``stop_failed``).
+            AdbError: The adb protocol or the command failed.
+        """
+        if isinstance(package, str):
+            package = str.__str__(package)
+        self._force_stop(check_package(package))
+
+    def _force_stop(self, package: str) -> None:
+        stop = self._shell(quote_args("am", "force-stop", package) + _EXIT_SUFFIX)
+        failure = _input_failure("force-stop", {}, stop)
+        if failure is None:
+            return
+        details: dict[str, object] = {"package": package, "reason": "stop_failed"}
+        if "exit_status" in failure.details:
+            details["exit_status"] = failure.details["exit_status"]
+        output = failure.details.get("output")
+        if isinstance(output, str):
+            details["output"] = _escaped(output)
+        msg = (
+            f"am force-stop {package} did not report success, so the app was not"
+            " launched"
+        )
         raise LaunchFailedError(msg, details=details)
 
     def api_level(self) -> int | None:
@@ -1781,17 +1847,23 @@ class Device:
         component = self._trusted_component()
         return None if component is None else component[0]
 
-    def focused_window(self) -> str | None:
-        """Return the package of the window that has input focus.
+    def focused_window(self) -> FocusedWindow | None:
+        """Return the window that has input focus: its owner and its title.
 
-        Reads ``mCurrentFocus`` from ``dumpsys window``. The answer is the
-        package of an app window whose title is ``package/activity``, ``""``
-        for a window that is not an activity of an app (the notification
-        shade, the status bar, a popup or a toast), and None when it is
-        unknown: no line, ``null``, a malformed line, or lines that disagree.
-        Window titles are chosen by apps and can hold newlines, so a forged
-        line can be added but the genuine one cannot be removed: when lines
-        disagree the answer is None.
+        ``mCurrentFocus`` in ``dumpsys window`` names the window (``Window{HASH
+        u0 TITLE}``); its block in ``dumpsys window windows`` (``Window #N
+        Window{HASH u0 TITLE}:``) has, two lines below, the line ``mOwnerUid=...
+        package=OWNER``, which the system writes. The owner comes from that
+        line, never from the title, which an app chooses. Captured in the same
+        form on emulators at API 24, 30 and 36; the notification shade is then
+        a window of ``com.android.systemui``.
+
+        None means unknown: no or several ``mCurrentFocus`` values, ``null``,
+        a malformed line, no block or several blocks with that hash (titles
+        can hold newlines, so a forged block can be added but the genuine one
+        cannot be removed), a block whose title differs, or an owner line of
+        another shape. The two dumps are read one after the other, so a focus
+        that changed in between gives None too.
 
         Raises:
             AdbError: The adb protocol or the command failed.
@@ -1800,7 +1872,66 @@ class Device:
             DeviceOfflineError: The device is offline.
             DeviceUnauthorizedError: The device has not authorized this host.
         """
-        return _read_current_focus(self._shell("dumpsys window"))
+        focus = _read_current_focus(self._shell("dumpsys window"))
+        if focus is None:
+            return None
+        return _read_window_owner(self._shell("dumpsys window windows"), *focus)
+
+    def identity(self) -> DeviceIdentity | None:
+        """Read whether this is an emulator, its serial number and build, at once.
+
+        One command reads ``ro.kernel.qemu``, ``ro.serialno`` and
+        ``ro.build.fingerprint``. None means the answer did not have exactly
+        those three lines.
+
+        Raises:
+            AdbError: The adb protocol or the command failed.
+            AdbServerUnavailableError: The adb server cannot be reached.
+            DeviceNotFoundError: The device is gone.
+            DeviceOfflineError: The device is offline.
+            DeviceUnauthorizedError: The device has not authorized this host.
+        """
+        lines = self._shell(IDENTITY_COMMAND).split("\n")
+        if lines and lines[-1] == "":
+            lines.pop()
+        if len(lines) != len(DeviceIdentity._fields):
+            return None
+        qemu, serialno, fingerprint = (line.rstrip("\r").strip() for line in lines)
+        return DeviceIdentity(qemu == "1", serialno, fingerprint)
+
+    def check_pin(self, expected: DeviceIdentity, *, emulator: bool) -> None:
+        """Raise unless the pinned transport still leads to the same device.
+
+        The adb server must still list the pinned transport id with this serial
+        (a restarted server numbers its transports anew), and `identity`
+        through it must equal `expected`; with `emulator` it must also be an
+        emulator. Nothing is sent but these two reads.
+
+        Raises:
+            DeviceNotFoundError: The pinned transport is gone, lists another
+                serial, or leads to a device whose identity differs
+                (``details["reason"]`` is ``device_changed``).
+            AdbError: `pin_transport` was not called, or the reads failed.
+        """
+        if self._transport_id is None:
+            msg = "the transport is not pinned"
+            raise AdbError(msg, details={"serial": self.serial})
+        listed = [
+            d for d in self._client.devices() if d.transport_id == self._transport_id
+        ]
+        same = (
+            len(listed) == 1
+            and listed[0].serial == self.serial
+            and listed[0].state == READY_STATE
+        )
+        found = self.identity() if same else None
+        if found is None or found != expected or (emulator and not found.emulator):
+            msg = (
+                f"the device pinned as {self.serial} (transport"
+                f" {self._transport_id}) is not the one that was checked any more"
+            )
+            details = {"serial": self.serial, "reason": "device_changed"}
+            raise DeviceNotFoundError(msg, details=details)
 
     def keyboard_shown(self) -> bool | None:
         """Return whether the soft keyboard is shown, or None when unknown.
