@@ -1,22 +1,25 @@
 """Tests for ``Device.type_text`` and ``uiprobe type``.
 
 Every device is a strict `FakeAndroid`: the command allowlist admits only
-``input text`` with a quoted argument, so any other form fails the test.
+``input text`` with a quoted argument and the exit status marker, so any
+other form fails the test.
 """
 
 from __future__ import annotations
 
 import json
+import re
 import shlex
 import string
 from typing import TYPE_CHECKING
 
 import pytest
 
-from tests.fake_device import El, FakeAndroid, Screen
+from tests.fake_adb_server import Fail
+from tests.fake_device import INPUT_MARKER_SUFFIX, El, FakeAndroid, Screen
 from uiprobe import cli
 from uiprobe.device import TYPE_PIECE_SIZE, Device, TextNotTypedError
-from uiprobe.errors import AdbError
+from uiprobe.errors import AdbError, InputFailedError, UiprobeError
 
 if TYPE_CHECKING:
     from tests.fake_adb_server import FakeAdbServer
@@ -47,7 +50,8 @@ def pieces(fake_adb: FakeAdbServer) -> list[str]:
     """The text of each ``input text`` command, split back as a shell would."""
     out = []
     for command in typed(fake_adb):
-        words = shlex.split(command)
+        assert command.endswith(INPUT_MARKER_SUFFIX)
+        words = shlex.split(command.removesuffix(INPUT_MARKER_SUFFIX))
         assert words[:2] == ["input", "text"]
         assert len(words) == 3
         out.append(words[2])
@@ -93,21 +97,23 @@ def test_the_whole_printable_range_in_one_command(device, fake_adb):
 )
 def test_measured_cases_are_sent_quoted_and_unchanged(device, fake_adb, text):
     device.type_text(text)
-    assert typed(fake_adb) == [f"input text {shlex.quote(text)}"]
+    assert typed(fake_adb) == [f"input text {shlex.quote(text)}{INPUT_MARKER_SUFFIX}"]
     assert typed(fake_adb)[0].startswith("input text '")
     assert pieces(fake_adb) == [text]
 
 
 def test_a_single_quote_uses_the_usual_escape(device, fake_adb):
     device.type_text("it's")
-    assert typed(fake_adb) == ["input text 'it'\"'\"'s'"]
+    assert typed(fake_adb) == ["input text 'it'\"'\"'s'" + INPUT_MARKER_SUFFIX]
 
 
 def test_the_command_is_exactly_input_text_and_the_piece(device, fake_adb):
     device.type_text("hello world")
     device.type_text("hello")
-    assert typed(fake_adb) == ["input text 'hello world'", "input text 'hello'"]
-    assert not any("uiprobe-exit" in c for c in requests(fake_adb))
+    assert typed(fake_adb) == [
+        "input text 'hello world'; echo uiprobe-exit:$?",
+        "input text 'hello'; echo uiprobe-exit:$?",
+    ]
 
 
 @pytest.mark.parametrize("text", ["%s", "a%sb", "%%s", "%s%s", "x%%%sy", "s%s%"])
@@ -115,6 +121,7 @@ def test_percent_s_is_never_inside_one_piece(device, fake_adb, text):
     device.type_text(text)
     parts = pieces(fake_adb)
     assert all("%s" not in p for p in parts)
+    assert all(parts)  # no empty piece
     assert "".join(parts) == text
     assert len(parts) > 1
 
@@ -301,28 +308,30 @@ def test_cli_non_ascii_is_a_usage_error_with_no_request(capsys, fake_adb):
         "character U+00E9 ('\\xe9') at position 3 is not ASCII; "
         "this version types ASCII text only"
     ) in err
-    assert requests(fake_adb) == []
+    assert fake_adb.requests == []
 
 
 def test_cli_non_ascii_json_error_has_details(capsys, fake_adb):
     code, out, err = invoke(capsys, fake_adb, "type", "--json", "café")
-    assert code == 2
-    error = json.loads(out + err)["error"]
+    assert (code, err) == (2, "")
+    error = json.loads(out)["error"]
     assert error["code"] == "usage_error"
     assert error["details"] == {
         "character": "U+00E9",
         "escaped": "'\\xe9'",
         "position": 3,
     }
-    assert requests(fake_adb) == []
+    assert fake_adb.requests == []
 
 
-@pytest.mark.parametrize("text", ["a\nb", "a\tb", "a\x01b", ""])
+@pytest.mark.parametrize(
+    "text", ["a\nb", "a\tb", "a\x01b", "", "a" * 300 + "\xe9", "a" * 256 + "\n"]
+)
 def test_cli_refuses_without_any_request(capsys, fake_adb, text):
     code, _, err = invoke(capsys, fake_adb, "type", text)
     assert code == 2
     assert err
-    assert requests(fake_adb) == []
+    assert fake_adb.requests == []  # not even the device list
 
 
 def test_cli_sends_long_text_in_pieces(capsys, fake_adb):
@@ -337,21 +346,50 @@ def test_cli_sends_long_text_in_pieces(capsys, fake_adb):
 TYPED_TEXT = "hunter2-Secret"
 
 
+def _no_text_anywhere(error: UiprobeError, text: str = TYPED_TEXT) -> None:
+    assert error.__cause__ is None
+    assert error.__context__ is None
+    dumped = json.dumps(error.to_dict()) + str(error) + repr(error.args)
+    assert text not in dumped
+
+
 def test_a_dropped_connection_error_leaves_the_text_out(device, android):
     android.drop_after_input(1)
     with pytest.raises(AdbError) as info:
         device.type_text(TYPED_TEXT)
-    dumped = json.dumps(info.value.to_dict()) + str(info.value)
-    assert TYPED_TEXT not in dumped
-    assert info.value.details["request"] == "shell:input text <text omitted>"
-    assert info.value.__suppress_context__
+    _no_text_anywhere(info.value)
+    assert info.value.details == {
+        "command": "type",
+        "request": "shell:input text <text omitted>",
+        "piece": 1,
+        "pieces": 1,
+        "pieces_done": 0,
+    }
+    assert info.value.message.startswith("typing stopped at piece 1 of 1")
 
 
 def test_a_quoted_text_is_left_out_of_the_error_too(device, android):
     android.drop_after_input(1)
     with pytest.raises(AdbError) as info:
         device.type_text("it's-" + TYPED_TEXT)
-    assert TYPED_TEXT not in json.dumps(info.value.to_dict())
+    _no_text_anywhere(info.value)
+
+
+@pytest.mark.parametrize(
+    "echo",
+    [
+        TYPED_TEXT,
+        f"'{TYPED_TEXT}'",
+        f"input text {TYPED_TEXT}",
+        "error: " + TYPED_TEXT[:7],
+    ],
+)
+def test_an_adb_failure_that_repeats_the_text_is_not_shown(device, android, echo):
+    android.override(re.compile(r"^input text "), Fail(echo))
+    with pytest.raises(AdbError) as info:
+        device.type_text(TYPED_TEXT)
+    _no_text_anywhere(info.value, TYPED_TEXT[:7])
+    assert "the adb request failed" in info.value.message
 
 
 def test_cli_json_error_after_a_dropped_connection_has_no_text(
@@ -361,21 +399,135 @@ def test_cli_json_error_after_a_dropped_connection_has_no_text(
     code, out, err = invoke(capsys, fake_adb, "--json", "type", TYPED_TEXT)
     assert code == 10
     assert TYPED_TEXT not in out + err
-    assert "<text omitted>" in out
+    assert json.loads(out)["error"]["details"]["pieces_done"] == 0
 
 
-@pytest.mark.parametrize(("text", "drop"), [("ab%s", 2), ("e", 1)])
-def test_a_short_piece_does_not_garble_the_error(device, android, text, drop):
-    android.drop_after_input(drop)
+def test_a_failure_after_the_first_piece_names_the_pieces(device, android):
+    text = "a" * TYPE_PIECE_SIZE + "b" * TYPE_PIECE_SIZE + "c" * 10
+    android.drop_after_input(2)
     with pytest.raises(AdbError) as info:
         device.type_text(text)
-    assert info.value.details["request"] == "shell:input text <text omitted>"
-    assert info.value.message.count("<text omitted>") == 0
-    assert "adb server" in info.value.message
+    sent = [e.args[1] for e in android.inputs if e.kind == "text"]
+    assert sent == ["a" * TYPE_PIECE_SIZE, "b" * TYPE_PIECE_SIZE]  # c never sent
+    details = info.value.details
+    assert (details["piece"], details["pieces"], details["pieces_done"]) == (2, 3, 1)
+    assert "1 earlier piece was reported typed" in info.value.message
 
 
-def test_a_failure_after_the_first_piece_leaves_earlier_pieces_typed(device, android):
-    android.drop_after_input(2)
-    with pytest.raises(AdbError):
-        device.type_text("a" * (TYPE_PIECE_SIZE + 44))
-    assert len(android.inputs) == 2
+# --- the device's answer to each piece ---
+
+
+@pytest.mark.parametrize(
+    ("answer", "reason", "extra"),
+    [
+        ({"status": 1}, "exit_status", {"exit_status": 1}),
+        ({"output": "input: permission denied\n"}, "unexpected_output", {}),
+        ({"output": TYPED_TEXT + "\n"}, "unexpected_output", {}),
+        (
+            {"status": 255, "output": TYPED_TEXT + "\n"},
+            "exit_status",
+            {"exit_status": 255},
+        ),
+        ({"marker": False}, "no_exit_status", {}),
+    ],
+)
+def test_a_piece_the_device_did_not_take_stops_typing(
+    device, android, answer, reason, extra
+):
+    android.answer_input(**answer)
+    with pytest.raises(InputFailedError) as info:
+        device.type_text("a" * TYPE_PIECE_SIZE + TYPED_TEXT)
+    _no_text_anywhere(info.value)
+    assert info.value.details == {
+        "command": "type",
+        "reason": reason,
+        "piece": 1,
+        "pieces": 2,
+        "pieces_done": 0,
+        **extra,
+    }
+    assert len([e for e in android.inputs if e.kind == "text"]) == 1
+
+
+def test_cli_device_failure_exits_14_without_the_text(capsys, fake_adb, android):
+    android.answer_input(output="input: " + TYPED_TEXT + "\n")
+    code, out, err = invoke(capsys, fake_adb, "--json", "type", TYPED_TEXT)
+    assert (code, err) == (14, "")
+    assert TYPED_TEXT not in out
+    assert json.loads(out)["error"]["code"] == "input_failed"
+
+
+# --- one plain str from the check to the device ---
+
+
+class _TwoFaced(str):
+    """Text whose iteration, slicing and splitting show other characters."""
+
+    __slots__ = ()
+
+    def __iter__(self):
+        return iter("x'; reboot; '")
+
+    def __getitem__(self, key):
+        return "'"
+
+    def split(self, *_args, **_kwargs):
+        return ["'; reboot; '"]
+
+    def __add__(self, other):
+        return "'; reboot; '"
+
+    def __len__(self) -> int:
+        return 3
+
+
+def test_a_str_subclass_is_read_once_as_plain_text(device, fake_adb):
+    device.type_text(_TwoFaced("hello"))
+    assert typed(fake_adb) == ["input text 'hello'; echo uiprobe-exit:$?"]
+
+
+class _HidesItsText(str):
+    """Text that shows only ASCII when iterated, but holds a non-ASCII one."""
+
+    __slots__ = ()
+
+    def __iter__(self):
+        return iter("cafe")
+
+
+def test_the_check_reads_the_plain_text_of_a_subclass(device, fake_adb):
+    with pytest.raises(TextNotTypedError, match="U\\+00E9"):
+        device.type_text(_HidesItsText("café"))
+    assert typed(fake_adb) == []
+
+
+# --- arguments argparse cannot place ---
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["type", "one", "two-" + TYPED_TEXT],
+        ["type", "-Q" + TYPED_TEXT],  # -h would show the help instead
+        ["type", "--" + TYPED_TEXT],
+        ["--json", "type", "one", TYPED_TEXT],
+        ["type", "--json", "-Q" + TYPED_TEXT],
+    ],
+)
+def test_argument_errors_of_type_never_show_the_arguments(capsys, fake_adb, argv):
+    code, out, err = invoke(capsys, fake_adb, *argv)
+    assert code == 2
+    assert TYPED_TEXT not in out + err
+    assert "give TEXT as one quoted argument" in out + err
+    if "--json" in argv:
+        assert err == ""
+        assert json.loads(out)["error"]["code"] == "usage_error"
+    else:
+        assert out == ""
+    assert fake_adb.requests == []
+
+
+def test_other_commands_keep_their_argument_errors(capsys, fake_adb):
+    code, _, err = invoke(capsys, fake_adb, "key", "enter", "extra")
+    assert code == 2
+    assert "unrecognized arguments: extra" in err

@@ -532,10 +532,10 @@ class TextNotTypedError(ValueError):
         self.details: dict[str, object] = details or {}
 
 
-def _check_text(text: object) -> str:
+def _check_text(text: str) -> str:
     """Return `text` when it can be typed; raise before anything is sent."""
-    if not isinstance(text, str):
-        msg = f"text must be a str, not {type(text).__name__}"
+    if type(text) is not str:  # `_plain_text` has made it one
+        msg = f"text must be a plain str, not {type(text).__name__}"
         raise TypeError(msg)
     if not text:
         msg = "text is empty; there is nothing to type"
@@ -573,13 +573,17 @@ def _single_quoted(piece: str) -> str:
 def _text_pieces(text: object) -> list[str]:
     """Split `text` into the pieces to send, after checking it.
 
+    `text` is first made a plain str (see `_plain_text`); the check and the
+    split read only that str.
+
     A piece has at most `TYPE_PIECE_SIZE` characters and never contains ``%``
     directly followed by ``s`` (the device turns that pair into a space). The
     pieces joined give `text` again.
     """
+    plain = _check_text(_plain_text(text))
     pieces: list[str] = []
     current = ""
-    for char in _check_text(text):
+    for char in plain:
         if len(current) >= TYPE_PIECE_SIZE or (char == "s" and current[-1:] == "%"):
             pieces.append(current)
             current = ""
@@ -588,23 +592,85 @@ def _text_pieces(text: object) -> list[str]:
     return pieces
 
 
-def _without_text(error: UiprobeError, secrets_: tuple[str, ...]) -> UiprobeError:
-    """Copy of `error` with the typed text left out of its message and details.
+def _plain_text(text: object) -> str:
+    """Return `text` as a plain str with the same characters.
 
-    An adb error carries the request that failed, and for typing that request
-    holds the text, which can be a password.
+    A str subclass is read once here, by the base type; everything after this
+    uses only the returned str, so a subclass cannot show one text to the
+    check and another to the device.
     """
+    if not isinstance(text, str):
+        msg = f"text must be a str, not {type(text).__name__}"
+        raise TypeError(msg)
+    return str.__str__(text)
 
-    def clean(value: object) -> object:
-        if not isinstance(value, str):
-            return value
-        for secret in secrets_:
-            value = "<text omitted>".join(value.split(secret))
-        return value
 
-    details = {key: clean(value) for key, value in error.details.items()}
-    message = str(clean(error.message))
-    return type(error)(message, details=details)
+# Why typing stopped, by error class, in fixed words: what the device or adb
+# said is never used, as it can repeat the text.
+_TYPING_STOPPED_BECAUSE: Final = (
+    (AdbServerUnavailableError, "the adb server cannot be reached"),
+    (DeviceNotFoundError, "the device is gone"),
+    (DeviceOfflineError, "the device is offline"),
+    (DeviceUnauthorizedError, "the device has not authorized this computer"),
+)
+
+
+def _typing_stopped(kind: type[UiprobeError], piece: int, pieces: int) -> UiprobeError:
+    """A new error of class `kind` for typing that stopped at `piece` (1-based).
+
+    It holds only numbers and fixed words, never the text or anything the
+    device or adb answered.
+    """
+    reason = next(
+        (words for cls, words in _TYPING_STOPPED_BECAUSE if issubclass(kind, cls)),
+        "the adb request failed",
+    )
+    done = piece - 1
+    msg = (
+        f"typing stopped at piece {piece} of {pieces} ({reason}); {done} earlier"
+        f" piece{' was' if done == 1 else 's were'} reported typed, and piece"
+        f" {piece} may have been typed in part or in full"
+    )
+    details: dict[str, object] = {
+        "command": "type",
+        "request": "shell:input text <text omitted>",
+        "piece": piece,
+        "pieces": pieces,
+        "pieces_done": done,
+    }
+    return kind(msg, details=details)
+
+
+def _piece_failure(output: str, piece: int, pieces: int) -> InputFailedError | None:
+    """Judge the answer to one piece; None means exit status 0 and nothing else.
+
+    The answer itself never goes into the error: it can repeat the text.
+    """
+    failure = _input_failure("type", {}, output)
+    if failure is None:
+        return None
+    reason = failure.details["reason"]
+    done = piece - 1
+    details: dict[str, object] = {
+        "command": "type",
+        "reason": reason,
+        "piece": piece,
+        "pieces": pieces,
+        "pieces_done": done,
+    }
+    if "exit_status" in failure.details:
+        details["exit_status"] = failure.details["exit_status"]
+    what = {
+        "no_exit_status": "the device did not report an exit status",
+        "exit_status": f"input exited with status {details.get('exit_status')}",
+        "unexpected_output": "input printed something besides its exit status",
+    }[str(reason)]
+    msg = (
+        f"typing stopped at piece {piece} of {pieces}: {what}; {done} earlier"
+        f" piece{' was' if done == 1 else 's were'} reported typed, and piece"
+        f" {piece} may have been typed in part or in full"
+    )
+    return InputFailedError(msg, details=details)
 
 
 def _check_launch_timeout(timeout: object) -> float:
@@ -1419,25 +1485,29 @@ class Device:
         before anything is sent: a character outside ASCII (it failed on every
         Android version tried: emulators at API 24, 30 and 36), a newline or
         tab (they can act as Enter or move the focus; press Enter with `key`),
-        any other control character, and empty text. The text goes to whatever
-        field has focus in whatever app is in front; nothing is checked
-        afterwards, and the device's answer is not used (its exit status can
-        be 0 when typing failed).
+        any other control character, and empty text. A str subclass is read
+        once and used as a plain str with the same characters. The text goes
+        to whatever field has focus in whatever app is in front; nothing is
+        checked afterwards.
 
         The text is sent as ``input text`` with the argument quoted for the
         device shell (always in single quotes, a quote inside as ``'"'"'``),
         in pieces of at most `TYPE_PIECE_SIZE` characters; the text is split
-        before it is quoted.
-        ``input text`` turns the two characters ``%s`` into a space, so a piece
-        never contains ``%`` directly followed by ``s``: the text is split
-        between them, and the pieces are sent as separate commands, in order.
-        Each command is exactly ``input text <quoted piece>``, sent once.
+        before it is quoted. ``input text`` turns the two characters ``%s``
+        into a space, so a piece never contains ``%`` directly followed by
+        ``s``: the text is split between them. Each piece is sent once, in
+        order, as exactly ``input text <quoted piece>; echo uiprobe-exit:$?``,
+        and must report exit status 0 and print nothing else, or typing stops.
+        Exit status 0 does not prove that the text arrived.
 
         Raises:
             TypeError: `text` is not a str.
             ValueError: `text` is empty or has a character that is not typed.
                 The error is a `TextNotTypedError`; its ``details`` hold
                 ``character`` (``U+XXXX``), ``escaped`` and ``position``.
+            InputFailedError: A piece did not report success; ``details``
+                hold ``reason``, ``piece``, ``pieces``, ``pieces_done`` and,
+                when the device reported one, ``exit_status``.
             AdbError: The adb protocol or the command failed.
             AdbServerUnavailableError: The adb server cannot be reached.
             DeviceNotFoundError: The device is gone.
@@ -1445,16 +1515,35 @@ class Device:
             DeviceUnauthorizedError: The device has not authorized this host.
 
         The first two are raised before anything is sent to the adb server.
-        The errors raised while sending leave the text out of their message and
-        details. An error after the first command can leave part of the text
-        typed.
+        An error while sending is a new error of the same class whose message
+        and ``details`` hold only fixed words and numbers (``piece``,
+        ``pieces``, ``pieces_done``): never the text, and nothing the device or
+        adb answered, which can repeat it. It is raised with no chained error.
+        Typing that stops can leave the earlier pieces typed, and the piece it
+        stopped at typed in part or in full.
         """
-        for piece in _text_pieces(text):
-            quoted = _single_quoted(piece)
-            try:
-                self._shell(f"input text {quoted}")
-            except UiprobeError as exc:
-                raise _without_text(exc, (quoted,)) from None
+        pieces = _text_pieces(text)  # from one plain str, checked
+        for number, piece in enumerate(pieces, start=1):
+            failure = self._type_piece(piece, number, len(pieces))
+            if failure is not None:
+                raise failure  # outside any handler: no chained error to read
+
+    def _type_piece(self, piece: str, number: int, pieces: int) -> UiprobeError | None:
+        """Send one piece; return the error to raise, or None when it worked.
+
+        A failed request leaves only its error class here, so the error that
+        `type_text` raises chains to nothing that holds the text.
+        """
+        command = f"input text {_single_quoted(piece)}{_EXIT_SUFFIX}"
+        kind: type[UiprobeError] | None = None
+        output = ""
+        try:
+            output = self._shell_text(command)
+        except UiprobeError as exc:
+            kind = type(exc)
+        if kind is not None:
+            return _typing_stopped(kind, number, pieces)
+        return _piece_failure(output, number, pieces)
 
     def launch(
         self,

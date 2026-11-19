@@ -910,7 +910,7 @@ def _cmd_key(args: argparse.Namespace) -> int:
 
 
 def _cmd_type(args: argparse.Namespace) -> int:
-    text = args.text
+    text = str.__str__(args.text)
     _text_pieces(text)  # a bad text is a usage error before any server contact
     device = Device(
         _single_serial(args),
@@ -1361,10 +1361,32 @@ def _json_requested(argv: Sequence[str]) -> bool:
     return "--json" in options
 
 
+# argparse quotes the words it cannot place ("unrecognized arguments: two"),
+# and with the type command those words can be part of the text.
+_TYPE_USAGE_MESSAGE = (
+    "the arguments could not be read (they are not shown, as they can hold the"
+    " text to type); give TEXT as one quoted argument, after -- when it starts"
+    " with -"
+)
+
+
 def _parse(argv: Sequence[str]) -> argparse.Namespace:
-    args = _build_parser().parse_args(argv)
-    _single_serial(args)
-    return args
+    """Read the command line.
+
+    When it holds the word ``type`` anywhere, an argparse error is replaced by
+    a message that shows none of the arguments. The replacement is raised
+    outside the handler, so the error chains to nothing that holds them.
+    """
+    hide = "type" in argv
+    try:
+        args = _build_parser().parse_args(argv)
+    except _UsageError:
+        if not hide:
+            raise
+    else:
+        _single_serial(args)
+        return args
+    raise _UsageError(_TYPE_USAGE_MESSAGE)
 
 
 def _guided_failure(exc: _GuidedUsageError, *, as_json: bool) -> int:

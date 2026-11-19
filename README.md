@@ -12,7 +12,7 @@ Eleven commands exist: `devices`, `dump`, `screenshot`, `find`, `tap`, `swipe`, 
 
 ## Safety
 
-- `tap`, `swipe`, `key` and `type` send real input to whatever screen is showing, in any app, and press what you name, even a button called "Delete" or "Buy". Only the crawl preview (what `crawl` does by default) uses deny words, and it presses nothing.
+- `tap`, `swipe` and `key` send real input to whatever screen is showing, in any app, and press what you name, even a button called "Delete" or "Buy". `type` sends text to whatever field has focus. Only the crawl preview (what `crawl` does by default) uses deny words, and it presses nothing.
 - Use an emulator, or a test device with test accounts. Do not run uiprobe on a phone that holds your own accounts, payment methods or messages.
 - uiprobe uses the device given with `-s`, else the one named in `ANDROID_SERIAL`, else the only ready device. Run `uiprobe devices` first.
 - Deny words see only the text, description, hint and resource id that uiautomator reports. An icon-only button without them (a trash can, a send arrow) has no words to match.
