@@ -187,6 +187,15 @@ def _build_parser() -> _Parser:
     ):
         command = commands.add_parser(name, allow_abbrev=False, help=text)
         _add_common_options(command, in_command=True)
+        if name == "dump":
+            command.add_argument(
+                "--brief",
+                action="store_true",
+                help=(
+                    "text view only: list just the elements with text, a"
+                    " description, a hint, [tap] or [scroll] (not with --json)"
+                ),
+            )
     find = commands.add_parser(
         "find",
         allow_abbrev=False,
@@ -434,6 +443,9 @@ def _cmd_devices(args: argparse.Namespace) -> int:
 
 
 def _cmd_dump(args: argparse.Namespace) -> int:
+    if args.brief and args.json:
+        msg = "--brief is a text view and cannot be combined with --json"
+        raise _UsageError(msg)
     device = Device(
         _single_serial(args),
         adb_server=args.adb_server,
@@ -441,7 +453,7 @@ def _cmd_dump(args: argparse.Namespace) -> int:
         start_server=args.start_server,
     )
     screen = device.dump()
-    _emit(screen.to_json(indent=2) if args.json else screen.to_tree())
+    _emit(screen.to_json(indent=2) if args.json else screen.to_tree(brief=args.brief))
     return 0
 
 

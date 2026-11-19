@@ -29,6 +29,29 @@ e1 FrameLayout
 
 Add `--json` to get JSON instead of text (`uiprobe dump --json`).
 
+### Short view with `--brief`
+
+A real screen is mostly containers with no text, so the full tree can run to over a hundred lines. `uiprobe dump --brief` prints a shorter text view. It is opt-in: `uiprobe dump` without it prints the full tree as before.
+
+```console
+$ uiprobe -s emulator-5554 dump --brief
+com.example.settings/.Settings  (s-0ad62355f058)
+e4 ImageButton [tap]
+e5 TextView "Settings"
+e9 EditText hint="Search settings" [tap]
+e10 ScrollView [scroll]
+├ e12 LinearLayout labels="Network & internet Mobile, Wi-Fi, hotspot" [tap]
+├ e18 LinearLayout labels="Connected devices Bluetooth, pairing" [tap]
+└ e24 LinearLayout labels="Apps Assistant, recent apps, default apps" [tap]
+```
+
+- The header line is kept. Of the elements, only these are kept: those with text, a content description or a hint, and those that carry a `[tap]` or `[scroll]` mark. Everything else is dropped, for example a container or an icon with no label that cannot be pressed. A pressable icon with no label is still listed, with its `[tap]`.
+- The element numbers are the numbers of the full view, so `e12` is the same element in `uiprobe dump` and `uiprobe dump --brief`. Numbers of dropped elements are missing, so there are gaps.
+- Indentation follows the parent and child relation among the kept elements only: an element is shown under its nearest kept ancestor, and a kept element with no kept ancestor starts at the left edge. The dropped elements in between add no indentation.
+- A pressable element with no text, description or hint of its own, whose labeled descendants are not themselves pressable, is folded into one line: the labels of those descendants (the text, else the content description, else the hint, with spaces at both ends removed) are joined by one space in document order and written as `labels="..."`, the way the crawl guards read a button. Those descendants are then not listed on their own lines. A settings row with a title and a summary shows as one line this way. A row is not folded when it has a label itself, when it has no labeled descendant, or when one of its labeled descendants carries a mark such as `[tap]`, `[scroll]` or `[checked]`; the row and that descendant are listed as usual.
+- The joined label is cut to 60 characters. A longer label ends with `...` and the whole cut label, `...` included, is 60 characters. Text is escaped as in the full view, so a line break or control character shows as `\n` or `\u202e`.
+- `--brief` cannot be used with `--json`, because the JSON stays complete. The command exits with 2 (`usage_error`) and sends nothing to the device. `find`, `tap` and the other commands are not affected.
+
 ## Finding elements
 
 `uiprobe find` lists the elements of the current screen that match all the criteria you give. At least one is needed:
