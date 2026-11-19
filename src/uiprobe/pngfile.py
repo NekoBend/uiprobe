@@ -218,6 +218,8 @@ def check_new_path(path: str) -> None:
         ValueError: `path` is empty, holds a null character, or on Windows
             names a stream of a file.
         FileExistsError: Something is at `path`, also a broken link.
+        OSError: Whether something is at `path` cannot be told (access to a
+            folder above it is denied, for example); `path` is not used.
     """
     if type(path) is not str:
         msg = f"path must be a str or an os.PathLike of str, not {type(path).__name__}"
@@ -234,8 +236,14 @@ def check_new_path(path: str) -> None:
             " give a plain file name"
         )
         raise ValueError(msg)
-    if os.path.lexists(path):
-        raise FileExistsError(errno.EEXIST, "file exists", path)
+    # os.path.lexists() answers False on any error, so an entry whose
+    # metadata cannot be read would pass. Only a missing entry (or a parent
+    # that is not a folder, so nothing can be there) lets the caller go on.
+    try:
+        os.lstat(path)
+    except (FileNotFoundError, NotADirectoryError):
+        return
+    raise FileExistsError(errno.EEXIST, "file exists", path)
 
 
 def save_png(path: str | os.PathLike[str], data: bytes) -> None:
@@ -252,7 +260,8 @@ def save_png(path: str | os.PathLike[str], data: bytes) -> None:
             empty, holds a null character, or on Windows names a stream of a
             file); nothing was created.
         PngFileError: The file could not be created (its parent is missing, or
-            access is denied) or could not be completed. A file that was
+            access is denied), whether something is at `path` could not be
+            told, or the file could not be completed. A file that was
             created stays on the disk.
         PngInterruptedError: Ctrl+C arrived after the file was created (a
             KeyboardInterrupt); the file stays, possibly incomplete.
@@ -262,7 +271,14 @@ def save_png(path: str | os.PathLike[str], data: bytes) -> None:
         # A plain str: a subclass with __index__ would make open() take it as
         # a descriptor, and its other methods could differ as well.
         path = str.__str__(path)
-    check_new_path(path)
+    try:
+        check_new_path(path)
+    except FileExistsError:
+        raise
+    except OSError as error:
+        msg = f"cannot check {path}: {error.strerror or error}"
+        details = {"path": path, "created": False}
+        raise PngFileError(msg, details=details) from error
     check_png(data)
     try:
         handle = open(path, "xb")  # noqa: PTH123, SIM115

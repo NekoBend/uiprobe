@@ -602,28 +602,34 @@ def test_write_default_settings_refuses_a_descriptor(tmp_path):
     assert target.read_text(encoding="utf-8") == "mine\n"
 
 
-class IndexableText(str):
-    """Text that open() would take as descriptor 1 if it were used as it is."""
+@pytest.mark.parametrize("through", ["str", "path"])
+def test_write_default_settings_uses_indexable_text_as_text(tmp_path, through):
+    sentinel = write(tmp_path, "mine\n", "mine.toml")
+    fd = os.open(sentinel, os.O_RDWR)
 
-    __slots__ = ()
+    class IndexableText(str):
+        """Text that open() would take as the sentinel's descriptor."""
 
-    def __index__(self) -> int:
-        return 1
+        __slots__ = ()
 
+        def __index__(self) -> int:
+            return fd
 
-class IndexablePath:
-    def __init__(self, text: str) -> None:
-        self.text = text
+    class IndexablePath:
+        def __fspath__(self) -> str:
+            return IndexableText(target)
 
-    def __fspath__(self) -> str:
-        return IndexableText(self.text)
-
-
-@pytest.mark.parametrize("wrap", [IndexableText, IndexablePath], ids=["str", "path"])
-def test_write_default_settings_uses_indexable_text_as_text(tmp_path, wrap):
-    target = tmp_path / SETTINGS_FILE
-    settings.write_default_settings(wrap(str(target)))
-    assert target.read_text(encoding="utf-8") == settings.render_default_settings()
+    target = str(tmp_path / SETTINGS_FILE)
+    given = IndexableText(target) if through == "str" else IndexablePath()
+    try:
+        settings.write_default_settings(given)
+        os.fstat(fd)  # still open
+    finally:
+        os.close(fd)
+    assert sentinel.read_text(encoding="utf-8") == "mine\n"
+    assert Path(target).read_text(encoding="utf-8") == (
+        settings.render_default_settings()
+    )
 
 
 @pytest.mark.parametrize("path", [b"u.toml", 2.0, None])
@@ -649,6 +655,52 @@ def test_on_windows_a_stream_of_an_existing_file_is_refused(tmp_path, monkeypatc
         settings.write_default_settings(f"{target}:extra")
     assert target.read_text(encoding="utf-8") == "mine\n"
     assert list(tmp_path.iterdir()) == [target]
+
+
+@pytest.mark.skipif(os.name != "nt", reason="streams exist on Windows")
+def test_on_this_windows_a_stream_of_an_existing_file_is_not_made(tmp_path):
+    target = write(tmp_path, "mine\n", SETTINGS_FILE)
+    stream = f"{target}:extra"
+    with pytest.raises(ValueError, match="stream"):
+        settings.write_default_settings(stream)
+    with pytest.raises(FileNotFoundError):
+        open(stream, "rb").close()  # noqa: PTH123
+    assert target.read_text(encoding="utf-8") == "mine\n"
+
+
+def test_an_os_error_inside_a_callers_interrupt_handler_is_a_write_failure(
+    tmp_path, monkeypatch
+):
+    _break_buffered_write(monkeypatch, always=True)
+    target = tmp_path / "u.toml"
+    try:
+        raise KeyboardInterrupt  # the caller's own handler
+    except KeyboardInterrupt:
+        with pytest.raises(settings.IncompleteFileError):
+            settings.write_default_settings(target)
+    assert target.exists()
+
+
+def test_a_path_that_cannot_be_looked_up_is_not_taken_as_missing(
+    tmp_path, capsys, monkeypatch
+):
+    target = tmp_path / SETTINGS_FILE
+    real = os.lstat
+
+    def lstat(path, *args, **kwargs):
+        if os.fspath(path) == str(target):
+            raise PermissionError(errno.EACCES, "Permission denied", str(target))
+        return real(path, *args, **kwargs)
+
+    with monkeypatch.context() as scoped:  # os is global: keep the patch short
+        scoped.setattr(pngfile.os, "lstat", lstat)
+        with pytest.raises(PermissionError):
+            settings.write_default_settings(target)
+        code, out, err = invoke(capsys, "init", str(target))
+    assert (code, out) == (2, "")
+    assert "cannot be created" in err
+    assert "Permission denied" in err
+    assert list(tmp_path.iterdir()) == []
 
 
 def test_elsewhere_a_colon_is_part_of_the_name(tmp_path, monkeypatch):

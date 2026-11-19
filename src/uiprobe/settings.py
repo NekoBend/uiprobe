@@ -404,7 +404,9 @@ def write_default_settings(path: str | os.PathLike[str]) -> None:
             never deletes files.
         InterruptedFileError: Ctrl+C arrived after the file was created (a
             KeyboardInterrupt); the file stays, possibly incomplete.
-        OSError: The file cannot be created.
+        OSError: The file cannot be created, or whether something is at
+            `path` cannot be told (access to a folder above it is denied, for
+            example).
         TypeError: `path` is not a str or an os.PathLike of str (neither an
             int nor bytes is taken, so nothing is used as an open descriptor).
         ValueError: `path` is empty, holds a null character, or on Windows
@@ -424,15 +426,21 @@ def write_default_settings(path: str | os.PathLike[str]) -> None:
     check_new_path(path)
     text = render_default_settings()
     handle = open(path, "x", encoding="utf-8", newline="\n")  # noqa: PTH123, SIM115
+    interrupted = False
     try:
         try:
             print(text, end="", file=handle)
             handle.flush()
+        except KeyboardInterrupt:
+            interrupted = True
+            raise
         finally:
             handle.close()
     except OSError as error:
         # A failing close must not hide a Ctrl+C that arrived while writing.
-        if isinstance(error.__context__, KeyboardInterrupt):
+        # Only a Ctrl+C caught here counts: an OSError raised while a caller
+        # handles its own KeyboardInterrupt is a write failure.
+        if interrupted:
             raise InterruptedFileError(path) from error
         raise IncompleteFileError(error) from error
     except KeyboardInterrupt as error:

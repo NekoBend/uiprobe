@@ -50,7 +50,13 @@ from uiprobe.errors import (
 )
 from uiprobe.guards import REASONS, Policy
 from uiprobe.model import MAX_CANDIDATES, _describe
-from uiprobe.pngfile import PngInterruptedError, check_new_path, check_png, save_png
+from uiprobe.pngfile import (
+    PngFileError,
+    PngInterruptedError,
+    check_new_path,
+    check_png,
+    save_png,
+)
 from uiprobe.settings import (
     SETTINGS_FILE,
     IncompleteFileError,
@@ -1087,6 +1093,10 @@ def _check_new_file(path: str) -> None:
     except ValueError as error:
         msg = f"-o {shown}: {error}"
         raise _UsageError(msg) from None
+    except OSError as error:
+        msg = f"cannot check {path}: {error.strerror or error}"
+        details = {"path": path, "created": False}
+        raise PngFileError(msg, details=details) from error
 
 
 def _cmd_screenshot(args: argparse.Namespace) -> int:
