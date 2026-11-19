@@ -1841,12 +1841,12 @@ def test_the_keyboard_back_on_the_root_is_still_allowed() -> None:
 def test_a_screen_with_the_roots_id_higher_up_gets_back_when_it_is_done() -> None:
     eng = started(Limits(depth=3))
     root = on_screen(["Item a"], name="root")
-    tap = eng.next(root)
-    assert isinstance(tap, Tap)
+    press(eng, root)
     mid = on_screen(["Item a"], name="mid")
     press(eng, mid)
     # mid links back to the root screen: path of 3, at the limit
     assert eng.next(root) == Back()
+    assert len(eng._path) == 3
 
 
 def test_random_graphs_give_the_same_actions_twice() -> None:

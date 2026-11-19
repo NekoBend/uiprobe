@@ -46,15 +46,16 @@ under the stated limits below.
   limit prevents another tap on the current path, it does not stop the crawl.
   On a screen at the depth limit nothing is pressed and the engine sends BACK,
   except on the root (path length 1, which is at the limit when the depth is
-  1), where it stops with ``exhausted``. The whole crawl stops at the action
+  1), where it stops with ``exhausted`` when candidate selection is reached
+  (a shown keyboard gets BACK first). The whole crawl stops at the action
   or time limit, at an exhausted root, or for one of the other stop reasons.
 * Sent taps. A `Tap` from ``next`` is only a proposal: it is counted as an
   action, recorded as a transition and allowed to move the path only when the
   driver reports it with `CrawlEngine.tap_sent` after an allowed
-  `CrawlEngine.recheck`. When ``next`` is called with a tap it handed out still
-  unreported (dropped, never rechecked, refused or failed to send), that tap is
-  released: not counted, no transition, path unchanged; it stays marked tried
-  and, unless the re-check refused it, is recorded as skipped with the reason
+  `CrawlEngine.recheck`. When ``next`` is called with a proposal still awaiting
+  its recheck, or an allowed tap still awaiting its send report (dropped, or
+  failed to send), that tap is released: not counted, no transition, path
+  unchanged; it stays marked tried and is recorded as skipped with the reason
   ``tap_not_sent`` and counts toward ``MAX_REFUSALS`` like a refused re-check,
   so a driver that never sends a tap still ends the crawl. Both `recheck` and
   `tap_sent` accept only the very `Tap` instance ``next`` returned, never an
