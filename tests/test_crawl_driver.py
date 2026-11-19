@@ -452,7 +452,10 @@ def test_stop_between_actions_ends_with_interrupted(tmp_path, device, android, c
     transitions = lines(out / "transitions.jsonl")
     starts = [r for r in transitions if "action" in r]
     assert result.actions == len(starts) == 3  # launch and two presses
-    assert len(transitions) == 6  # each start has its end
+    # stop() turned True in the pause after the second press: the run ended
+    # there, so that press has no end line (its result is not read).
+    assert len(transitions) == 5
+    assert "action" in transitions[-1]
     assert len(android.inputs) == 2
     assert (
         json.loads((out / "run.json").read_text(encoding="utf-8"))["stop_reason"]
@@ -1597,3 +1600,65 @@ def test_a_stop_refusal_ends_the_run_without_another_read(
     # refused action.
     last_start = max(i for i, r in enumerate(records) if "action" in r)
     assert all("action" not in r for r in records[last_start + 1 :])
+
+
+# --- the two last gaps ---
+
+
+def test_a_changed_identity_after_the_force_stop_sends_no_start(
+    tmp_path, device, android, monkeypatch, clock
+):
+    original = device.tap
+
+    def tap_then_cover(point: tuple[int, int]) -> tuple[int, int]:
+        result = original(point)
+        if not android.stopped and android.screen.name == "browse":
+            for name in ("ext1", "ext2", "ext3"):
+                android.show(name)
+        return result
+
+    monkeypatch.setattr(device, "tap", tap_then_cover)
+    stop_app = device.stop_app
+
+    def stop_then_swap(package: str) -> None:
+        stop_app(package)
+        android.props["ro.build.fingerprint"] = "other/build:36/X/9:user/k"
+
+    monkeypatch.setattr(device, "stop_app", stop_then_swap)
+    launches = spy(monkeypatch, device, "launch", lambda *_a, **_k: None)
+    with pytest.raises(DeviceNotFoundError) as info:
+        run(device, clock, tmp_path / "run")
+    assert info.value.details["reason"] == "device_changed"
+    assert android.stopped == [SHOP]
+    assert len(launches) == 1  # the first launch only, no start after the stop
+
+
+@pytest.mark.parametrize("kind", ["tap", "back"])
+def test_a_stop_seen_in_the_pause_sends_no_further_request(
+    tmp_path, device, android, fake_adb, clock, monkeypatch, kind
+):
+    stopping = []
+    marks: list[int] = []
+    if kind == "back":
+        original_launch = device.launch
+
+        def launch_into_another_app(*args, **kwargs):
+            original_launch(*args, **kwargs)
+            android.show("ext1")  # the engine will press BACK
+
+        monkeypatch.setattr(device, "launch", launch_into_another_app)
+    sender = device.tap if kind == "tap" else device.key
+
+    def send_then_stop(*args, **kwargs):
+        result = sender(*args, **kwargs)
+        stopping.append(True)  # stop() turns True during the pause after it
+        marks.append(len(fake_adb.requests))
+        return result
+
+    monkeypatch.setattr(device, kind if kind == "tap" else "key", send_then_stop)
+    out = tmp_path / "run"
+    result = run(device, clock, out, stop=lambda: bool(stopping), settle=1.0)
+    assert result.stop_reason == "interrupted"
+    assert fake_adb.requests[marks[0] :] == []  # not one request after it
+    records = lines(out / "transitions.jsonl")
+    assert "action" in records[-1]  # its start line has no end line

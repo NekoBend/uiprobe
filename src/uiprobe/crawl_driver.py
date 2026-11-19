@@ -262,20 +262,32 @@ class _Run:
                 observation = self.observe()
                 continue
             refused, fresh = self.send(action, observation)
-            if refused in (NOT_SENT_STOPPED, NOT_SENT_TIME_LIMIT, NOT_SENT_START):
-                # Asked to stop or out of time: end now, without another read.
-                return INTERRUPTED if self._stop_seen else MAX_DURATION
-            if refused is not None and isinstance(action, Back | Relaunch):
-                # The engine counted it as sent: rather than let it go on from
-                # a wrong count, the run ends (alpha: the safe side).
-                self.notes.append(f"{_kind(action)} was not sent: {refused}")
-                return STOP_NOT_SENT
+            ending = self.ending(action, refused)
+            if ending is not None:
+                return ending
             if fresh is not None:
                 # A tap the gate did not send: the screen it re-read goes to
                 # the engine, which releases the unreported tap.
                 observation = fresh
                 continue
             observation = self.observe()
+
+    def ending(self, action: Action, refused: str | None) -> str | None:
+        """The stop reason when the run ends after `action`, or None to go on.
+
+        Asked to stop or out of time (also when stop() said so in the pause
+        after the input, whose start line then has no end line: its result is
+        unknown, as the run folder page says): end now, without another
+        request. A BACK or relaunch the gate held back: the engine already
+        counted it, so rather than go on from a wrong count the run ends
+        (alpha: the safe side).
+        """
+        if refused in (NOT_SENT_STOPPED, NOT_SENT_TIME_LIMIT, NOT_SENT_START):
+            return INTERRUPTED if self._stop_seen else MAX_DURATION
+        if refused is not None and isinstance(action, Back | Relaunch):
+            self.notes.append(f"{_kind(action)} was not sent: {refused}")
+            return STOP_NOT_SENT
+        return INTERRUPTED if self._stop_seen else None
 
     def stopped(self) -> bool:
         """Whether `stop` asked to end; once it did, the answer stays True."""
@@ -399,10 +411,9 @@ class _Run:
                     NOT_SENT_CHANGED,
                 ),
             )
-        why = next((why for failed, why in checks if failed), None)
-        if why == NOT_SENT_REFUSED and self.clock() >= self.deadline:
-            why = NOT_SENT_TIME_LIMIT  # the engine refused it for the time
-        return why, seen
+        # The engine re-checks with the same time the gate took first, which was
+        # before the limit, so its refusal is never about the time.
+        return next((why for failed, why in checks if failed), None), seen
 
     def halt(self, now: float | None = None) -> str | None:
         """The reason not to send that does not depend on the screen, if any."""
@@ -452,6 +463,9 @@ class _Run:
         """
         self.device.stop_app(self.package)
         reason = self.halt()
+        if reason is None:
+            # The device behind the pin is checked again before the start.
+            self.device.check_pin(self.identity, emulator=self.emulator)
         if reason is not None:
             self._open = None
             self.writer.write_transition_end(action_id, not_sent=NOT_SENT_START)
