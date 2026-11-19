@@ -307,6 +307,42 @@ def test_save_png_makes_no_file_for_a_bad_image(tmp_path, name):
     assert list(tmp_path.iterdir()) == []
 
 
+def _deny_lstat(monkeypatch, target):
+    """Make os.lstat fail with EACCES for `target` only."""
+    real = os.lstat
+
+    def lstat(path, *args, **kwargs):
+        if os.fspath(path) == str(target):
+            raise PermissionError(errno.EACCES, "Permission denied", str(target))
+        return real(path, *args, **kwargs)
+
+    monkeypatch.setattr(pngfile.os, "lstat", lstat)
+
+
+def test_a_path_that_cannot_be_looked_up_is_not_taken_as_missing(tmp_path, monkeypatch):
+    target = tmp_path / "shot.png"
+    with monkeypatch.context() as scoped:  # os is global: keep the patch short
+        _deny_lstat(scoped, target)
+        with pytest.raises(PermissionError):
+            pngfile.check_new_path(str(target))
+        with pytest.raises(PngFileError) as raised:
+            save_png(target, PNG)
+    assert raised.value.details == {"path": str(target), "created": False}
+    assert "cannot check" in raised.value.message
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_a_parent_that_is_a_file_is_a_file_that_cannot_be_created(tmp_path):
+    parent = tmp_path / "plain"
+    parent.write_bytes(b"mine")
+    target = parent / "shot.png"
+    pngfile.check_new_path(str(target))  # nothing can be there
+    with pytest.raises(PngFileError) as raised:
+        save_png(target, PNG)
+    assert raised.value.details == {"path": str(target), "created": False}
+    assert parent.read_bytes() == b"mine"
+
+
 def test_save_png_names_a_file_it_could_not_create(tmp_path):
     target = tmp_path / "missing" / "shot.png"
     with pytest.raises(PngFileError) as raised:
@@ -773,6 +809,21 @@ def test_a_missing_folder_is_an_error_that_names_the_file(capsys, fake_adb, tmp_
     assert error["code"] == "file_error"
     assert error["details"] == {"path": str(target), "created": False}
     assert not (tmp_path / "missing").exists()
+
+
+def test_a_path_that_cannot_be_looked_up_is_a_file_error_before_the_device(
+    capsys, fake_adb, tmp_path, monkeypatch
+):
+    target = tmp_path / "shot.png"
+    with monkeypatch.context() as scoped:  # os is global: keep the patch short
+        _deny_lstat(scoped, target)
+        code, out, _ = shoot(capsys, fake_adb, target, "--json")
+    assert code == 1
+    error = json.loads(out)["error"]
+    assert error["code"] == "file_error"
+    assert error["details"] == {"path": str(target), "created": False}
+    assert fake_adb.requests == []  # refused before the device was asked
+    assert list(tmp_path.iterdir()) == []
 
 
 def test_a_write_failure_after_create_keeps_the_file_and_names_it(

@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 
-from uiprobe import cli, guards, settings
+from uiprobe import cli, guards, pngfile, settings
 from uiprobe.device import DEVICE_WIDE_KEY_PREFIXES, DEVICE_WIDE_KEYS
 from uiprobe.guards import (
     API36_BOTTOM_PX,
@@ -600,6 +600,140 @@ def test_write_default_settings_refuses_a_descriptor(tmp_path):
     finally:
         os.close(fd)
     assert target.read_text(encoding="utf-8") == "mine\n"
+
+
+@pytest.mark.parametrize("through", ["str", "path"])
+def test_write_default_settings_uses_indexable_text_as_text(tmp_path, through):
+    sentinel = write(tmp_path, "mine\n", "mine.toml")
+    fd = os.open(sentinel, os.O_RDWR)
+
+    class IndexableText(str):
+        """Text that open() would take as the sentinel's descriptor."""
+
+        __slots__ = ()
+
+        def __index__(self) -> int:
+            return fd
+
+    class IndexablePath:
+        def __fspath__(self) -> str:
+            return IndexableText(target)
+
+    target = str(tmp_path / SETTINGS_FILE)
+    given = IndexableText(target) if through == "str" else IndexablePath()
+    try:
+        settings.write_default_settings(given)
+        os.fstat(fd)  # still open
+    finally:
+        os.close(fd)
+    assert sentinel.read_text(encoding="utf-8") == "mine\n"
+    assert Path(target).read_text(encoding="utf-8") == (
+        settings.render_default_settings()
+    )
+
+
+@pytest.mark.parametrize("path", [b"u.toml", 2.0, None])
+def test_write_default_settings_refuses_what_is_not_text(tmp_path, monkeypatch, path):
+    monkeypatch.chdir(tmp_path)
+    with pytest.raises(TypeError):
+        settings.write_default_settings(path)
+    assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.parametrize("name", ["u.toml:extra", "u.toml::$DATA", "dir:x/u.toml"])
+def test_on_windows_a_stream_path_is_refused(tmp_path, monkeypatch, name):
+    monkeypatch.setattr(pngfile, "_WINDOWS", True)
+    with pytest.raises(ValueError, match="stream"):
+        settings.write_default_settings(tmp_path / name)
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_on_windows_a_stream_of_an_existing_file_is_refused(tmp_path, monkeypatch):
+    target = write(tmp_path, "mine\n", SETTINGS_FILE)
+    monkeypatch.setattr(pngfile, "_WINDOWS", True)
+    with pytest.raises(ValueError, match="stream"):
+        settings.write_default_settings(f"{target}:extra")
+    assert target.read_text(encoding="utf-8") == "mine\n"
+    assert list(tmp_path.iterdir()) == [target]
+
+
+@pytest.mark.skipif(os.name != "nt", reason="streams exist on Windows")
+def test_on_this_windows_a_stream_of_an_existing_file_is_not_made(tmp_path):
+    target = write(tmp_path, "mine\n", SETTINGS_FILE)
+    stream = f"{target}:extra"
+    with pytest.raises(ValueError, match="stream"):
+        settings.write_default_settings(stream)
+    with pytest.raises(FileNotFoundError):
+        open(stream, "rb").close()  # noqa: PTH123
+    assert target.read_text(encoding="utf-8") == "mine\n"
+
+
+def test_an_os_error_inside_a_callers_interrupt_handler_is_a_write_failure(
+    tmp_path, monkeypatch
+):
+    # Only the first write fails, so close() succeeds and the flush error is
+    # the one raised; its context is the caller's KeyboardInterrupt.
+    _break_buffered_write(monkeypatch, always=False)
+    target = tmp_path / "u.toml"
+    try:
+        raise KeyboardInterrupt  # the caller's own handler
+    except KeyboardInterrupt:
+        with pytest.raises(settings.IncompleteFileError):
+            settings.write_default_settings(target)
+    assert target.exists()
+
+
+def test_a_path_that_cannot_be_looked_up_is_not_taken_as_missing(
+    tmp_path, capsys, monkeypatch
+):
+    target = tmp_path / SETTINGS_FILE
+    real = os.lstat
+
+    def lstat(path, *args, **kwargs):
+        if os.fspath(path) == str(target):
+            raise PermissionError(errno.EACCES, "Permission denied", str(target))
+        return real(path, *args, **kwargs)
+
+    with monkeypatch.context() as scoped:  # os is global: keep the patch short
+        scoped.setattr(pngfile.os, "lstat", lstat)
+        with pytest.raises(PermissionError):
+            settings.write_default_settings(target)
+        code, out, err = invoke(capsys, "init", str(target))
+    assert (code, out) == (2, "")
+    assert "cannot be created" in err
+    assert "Permission denied" in err
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_elsewhere_a_colon_is_part_of_the_name(tmp_path, monkeypatch):
+    monkeypatch.setattr(pngfile, "_WINDOWS", False)
+    if os.name == "nt":
+        pytest.skip("Windows names a stream with a colon")
+    target = tmp_path / "u.toml:extra"
+    settings.write_default_settings(target)
+    assert target.is_file()
+
+
+@pytest.mark.parametrize(
+    ("path", "word"), [("", "empty"), ("u\x00.toml", "null")], ids=["empty", "null"]
+)
+def test_write_default_settings_refuses_an_empty_or_null_path(
+    tmp_path, monkeypatch, path, word
+):
+    monkeypatch.chdir(tmp_path)
+    with pytest.raises(ValueError, match=word):
+        settings.write_default_settings(path)
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_init_refuses_a_stream_path_on_windows(tmp_path, capsys, monkeypatch):
+    target = write(tmp_path, "mine\n", SETTINGS_FILE)
+    monkeypatch.setattr(pngfile, "_WINDOWS", True)
+    code, out, err = invoke(capsys, "init", f"{target}:extra")
+    assert (code, out) == (2, "")
+    assert "names a stream of a file" in err
+    assert target.read_text(encoding="utf-8") == "mine\n"
+    assert list(tmp_path.iterdir()) == [target]
 
 
 @pytest.mark.parametrize(
