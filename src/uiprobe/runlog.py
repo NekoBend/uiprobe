@@ -16,26 +16,28 @@ Rules that hold for every file:
   used in a path. Text that comes from the app goes into file contents only.
 * Text is UTF-8 with LF line ends on every platform. JSON goes through the
   project's JSON helper, which escapes control and bidirectional characters.
-  NaN and infinite numbers are refused before any file is opened.
+  NaN and infinite numbers are refused by the encoder before any file is
+  opened.
 * Each line or file is flushed to the operating system and then fsynced before
   the method returns, so a line that was written before an action was sent is
   complete on disk if the program is killed right after. ``run.json`` is
   written last, after the line files are closed and ``summary.txt`` is
-  written; a run folder whose ``run.json`` is missing or is not complete JSON
-  did not end normally.
+  written. A run folder whose ``run.json`` is missing or is not complete JSON
+  did not end normally. The reverse does not hold: ``run.json`` can look
+  complete although `RunWriter.finish` failed (at the final fsync, for
+  example); only a `finish` that returned proves a normal end.
 
 A write that is under way, together with the writer's record of it, is
 marked with `RunWriter.critical`, so that a Ctrl+C handler in the caller can
 wait until it is complete. This module installs no signal handler. An
-exception other than `OSError` (such as `KeyboardInterrupt`) that escapes
-while a file is written leaves the writer refusing every later write, as a
-failed write does.
+interrupt (`KeyboardInterrupt`, `SystemExit`, ...) that reaches a write
+propagates as itself, without ``details["path"]``, and the writer then
+refuses every later write, as after a failed write.
 """
 
 from __future__ import annotations
 
 import contextlib
-import json
 import os
 import re
 from datetime import UTC, datetime
@@ -139,18 +141,13 @@ def _encoded(text: str) -> str:
 
 
 def _json_text(value: dict[str, object], *, indent: int | None = None) -> str:
-    """Return `value` as JSON text, refusing what strict JSON cannot hold.
+    """Return `value` as JSON text, in one pass of the project's JSON helper.
 
-    NaN and infinite numbers are refused here, before any file is opened.
-    The project's JSON helper keeps the default of `json.dumps` for other
-    output, so the check is made with a strict `json.dumps` first.
+    NaN and infinite numbers raise `ValueError` from the encoder itself;
+    other encoder errors (a circular mapping, a value JSON cannot hold) are
+    raised as they come. Text that cannot be encoded as UTF-8 is refused.
     """
-    try:
-        json.dumps(value, allow_nan=False)
-    except ValueError as error:
-        msg = "JSON output cannot hold NaN or an infinite number"
-        raise ValueError(msg) from error
-    return _encoded(dumps(value, indent=indent))
+    return _encoded(dumps(value, indent=indent, allow_nan=False))
 
 
 def _check_number(name: str, value: object) -> int:
@@ -329,10 +326,19 @@ class RunWriter:
         that a screen was seen) inside one block. A Ctrl+C handler in the
         caller can look at `writing` and postpone the interrupt until the
         write is complete. Nothing is installed here.
+
+        An exception that is not an `Exception` (`KeyboardInterrupt`,
+        `SystemExit`, ...) leaving the block marks the writer as failed: a
+        write or its record may be incomplete, so every later write is
+        refused. The exception itself propagates unchanged.
         """
         self._depth += 1
         try:
             yield
+        except BaseException as error:
+            if not isinstance(error, Exception) and self._failed is None:
+                self._failed = self._root
+            raise
         finally:
             self._depth -= 1
 
@@ -421,20 +427,20 @@ class RunWriter:
         listed = tuple(_check_texts("reasons", reasons))
         body = _element_dict(element)
         key = (checked, fingerprint, listed)
-        line = _json_text(
-            {
-                "schema": SKIP_SCHEMA,
-                "recorded_at": _stamp(_now()),
-                "screen_id": checked,
-                "fingerprint": fingerprint,
-                "reasons": list(listed),
-                "element": body,
-            }
-        )
         with self.critical():
             self._check_usable()
             if key in self._skipped:
                 return False
+            line = _json_text(
+                {
+                    "schema": SKIP_SCHEMA,
+                    "recorded_at": _stamp(_now()),
+                    "screen_id": checked,
+                    "fingerprint": fingerprint,
+                    "reasons": list(listed),
+                    "element": body,
+                }
+            )
             self._append("skipped.jsonl", line + "\n")
             self._skipped.add(key)
         return True
@@ -450,11 +456,8 @@ class RunWriter:
             self._check_usable()
             if screen_id in self._screens:
                 return False
-            self._write_new(
-                self._screen_path(screen_id, "json"),
-                _encoded(screen.to_json(indent=2) + "\n"),
-                in_screens=True,
-            )
+            text = _json_text(screen.to_dict(), indent=2) + "\n"
+            self._write_new(self._screen_path(screen_id, "json"), text, in_screens=True)
             self._screens[screen_id] = screen
         return True
 
@@ -491,9 +494,12 @@ class RunWriter:
         """End the run once: close the line files, write ``summary.txt``,
         then ``run.json``.
 
-        ``run.json`` comes last, so a folder whose ``run.json`` is complete
-        JSON ended normally. If closing a line file or writing ``summary.txt``
-        fails, no ``run.json`` is made. A second call raises `RunFolderError`.
+        ``run.json`` comes last. If closing a line file or writing
+        ``summary.txt`` fails, no ``run.json`` is made, so a missing or
+        malformed ``run.json`` means the run did not end normally. The reverse
+        does not hold: a failure at the final fsync of ``run.json`` raises
+        `RunFolderError` after its bytes are already in the file. A second
+        call raises `RunFolderError`.
         """
         _check_text("stop_reason", stop_reason)
         screen_count = _check_number("screens", screens)
@@ -557,17 +563,16 @@ class RunWriter:
 
     def _close_streams(self) -> None:
         """Close the line files; the first failure breaks the writer."""
-        streams = list(self._streams.items())
-        self._streams.clear()
         first: tuple[str, OSError] | None = None
-        for name, handle in streams:
+        while self._streams:
+            # Take out only the handle being closed: if an interrupt stops
+            # this close, the others stay reachable for a later close().
+            name = next(iter(self._streams))
+            handle = self._streams.pop(name)
             try:
                 handle.close()
             except OSError as error:
                 first = first or (name, error)
-            except BaseException:
-                self._failed = self._root / name
-                raise
         if first is not None:
             raise self._broken(self._root / first[0], first[1]) from first[1]
 
@@ -575,7 +580,9 @@ class RunWriter:
         """Forget a line file after a failure and close it now.
 
         Closing may flush bytes that are still buffered; doing it here, before
-        the error is raised, means nothing reaches the file afterwards.
+        the error is raised, means nothing reaches the file afterwards. The
+        caller has marked the writer as failed already, so an interrupt during
+        this close cannot leave it usable.
         """
         handle = self._streams.pop(name, None)
         if handle is not None:
@@ -598,10 +605,10 @@ class RunWriter:
                     else _create_text(path)
                 ) as handle:
                     _put(handle, data)
-            except OSError as error:
-                raise self._broken(path, error) from error
-            except BaseException:
+            except BaseException as error:
                 self._failed = path
+                if isinstance(error, OSError):
+                    raise self._broken(path, error) from error
                 raise
 
     def _ensure_screens_folder(self, folder: Path) -> None:
@@ -619,12 +626,11 @@ class RunWriter:
                 if handle is None:
                     handle = self._streams[name] = _create_text(path)
                 _put(handle, line)
-            except OSError as error:
+            except BaseException as error:
+                self._failed = path  # before the cleanup, which may be interrupted
                 self._drop_stream(name)
-                raise self._broken(path, error) from error
-            except BaseException:
-                self._failed = path
-                self._drop_stream(name)
+                if isinstance(error, OSError):
+                    raise self._broken(path, error) from error
                 raise
 
     def _summary(self, stop_reason: str, screens: int, actions: int) -> str:

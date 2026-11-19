@@ -1124,11 +1124,158 @@ def test_a_repeat_does_not_hide_a_closed_writer(tmp_path):
 @pytest.mark.parametrize("number", [float("nan"), float("inf"), float("-inf")])
 def test_non_finite_numbers_are_refused_before_any_file_is_opened(tmp_path, number):
     writer = make(tmp_path)
-    with pytest.raises(ValueError, match="NaN"):
+    with pytest.raises(ValueError, match="not JSON compliant"):
         writer.write_transition_start(1, "tap", element={"x": number})
-    with pytest.raises(ValueError, match="NaN"):
+    with pytest.raises(ValueError, match="not JSON compliant"):
         writer.write_skip(ID_A, "fp", ["r"], {"nested": [{"x": number}]})
     assert names(tmp_path / "run") == ["run-start.json"]
     # nothing was recorded, and the writer is still usable
     assert writer.write_skip(ID_A, "fp", ["r"], {"x": 1.5})
     writer.finish("done", screens=0, actions=0)
+
+
+# --- second review ---
+
+
+class _InterruptOnAdd(set):
+    """Raises KeyboardInterrupt on the first add only."""
+
+    interrupted = False
+
+    def add(self, item):
+        if not self.interrupted:
+            self.interrupted = True
+            raise KeyboardInterrupt
+        super().add(item)
+
+
+def test_an_interrupt_before_a_skip_is_recorded_breaks_the_writer(tmp_path):
+    writer = make(tmp_path)
+    writer._skipped = _InterruptOnAdd()
+    with pytest.raises(KeyboardInterrupt):
+        writer.write_skip(ID_A, "fp", ["r"], {})
+    with pytest.raises(RunFolderError, match="earlier write failed"):
+        writer.write_skip(ID_A, "fp", ["r"], {})
+    assert len(lines_of(tmp_path / "run" / "skipped.jsonl")) == 1
+    assert writer.writing is False
+
+
+def test_an_interrupt_after_run_json_breaks_the_writer(tmp_path, monkeypatch):
+    writer = make(tmp_path)
+    real = writer._write_new
+
+    def then_interrupt(path, data, **kwargs):
+        real(path, data, **kwargs)
+        if path.name == "run.json":
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr(writer, "_write_new", then_interrupt)
+    with pytest.raises(KeyboardInterrupt):
+        writer.finish("done", screens=0, actions=0)
+    monkeypatch.undo()
+    with pytest.raises(RunFolderError, match="earlier write failed"):
+        writer.finish("done", screens=0, actions=0)
+
+
+def test_an_argument_error_does_not_break_the_writer(tmp_path):
+    writer = make(tmp_path)
+    with pytest.raises(TypeError):
+        writer.write_skip(ID_A, "fp", ["r"], {"x": object()})
+    assert writer._failed is None
+    assert writer.write_skip(ID_A, "fp", ["r"], {})
+
+
+def test_a_screen_with_a_non_finite_number_writes_nothing(tmp_path):
+    writer = make(tmp_path)
+    screen = replace(make_screen(), display=(float("nan"), 2400))
+    with pytest.raises(ValueError, match="not JSON compliant"):
+        writer.write_screen(screen)
+    assert names(tmp_path / "run") == ["run-start.json"]
+    assert writer._failed is None
+    assert writer.write_screen(make_screen())
+
+
+def test_a_circular_mapping_is_reported_as_circular(tmp_path):
+    writer = make(tmp_path)
+    element: dict[str, object] = {}
+    element["self"] = element
+    with pytest.raises(ValueError, match="Circular") as raised:
+        writer.write_transition_start(1, "tap", element=element)
+    assert "JSON compliant" not in str(raised.value)
+    assert names(tmp_path / "run") == ["run-start.json"]
+
+
+class _FlushFailsCloseInterrupted:
+    def __init__(self, handle):
+        self.handle = handle
+
+    def write(self, data):
+        return self.handle.write(data)
+
+    def flush(self):
+        raise OSError(errno.ENOSPC, "No space left on device")
+
+    def fileno(self):
+        return self.handle.fileno()
+
+    def close(self):
+        self.handle.close()
+        raise KeyboardInterrupt
+
+
+def test_an_interrupt_while_dropping_a_failed_stream_keeps_the_failure(tmp_path):
+    writer = make(tmp_path)
+    writer.write_transition_start(1, "launch")
+    path = tmp_path / "run" / "transitions.jsonl"
+    real = writer._streams["transitions.jsonl"]
+    writer._streams["transitions.jsonl"] = _FlushFailsCloseInterrupted(real)  # ty: ignore[invalid-assignment]
+    with pytest.raises(KeyboardInterrupt):
+        writer.write_transition_end(1, ID_A)
+    with pytest.raises(RunFolderError, match="earlier write failed") as raised:
+        writer.write_transition_start(2, "back")
+    assert raised.value.details["path"] == str(path)
+    with pytest.raises(RunFolderError) as raised:
+        writer.finish("done", screens=0, actions=1)
+    assert raised.value.details["path"] == str(path)
+    assert not (tmp_path / "run" / "run.json").exists()
+
+
+class _CloseInterrupted:
+    def __init__(self, handle):
+        self.handle = handle
+
+    def close(self):
+        self.handle.close()
+        raise KeyboardInterrupt
+
+
+def test_an_interrupted_close_leaves_the_other_streams_reachable(tmp_path):
+    writer = make(tmp_path)
+    writer.write_transition_start(1, "launch")
+    writer.write_skip(ID_A, "fp", ["r"], {})
+    skipped = writer._streams["skipped.jsonl"]
+    real = writer._streams["transitions.jsonl"]
+    writer._streams["transitions.jsonl"] = _CloseInterrupted(real)  # ty: ignore[invalid-assignment]
+    with pytest.raises(KeyboardInterrupt):
+        writer.close()
+    assert real.closed
+    assert writer._streams == {"skipped.jsonl": skipped}
+    assert not skipped.closed
+    writer.close()
+    assert skipped.closed
+    assert writer._streams == {}
+
+
+def test_a_repeated_skip_on_a_failed_writer_reports_the_failure(tmp_path, monkeypatch):
+    writer = make(tmp_path)
+    assert writer.write_skip(ID_A, "fp", ["r"], {})
+
+    def broken(*_arguments):
+        raise OSError(errno.EIO, "I/O error")
+
+    monkeypatch.setattr(runlog, "_put", broken)
+    with pytest.raises(RunFolderError):
+        writer.write_transition_start(1, "launch")
+    monkeypatch.undo()
+    with pytest.raises(RunFolderError, match="earlier write failed"):
+        writer.write_skip(ID_A, "fp", ["r"], {"x": object()})
