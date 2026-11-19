@@ -234,8 +234,9 @@ def _make_dir(path: Path) -> None:
 
     Its parent must exist and the folder must not. Mode 0o700 keeps other
     users out on POSIX (the umask can only narrow it); on Windows, Python
-    3.12.4 and later give the folder access control for the current user and
-    administrators only, and older 3.12 releases ignore the mode.
+    3.12.4 and later give the folder access control for its owner, the
+    Administrators group and SYSTEM only, and older 3.12 releases ignore the
+    mode.
     """
     os.mkdir(path, 0o700)  # noqa: PTH102
 
