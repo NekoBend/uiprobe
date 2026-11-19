@@ -17,12 +17,14 @@ _UNSAFE: Final = re.compile(
 )
 
 
-def dumps(value: object, *, indent: int | None = None) -> str:
+def dumps(value: object, *, indent: int | None = None, allow_nan: bool = True) -> str:
     """Serialize `value` as JSON, escaping controls as ``\\uXXXX``.
 
     Other non-ASCII text, such as Japanese, stays readable. The text parses
     back to the same value as plain `json.dumps` would give. Outside strings
-    JSON has only ASCII, so every match lies inside a string.
+    JSON has only ASCII, so every match lies inside a string. With
+    `allow_nan` False, NaN and infinite numbers raise `ValueError` (as in
+    `json.dumps`) instead of being written as ``NaN`` or ``Infinity``.
     """
-    text = json.dumps(value, ensure_ascii=False, indent=indent)
+    text = json.dumps(value, ensure_ascii=False, indent=indent, allow_nan=allow_nan)
     return _UNSAFE.sub(lambda match: f"\\u{ord(match[0]):04x}", text)
