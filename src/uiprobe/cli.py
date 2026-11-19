@@ -29,7 +29,9 @@ from uiprobe._json import dumps
 from uiprobe.crawl_preview import check_package
 from uiprobe.crawl_preview import preview as make_preview
 from uiprobe.device import (
+    DEFAULT_PRESS_MS,
     DEFAULT_SWIPE_MS,
+    MAX_PRESS_MS,
     Device,
     DeviceDetails,
     DisplaySizeUnknownError,
@@ -218,7 +220,13 @@ def _build_parser() -> _Parser:
         help="tap or long-press an element or a point",
         description=(
             "Tap (or, with --long, press for 800 ms) the element chosen by"
-            " --text, --id and --desc, or the point given with --xy. The"
+            " --text, --id and --desc, or the point given with --xy. A tap holds"
+            f" still for {DEFAULT_PRESS_MS} ms by default (visible in the Pointer"
+            " location developer option on a Galaxy S25 Ultra at 60 Hz);"
+            " --press-ms changes the hold"
+            f" (0 sends a plain input tap; the cap of {MAX_PRESS_MS} ms stays below"
+            " Android's usual default long-press time, but an app may use a"
+            " shorter threshold). The"
             " command acts on the screen showing now; it does not check which"
             " app is in front. Two or more matches (also a thin one) exit with 13"
             " (multiple_elements). An element is pressed only when at least 8 x 8"
@@ -243,6 +251,16 @@ def _build_parser() -> _Parser:
         help="press this point instead of an element (0 to 32767)",
     )
     tap.add_argument("--long", action="store_true", help="press for 800 ms")
+    tap.add_argument(
+        "--press-ms",
+        metavar="N",
+        action="append",
+        help=(
+            f"hold a tap still for N ms, 0 to {MAX_PRESS_MS} (default"
+            f" {DEFAULT_PRESS_MS}; 0 sends a plain input tap); not with --long; every"
+            " repeated value is checked and the last one is used"
+        ),
+    )
     swipe = commands.add_parser(
         "swipe",
         allow_abbrev=False,
@@ -520,6 +538,26 @@ def _parse_xy(values: Sequence[str], option: str = "--xy") -> tuple[int, int]:
     return numbers[0], numbers[1]
 
 
+def _parse_press_ms(values: list[str] | None, *, long: bool) -> int:
+    """Read ``--press-ms``: plain decimal integers from 0 to 200, not with --long.
+
+    The option may be repeated; every value must be valid and the last one wins.
+    """
+    if values is None:
+        return DEFAULT_PRESS_MS
+    if long:
+        msg = "--press-ms cannot be combined with --long"
+        raise _UsageError(msg)
+    numbers: list[int] = []
+    for value in values:
+        number = int(value) if re.fullmatch(r"[0-9]{1,3}", value) else -1
+        if not 0 <= number <= MAX_PRESS_MS:
+            msg = f"--press-ms needs an integer from 0 to {MAX_PRESS_MS}, not {value!r}"
+            raise _UsageError(msg)
+        numbers.append(number)
+    return numbers[-1]
+
+
 def _cmd_tap(args: argparse.Namespace) -> int:
     selected = (args.text, args.resource_id, args.desc)
     by_element = any(value is not None for value in selected)
@@ -530,13 +568,14 @@ def _cmd_tap(args: argparse.Namespace) -> int:
         msg = "give --xy X Y, or at least one of --text, --id, --desc"
         raise _UsageError(msg)
     xy = None if args.xy is None else _parse_xy(args.xy)
+    long: bool = args.long
+    press_ms = _parse_press_ms(args.press_ms, long=long)
     device = Device(
         _single_serial(args),
         adb_server=args.adb_server,
         adb=args.adb,
         start_server=args.start_server,
     )
-    long: bool = args.long
     element: Element | None = None
     element_json: dict[str, object] | None = None
     if xy is None:
@@ -554,7 +593,7 @@ def _cmd_tap(args: argparse.Namespace) -> int:
             )
     else:
         point = xy
-    pressed = device.tap(point, long=long)
+    pressed = device.tap(point, long=long, press_ms=press_ms)
     verb = "long-tapped" if long else "tapped"
     if args.json:
         payload: dict[str, object] = {

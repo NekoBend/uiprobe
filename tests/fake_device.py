@@ -288,6 +288,11 @@ class FakeAndroid:
         re.compile(
             r"^input swipe ([0-9]+) ([0-9]+) \1 \2 800; echo uiprobe-exit:\$\?\Z"
         ),
+        # A tap that holds still for 1 to 200 ms (the default is 10).
+        re.compile(
+            r"^input swipe ([0-9]+) ([0-9]+) \1 \2 (?:[1-9][0-9]?|1[0-9]{2}|200)"
+            r"; echo uiprobe-exit:\$\?\Z"
+        ),
         re.compile(r"^input keyevent (?:KEYCODE_BACK|4)\Z"),
         # The marker form ``uiprobe key`` sends (``uiprobe swipe``: SWIPE_ALLOWED).
         re.compile(
@@ -696,6 +701,15 @@ class FakeAndroid:
             ) is not None:
                 self.inputs.append(Input("long_press", tuple(args), screen, point))
                 self._press(point, long=True)
+            case ["swipe", x1, y1, x2, y2, ms] if (
+                (x1, y1) == (x2, y2)
+                and re.fullmatch(r"[1-9][0-9]{0,2}", ms)
+                and int(ms) <= 200
+                and (point := _point(x1, y1)) is not None
+            ):
+                # A short hold in place is a tap (below the long-press timeout).
+                self.inputs.append(Input("tap", tuple(args), screen, point))
+                self._press(point, long=False)
             case ["swipe", *_]:
                 self.inputs.append(Input("swipe", tuple(args), screen))
             case ["keyevent", *keys]:

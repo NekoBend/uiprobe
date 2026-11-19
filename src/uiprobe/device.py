@@ -83,6 +83,14 @@ _CURRENT_SIZE: Final = re.compile(r"cur=([0-9]{1,5})x([0-9]{1,5})")
 # success by itself; failure also prints usage text or an exception.
 EXIT_MARKER: Final = "uiprobe-exit:"
 LONG_PRESS_MS: Final = 800
+# A tap holds still this long by default (``input swipe X Y X Y 10``), so that
+# the "Pointer location" developer option shows it; a plain ``input tap`` is
+# barely visible there (measured on one device, a Galaxy S25 Ultra at 60 Hz:
+# 10 ms visible, 6 ms not). The cap stays below Android's usual default
+# long-press time (about 400 to 500 ms, longer with accessibility settings);
+# an app may use its own shorter threshold.
+DEFAULT_PRESS_MS: Final = 10
+MAX_PRESS_MS: Final = 200
 _EXIT_SUFFIX: Final = f"; echo {EXIT_MARKER}$?"
 _MAX_COORDINATE: Final = 32767
 _OUTPUT_LIMIT: Final = 200
@@ -270,6 +278,18 @@ def _check_duration(value: object) -> int:
     value = int.__index__(value)
     if not 1 <= value <= _MAX_SWIPE_MS:
         msg = f"duration_ms must be from 1 to {_MAX_SWIPE_MS}, not {value}"
+        raise ValueError(msg)
+    return value
+
+
+def _check_press_ms(value: object) -> int:
+    """Return `value` when it is a usable tap hold in ms (0 to 200), else raise."""
+    if isinstance(value, bool) or not isinstance(value, int):
+        msg = f"press_ms must be an int, not {type(value).__name__}"
+        raise TypeError(msg)
+    value = int.__index__(value)
+    if not 0 <= value <= MAX_PRESS_MS:
+        msg = f"press_ms must be from 0 to {MAX_PRESS_MS}, not {value}"
         raise ValueError(msg)
     return value
 
@@ -901,7 +921,11 @@ class Device:
         return raw.decode("utf-8", errors="replace")
 
     def tap(
-        self, target: Element | tuple[int, int] | list[int], *, long: bool = False
+        self,
+        target: Element | tuple[int, int] | list[int],
+        *,
+        long: bool = False,
+        press_ms: int = DEFAULT_PRESS_MS,
     ) -> tuple[int, int]:
         """Press one point of the screen showing now; return the point pressed.
 
@@ -918,12 +942,21 @@ class Device:
         ``(x, y)`` given directly is pressed as given, with no check, because
         the caller named the point.
 
-        A tap runs ``input tap X Y``; with `long` a press of 800 ms runs
-        ``input swipe X Y X Y 800``. Either is followed by ``echo
-        uiprobe-exit:$?`` to read the device-side exit status. The command is
-        sent exactly once, in one shell call. It is never retried or resent,
-        not even after a connection error (that error propagates unchanged),
-        because a resend could press twice.
+        By default a tap holds still for `press_ms` = 10 ms and runs ``input
+        swipe X Y X Y 10`` (the point does not move). A plain ``input tap`` is
+        barely visible in Android's "Pointer location" developer option; a 10 ms
+        hold is (measured on one device, a Galaxy S25 Ultra at 60 Hz: 10 ms
+        visible, 6 ms not). `press_ms` is an int from 0 to 200 (a bool is not
+        accepted); 0 runs the plain ``input tap X Y``. The upper bound stays below
+        Android's usual default long-press time, about 400 to 500 ms (longer
+        with accessibility settings); an app may use its own shorter threshold,
+        and a longer hold could turn into a long press. With `long` a press of
+        800 ms runs ``input swipe X Y X Y 800``; it cannot be combined with a
+        `press_ms` other than the default (``ValueError``). Every form is
+        followed by ``echo uiprobe-exit:$?`` to read the device-side exit
+        status. The command is sent exactly once, in one shell call. It is
+        never retried or resent, not even after a connection error (that error
+        propagates unchanged), because a resend could press twice.
 
         ``input`` prints usage text or an exception when it fails, and its exit
         status is not always nonzero then, so success needs the marker line
@@ -934,9 +967,11 @@ class Device:
         checked.
 
         Raises:
-            TypeError: `target` or `long` has the wrong type, or a coordinate
-                is not an int (a bool is not accepted).
-            ValueError: A coordinate is outside 0 to 32767, or `target` is an
+            TypeError: `target`, `long` or `press_ms` has the wrong type, or a
+                coordinate is not an int (a bool is not accepted).
+            ValueError: A coordinate is outside 0 to 32767, `press_ms` is
+                outside 0 to 200, `long` is combined with a `press_ms` other
+                than the default, or `target` is an
                 `Element` that is not one of the elements of the latest
                 `dump` of this device (none yet, an older dump, another
                 device, or built by hand). Dump again, or pass
@@ -961,6 +996,10 @@ class Device:
         if not isinstance(long, bool):
             msg = f"long must be a bool, not {type(long).__name__}"
             raise TypeError(msg)
+        hold = _check_press_ms(press_ms)
+        if long and hold != DEFAULT_PRESS_MS:
+            msg = "press_ms cannot be combined with long=True (a long press is 800 ms)"
+            raise ValueError(msg)
         if isinstance(target, Element):
             latest = self._latest_screen
             if latest is None or not any(e is target for e in latest.elements):
@@ -974,9 +1013,9 @@ class Device:
         else:
             x, y = _press_point(target)
         point = (x, y)
-        if long:
+        if long or hold > 0:
             words = ("input", "swipe", str(x), str(y), str(x), str(y))
-            words = (*words, str(LONG_PRESS_MS))
+            words = (*words, str(LONG_PRESS_MS if long else hold))
         else:
             words = ("input", "tap", str(x), str(y))
         output = self._shell_text(quote_args(*words) + _EXIT_SUFFIX)
