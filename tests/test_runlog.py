@@ -1708,11 +1708,10 @@ def test_out_that_is_not_text_is_refused(tmp_path, monkeypatch, out):
 
 @pytest.mark.parametrize(
     "path",
-    ["C:run", "c:runs/x", "C:", "\\run", "/uiprobe-no-such-run", "\\runs\\x"],
+    ["C:run", "c:runs/x", "\\run", "/uiprobe-no-such-run", "\\runs\\x"],
     ids=[
         "drive",
         "drive-slash-inside",
-        "drive-only",
         "root",
         "root-slash",
         "root-deep",
@@ -1731,6 +1730,13 @@ def test_on_windows_a_path_relative_to_a_drive_folder_is_refused(
     assert raised.value.details == {"path": path}
     assert "relative to the working folder" in raised.value.message
     assert (checked, made) == ([path], [])  # only looked up, never made
+
+
+def test_on_windows_a_bare_drive_depends_on_its_folder(monkeypatch):
+    # The working folder of the drive exists, so create says "already exists"
+    # first on Windows; the rule itself still counts it.
+    monkeypatch.setattr(pngfile, "_WINDOWS", True)
+    assert pngfile.depends_on_a_drive_folder("C:")
 
 
 @pytest.mark.parametrize(
