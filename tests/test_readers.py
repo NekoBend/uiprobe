@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 import pytest
 
 from tests.fake_adb_server import Fail
-from tests.fake_device import El, FakeAndroid, Screen
+from tests.fake_device import El, FakeAndroid, Screen, _hex
 from uiprobe.device import Device, DeviceIdentity, FocusedWindow
 from uiprobe.errors import AdbError, AdbServerUnavailableError
 
@@ -402,7 +402,8 @@ WINDOWS = re.compile(r"^dumpsys window windows\Z")
 @pytest.mark.parametrize("api", APIS)
 def test_focused_window_names_the_app_in_front(fake_adb, api):
     _, device = make(fake_adb, api=api)
-    assert device.focused_window() == FocusedWindow(SHOP, f"{SHOP}/{SHOP}.Main")
+    title = f"{SHOP}/{SHOP}.Main"
+    assert device.focused_window() == FocusedWindow(SHOP, title, _hex(title))
 
 
 @pytest.mark.parametrize("api", sorted(CAPTURED_BLOCKS))
@@ -416,7 +417,7 @@ def test_focused_window_reads_the_captured_owner_line(fake_adb, api):
         if title == "NotificationShade"
         else "com.android.settings"
     )
-    assert device.focused_window() == FocusedWindow(expected, title)
+    assert device.focused_window() == FocusedWindow(expected, title, window)
     assert_no_input(fake_adb, android)
 
 
@@ -424,7 +425,7 @@ def test_the_shade_belongs_to_the_system_ui(fake_adb):
     android, device = make(fake_adb)
     android.focus_window = ("NotificationShade", "com.android.systemui")
     assert device.focused_window() == FocusedWindow(
-        "com.android.systemui", "NotificationShade"
+        "com.android.systemui", "NotificationShade", _hex("NotificationShade")
     )
 
 
@@ -435,7 +436,7 @@ def test_a_title_shaped_like_the_target_does_not_make_it_the_owner(fake_adb):
     android.override(
         WINDOWS, block("abc123", title, SECOND, owner_line(OTHER)).encode()
     )
-    assert device.focused_window() == FocusedWindow(OTHER, title)
+    assert device.focused_window() == FocusedWindow(OTHER, title, "abc123")
 
 
 @pytest.mark.parametrize(

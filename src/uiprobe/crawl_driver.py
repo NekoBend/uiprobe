@@ -178,6 +178,7 @@ NOT_SENT_TIME_LIMIT: Final = "time_limit"
 NOT_SENT_FOREGROUND_UNKNOWN: Final = "foreground_unknown"
 NOT_SENT_FOCUS_UNKNOWN: Final = "focus_unknown"
 NOT_SENT_FOCUS_OTHER: Final = "focus_other"
+NOT_SENT_FOCUS_CHANGED: Final = "focus_changed"
 NOT_SENT_KEYBOARD_UNKNOWN: Final = "keyboard_unknown"
 NOT_SENT_KEYBOARD_SHOWN: Final = "keyboard_shown"
 NOT_SENT_CHANGED: Final = "changed_before_send"
@@ -246,7 +247,9 @@ class _Run:
         if self.stopped():
             return INTERRUPTED
         engine = self.engine
-        self.send(engine.start(), None)
+        refused, _ = self.send(engine.start(), None)
+        if refused is not None:  # only stop() or the time limit hold a launch
+            return INTERRUPTED if self._stop_seen else MAX_DURATION
         observation = self.observe()
         while True:
             if self.stopped():
@@ -259,13 +262,12 @@ class _Run:
                 observation = self.observe()
                 continue
             refused, fresh = self.send(action, observation)
+            if refused in (NOT_SENT_STOPPED, NOT_SENT_TIME_LIMIT, NOT_SENT_START):
+                # Asked to stop or out of time: end now, without another read.
+                return INTERRUPTED if self._stop_seen else MAX_DURATION
             if refused is not None and isinstance(action, Back | Relaunch):
                 # The engine counted it as sent: rather than let it go on from
                 # a wrong count, the run ends (alpha: the safe side).
-                if self._stop_seen:
-                    return INTERRUPTED
-                if self.clock() >= self.deadline:
-                    return MAX_DURATION
                 self.notes.append(f"{_kind(action)} was not sent: {refused}")
                 return STOP_NOT_SENT
             if fresh is not None:
@@ -314,20 +316,21 @@ class _Run:
             action_id, _kind(action), from_id, element, point
         )
         reason, seen = self.gate(action, observation)
-        if seen is not None and isinstance(action, Tap):
-            self.write_skips(screen, seen.observation.screen, tap=action)
         if reason is not None:
             self.writer.write_transition_end(action_id, not_sent=reason)
             if seen is not None and isinstance(action, Tap):
+                self.write_skips(screen, seen.observation.screen, tap=action)
                 self.record(seen)
                 return reason, seen.observation
             return reason, None
         # Nothing runs between the gate's last read and the input: no user
-        # code (stop() was asked first), no other read.
+        # code (stop() and the clock were asked first), no other read, no write.
         self._open = action_id
         if isinstance(action, Tap):
             self.device.tap(action.point)
             self.engine.tap_sent(action)
+            if seen is not None:
+                self.write_skips(screen, seen.observation.screen, tap=action)
             self.pause()
         elif isinstance(action, Back):
             self.device.key("back")
@@ -351,25 +354,31 @@ class _Run:
         differs from what the action was chosen on, is a refusal. After the
         decision nothing else runs before the input is sent.
         """
-        reason = self.halt()
+        now = self.clock()  # the one time taken, before any read
+        reason = self.halt(now)
         if reason is not None:
             return reason, None
         self.device.check_pin(self.identity, emulator=self.emulator)
         if isinstance(action, Launch):
             return None, None
+        # For a tap: the focused window before and after the dump must be the
+        # same window of the app, so the dump shows that window (uiautomator
+        # dumps the focused window: seen on API 24, 30 and 36 with the shade).
+        before = self.device.focused_window() if isinstance(action, Tap) else None
         screen = self.dump() if isinstance(action, Tap) else None
         foreground = self.device.foreground()
         focus = self.device.focused_window()
         keyboard = self.device.keyboard_shown()
-        seen = _Seen(Observation(screen, foreground, keyboard, self.clock()), focus)
+        seen = _Seen(Observation(screen, foreground, keyboard, now), focus)
         if isinstance(action, Tap):
             allowed = self.engine.recheck(action, seen.observation)
-            owner = None if focus is None else focus.owner
+            owners = {None if f is None else f.owner for f in (before, focus)}
             checks = (
                 (keyboard is None, NOT_SENT_KEYBOARD_UNKNOWN),
                 (keyboard is True, NOT_SENT_KEYBOARD_SHOWN),
-                (focus is None, NOT_SENT_FOCUS_UNKNOWN),
-                (owner != self.package, NOT_SENT_FOCUS_OTHER),
+                (before is None or focus is None, NOT_SENT_FOCUS_UNKNOWN),
+                (owners != {self.package}, NOT_SENT_FOCUS_OTHER),
+                (before != focus, NOT_SENT_FOCUS_CHANGED),
                 (not allowed, NOT_SENT_REFUSED),
             )
         else:
@@ -390,13 +399,16 @@ class _Run:
                     NOT_SENT_CHANGED,
                 ),
             )
-        return next((why for failed, why in checks if failed), None), seen
+        why = next((why for failed, why in checks if failed), None)
+        if why == NOT_SENT_REFUSED and self.clock() >= self.deadline:
+            why = NOT_SENT_TIME_LIMIT  # the engine refused it for the time
+        return why, seen
 
-    def halt(self) -> str | None:
+    def halt(self, now: float | None = None) -> str | None:
         """The reason not to send that does not depend on the screen, if any."""
         if self.stopped():
             return NOT_SENT_STOPPED
-        if self.clock() >= self.deadline:
+        if (self.clock() if now is None else now) >= self.deadline:
             return NOT_SENT_TIME_LIMIT
         return None
 
@@ -701,8 +713,11 @@ def crawl(
     device.pin_transport()
     _check_device(device, allow_real_device=allow_real_device)
     identity = device.identity()
-    if identity is None:
-        msg = f"the identity of {device.serial} could not be read, so it cannot be kept"
+    if identity is None or not identity.fingerprint:
+        msg = (
+            f"the identity of {device.serial} (ro.build.fingerprint) could not be"
+            " read, so the device cannot be told apart from another one later"
+        )
         raise AdbError(msg, details={"serial": device.serial})
     started_at = clock()
     _check_clock("clock()", started_at)

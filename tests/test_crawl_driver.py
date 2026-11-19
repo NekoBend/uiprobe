@@ -396,7 +396,9 @@ def test_a_screen_that_changes_before_the_press_is_not_pressed(
     assert len(browse) == 1  # written, then closed as not sent
     ends = [r for r in records if r.get("action_id") == browse[0]["action_id"]]
     assert ends[-1]["not_sent"] is True
-    assert ends[-1]["reason"] == "changed_before_press"
+    # The dialog came up just before the dump: the focused window changed
+    # across it, which the gate sees before the engine's re-check.
+    assert ends[-1]["reason"] == "focus_changed"
     on_browse = [
         i
         for i in android.inputs
@@ -1062,7 +1064,7 @@ def _make_action(kind: str, engine: CrawlEngine, observation: Observation):
     return {"back": Back(), "relaunch": Relaunch()}[kind]
 
 
-SHADE = FocusedWindow("com.android.systemui", "NotificationShade")
+SHADE = FocusedWindow("com.android.systemui", "NotificationShade", "2f7e017")
 # Each condition, how to bring it about, and the reason it gives per kind.
 _CONDITIONS = {
     "stopped": ("stop", None),
@@ -1072,7 +1074,10 @@ _CONDITIONS = {
     "focus_other": ("focused_window", SHADE),
     "keyboard_unknown": ("keyboard_shown", None),
     "keyboard_shown": ("keyboard_shown", True),
-    "focus_title": ("focused_window", FocusedWindow(SHOP, f"{SHOP}/{SHOP}.Other")),
+    "focus_title": (
+        "focused_window",
+        FocusedWindow(SHOP, f"{SHOP}/{SHOP}.Other", "a1b2c3"),
+    ),
 }
 _CASES = [
     ("tap", "stopped", "stopped"),
@@ -1503,3 +1508,92 @@ def test_a_clock_that_does_not_move_cannot_hold_the_pause(tmp_path, device, cloc
     driver.sleep = sleeps.append  # the clock never moves
     driver.pause()
     assert 0 < len(sleeps) <= int(1.0 / crawl_driver.PAUSE_STEP) + 2
+
+
+# --- round three ---
+
+
+def test_a_window_that_takes_focus_during_the_dump_is_not_pressed(
+    tmp_path, device, android, clock, monkeypatch
+):
+    out = tmp_path / "run"
+    original_dump = device.dump
+    popped = []
+
+    def in_a_tap_gate() -> bool:
+        # One more tap start line than taps sent: the gate is reading for it.
+        path = out / "transitions.jsonl"
+        records = lines(path) if path.exists() else []
+        started = sum(r.get("action", {}).get("kind") == "tap" for r in records)
+        sent = sum(i.kind == "tap" for i in android.inputs)
+        return (
+            started == sent + 1 and records[-1].get("action", {}).get("kind") == "tap"
+        )
+
+    def dump_then_popup(*args, **kwargs):
+        gate = in_a_tap_gate()
+        screen = original_dump(*args, **kwargs)
+        if gate and android.inputs and not popped:  # once, after a press
+            popped.append(True)
+            android.focus_window = ("PopupWindow:9f8e7d", SHOP)  # the app's own
+        return screen
+
+    monkeypatch.setattr(device, "dump", dump_then_popup)
+    run(device, clock, out)
+    assert popped
+    ends = [r for r in lines(out / "transitions.jsonl") if r.get("not_sent")]
+    assert ends
+    assert ends[0]["reason"] == "focus_changed"
+
+
+def test_a_device_without_a_fingerprint_is_not_started(
+    tmp_path, device, android, clock
+):
+    android.props["ro.build.fingerprint"] = ""
+    out = tmp_path / "run"
+    with pytest.raises(AdbError, match="fingerprint"):
+        run(device, clock, out)
+    assert not out.exists()
+    assert android.inputs == []
+
+
+@pytest.mark.usefixtures("android")
+def test_a_transport_number_taken_before_the_run_is_refused(
+    tmp_path, device, fake_adb, clock
+):
+    # Between making the Device and the crawl, a restarted server gave the
+    # number to another device: nothing at all goes to that transport.
+    fake_adb.devices[:] = [
+        {"serial": "R58M1234", "state": "device", "transport_id": TRANSPORT}
+    ]
+    before = len(fake_adb.requests)
+    out = tmp_path / "run"
+    with pytest.raises(DeviceNotFoundError):
+        run(device, clock, out)
+    assert not [r for r in fake_adb.requests[before:] if r.startswith("host:transport")]
+    assert not out.exists()
+
+
+def test_every_device_request_checks_the_listing_first(
+    tmp_path, device, fake_adb, clock
+):
+    run(device, clock, tmp_path / "run", limits=Limits(actions=2))
+    requests = fake_adb.requests
+    for index, request in enumerate(requests):
+        if request.startswith("host:transport-id:"):
+            assert requests[index - 1] == "host:devices-l"
+
+
+def test_a_stop_refusal_ends_the_run_without_another_read(
+    tmp_path, device, android, clock
+):
+    def stop() -> bool:
+        return bool(android.inputs)  # true from the first press on
+
+    run(device, clock, tmp_path / "run", stop=stop)
+    records = lines(tmp_path / "run" / "transitions.jsonl")
+    assert records[-1].get("reason") in (None, "stopped")
+    # The run ended right after the refusal or the press: no dump followed a
+    # refused action.
+    last_start = max(i for i, r in enumerate(records) if "action" in r)
+    assert all("action" not in r for r in records[last_start + 1 :])

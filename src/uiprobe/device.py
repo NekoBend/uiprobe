@@ -68,10 +68,15 @@ IDENTITY_COMMAND: Final = (
 
 
 class FocusedWindow(NamedTuple):
-    """The window that has input focus: the package that owns it and its title."""
+    """The window that has input focus: its owner package, title and hash.
+
+    ``window`` is the hash ``dumpsys window`` prints for the window, which
+    tells two windows with the same owner and title apart.
+    """
 
     owner: str
     title: str
+    window: str
 
 
 class DeviceIdentity(NamedTuple):
@@ -958,7 +963,7 @@ def _read_window_owner(text: str, window: str, title: str) -> FocusedWindow | No
     if head is None or head[1] != window or head[2] != title:
         return None
     owner = _WINDOW_OWNER.fullmatch(lines[index + 2])
-    return None if owner is None else FocusedWindow(owner[1], title)
+    return None if owner is None else FocusedWindow(owner[1], title, window)
 
 
 _BOOL = r"(true|false)"
@@ -1218,10 +1223,35 @@ class Device:
         return self._transport_id
 
     def _pin(self) -> dict[str, int]:
-        """The client keyword that selects the pinned transport, if any."""
-        return (
-            {} if self._transport_id is None else {"transport_id": self._transport_id}
-        )
+        """The client keyword that selects the pinned transport, if any.
+
+        While a transport is pinned, every request first checks with the adb
+        server (``host:devices-l``) that the pinned transport id still lists
+        this serial, so no request goes to a device that a restarted server
+        gave the same number. The instant between that check and the request
+        itself remains.
+        """
+        if self._transport_id is None:
+            return {}
+        self._check_listed()
+        return {"transport_id": self._transport_id}
+
+    def _check_listed(self) -> None:
+        """Raise unless the server lists the pinned transport with this serial."""
+        listed = [
+            d for d in self._client.devices() if d.transport_id == self._transport_id
+        ]
+        if (
+            len(listed) != 1
+            or listed[0].serial != self.serial
+            or listed[0].state != READY_STATE
+        ):
+            msg = (
+                f"the transport pinned for {self.serial} ({self._transport_id})"
+                " does not lead to that device any more"
+            )
+            details = {"serial": self.serial, "reason": "device_changed"}
+            raise DeviceNotFoundError(msg, details=details)
 
     def pin_transport(self) -> int:
         """Send every later request to the transport this device was chosen on.
@@ -1235,6 +1265,9 @@ class Device:
         Raises:
             AdbError: The adb server reported no transport id for this device,
                 so it cannot be pinned (nothing is sent).
+            DeviceNotFoundError: The server no longer lists that transport id
+                with this serial (``details["reason"]`` is ``device_changed``);
+                nothing is pinned and nothing is sent.
         """
         if self._transport_id is None:
             transport = self._info.transport_id
@@ -1245,6 +1278,11 @@ class Device:
                 )
                 raise AdbError(msg, details={"serial": self.serial})
             self._transport_id = transport
+            try:
+                self._check_listed()  # the number may already be another's
+            except DeviceNotFoundError:
+                self._transport_id = None
+                raise
         return self._transport_id
 
     @property
@@ -1875,7 +1913,16 @@ class Device:
         focus = _read_current_focus(self._shell("dumpsys window"))
         if focus is None:
             return None
-        return _read_window_owner(self._shell("dumpsys window windows"), *focus)
+        found = _read_window_owner(self._shell("dumpsys window windows"), *focus)
+        # Read the focus again: a window that took it between the two dumps
+        # would otherwise be given the old window's owner.
+        if found is None:
+            return None
+        return (
+            found
+            if _read_current_focus(self._shell("dumpsys window")) == focus
+            else None
+        )
 
     def identity(self) -> DeviceIdentity | None:
         """Read whether this is an emulator, its serial number and build, at once.
@@ -1916,15 +1963,7 @@ class Device:
         if self._transport_id is None:
             msg = "the transport is not pinned"
             raise AdbError(msg, details={"serial": self.serial})
-        listed = [
-            d for d in self._client.devices() if d.transport_id == self._transport_id
-        ]
-        same = (
-            len(listed) == 1
-            and listed[0].serial == self.serial
-            and listed[0].state == READY_STATE
-        )
-        found = self.identity() if same else None
+        found = self.identity()  # its request checks the server's listing first
         if found is None or found != expected or (emulator and not found.emulator):
             msg = (
                 f"the device pinned as {self.serial} (transport"
