@@ -53,7 +53,7 @@ When an interrupt does reach a write, the writer marks itself as failed and refu
 
 ## Limits
 
-Files and folders are only ever created new: an existing file is never opened. But if another program running with the same rights replaces the run folder or the `screens` folder with a link (or, on Windows, a junction) during a run, later new files can be created where that link points. uiprobe does not defend against such a program, which could just as well write there itself.
+Files and folders are only ever created new: an existing file is never opened. But if another program running with the same rights replaces the run folder or the `screens` folder with a link (or, on Windows, a junction) during a run, later new files can be created where that link points. uiprobe does not defend against such a program, which could just as well write there itself. That reasoning holds only when the other program has the same rights: if you run uiprobe with higher rights (as an administrator or root), choose a run folder whose parent folders no other user can write to, not a shared folder such as a common temporary folder, because a program with lower rights could otherwise move where uiprobe creates its new files.
 
 The same holds for a program that appends to `transitions.jsonl` or `skipped.jsonl` during a run: the writer keeps its own position in the file, so its next line can overwrite what was appended. The writer assumes it is the only one writing into its run folder.
 
