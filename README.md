@@ -62,7 +62,7 @@ $ uiprobe -s emulator-5554 tap --id email
 tapped e3 EditText id=email hint="メールアドレス" [tap] at 540,660
 ```
 
-Add `--json` to get JSON instead of text (`uiprobe dump --json`), or `--brief` for a short text view with only the elements that have a label or can be pressed or scrolled (see [Dumping a screen](docs/commands.md#dumping-a-screen)).
+Add `--json` to get JSON instead of text (`uiprobe dump --json`), or `--brief` for a short text view with only the elements that have a label or a `[tap]` or `[scroll]` mark (see [Dumping a screen](docs/commands.md#dumping-a-screen)).
 
 ## Commands
 

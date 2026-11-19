@@ -177,18 +177,6 @@ def test_nesting_follows_the_nearest_kept_ancestor():
     ]
 
 
-def test_row_with_a_pressable_labeled_descendant_is_not_folded():
-    b = Builder()
-    row = b.add(None, "LinearLayout", flags=["clickable"])
-    b.add(row, "TextView", text="Wi-Fi")
-    b.add(row, "Switch", text="On", flags=["clickable", "checkable"])
-    assert brief_text(make_screen(b.items)).splitlines()[1:] == [
-        "e1 LinearLayout [tap]",
-        '\u251c e2 TextView "Wi-Fi"',
-        '\u2514 e3 Switch "On" [tap]',
-    ]
-
-
 def test_row_with_its_own_label_is_not_folded():
     b = Builder()
     row = b.add(None, "LinearLayout", content_desc="Open", flags=["clickable"])
@@ -199,14 +187,72 @@ def test_row_with_its_own_label_is_not_folded():
     ]
 
 
-def test_nested_pressable_inside_a_folded_row_does_not_repeat_labels():
+def test_fold_stops_at_a_nested_pressable_and_its_subtree_keeps_its_labels():
     b = Builder()
     row = b.add(None, "LinearLayout", flags=["clickable"])
     mid = b.add(row, "LinearLayout", flags=["clickable"])
     b.add(mid, "TextView", text="Only once")
     assert brief_text(make_screen(b.items)).splitlines()[1:] == [
-        'e1 LinearLayout labels="Only once" [tap]',
-        "\u2514 e2 LinearLayout [tap]",
+        "e1 LinearLayout [tap]",
+        '\u2514 e2 LinearLayout labels="Only once" [tap]',
+    ]
+
+
+def test_fold_stops_at_a_nested_scroll_container():
+    b = Builder()
+    row = b.add(None, "LinearLayout", flags=["clickable"])
+    b.add(row, "TextView", text="Title")
+    box = b.add(row, "ScrollView", flags=["scrollable"])
+    b.add(box, "TextView", text="Inside")
+    assert brief_text(make_screen(b.items)).splitlines()[1:] == [
+        'e1 LinearLayout labels="Title" [tap]',
+        "\u2514 e3 ScrollView [scroll]",
+        '  \u2514 e4 TextView "Inside"',
+    ]
+
+
+def test_unlabeled_nested_pressable_and_scroll_alone_leave_the_row_unfolded():
+    b = Builder()
+    row = b.add(None, "LinearLayout", flags=["clickable"])
+    box = b.add(row, "ScrollView", flags=["scrollable"])
+    b.add(box, "TextView", text="Inside")
+    assert brief_text(make_screen(b.items)).splitlines()[1:] == [
+        "e1 LinearLayout [tap]",
+        "\u2514 e2 ScrollView [scroll]",
+        '  \u2514 e3 TextView "Inside"',
+    ]
+
+
+def test_descendant_with_a_blank_field_gives_its_next_field_and_stays_listed_if_empty():
+    b = Builder()
+    row = b.add(None, "LinearLayout", flags=["clickable"])
+    b.add(row, "TextView", text="   ", content_desc="Open details")
+    b.add(row, "TextView", text="Wi-Fi")
+    b.add(row, "TextView", text="  ")
+    assert brief_text(make_screen(b.items)).splitlines()[1:] == [
+        'e1 LinearLayout labels="Open details Wi-Fi" [tap]',
+        '\u2514 e4 TextView "  "',
+    ]
+
+
+@pytest.mark.parametrize(
+    ("flag", "tag"),
+    [
+        ("clickable", "[tap]"),
+        ("scrollable", "[scroll]"),
+        ("checked", "[checked]"),
+        ("disabled", "[disabled]"),
+    ],
+)
+def test_row_with_a_tagged_labeled_descendant_is_not_folded(flag, tag):
+    b = Builder()
+    row = b.add(None, "LinearLayout", flags=["clickable"])
+    b.add(row, "TextView", text="Wi-Fi")
+    b.add(row, "Switch", text="On", flags=[flag])
+    assert brief_text(make_screen(b.items)).splitlines()[1:] == [
+        "e1 LinearLayout [tap]",
+        '\u251c e2 TextView "Wi-Fi"',
+        f'\u2514 e3 Switch "On" {tag}',
     ]
 
 
@@ -245,6 +291,33 @@ def test_long_folded_label_is_cut_with_an_ellipsis():
     assert len(label) == BRIEF_LABEL_LIMIT
 
 
+def test_cut_label_may_be_shorter_than_the_limit_when_white_space_is_trimmed():
+    b = Builder()
+    row = b.add(None, "LinearLayout", flags=["clickable"])
+    b.add(row, "TextView", text="a" * 56 + " " + "b" * 10)
+    line = brief_text(make_screen(b.items)).splitlines()[1]
+    assert 'labels="' + "a" * 56 + '..."' in line
+    assert len("a" * 56 + "...") == BRIEF_LABEL_LIMIT - 1
+
+
+def test_label_one_over_the_limit_is_cut():
+    b = Builder()
+    row = b.add(None, "LinearLayout", flags=["clickable"])
+    b.add(row, "TextView", text="z" * (BRIEF_LABEL_LIMIT + 1))
+    line = brief_text(make_screen(b.items)).splitlines()[1]
+    assert 'labels="' + "z" * (BRIEF_LABEL_LIMIT - 3) + '..."' in line
+
+
+def test_limit_counts_the_label_before_escaping():
+    b = Builder()
+    row = b.add(None, "LinearLayout", flags=["clickable"])
+    text = "a\n" * 29 + "ab"
+    assert len(text) == BRIEF_LABEL_LIMIT
+    b.add(row, "TextView", text=text)
+    line = brief_text(make_screen(b.items)).splitlines()[1]
+    assert 'labels="' + "a\\n" * 29 + 'ab"' in line
+
+
 def test_label_of_exactly_the_limit_is_not_cut():
     b = Builder()
     row = b.add(None, "LinearLayout", flags=["clickable"])
@@ -258,6 +331,32 @@ def test_element_with_only_a_hint_is_kept():
     b.add(root, "EditText", hint="Search")
     assert brief_text(make_screen(b.items)).splitlines()[1:] == [
         'e2 EditText hint="Search"'
+    ]
+
+
+def test_documented_example_is_exact():
+    b = Builder()
+    root = b.add(None, "FrameLayout")
+    b.add(root, "ImageButton", flags=["clickable"])
+    b.add(root, "TextView", text="Settings")
+    scroll = b.add(root, "ScrollView", flags=["scrollable"])
+    net = b.add(scroll, "LinearLayout", flags=["clickable"])
+    b.add(net, "ImageView")
+    b.add(net, "TextView", text="Network & internet")
+    b.add(net, "TextView", text="Mobile, Wi-Fi, hotspot")
+    bat = b.add(scroll, "LinearLayout", flags=["clickable"])
+    b.add(bat, "TextView", text="Battery")
+    b.add(bat, "TextView", text="100%")
+    screen = make_screen(b.items)
+    assert len(screen.to_tree().splitlines()) == 12
+    assert brief_text(screen).splitlines() == [
+        f"com.example.settings/.Settings  ({screen.screen_id})",
+        "e2 ImageButton [tap]",
+        'e3 TextView "Settings"',
+        "e4 ScrollView [scroll]",
+        '\u251c e5 LinearLayout labels="Network & internet Mobile, Wi-Fi, hotspot"'
+        " [tap]",
+        '\u2514 e9 LinearLayout labels="Battery 100%" [tap]',
     ]
 
 
@@ -378,6 +477,7 @@ def test_dump_without_brief_is_the_default_view(phone, capsys):
 )
 def test_brief_with_json_is_a_usage_error(phone, capsys, argv):
     code, out, err = invoke(capsys, *argv, "--adb-server", phone.address)
+    assert phone.requests == []
     assert code == 2
     payload = json.loads(out)
     assert payload["error"]["code"] == "usage_error"

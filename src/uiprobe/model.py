@@ -46,7 +46,8 @@ MAX_NODES = 100_000
 # depth, from exploding.
 MAX_DEPTH = 256
 MAX_CANDIDATES = 20
-# Longest folded row label in the brief view, the "..." that ends a cut one included.
+# Longest folded row label in the brief view, the "..." that ends a cut one
+# included, counted before escaping.
 BRIEF_LABEL_LIMIT = 60
 # An element counts as visible only when the part of it on the display is at
 # least this many pixels wide and this many pixels high. Thinner slivers (two
@@ -287,28 +288,28 @@ class Screen:
         A kept element sits under its nearest kept ancestor. A pressable element
         with no label of its own whose labeled descendants are all plain (none
         has a tag such as [tap] or [checked]) shows their labels on its own line
-        (``labels="..."``) and those descendants are left out.
+        (``labels="..."``) and those descendants are left out. The fold does not
+        reach into a nested [tap] or [scroll] element.
         """
         children = self._children_map()
         kept: dict[str | None, list[Element]] = {}
         labels: dict[str, str] = {}
         dropped: set[str] = set()
-        # Each entry: element, nearest kept ancestor id, inside a folded row.
-        stack = [(top, None, False) for top in reversed(children.get(None, []))]
+        # Each entry: element and its nearest kept ancestor id.
+        stack = [(top, None) for top in reversed(children.get(None, []))]
         while stack:
-            element, anchor, inside = stack.pop()
+            element, anchor = stack.pop()
             keep = _is_brief_kept(element) and element.id not in dropped
             if keep:
                 kept.setdefault(anchor, []).append(element)
                 anchor = element.id
-                if not inside and "clickable" in element.flags:
+                if "clickable" in element.flags:
                     folded = _fold_labels(element, children)
                     if folded is not None:
                         labels[element.id] = folded[0]
                         dropped.update(folded[1])
-                        inside = True
             kids = children.get(element.id, [])
-            stack.extend((kid, anchor, inside) for kid in reversed(kids))
+            stack.extend((kid, anchor) for kid in reversed(kids))
         return _render_tree(kept, labels)
 
     def _clip(self, element: Element) -> Bounds | None:
@@ -912,16 +913,31 @@ def _is_brief_kept(element: Element) -> bool:
     )
 
 
+def _is_control(element: Element) -> bool:
+    """True for an element that can be pressed or scrolled (a [tap] or [scroll])."""
+    return "clickable" in element.flags or "scrollable" in element.flags
+
+
+def _first_label(element: Element) -> str:
+    """Return the stripped text, else description, else hint that is not blank."""
+    for field in (element.text, element.content_desc, element.hint):
+        if field.strip():
+            return field.strip()
+    return ""
+
+
 def _fold_labels(
     row: Element, children: dict[str | None, list[Element]]
 ) -> tuple[str, list[str]] | None:
-    """Return the folded label of a pressable row and its labeled descendants.
+    """Return the folded label of a pressable row and the descendants it replaces.
 
-    None when the row has a label of its own, has no labeled descendant, has
-    one that carries a tag (it is shown on its own line then), or the labels
-    are only white space. A label is a descendant's text, else its content
-    description, else its hint; the labels are stripped and joined by one space
-    in document order, the way the crawl guards read a button.
+    None when the row has a label of its own, when no descendant gives a
+    label, or when a labeled descendant carries a tag (it is shown on its own
+    line then). A descendant gives the first of its text, content description
+    and hint that is not blank once stripped; the labels are joined by one
+    space in document order. The walk stops at a nested pressable or scrollable
+    element: its subtree keeps its own labels. A descendant that gives no label
+    is not replaced and stays listed.
     """
     if _is_labeled(row):
         return None
@@ -933,10 +949,12 @@ def _fold_labels(
         if _is_labeled(element):
             if any(flag in element.flags for flag, _ in _FLAG_TAGS):
                 return None
-            ids.append(element.id)
-            label = (element.text or element.content_desc or element.hint).strip()
+            label = _first_label(element)
             if label:
+                ids.append(element.id)
                 parts.append(label)
+        elif _is_control(element):
+            continue
         stack.extend(reversed(children.get(element.id, [])))
     if not parts:
         return None

@@ -33,23 +33,23 @@ Add `--json` to get JSON instead of text (`uiprobe dump --json`).
 
 A real screen is mostly containers with no text, so the full tree can run to over a hundred lines. `uiprobe dump --brief` prints a shorter text view. It is opt-in: `uiprobe dump` without it prints the full tree as before.
 
+A small screen of 11 elements (the full tree is 12 lines with its header line) shows in 6 lines:
+
 ```console
 $ uiprobe -s emulator-5554 dump --brief
-com.example.settings/.Settings  (s-0ad62355f058)
-e4 ImageButton [tap]
-e5 TextView "Settings"
-e9 EditText hint="Search settings" [tap]
-e10 ScrollView [scroll]
-├ e12 LinearLayout labels="Network & internet Mobile, Wi-Fi, hotspot" [tap]
-├ e18 LinearLayout labels="Connected devices Bluetooth, pairing" [tap]
-└ e24 LinearLayout labels="Apps Assistant, recent apps, default apps" [tap]
+com.example.settings/.Settings  (s-06d03764c6a8)
+e2 ImageButton [tap]
+e3 TextView "Settings"
+e4 ScrollView [scroll]
+├ e5 LinearLayout labels="Network & internet Mobile, Wi-Fi, hotspot" [tap]
+└ e9 LinearLayout labels="Battery 100%" [tap]
 ```
 
 - The header line is kept. Of the elements, only these are kept: those with text, a content description or a hint, and those that carry a `[tap]` or `[scroll]` mark. Everything else is dropped, for example a container or an icon with no label that cannot be pressed. A pressable icon with no label is still listed, with its `[tap]`.
-- The element numbers are the numbers of the full view, so `e12` is the same element in `uiprobe dump` and `uiprobe dump --brief`. Numbers of dropped elements are missing, so there are gaps.
+- The element numbers are those of the same capture, so `e5` is the same element in the full view and in the brief view of one capture. Numbers of dropped elements are missing, so there are gaps. Two separate captures can number elements differently, so take an id from the capture you act on.
 - Indentation follows the parent and child relation among the kept elements only: an element is shown under its nearest kept ancestor, and a kept element with no kept ancestor starts at the left edge. The dropped elements in between add no indentation.
-- A pressable element with no text, description or hint of its own, whose labeled descendants are not themselves pressable, is folded into one line: the labels of those descendants (the text, else the content description, else the hint, with spaces at both ends removed) are joined by one space in document order and written as `labels="..."`, the way the crawl guards read a button. Those descendants are then not listed on their own lines. A settings row with a title and a summary shows as one line this way. A row is not folded when it has a label itself, when it has no labeled descendant, or when one of its labeled descendants carries a mark such as `[tap]`, `[scroll]` or `[checked]`; the row and that descendant are listed as usual.
-- The joined label is cut to 60 characters. A longer label ends with `...` and the whole cut label, `...` included, is 60 characters. Text is escaped as in the full view, so a line break or control character shows as `\n` or `\u202e`.
+- A pressable (`[tap]`) element with no text, description or hint of its own is folded into one line when it has labeled descendants and none of them carries a mark such as `[tap]`, `[scroll]` or `[checked]`. Each descendant gives its text, else its content description, else its hint, taking the first of the three that is not blank once spaces at both ends are removed. These labels are joined by one space in document order and written as `labels="..."`. A descendant that gave a label is not listed on its own line; one that gave none (all its fields blank) stays listed. A settings row with a title and a summary shows as one line this way. The fold does not go into a nested `[tap]` or `[scroll]` element: that element and its subtree keep their own labels, and a nested pressable element may fold its own labels the same way. A row is not folded when it has a label itself, when no descendant gives a label, or when a labeled descendant carries a mark; the row and that descendant are listed as usual.
+- A folded label is at most 60 characters, counted before escaping. A longer label is cut and ends with `...`, which counts in the 60; spaces left at the cut are removed, so a cut label can be a little shorter than 60. Text is then escaped as in the full view, so a line break or control character shows as `\n` or `\u202e` and the printed value can be longer than 60 characters.
 - `--brief` cannot be used with `--json`, because the JSON stays complete. The command exits with 2 (`usage_error`) and sends nothing to the device. `find`, `tap` and the other commands are not affected.
 
 ## Finding elements
