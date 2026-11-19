@@ -7,6 +7,7 @@ sleeps: the clock and the pause are injected.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import time
 from dataclasses import dataclass, replace
@@ -25,13 +26,26 @@ from tests.fake_device import (
     assert_no_text_input,
     assert_only_back_keys,
 )
-from uiprobe import crawl_driver
-from uiprobe.crawl import TAP_NOT_SENT, CrawlEngine, Limits, Observation, Tap
+from uiprobe import crawl_driver, runlog
+from uiprobe.crawl import (
+    TAP_NOT_SENT,
+    Back,
+    CrawlEngine,
+    Limits,
+    Observation,
+    Relaunch,
+    Tap,
+)
 from uiprobe.crawl_driver import CrawlResult, crawl
 from uiprobe.device import Device
-from uiprobe.errors import AdbError, LaunchFailedError, NotEmulatorError
+from uiprobe.errors import (
+    AdbError,
+    DeviceNotFoundError,
+    LaunchFailedError,
+    NotEmulatorError,
+)
 from uiprobe.guards import Policy
-from uiprobe.runlog import RunFolderError
+from uiprobe.runlog import RunFolderError, RunWriter
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -42,6 +56,7 @@ if TYPE_CHECKING:
     from uiprobe.model import Screen as ModelScreen
 
 SERIAL = "emulator-5554"
+TRANSPORT = 7
 SHOP = "com.example.shop"
 OTHER = "com.example.other"
 BUTTON = "android.widget.Button"
@@ -106,7 +121,7 @@ class Clock:
 
 @pytest.fixture
 def android(fake_adb: FakeAdbServer) -> FakeAndroid:
-    return FakeAndroid(fake_adb, SERIAL, SCREENS, start="home")
+    return FakeAndroid(fake_adb, SERIAL, SCREENS, start="home", transport_id=TRANSPORT)
 
 
 @pytest.fixture
@@ -128,7 +143,6 @@ def run(
     limits: Limits | None = None,
     screenshots: bool = False,
     allow_real_device: bool = False,
-    recheck: bool = True,
     settle: float = 1.0,
     stop: Callable[[], bool] | None = None,
 ) -> CrawlResult:
@@ -140,7 +154,6 @@ def run(
         limits=limits or Limits(),
         screenshots=screenshots,
         allow_real_device=allow_real_device,
-        recheck=recheck,
         settle=settle,
         stop=stop,
         clock=clock.monotonic,
@@ -238,7 +251,9 @@ def test_a_small_app_is_crawled_end_to_end(tmp_path, device, android, clock):
     assert_no_long_press(android)
     assert_no_press_inside(android, "delete")
     assert android.stopped == []
-    assert clock.pauses == [1.0] * (result.actions - 1)
+    # Each tap and BACK waits 1 s in steps of at most 0.1 s (stop is polled).
+    assert max(clock.pauses) <= crawl_driver.PAUSE_STEP
+    assert sum(clock.pauses) == pytest.approx(1.0 * (result.actions - 1))
 
 
 def test_crawl_run_is_exported():
@@ -260,7 +275,6 @@ def test_bad_arguments_refuse_before_any_command(tmp_path, device, fake_adb):
         (TypeError, {"limits": {"depth": 1, "actions": 1, "minutes": 1}}),
         (TypeError, {"screenshots": 1}),
         (TypeError, {"allow_real_device": "yes"}),
-        (TypeError, {"recheck": None}),
         (ValueError, {"settle": -1.0}),
         (ValueError, {"settle": float("nan")}),
         (TypeError, {"settle": "1"}),
@@ -374,10 +388,15 @@ def test_a_screen_that_changes_before_the_press_is_not_pressed(
     skipped = lines(out / "skipped.jsonl")
     refused = [r for r in skipped if r["reasons"] == ["changed_before_press"]]
     assert [r["element"]["text"] for r in refused] == ["Browse"]
-    starts = [r for r in lines(out / "transitions.jsonl") if "action" in r]
-    assert not [
+    records = lines(out / "transitions.jsonl")
+    starts = [r for r in records if "action" in r]
+    browse = [
         s for s in starts if s["action"].get("element", {}).get("text") == "Browse"
     ]
+    assert len(browse) == 1  # written, then closed as not sent
+    ends = [r for r in records if r.get("action_id") == browse[0]["action_id"]]
+    assert ends[-1]["not_sent"] is True
+    assert ends[-1]["reason"] == "changed_before_press"
     on_browse = [
         i
         for i in android.inputs
@@ -385,19 +404,6 @@ def test_a_screen_that_changes_before_the_press_is_not_pressed(
     ]
     assert not on_browse
     assert (out / "run.json").exists()
-
-
-def test_without_recheck_the_screen_is_not_read_again(tmp_path, device, android, clock):
-    first = run(device, clock, tmp_path / "with")
-    dumps = android.dumps
-    second = run(device, clock, tmp_path / "without", recheck=False)
-    taps = sum(
-        1
-        for r in lines(tmp_path / "with" / "transitions.jsonl")
-        if r.get("action", {}).get("kind") == "tap"
-    )
-    assert second.stop_reason == first.stop_reason == "exhausted"
-    assert dumps - (android.dumps - dumps) == taps
 
 
 def test_a_relaunch_restarts_the_app(tmp_path, device, android, monkeypatch, clock):
@@ -436,19 +442,18 @@ def test_a_relaunch_restarts_the_app(tmp_path, device, android, monkeypatch, clo
 # --- stopping ---
 
 
-def test_stop_between_actions_ends_with_interrupted(tmp_path, device, clock):
-    calls = []
-
+def test_stop_between_actions_ends_with_interrupted(tmp_path, device, android, clock):
     def stop() -> bool:
-        calls.append(1)
-        return len(calls) > 3
+        return len(android.inputs) >= 2  # after the second press
 
     out = tmp_path / "run"
     result = run(device, clock, out, stop=stop)
     assert result.stop_reason == "interrupted"
-    assert result.actions == 3
     transitions = lines(out / "transitions.jsonl")
-    assert len(transitions) == 6
+    starts = [r for r in transitions if "action" in r]
+    assert result.actions == len(starts) == 3  # launch and two presses
+    assert len(transitions) == 6  # each start has its end
+    assert len(android.inputs) == 2
     assert (
         json.loads((out / "run.json").read_text(encoding="utf-8"))["stop_reason"]
         == "interrupted"
@@ -561,7 +566,12 @@ def test_an_unexpected_error_is_recorded_as_internal_error(
 
 def test_a_failed_screenshot_is_noted_and_the_crawl_goes_on(tmp_path, fake_adb, clock):
     android = FakeAndroid(
-        fake_adb, SERIAL, SCREENS, start="home", secure_screencap="empty"
+        fake_adb,
+        SERIAL,
+        SCREENS,
+        start="home",
+        secure_screencap="empty",
+        transport_id=TRANSPORT,
     )
     device = Device(adb_server=fake_adb.address)
     out = tmp_path / "run"
@@ -581,8 +591,9 @@ def test_max_duration_is_judged_on_the_injected_clock(tmp_path, device, clock):
     result = run(device, clock, out, limits=Limits(minutes=1), settle=25.0)
     assert result.stop_reason == "max_duration"
     assert clock.pauses
-    assert set(clock.pauses) == {25.0}
+    assert max(clock.pauses) <= crawl_driver.PAUSE_STEP
     assert clock.now >= 5000.0 + 60
+    assert clock.now <= 5000.0 + 60 + crawl_driver.PAUSE_STEP  # no pause past it
 
 
 def test_max_actions_stops_the_crawl(tmp_path, device, clock):
@@ -611,6 +622,10 @@ def test_a_launch_that_is_not_in_front_does_not_end_the_crawl(
     assert "was not in front after launch" in summary
     starts = [r for r in lines(out / "transitions.jsonl") if "action" in r]
     assert starts[0]["action"] == {"kind": "launch"}
+    # The off-target screen was answered with BACK or a relaunch, not ignored.
+    later = {r["action"]["kind"] for r in starts[1:]}
+    assert later & {"back", "relaunch"}
+    assert result.stop_reason in {"relaunch_limit", "max_actions", "exhausted"}
 
 
 def test_a_launch_that_cannot_find_the_app_still_ends_with_error(
@@ -710,7 +725,7 @@ def test_a_skip_row_names_the_element_whose_reasons_match(tmp_path, fake_adb, cl
             ),
         ),
     )
-    FakeAndroid(fake_adb, SERIAL, screens, start="home")
+    FakeAndroid(fake_adb, SERIAL, screens, start="home", transport_id=TRANSPORT)
     out = tmp_path / "run"
     run(Device(adb_server=fake_adb.address), clock, out)
     rows = lines(out / "skipped.jsonl")
@@ -901,14 +916,9 @@ def test_a_tap_whose_send_fails_is_not_reported_and_the_engine_releases_it(
     run_json = json.loads((out / "run.json").read_text(encoding="utf-8"))
     assert run_json["stop_reason"] == "error"
     assert run_json["actions"] == starts[-1]["action_id"]
-    # The next step releases the unreported tap with a tap_not_sent row.
-    engine.next(Observation(None, SHOP, keyboard_shown=False, now=clock.now))
-    released = [
-        s
-        for s in engine.records.skipped
-        if (s.screen_id, s.fingerprint) == (failed.screen_id, failed.fingerprint)
-    ]
-    assert [s.reasons for s in released] == [(TAP_NOT_SENT,)]
+    # The run ended at the failed send: the failed tap was never reported, so
+    # the engine still counts only what was sent.
+    assert all(t is not failed for t in engine_log.reported())
     assert engine.actions_sent == counted
     assert len(engine.records.transitions) == transitions
 
@@ -986,3 +996,329 @@ def test_a_dump_with_duplicate_element_ids_is_recorded_as_a_failed_dump(
     assert ends[1]["action_id"] == 2
     assert ends[1]["dump_failed"] is True
     assert [e for e in ends if e["dump_failed"]] == [ends[1]]
+
+
+# --- the gate: every action is judged right before it is sent ---
+
+
+def _gate_run(
+    tmp_path: Path,
+    device: Device,
+    clock: Clock,
+    *,
+    stop: Callable[[], bool] | None = None,
+) -> tuple[crawl_driver._Run, CrawlEngine, Observation]:
+    """A run after its launch, with the first observation, for direct sends."""
+    device.pin_transport()
+    engine = CrawlEngine(SHOP, Policy(), Limits(minutes=1), started_at=clock.now)
+    writer = RunWriter.create(
+        tmp_path / "run", package=SHOP, limits=Limits(), deny_words=[], serial=SERIAL
+    )
+    _WRITERS.append(writer)
+    driver = crawl_driver._Run(
+        device,
+        SHOP,
+        writer,
+        engine,
+        Policy(),
+        screenshots=False,
+        settle=0.0,
+        deadline=clock.now + 60,
+        stop=stop,
+        clock=clock.monotonic,
+        sleep=clock.sleep,
+    )
+    driver.send(engine.start(), None)
+    return driver, engine, driver.observe()
+
+
+_WRITERS: list[RunWriter] = []
+
+
+@pytest.fixture(autouse=True)
+def _close_writers():
+    yield
+    while _WRITERS:
+        with contextlib.suppress(RunFolderError):
+            _WRITERS.pop().close()
+
+
+def _not_sent_reason(tmp_path: Path) -> str | None:
+    records = lines(tmp_path / "run" / "transitions.jsonl")
+    return records[-1].get("reason") if records[-1].get("not_sent") else None
+
+
+def _make_action(kind: str, engine: CrawlEngine, observation: Observation):
+    if kind == "tap":
+        action = engine.next(observation)
+        assert isinstance(action, Tap)
+        return action
+    return {"back": Back(), "relaunch": Relaunch()}[kind]
+
+
+# Each condition, how to bring it about, and the reason it gives per kind.
+_CONDITIONS = {
+    "stopped": ("stop", None),
+    "time_limit": ("clock", None),
+    "foreground_unknown": ("foreground", None),
+    "focus_unknown": ("focused_window", None),
+    "focus_other": ("focused_window", ""),
+    "keyboard_unknown": ("keyboard_shown", None),
+    "keyboard_shown": ("keyboard_shown", True),
+}
+_CASES = [
+    ("tap", "stopped", "stopped"),
+    ("tap", "time_limit", "time_limit"),
+    ("tap", "focus_unknown", "focus_unknown"),
+    ("tap", "focus_other", "focus_other"),
+    ("tap", "keyboard_unknown", "keyboard_unknown"),
+    ("tap", "keyboard_shown", "keyboard_shown"),
+    ("back", "stopped", "stopped"),
+    ("back", "time_limit", "time_limit"),
+    ("back", "foreground_unknown", "foreground_unknown"),
+    ("back", "focus_unknown", "focus_unknown"),
+    ("back", "focus_other", "changed_before_send"),
+    ("back", "keyboard_unknown", "keyboard_unknown"),
+    ("back", "keyboard_shown", "changed_before_send"),
+    ("relaunch", "stopped", "stopped"),
+    ("relaunch", "time_limit", "time_limit"),
+    ("relaunch", "foreground_unknown", "foreground_unknown"),
+    ("relaunch", "focus_unknown", "focus_unknown"),
+    ("relaunch", "focus_other", "changed_before_send"),
+]
+
+
+@pytest.mark.parametrize(("kind", "condition", "reason"), _CASES)
+def test_the_gate_sends_nothing_when_a_condition_fails(
+    tmp_path, device, android, clock, monkeypatch, kind, condition, reason
+):
+    stopping = []
+    driver, engine, observation = _gate_run(
+        tmp_path, device, clock, stop=lambda: bool(stopping)
+    )
+    action = _make_action(kind, engine, observation)
+    inputs, stopped = len(android.inputs), list(android.stopped)
+    how, value = _CONDITIONS[condition]
+    if how == "stop":
+        stopping.append(True)
+    elif how == "clock":
+        clock.now = driver.deadline
+    else:
+        monkeypatch.setattr(device, how, lambda: value)
+    driver.send(action, observation)
+    assert len(android.inputs) == inputs  # no tap, no key
+    assert android.stopped == stopped  # no relaunch
+    assert _not_sent_reason(tmp_path) == reason
+
+
+@pytest.mark.parametrize("condition", ["stopped", "time_limit"])
+def test_the_gate_holds_back_the_launch_too(
+    tmp_path, device, android, clock, condition
+):
+    device.pin_transport()
+    engine = CrawlEngine(SHOP, Policy(), Limits(minutes=1), started_at=clock.now)
+    writer = RunWriter.create(
+        tmp_path / "run", package=SHOP, limits=Limits(), deny_words=[], serial=SERIAL
+    )
+    _WRITERS.append(writer)
+    driver = crawl_driver._Run(
+        device,
+        SHOP,
+        writer,
+        engine,
+        Policy(),
+        screenshots=False,
+        settle=0.0,
+        deadline=clock.now + 60,
+        stop=lambda: condition == "stopped",
+        clock=clock.monotonic,
+        sleep=clock.sleep,
+    )
+    if condition == "time_limit":
+        clock.now += 60
+    driver.send(engine.start(), None)
+    assert android.screen.name == "home"  # nothing was launched
+    assert _not_sent_reason(tmp_path) == condition
+
+
+@pytest.mark.parametrize("kind", ["tap", "back", "relaunch"])
+def test_the_gate_lets_an_unchanged_action_through(
+    tmp_path, device, android, clock, kind
+):
+    driver, engine, observation = _gate_run(tmp_path, device, clock)
+    action = _make_action(kind, engine, observation)
+    inputs, stopped = len(android.inputs), len(android.stopped)
+    driver.send(action, observation)
+    assert len(android.inputs) + len(android.stopped) == inputs + stopped + 1
+    assert _not_sent_reason(tmp_path) is None
+
+
+# --- the device stays the one that was checked ---
+
+
+def test_a_device_that_takes_over_the_serial_receives_nothing(
+    tmp_path, device, android, fake_adb, clock, monkeypatch
+):
+    def swap(_number: int, *_args: object, **_kwargs: object) -> None:
+        # Right after the emulator check: another device takes the serial.
+        fake_adb.devices[:] = [
+            {"serial": SERIAL, "state": "device", "transport_id": TRANSPORT + 1}
+        ]
+
+    original = device.is_emulator
+
+    def check_then_swap() -> bool:
+        answer = original()
+        swap(0)
+        return answer
+
+    monkeypatch.setattr(device, "is_emulator", check_then_swap)
+    before = len(fake_adb.requests)
+    with pytest.raises(DeviceNotFoundError):
+        run(device, clock, tmp_path / "run")
+    after = fake_adb.requests[before:]
+    selectors = [r for r in after if r.startswith("host:transport")]
+    assert selectors
+    assert set(selectors) == {f"host:transport-id:{TRANSPORT}"}
+    assert android.inputs == []
+    assert android.stopped == []
+    assert not [c for _, _, c in fake_adb.commands if c.startswith(("monkey", "input"))]
+
+
+def test_the_emulator_check_goes_through_the_pinned_transport(
+    tmp_path, device, fake_adb, clock
+):
+    before = len(fake_adb.requests)
+    run(device, clock, tmp_path / "run", limits=Limits(actions=1))
+    first = [r for r in fake_adb.requests[before:] if r.startswith("host:transport")]
+    assert first[0] == f"host:transport-id:{TRANSPORT}"
+    assert all(r == f"host:transport-id:{TRANSPORT}" for r in first)
+
+
+def test_a_real_device_allowed_is_pinned_too(
+    tmp_path, device, fake_adb, android, clock
+):
+    android.props["ro.kernel.qemu"] = "0"
+    before = len(fake_adb.requests)
+    run(
+        device,
+        clock,
+        tmp_path / "run",
+        allow_real_device=True,
+        limits=Limits(actions=1),
+    )
+    selectors = [
+        r for r in fake_adb.requests[before:] if r.startswith("host:transport")
+    ]
+    assert selectors
+    assert set(selectors) == {f"host:transport-id:{TRANSPORT}"}
+
+
+def test_no_transport_id_means_nothing_is_written_or_sent(tmp_path, fake_adb, clock):
+    android = FakeAndroid(fake_adb, SERIAL, SCREENS, start="home")  # no id listed
+    device = Device(adb_server=fake_adb.address)
+    out = tmp_path / "run"
+    with pytest.raises(AdbError, match="no transport id"):
+        run(device, clock, out)
+    assert not out.exists()
+    assert android.inputs == []
+    assert fake_adb.commands == []
+
+
+# --- the rest of the review's cases ---
+
+
+def test_a_lost_reply_to_a_tap_is_not_resent(tmp_path, device, android, clock):
+    android.drop_after_input(1)  # the device takes the tap, the reply is lost
+    out = tmp_path / "run"
+    with pytest.raises(AdbError):
+        run(device, clock, out)
+    assert len([i for i in android.inputs if i.kind == "tap"]) == 1
+    starts = [r for r in lines(out / "transitions.jsonl") if "action" in r]
+    assert [r["action"]["kind"] for r in starts].count("tap") == 1
+
+
+def test_a_custom_deny_word_is_honoured(tmp_path, device, android, clock):
+    out = tmp_path / "run"
+    crawl(
+        device,
+        SHOP,
+        out,
+        policy=Policy(deny_words=("browse",)),
+        limits=Limits(),
+        clock=clock.monotonic,
+        sleep=clock.sleep,
+    )
+    assert_no_press_inside(android, "browse")
+    rows = lines(out / "skipped.jsonl")
+    assert any(r.get("element", {}).get("text") == "Browse" for r in rows)
+
+
+def test_screens_are_counted_when_observed(tmp_path, device, clock):
+    screens = tmp_path / "run" / "screens"
+
+    def stop() -> bool:  # as soon as the first screen is written
+        return screens.is_dir() and any(screens.glob("*.json"))
+
+    result = run(device, clock, tmp_path / "run", stop=stop)
+    assert result.stop_reason == "interrupted"
+    assert result.screens == len(list((tmp_path / "run" / "screens").glob("*.json")))
+    assert result.screens == 1
+
+
+def test_the_transition_end_comes_before_a_screenshot_that_fails(
+    tmp_path, device, clock, monkeypatch
+):
+    def fail(*_args: object, **_kwargs: object) -> bytes:
+        raise AdbError("the adb server answered FAIL")
+
+    monkeypatch.setattr(device, "screenshot", fail)
+    out = tmp_path / "run"
+    with pytest.raises(AdbError):
+        run(device, clock, out, screenshots=True)
+    records = lines(out / "transitions.jsonl")
+    assert records[0]["action"] == {"kind": "launch"}
+    assert records[1]["action_id"] == 1
+    assert "to_screen_id" in records[1]
+
+
+def test_a_screenshot_of_another_app_is_not_saved(
+    tmp_path, device, android, clock, monkeypatch
+):
+    original = device.screenshot
+
+    def shot_then_cover() -> bytes:
+        data = original()
+        android.show("ext1")  # another app comes forward as the image is taken
+        return data
+
+    monkeypatch.setattr(device, "screenshot", shot_then_cover)
+    out = tmp_path / "run"
+    run(device, clock, out, screenshots=True, limits=Limits(actions=1))
+    assert list((out / "screens").glob("*.png")) == []
+    summary = (out / "summary.txt").read_text(encoding="utf-8")
+    assert "the app was not in front" in summary
+
+
+def test_an_interrupt_that_breaks_a_write_is_raised_even_with_stop_set(
+    tmp_path, device, clock, monkeypatch
+):
+    stopping = []
+    original = RunWriter.write_transition_start
+    count = []
+
+    def interrupted(self, *args, **kwargs):
+        count.append(1)
+        if len(count) == 2:
+            stopping.append(True)
+            monkeypatch.setattr(runlog, "_put", _interrupting_put)
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(RunWriter, "write_transition_start", interrupted)
+    with pytest.raises(KeyboardInterrupt):
+        run(device, clock, tmp_path / "run", stop=lambda: bool(stopping))
+    assert not (tmp_path / "run" / "run.json").exists()
+
+
+def _interrupting_put(_handle, _data):
+    raise KeyboardInterrupt

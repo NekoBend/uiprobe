@@ -347,3 +347,50 @@ def test_is_emulator_unreachable_server_propagates(fake_adb):
     with pytest.raises(AdbServerUnavailableError):
         device.is_emulator()
     assert_no_input(fake_adb, android)
+
+
+# --- focused_window ---
+
+
+def focus(title: str) -> str:
+    return f"  mCurrentFocus=Window{{4c2f1a8 u0 {title}}}\n"
+
+
+@pytest.mark.parametrize("api", APIS)
+def test_focused_window_names_the_app_in_front(fake_adb, api):
+    _, device = make(fake_adb, api=api)
+    assert device.focused_window() == SHOP
+
+
+@pytest.mark.parametrize(
+    ("text", "answer"),
+    [
+        (focus(f"{SHOP}/{SHOP}.Main"), SHOP),
+        (focus("NotificationShade"), ""),
+        (focus("StatusBar"), ""),
+        (focus("PopupWindow:1a2b3c"), ""),
+        ("  mCurrentFocus=null\n", None),
+        ("", None),
+        (focus(f"{SHOP}/.Main") + focus("NotificationShade"), None),
+        (focus(f"{SHOP}/.Main") * 2, SHOP),
+        ("  mCurrentFocus=Window{zz u0 x/y}\n", None),
+        ("  mCurrentFocus=Window{1 u0 " + "a" * 600 + "}\n", None),
+    ],
+    ids=[
+        "app",
+        "shade",
+        "status-bar",
+        "popup",
+        "null",
+        "absent",
+        "forged-disagrees",
+        "same-twice",
+        "bad-hash",
+        "too-long",
+    ],
+)
+def test_focused_window_reads_the_focus_line(fake_adb, text, answer):
+    android, device = make(fake_adb)
+    android.override(WINDOW, text.encode())
+    assert device.focused_window() == answer
+    assert_no_input(fake_adb, android)

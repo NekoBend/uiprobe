@@ -411,6 +411,7 @@ class FakeAndroid:
         display: tuple[int, int] = (320, 640),
         extra_attributes: bool | None = None,
         focused_app_line: bool = True,
+        transport_id: int | None = None,
         keyboard_in_dump: bool = False,
         secure_screencap: str | None = None,
         strict: bool = True,
@@ -508,7 +509,8 @@ class FakeAndroid:
         # touched, so a refused construction leaves the server as it was.
         rules = self.allowed(extra_packages)
         if not any(d["serial"] == serial for d in server.devices):
-            server.add_device(serial)
+            # ``transport_id`` is listed only when given, as old servers omit it.
+            server.add_device(serial, transport_id=transport_id)
         server.on_shell(serial, re.compile(""), self._shell)
         server.on_exec(serial, re.compile(""), self._shell)
         if strict:

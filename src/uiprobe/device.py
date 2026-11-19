@@ -885,6 +885,38 @@ def _read_source(text: str, source: _Source) -> tuple[str, str] | object | None:
     return found.pop() if len(found) == 1 else None
 
 
+_CURRENT_FOCUS_CLAIM: Final = re.compile(r"\s*mCurrentFocus=")
+_CURRENT_FOCUS: Final = re.compile(
+    r"\s*mCurrentFocus=Window\{[0-9a-f]{1,16} u[0-9]{1,3} ([^{}\r\n]{1,512})\}\s*"
+)
+_WINDOW_COMPONENT: Final = re.compile(_COMPONENT)
+
+
+def _read_current_focus(text: str) -> str | None:
+    """The package of the focused window, ``""`` for a non-app one, or None.
+
+    Every line that claims ``mCurrentFocus`` must be well formed and all must
+    name the same window; anything else is None.
+    """
+    lines = {
+        line.rstrip("\r")
+        for line in text.split("\n")
+        if _CURRENT_FOCUS_CLAIM.match(line)
+    }
+    titles: set[str] = set()
+    for line in lines:
+        match = (
+            _CURRENT_FOCUS.fullmatch(line) if len(line) <= _MAX_DUMPSYS_LINE else None
+        )
+        if match is None:
+            return None
+        titles.add(match[1])
+    if len(titles) != 1:
+        return None
+    component = _WINDOW_COMPONENT.fullmatch(titles.pop())
+    return "" if component is None else component[1]
+
+
 _BOOL = r"(true|false)"
 # Both genuine shapes of the line that carries ``mInputShown``: API 24-32 print
 # it at the end of one flag line, API 36 on a line of its own (API 33-35 were
@@ -1128,11 +1160,48 @@ class Device:
         # The clock and the pause of `launch`; tests replace them.
         self._clock: Callable[[], float] = time.monotonic
         self._sleep: Callable[[float], None] = time.sleep
+        # Set by `pin_transport`: every later request uses this transport.
+        self._transport_id: int | None = None
 
     @property
     def serial(self) -> str:
         """The adb serial of this device."""
         return self._info.serial
+
+    @property
+    def transport_id(self) -> int | None:
+        """The transport every request uses, once `pin_transport` set it."""
+        return self._transport_id
+
+    def _pin(self) -> dict[str, int]:
+        """The client keyword that selects the pinned transport, if any."""
+        return (
+            {} if self._transport_id is None else {"transport_id": self._transport_id}
+        )
+
+    def pin_transport(self) -> int:
+        """Send every later request to the transport this device was chosen on.
+
+        The transport id is the one ``adb devices -l`` reported when the
+        `Device` was made. Afterwards each request selects that transport
+        (``host:transport-id:N``), not the serial, so a device that later takes
+        the same serial never receives anything: the requests fail instead.
+        Calling it again keeps the first transport.
+
+        Raises:
+            AdbError: The adb server reported no transport id for this device,
+                so it cannot be pinned (nothing is sent).
+        """
+        if self._transport_id is None:
+            transport = self._info.transport_id
+            if transport is None:
+                msg = (
+                    f"adb reported no transport id for {self.serial}, so the"
+                    " requests cannot be kept on the device that was chosen"
+                )
+                raise AdbError(msg, details={"serial": self.serial})
+            self._transport_id = transport
+        return self._transport_id
 
     @property
     def info(self) -> DeviceInfo:
@@ -1144,7 +1213,7 @@ class Device:
         return self._shell_text(command)
 
     def _shell_text(self, command: str, *, timeout: float | None = None) -> str:
-        raw = self._client.shell(self.serial, command, timeout=timeout)
+        raw = self._client.shell(self.serial, command, timeout=timeout, **self._pin())
         return raw.decode("utf-8", errors="replace")
 
     def tap(
@@ -1712,6 +1781,27 @@ class Device:
         component = self._trusted_component()
         return None if component is None else component[0]
 
+    def focused_window(self) -> str | None:
+        """Return the package of the window that has input focus.
+
+        Reads ``mCurrentFocus`` from ``dumpsys window``. The answer is the
+        package of an app window whose title is ``package/activity``, ``""``
+        for a window that is not an activity of an app (the notification
+        shade, the status bar, a popup or a toast), and None when it is
+        unknown: no line, ``null``, a malformed line, or lines that disagree.
+        Window titles are chosen by apps and can hold newlines, so a forged
+        line can be added but the genuine one cannot be removed: when lines
+        disagree the answer is None.
+
+        Raises:
+            AdbError: The adb protocol or the command failed.
+            AdbServerUnavailableError: The adb server cannot be reached.
+            DeviceNotFoundError: The device is gone.
+            DeviceOfflineError: The device is offline.
+            DeviceUnauthorizedError: The device has not authorized this host.
+        """
+        return _read_current_focus(self._shell("dumpsys window"))
+
     def keyboard_shown(self) -> bool | None:
         """Return whether the soft keyboard is shown, or None when unknown.
 
@@ -1800,6 +1890,7 @@ class Device:
             self.serial,
             quote_args("screencap", "-p"),
             timeout=SCREENSHOT_TIMEOUT,
+            **self._pin(),
         )
         try:
             check_png(data)
@@ -1837,7 +1928,9 @@ class Device:
                     "uiautomator dump failed",
                     details={"output": output.strip()[:DUMP_MESSAGE_LIMIT]},
                 )
-            return self._client.exec_out(self.serial, quote_args("cat", path))
+            return self._client.exec_out(
+                self.serial, quote_args("cat", path), **self._pin()
+            )
         finally:
             with contextlib.suppress(UiprobeError):
                 self._shell(quote_args("rm", "-f", path))

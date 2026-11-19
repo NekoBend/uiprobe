@@ -577,7 +577,7 @@ def _fail(request: str, message: str) -> AdbError:
 def _transport_error(serial: str, message: str) -> UiprobeError:
     lowered = message.lower()
     details = {"serial": serial, "message": message}
-    if "not found" in lowered:
+    if "not found" in lowered or "no device" in lowered:
         return DeviceNotFoundError(f"device {serial!r} not found", details=details)
     if "unauthorized" in lowered:
         return DeviceUnauthorizedError(
@@ -630,23 +630,37 @@ class AdbClient:
         return parse_devices_l(text)
 
     def shell(
-        self, serial: str, command: str, *, timeout: float | None = None
+        self,
+        serial: str,
+        command: str,
+        *,
+        timeout: float | None = None,
+        transport_id: int | None = None,
     ) -> bytes:
         """Run `command` on the device with the ``shell:`` service.
 
         `timeout` replaces the client's timeout for reading the command's
         output (the longest silence allowed); the handshake keeps the client's.
+        `transport_id`, when given, selects the device by that transport
+        (``host:transport-id:N``) instead of by `serial`, so the request goes
+        to that very connection or fails; `serial` then only names it in
+        errors.
         """
-        return self._device_service(serial, f"shell:{command}", timeout)
+        return self._device_service(serial, f"shell:{command}", timeout, transport_id)
 
     def exec_out(
-        self, serial: str, command: str, *, timeout: float | None = None
+        self,
+        serial: str,
+        command: str,
+        *,
+        timeout: float | None = None,
+        transport_id: int | None = None,
     ) -> bytes:
         """Run `command` with the binary-safe ``exec:`` service.
 
-        `timeout` is as for `shell`.
+        `timeout` and `transport_id` are as for `shell`.
         """
-        return self._device_service(serial, f"exec:{command}", timeout)
+        return self._device_service(serial, f"exec:{command}", timeout, transport_id)
 
     def _host_query(self, request: str) -> bytes:
         with self._connect() as sock:
@@ -656,10 +670,21 @@ class AdbClient:
             return _read_length_prefixed(sock, request)
 
     def _device_service(
-        self, serial: str, service: str, read_timeout: float | None
+        self,
+        serial: str,
+        service: str,
+        read_timeout: float | None,
+        transport_id: int | None = None,
     ) -> bytes:
+        if transport_id is None:
+            selector = f"host:transport:{serial}"
+        elif isinstance(transport_id, bool) or not isinstance(transport_id, int):
+            msg = f"transport_id must be an int, not {type(transport_id).__name__}"
+            raise TypeError(msg)
+        else:
+            selector = f"host:transport-id:{transport_id:d}"
         with self._connect() as sock:
-            message = _send_request(sock, f"host:transport:{serial}")
+            message = _send_request(sock, selector)
             if message is not None:
                 raise _transport_error(serial, message)
             message = _send_request(sock, service)

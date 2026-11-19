@@ -339,6 +339,7 @@ class RunWriter:
         self._pictures: set[str] = set()
         self._skipped: set[tuple[str, str, tuple[str, ...]]] = set()
         self._made_screens_folder = False
+        self._starts_written = 0
 
     @classmethod
     def create(
@@ -447,6 +448,11 @@ class RunWriter:
         """The run folder."""
         return self._root
 
+    @property
+    def starts_written(self) -> int:
+        """How many transition start lines are complete on disk."""
+        return self._starts_written
+
     # -- the records --
 
     def write_transition_start(
@@ -477,7 +483,7 @@ class RunWriter:
         line["action"] = action
         if from_screen_id is not None:
             line["from_screen_id"] = _check_screen_id(from_screen_id)
-        self._append("transitions.jsonl", _json_text(line) + "\n")
+        self._append("transitions.jsonl", _json_text(line) + "\n", start=True)
 
     def write_transition_end(
         self,
@@ -485,15 +491,33 @@ class RunWriter:
         to_screen_id: str | None = None,
         *,
         dump_failed: bool = False,
+        not_sent: str | None = None,
     ) -> None:
-        """Write the line that says where an action led.
+        """Write the line that says where an action led, or that it was not sent.
 
         ``to_screen_id`` is required when ``dump_failed`` is False and must be
-        None when it is True.
+        None when it is True. ``not_sent`` is the reason (a short word) when
+        the action whose start line was written was then not sent; the line
+        then has ``not_sent: true`` and ``reason``, and neither ``dump_failed``
+        nor ``to_screen_id`` (both must be left at their defaults).
         """
         if not isinstance(dump_failed, bool):
             msg = "dump_failed must be a bool"
             raise TypeError(msg)
+        if not_sent is not None:
+            _check_text("not_sent", not_sent)
+            if dump_failed or to_screen_id is not None:
+                msg = "an action that was not sent has no destination"
+                raise ValueError(msg)
+            skipped: dict[str, object] = {
+                "schema": TRANSITION_END_SCHEMA,
+                "recorded_at": _stamp(_now()),
+                "action_id": _check_action_id(action_id),
+                "not_sent": True,
+                "reason": not_sent,
+            }
+            self._append("transitions.jsonl", _json_text(skipped) + "\n")
+            return
         line: dict[str, object] = {
             "schema": TRANSITION_END_SCHEMA,
             "recorded_at": _stamp(_now()),
@@ -736,7 +760,7 @@ class RunWriter:
             self._made_screens_folder = True
             _make_dir(folder)
 
-    def _append(self, name: str, line: str) -> None:
+    def _append(self, name: str, line: str, *, start: bool = False) -> None:
         _encoded(line)
         with self.critical():
             self._check_usable()
@@ -746,6 +770,8 @@ class RunWriter:
                 if handle is None:
                     handle = self._streams[name] = _create_text(path)
                 _put(handle, line)
+                if start:  # counted inside the same marked block as the write
+                    self._starts_written += 1
             except BaseException as error:
                 self._failed = path  # before the cleanup, which may be interrupted
                 self._drop_stream(name)
