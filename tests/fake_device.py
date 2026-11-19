@@ -764,7 +764,11 @@ class FakeAndroid:
 
         The fake has no home screen, so a stack that would become empty keeps
         its screens on show, but the task is gone: the next launch of the
-        package starts it fresh from its first screen.
+        package starts it fresh from its first screen. Until then those
+        screens stay in front, also with ``launch_in_front`` False, where a
+        real device would show its home screen; a test of a launch that does
+        not come to the front after a restart needs a screen of another app
+        on the stack.
         """
         self.stopped.append(package)
         kept = [n for n in self.stack if self.screens[n].package != package]
@@ -795,7 +799,8 @@ class FakeAndroid:
         if package in self._gone:
             self._gone.discard(package)
             first = next(s.name for s in self.screens.values() if wanted(s))
-            self.stack = [first]
+            others = [n for n in self.stack if self.screens[n].package != package]
+            self.stack = [*others, first]
             self._keyboard_hidden = False
             return True
         owned = [

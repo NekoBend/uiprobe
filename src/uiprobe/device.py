@@ -20,7 +20,7 @@ from uiprobe.adb import (
     resolve_server_address,
     start_blocked_by_environment,
 )
-from uiprobe.crawl_preview import MAX_PACKAGE_LENGTH, check_package
+from uiprobe.crawl_preview import check_package
 from uiprobe.errors import (
     AdbError,
     AdbServerUnavailableError,
@@ -65,6 +65,7 @@ LAUNCH_POLL_INTERVAL: Final = 0.5
 MAX_LAUNCH_TIMEOUT: Final = 600.0
 _EVENTS_INJECTED = re.compile(r"Events injected: ([0-9]+)")
 _NO_ACTIVITIES: Final = "** No activities found"
+_FOREGROUND_LIMIT: Final = 1000
 DUMP_DIRECTORY: Final = "/data/local/tmp"
 DUMP_MESSAGE_LIMIT: Final = 500
 # `uiautomator dump` prints nothing until it finishes, and on an animating
@@ -527,12 +528,14 @@ def _check_launch_timeout(timeout: object) -> float:
     if isinstance(timeout, bool) or not isinstance(timeout, int | float):
         msg = f"timeout must be a number, not {type(timeout).__name__}"
         raise TypeError(msg)
+    # The real type decides, not a `__class__` that claims another one.
     try:
-        value = (
-            float.__float__(timeout)
-            if isinstance(timeout, float)
-            else int.__float__(timeout)
-        )
+        if isinstance(timeout, int) and not issubclass(type(timeout), float):
+            value = int.__float__(timeout)
+        elif isinstance(timeout, float):
+            value = float.__float__(timeout)
+        else:  # an int that is also a float cannot be made; kept for the types
+            value = float("nan")
     except OverflowError:
         value = float("inf")
     if not 0 <= value <= MAX_LAUNCH_TIMEOUT:  # also false for NaN
@@ -546,8 +549,19 @@ def _escaped(text: str, limit: int = 200) -> str:
     return ascii(text[:limit])[1:-1]
 
 
+def _shown_foreground(name: str) -> str:
+    """Return `name` escaped; past 1000 characters it is cut and ends in ``...``.
+
+    A name cut this way is never equal to a package name, which has at most
+    255 characters.
+    """
+    if len(name) <= _FOREGROUND_LIMIT:
+        return _escaped(name, _FOREGROUND_LIMIT)
+    return _escaped(name, _FOREGROUND_LIMIT) + "..."
+
+
 def _lines(text: str) -> list[str]:
-    """Split shell output at line feeds only, dropping one CR before each."""
+    """Split shell output at line feeds only, dropping one CR at each line end."""
     return [line.removesuffix("\r") for line in text.split("\n")]
 
 
@@ -1321,7 +1335,8 @@ class Device:
         With ``restart=True`` the command ``am force-stop PACKAGE; echo
         uiprobe-exit:$?`` is sent first. It stops the app, so the next launch
         starts a fresh task; state the app has not saved is lost. It must
-        report exit status 0 and print nothing else, or nothing more is sent.
+        report exit status 0 and print nothing else (empty lines are ignored),
+        or nothing more is sent.
         Then exactly ``monkey -p PACKAGE -c android.intent.category.LAUNCHER
         1`` is sent (no other monkey option, and always a count of 1). Monkey
         must print the line ``Events injected: 1`` exactly once. Each command
@@ -1330,8 +1345,9 @@ class Device:
         Then `foreground` is read about every 0.5 seconds until it equals
         `package`. It is read at least once, and no read starts after
         `timeout` seconds have passed: the timeout bounds when the last read
-        may start, so the whole wait can last up to the timeout plus the time
-        of one read.
+        may start, not the whole wait. A read that started in time still
+        counts, so the wait can run past the timeout by the time of that read,
+        and by how late a pause ends when the system wakes it late.
 
         A str subclass is used as a plain str with the same text.
 
@@ -1345,14 +1361,16 @@ class Device:
             LaunchFailedError: ``details`` hold ``package`` and ``reason``:
                 ``stop_failed`` (``am force-stop`` did not report success;
                 ``exit_status`` when it reported a status other than 0,
-                ``output`` when it printed something else, escaped; monkey
-                was not sent), ``not_installed_or_no_launcher`` (monkey found
-                no launcher activity), ``unexpected_output`` (monkey did not
-                report exactly one injected event; ``output`` is its first
-                line that is not blank, stripped and escaped) or
+                ``output`` when it printed something else, escaped; with no
+                status and no output neither is set; monkey was not sent),
+                ``not_installed_or_no_launcher`` (monkey found no launcher
+                activity), ``unexpected_output`` (monkey did not report exactly
+                one injected event; ``output`` is its first line that is not
+                blank, stripped, cut to 200 characters and escaped) or
                 ``not_in_front`` (the app was not the foreground app in time;
-                ``foreground`` is the last package seen, or None, and
-                ``timeout`` the limit). The app may still have started.
+                ``foreground`` is the last package seen (escaped; past 1000
+                characters cut and ended with ``...``), or None, and ``timeout``
+                the limit). The app may still have started.
             AdbError: The adb protocol or the command failed.
             AdbServerUnavailableError: The adb server cannot be reached.
             DeviceNotFoundError: The device is gone.
@@ -1416,7 +1434,7 @@ class Device:
             self._sleep(max(0.0, min(LAUNCH_POLL_INTERVAL, deadline - self._clock())))
             if self._clock() > deadline:
                 break  # no read starts after the deadline
-        shown = None if seen is None else _escaped(seen, MAX_PACKAGE_LENGTH)
+        shown = None if seen is None else _shown_foreground(seen)
         details.update(reason="not_in_front", foreground=shown, timeout=limit)
         last = "unknown" if shown is None else shown
         msg = f"{package} was not in front after {limit:g} seconds (foreground: {last})"

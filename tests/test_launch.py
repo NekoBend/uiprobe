@@ -372,6 +372,15 @@ def test_restart_stop_failure_sends_no_monkey(device, android, fake_adb, answer,
     assert "\x1b" not in info.value.message
 
 
+def test_a_fresh_start_keeps_the_screens_of_other_apps(device, android):
+    android.show("main")
+    android.stack = ["main"]
+    android._stop(SHOP)  # the task is gone, its screen still shows
+    android.show("launcher")  # another app comes to the front
+    device.launch(SHOP)
+    assert android.stack == ["launcher", "main"]
+
+
 def test_restart_starts_fresh_when_every_screen_is_the_app(device, android):
     android.show("main")
     android.show("detail")
@@ -523,6 +532,22 @@ def test_timeout_value_comes_from_the_base_type(device, android, clock):
     assert sum(clock.pauses) == 1.0
 
 
+class _IntPosingAsFloat(int):
+    @property
+    def __class__(self):
+        return float
+
+
+def test_an_int_that_claims_to_be_a_float_is_read_as_an_int(device, android, clock):
+    android.launch_in_front = False
+    timeout = _IntPosingAsFloat(1)
+    assert isinstance(timeout, float)
+    with pytest.raises(LaunchFailedError) as info:
+        device.launch(SHOP, timeout=timeout)
+    assert info.value.details["timeout"] == 1.0
+    assert sum(clock.pauses) == 1.0
+
+
 def test_a_timeout_too_large_for_a_float_is_refused(device, fake_adb):
     before = list(fake_adb.requests)
     with pytest.raises(ValueError, match="from 0 to 600"):
@@ -530,14 +555,23 @@ def test_a_timeout_too_large_for_a_float_is_refused(device, fake_adb):
     assert fake_adb.requests == before
 
 
+@pytest.mark.parametrize(
+    ("length", "shown_length", "cut"),
+    [(255, 255, False), (256, 256, False), (1000, 1000, False), (1001, 1003, True)],
+)
 @pytest.mark.usefixtures("android")
-def test_the_last_foreground_is_not_cut(device, monkeypatch):
-    long_name = "com." + "a" * 251
-    assert len(long_name) == 255
-    monkeypatch.setattr(device, "foreground", lambda: long_name)
+def test_the_last_foreground_is_cut_only_past_1000_characters(
+    device, monkeypatch, length, shown_length, cut
+):
+    name = "com." + "a" * (length - 4)
+    monkeypatch.setattr(device, "foreground", lambda: name)
     with pytest.raises(LaunchFailedError) as info:
         device.launch(SHOP, timeout=0)
-    assert info.value.details["foreground"] == long_name
+    shown = info.value.details["foreground"]
+    assert isinstance(shown, str)
+    assert len(shown) == shown_length
+    assert shown.endswith("...") is cut
+    assert shown == (name[:1000] + "..." if cut else name)
 
 
 def test_launch_does_not_resend_after_an_error_while_waiting(device, android, fake_adb):

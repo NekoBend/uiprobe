@@ -164,16 +164,17 @@ class LaunchFailedError(UiprobeError):
     """The app could not be started, or did not come to the front in time.
 
     ``details["package"]`` is the package and ``details["reason"]`` is one of:
-    ``stop_failed`` (``am force-stop`` before the launch did not report
-    success; ``details["exit_status"]`` and ``details["output"]`` say how, and
-    the launch was not sent), ``not_installed_or_no_launcher`` (monkey found
-    no launcher activity: the package is not installed, or it has none),
-    ``unexpected_output`` (monkey did not report exactly one injected event;
-    ``details["output"]`` is the first line that is not blank, stripped and
-    escaped) or ``not_in_front`` (monkey reported success but the app was not
-    the foreground app within the timeout; ``details["foreground"]`` is the
-    last package seen, or None, and ``details["timeout"]`` the timeout in
-    seconds).
+    ``stop_failed`` (``am force-stop`` before the launch did not report success;
+    ``details["exit_status"]`` and ``details["output"]``, each set only when
+    known, say how, and the launch was not sent),
+    ``not_installed_or_no_launcher`` (monkey found no launcher activity: the
+    package is not installed, or it has none), ``unexpected_output`` (monkey did
+    not report exactly one injected event; ``details["output"]`` is the first
+    line that is not blank, stripped, cut to 200 characters and escaped) or
+    ``not_in_front`` (monkey reported success but the app was not the foreground
+    app within the timeout; ``details["foreground"]`` is the last package seen
+    (escaped; past 1000 characters cut and ended with ``...``), or None, and
+    ``details["timeout"]`` the timeout in seconds).
 
     A launch that failed with ``not_in_front`` may still have started the app.
     """
