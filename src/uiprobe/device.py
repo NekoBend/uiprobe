@@ -85,9 +85,10 @@ EXIT_MARKER: Final = "uiprobe-exit:"
 LONG_PRESS_MS: Final = 800
 # A tap holds still this long by default (``input swipe X Y X Y 10``), so that
 # the "Pointer location" developer option shows it; a plain ``input tap`` is
-# barely visible there. The hold is capped well below Android's default
-# long-press timeout (about 400 to 500 ms, longer with accessibility settings),
-# so a tap never turns into a long press.
+# barely visible there (measured on one device, a Galaxy S25 Ultra at 60 Hz:
+# 10 ms visible, 6 ms not). The cap stays below Android's usual default
+# long-press time (about 400 to 500 ms, longer with accessibility settings);
+# an app may use its own shorter threshold.
 DEFAULT_PRESS_MS: Final = 10
 MAX_PRESS_MS: Final = 200
 _EXIT_SUFFIX: Final = f"; echo {EXIT_MARKER}$?"
@@ -944,17 +945,18 @@ class Device:
         By default a tap holds still for `press_ms` = 10 ms and runs ``input
         swipe X Y X Y 10`` (the point does not move). A plain ``input tap`` is
         barely visible in Android's "Pointer location" developer option; a 10 ms
-        hold is. `press_ms` is an int from 0 to 200 (a bool is not accepted);
-        0 runs the plain ``input tap X Y``. The upper bound keeps a tap far
-        below Android's default long-press timeout, which is about 400 to 500 ms
-        and can be longer with accessibility settings; a longer hold could turn
-        into a long press. With `long` a press of 800 ms runs ``input swipe X Y
-        X Y 800``; it cannot be combined with a `press_ms` other than the
-        default (``ValueError``). Every form is followed by ``echo
-        uiprobe-exit:$?`` to read the device-side exit status. The command is
-        sent exactly once, in one shell call. It is never retried or resent,
-        not even after a connection error (that error propagates unchanged),
-        because a resend could press twice.
+        hold is (measured on one device, a Galaxy S25 Ultra at 60 Hz: 10 ms
+        visible, 6 ms not). `press_ms` is an int from 0 to 200 (a bool is not
+        accepted); 0 runs the plain ``input tap X Y``. The upper bound stays below
+        Android's usual default long-press time, about 400 to 500 ms (longer
+        with accessibility settings); an app may use its own shorter threshold,
+        and a longer hold could turn into a long press. With `long` a press of
+        800 ms runs ``input swipe X Y X Y 800``; it cannot be combined with a
+        `press_ms` other than the default (``ValueError``). Every form is
+        followed by ``echo uiprobe-exit:$?`` to read the device-side exit
+        status. The command is sent exactly once, in one shell call. It is
+        never retried or resent, not even after a connection error (that error
+        propagates unchanged), because a resend could press twice.
 
         ``input`` prints usage text or an exception when it fails, and its exit
         status is not always nonzero then, so success needs the marker line

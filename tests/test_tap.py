@@ -52,7 +52,8 @@ MARKER_FORMS = (
     re.compile(r"^input tap [0-9]+ [0-9]+; echo uiprobe-exit:\$\?\Z"),
     re.compile(r"^input swipe ([0-9]+) ([0-9]+) \1 \2 800; echo uiprobe-exit:\$\?\Z"),
     re.compile(
-        r"^input swipe ([0-9]+) ([0-9]+) \1 \2 [0-9]{1,3}; echo uiprobe-exit:\$\?\Z"
+        r"^input swipe ([0-9]+) ([0-9]+) \1 \2"
+        r" (?:[1-9][0-9]?|1[0-9]{2}|200); echo uiprobe-exit:\$\?\Z"
     ),
 )
 
@@ -1308,3 +1309,49 @@ def test_cli_tap_bad_press_ms_is_a_usage_error(capsys, fake_adb, android, value)
     assert json.loads(out)["error"]["code"] == "usage_error"
     assert fake_adb.requests == []
     assert android.inputs == []
+
+
+@pytest.mark.parametrize("values", [("201", "10"), ("10", "201")])
+def test_cli_tap_every_repeated_press_ms_is_checked(capsys, fake_adb, android, values):
+    code, out, _ = invoke(
+        capsys,
+        fake_adb,
+        "tap",
+        "--xy",
+        "1",
+        "2",
+        "--press-ms",
+        values[0],
+        "--press-ms",
+        values[1],
+        "--json",
+    )
+    assert code == 2
+    assert json.loads(out)["error"]["code"] == "usage_error"
+    assert fake_adb.requests == []
+    assert android.inputs == []
+
+
+def test_cli_tap_repeated_valid_press_ms_uses_the_last(capsys, fake_adb, android):
+    code, _, _ = invoke(
+        capsys, fake_adb, "tap", "--xy", "1", "2", "--press-ms", "5", "--press-ms", "7"
+    )
+    assert code == 0
+    assert sent_inputs(fake_adb) == ["input swipe 1 2 1 2 7; echo uiprobe-exit:$?"]
+    assert len(android.inputs) == 1
+
+
+@pytest.mark.parametrize(
+    ("command", "matches"),
+    [
+        ("input swipe 1 2 1 2 1", True),
+        ("input swipe 1 2 1 2 200", True),
+        ("input swipe 1 2 1 2 0", False),
+        ("input swipe 1 2 1 2 01", False),
+        ("input swipe 1 2 1 2 010", False),
+        ("input swipe 1 2 1 2 201", False),
+    ],
+)
+def test_held_tap_marker_pattern_is_canonical_one_to_200(command, matches):
+    held = MARKER_FORMS[2]
+    assert bool(held.match(f"{command}; echo uiprobe-exit:$?")) is matches

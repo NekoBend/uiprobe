@@ -214,7 +214,9 @@ def _build_parser() -> _Parser:
             " --text, --id and --desc, or the point given with --xy. A tap holds"
             f" still for {DEFAULT_PRESS_MS} ms by default so that the Pointer"
             " location developer option shows it; --press-ms changes the hold"
-            " (0 sends a plain input tap). The"
+            f" (0 sends a plain input tap; the cap of {MAX_PRESS_MS} ms stays below"
+            " Android's usual default long-press time, but an app may use a"
+            " shorter threshold). The"
             " command acts on the screen showing now; it does not check which"
             " app is in front. Two or more matches (also a thin one) exit with 13"
             " (multiple_elements). An element is pressed only when at least 8 x 8"
@@ -242,9 +244,11 @@ def _build_parser() -> _Parser:
     tap.add_argument(
         "--press-ms",
         metavar="N",
+        action="append",
         help=(
             f"hold a tap still for N ms, 0 to {MAX_PRESS_MS} (default"
-            f" {DEFAULT_PRESS_MS}; 0 sends a plain input tap); not with --long"
+            f" {DEFAULT_PRESS_MS}; 0 sends a plain input tap); not with --long; every"
+            " repeated value is checked and the last one is used"
         ),
     )
     swipe = commands.add_parser(
@@ -521,18 +525,24 @@ def _parse_xy(values: Sequence[str], option: str = "--xy") -> tuple[int, int]:
     return numbers[0], numbers[1]
 
 
-def _parse_press_ms(value: str | None, *, long: bool) -> int:
-    """Read ``--press-ms``: a plain decimal integer from 0 to 200, not with --long."""
-    if value is None:
+def _parse_press_ms(values: list[str] | None, *, long: bool) -> int:
+    """Read ``--press-ms``: plain decimal integers from 0 to 200, not with --long.
+
+    The option may be repeated; every value must be valid and the last one wins.
+    """
+    if values is None:
         return DEFAULT_PRESS_MS
     if long:
         msg = "--press-ms cannot be combined with --long"
         raise _UsageError(msg)
-    number = int(value) if re.fullmatch(r"[0-9]{1,3}", value) else -1
-    if not 0 <= number <= MAX_PRESS_MS:
-        msg = f"--press-ms needs an integer from 0 to {MAX_PRESS_MS}, not {value!r}"
-        raise _UsageError(msg)
-    return number
+    numbers: list[int] = []
+    for value in values:
+        number = int(value) if re.fullmatch(r"[0-9]{1,3}", value) else -1
+        if not 0 <= number <= MAX_PRESS_MS:
+            msg = f"--press-ms needs an integer from 0 to {MAX_PRESS_MS}, not {value!r}"
+            raise _UsageError(msg)
+        numbers.append(number)
+    return numbers[-1]
 
 
 def _cmd_tap(args: argparse.Namespace) -> int:
