@@ -1804,6 +1804,81 @@ def test_each_pngfile_call_has_exactly_one_call_site():
     assert ALLOWED_CALLS["pngfile.py"] == frozenset(PNGFILE_CALLS)
 
 
+def write_handle_problems(source: str) -> list[str]:
+    """Why the one write in `source` may not go to the file `save_png` creates.
+
+    The write must sit in `save_png`, whose name `handle` must be bound exactly
+    once, from the create-only open; no other code in the module may bind or
+    take a `handle`.
+    """
+    tree = ast.parse(source)
+    problems = []
+    functions = [n for n in tree.body if isinstance(n, ast.FunctionDef)]
+    save = next((f for f in functions if f.name == "save_png"), None)
+    if save is None:
+        return ["no save_png"]
+    writes = [
+        n
+        for n in ast.walk(save)
+        if isinstance(n, ast.Call) and ast.unparse(n) == RUNLOG_WRITE
+    ]
+    if len(writes) != 1:
+        problems.append(f"save_png has {len(writes)} writes")
+    binds = [
+        n
+        for n in ast.walk(tree)
+        if (
+            isinstance(n, ast.Name)
+            and n.id == "handle"
+            and isinstance(n.ctx, ast.Store)
+        )
+        or (isinstance(n, ast.arg) and n.arg == "handle")
+    ]
+    opens = [
+        n
+        for n in ast.walk(save)
+        if isinstance(n, ast.Assign)
+        and [ast.unparse(t) for t in n.targets] == ["handle"]
+        and ast.unparse(n.value) == RUNLOG_OPEN_BINARY
+    ]
+    if len(binds) != 1 or len(opens) != 1 or binds[0] is not opens[0].targets[0]:
+        problems.append("handle is not bound only by the create-only open")
+    return problems
+
+
+def test_the_pngfile_write_goes_to_the_file_it_created():
+    source = SOURCE_DIR.joinpath("pngfile.py").read_text(encoding="utf-8")
+    assert write_handle_problems(source) == []
+
+
+MOVED_WRITE = """
+def _put(handle, data):
+    handle.write(data)
+
+def save_png(path, data):
+    handle = open(path, 'xb')
+    _put(handle, data)
+"""
+REBOUND_HANDLE = """
+def save_png(path, data, other):
+    handle = open(path, 'xb')
+    handle = other
+    handle.write(data)
+"""
+WITH_AS_HANDLE = """
+def save_png(path, data, other):
+    with other as handle:
+        handle.write(data)
+    open(path, 'xb')
+"""
+
+
+@pytest.mark.parametrize("source", [MOVED_WRITE, REBOUND_HANDLE, WITH_AS_HANDLE])
+def test_a_write_to_another_handle_is_caught(source):
+    assert write_handle_problems(source)
+    assert not file_changes(source, "pngfile.py")  # the call guard alone misses it
+
+
 # What runlog.py may do beyond this stays forbidden in pngfile.py.
 PNGFILE_ONLY_VARIANTS = [RUNLOG_MKDIR, RUNLOG_OPEN_TEXT]
 

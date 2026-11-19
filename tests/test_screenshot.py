@@ -10,6 +10,7 @@ from __future__ import annotations
 import builtins
 import errno
 import json
+import os
 import re
 import struct
 import zlib
@@ -111,6 +112,64 @@ BAD_IMAGES = {
     "no closing chunk": PNG[:-12],
     "trailing bytes": PNG + b"\x00",
 }
+
+
+def png_with(header: bytes, *chunks: bytes) -> bytes:
+    return b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", header) + b"".join(chunks)
+
+
+def ihdr(depth: int = 8, color: int = 0, *rest: int) -> bytes:
+    methods = rest or (0, 0, 0)
+    return struct.pack(">IIBB", 2, 3, depth, color) + bytes(methods)
+
+
+IDAT = chunk(b"IDAT", b"xx")
+IEND = chunk(b"IEND", b"")
+BAD_IMAGES.update(
+    {
+        "no image data": png_with(ihdr(), IEND),
+        "bit depth 0": png_with(ihdr(0), IDAT, IEND),
+        "bit depth 3": png_with(ihdr(3), IDAT, IEND),
+        "16-bit palette": png_with(ihdr(16, 3), chunk(b"PLTE", b"\0\0\0"), IDAT, IEND),
+        "color type 5": png_with(ihdr(8, 5), IDAT, IEND),
+        "compression 1": png_with(ihdr(8, 0, 1, 0, 0), IDAT, IEND),
+        "filter 1": png_with(ihdr(8, 0, 0, 1, 0), IDAT, IEND),
+        "interlace 2": png_with(ihdr(8, 0, 0, 0, 2), IDAT, IEND),
+        "palette missing": png_with(ihdr(8, 3), IDAT, IEND),
+        "palette after the data": png_with(
+            ihdr(8, 3), IDAT, chunk(b"PLTE", b"\0\0\0"), IEND
+        ),
+        # A chunk claims more bytes than there are, although the file ends with IEND.
+        "cut chunk before the end": png_with(
+            ihdr(), IDAT, struct.pack(">I", 99) + b"tEXt", IEND
+        ),
+        "chunk type not letters": png_with(ihdr(), IDAT, chunk(b"ID1T", b""), IEND),
+        "chunk length too big": png_with(
+            ihdr(), struct.pack(">I", 2**31) + b"IDAT", IEND
+        ),
+        "data after the end": png_with(ihdr(), IDAT, IEND, IDAT),
+    }
+)
+
+GOOD_IMAGES = {
+    "palette": png_with(ihdr(4, 3), chunk(b"PLTE", b"\0\0\0"), IDAT, IEND),
+    "interlaced 16-bit color": png_with(ihdr(16, 6, 0, 0, 1), IDAT, IEND),
+    "1-bit gray": png_with(ihdr(1, 0), IDAT, IEND),
+    "ancillary chunks and split data": png_with(
+        ihdr(8, 2), chunk(b"sRGB", b"\0"), IDAT, chunk(b"IDAT", b""), IDAT, IEND
+    ),
+}
+
+
+@pytest.mark.parametrize("name", sorted(GOOD_IMAGES))
+def test_well_formed_images_pass(name):
+    assert check_png(GOOD_IMAGES[name]) == (2, 3)
+
+
+@pytest.mark.parametrize("name", sorted(BAD_IMAGES))
+def test_a_malformed_image_is_refused(name):
+    with pytest.raises(ValueError, match=r"screenshot|PNG"):
+        check_png(BAD_IMAGES[name])
 
 
 def test_the_fake_images_are_valid():
@@ -223,6 +282,67 @@ def test_save_png_names_a_file_it_could_not_create(tmp_path):
     assert not (tmp_path / "missing").exists()
 
 
+def test_save_png_does_not_take_a_descriptor(tmp_path):
+    target = tmp_path / "old.bin"
+    target.write_bytes(b"old")
+    fd = os.open(target, os.O_RDWR)
+    try:
+        with pytest.raises(TypeError, match="int"):
+            save_png(fd, PNG)  # ty: ignore[invalid-argument-type]
+        assert os.fstat(fd).st_size == 3  # still open
+    finally:
+        os.close(fd)
+    assert target.read_bytes() == b"old"
+    with pytest.raises(TypeError, match="bytes"):
+        save_png(os.fsencode(tmp_path / "b.png"), PNG)  # ty: ignore[invalid-argument-type]
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["old.bin"]
+
+
+def test_save_png_refuses_a_dangling_link_and_makes_no_target(tmp_path):
+    target = tmp_path / "absent.png"
+    link = tmp_path / "link.png"
+    try:
+        link.symlink_to(target)
+    except (OSError, NotImplementedError):
+        pytest.skip("symbolic links are not available here")
+    with pytest.raises(FileExistsError):
+        save_png(link, PNG)
+    assert not target.exists()
+    assert link.is_symlink()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Windows follows a link at the open")
+def test_a_link_made_after_the_check_is_refused_by_the_open(tmp_path, monkeypatch):
+    target = tmp_path / "absent.png"
+    link = tmp_path / "link.png"
+    link.symlink_to(target)
+    monkeypatch.setattr(pngfile, "check_new_path", lambda _path: None)
+    with pytest.raises(FileExistsError):
+        save_png(link, PNG)
+    assert not target.exists()
+
+
+@pytest.mark.parametrize("name", ["a.png:extra", "a.png::$DATA", "dir:x/a.png"])
+def test_on_windows_a_stream_path_is_refused(tmp_path, monkeypatch, name):
+    monkeypatch.setattr(pngfile, "_WINDOWS", True)
+    with pytest.raises(ValueError, match="stream"):
+        save_png(tmp_path / name, PNG)
+    assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.parametrize(
+    "path", ["C:\\Users\\me\\shot.png", "\\\\?\\C:\\shot.png", "shots\\a.png"]
+)
+def test_on_windows_a_drive_is_not_a_stream(monkeypatch, path):
+    monkeypatch.setattr(pngfile, "_WINDOWS", True)
+    assert not pngfile._names_a_stream(path)
+
+
+def test_elsewhere_a_colon_is_an_ordinary_character(tmp_path, monkeypatch):
+    monkeypatch.setattr(pngfile, "_WINDOWS", False)
+    assert not pngfile._names_a_stream(str(tmp_path / "a.png:extra"))
+
+
 def test_save_png_refuses_a_null_character_before_creating_anything(tmp_path):
     with pytest.raises(ValueError, match="null"):
         save_png(Path(str(tmp_path / "a") + "\x00b"), PNG)
@@ -270,6 +390,62 @@ def test_a_failed_write_leaves_the_file_and_names_it(tmp_path, monkeypatch):
     assert "No space left" in raised.value.message
     assert isinstance(raised.value.__cause__, OSError)
     assert target.read_bytes() == PNG[: len(PNG) // 2]
+
+
+class InterruptedHandle(FailingHandle):
+    """Writes half of the data, then gets Ctrl+C; can also fail to close."""
+
+    def __init__(self, handle, *, close_fails: bool = False):
+        super().__init__(handle)
+        self.close_fails = close_fails
+
+    def __exit__(self, *exc):
+        self.handle.close()
+        if self.close_fails:
+            raise OSError(errno.EIO, "I/O error")
+
+    def write(self, data):
+        self.handle.write(data[: len(data) // 2])
+        self.handle.flush()
+        raise KeyboardInterrupt
+
+
+def interrupt_writes(monkeypatch, *, close_fails: bool = False) -> None:
+    real = builtins.open
+    monkeypatch.setattr(
+        pngfile,
+        "open",
+        lambda *a, **k: InterruptedHandle(real(*a, **k), close_fails=close_fails),
+        raising=False,
+    )
+
+
+@pytest.mark.parametrize("close_fails", [False, True])
+def test_an_interrupt_after_creation_names_the_file(tmp_path, monkeypatch, close_fails):
+    target = tmp_path / "shot.png"
+    interrupt_writes(monkeypatch, close_fails=close_fails)
+    with pytest.raises(pngfile.PngInterruptedError) as raised:
+        save_png(target, PNG)
+    assert raised.value.path == str(target)
+    assert isinstance(raised.value, KeyboardInterrupt)
+    assert target.read_bytes() == PNG[: len(PNG) // 2]
+
+
+def test_a_file_exists_error_after_creation_is_a_file_error(tmp_path, monkeypatch):
+    class Exists(FailingHandle):
+        def write(self, data):
+            self.handle.write(data[:5])
+            raise FileExistsError(errno.EEXIST, "File exists")
+
+    real = builtins.open
+    monkeypatch.setattr(
+        pngfile, "open", lambda *a, **k: Exists(real(*a, **k)), raising=False
+    )
+    target = tmp_path / "shot.png"
+    with pytest.raises(PngFileError) as raised:
+        save_png(target, PNG)
+    assert raised.value.details == {"path": str(target), "created": True}
+    assert target.read_bytes() == PNG[:5]
 
 
 # --- uiprobe screenshot ---
@@ -422,10 +598,39 @@ def test_a_file_that_appears_meanwhile_is_still_refused(
     target = tmp_path / "shot.png"
     target.write_bytes(b"late")
     monkeypatch.setattr(cli, "_check_new_file", lambda _path: None)
+    monkeypatch.setattr(pngfile, "check_new_path", lambda _path: None)
     code, out, err = shoot(capsys, fake_adb, target)
     assert (code, out) == (2, "")
     assert "already exists" in err
     assert target.read_bytes() == b"late"
+
+
+@pytest.mark.parametrize("close_fails", [False, True])
+def test_an_interrupt_while_writing_exits_130_and_names_the_file(
+    capsys, fake_adb, tmp_path, monkeypatch, close_fails
+):
+    target = tmp_path / "shot.png"
+    interrupt_writes(monkeypatch, close_fails=close_fails)
+    code, out, err = shoot(capsys, fake_adb, target)
+    assert (code, out) == (130, "")
+    assert f"interrupted; {target} was created and may be incomplete" in err
+    other = tmp_path / "other.png"
+    code, out, _ = shoot(capsys, fake_adb, other, "--json")
+    assert code == 130
+    error = json.loads(out)["error"]
+    assert error["code"] == "interrupted"
+    assert error["details"] == {"path": str(other), "created": True}
+
+
+def test_a_stream_path_on_windows_is_a_usage_error(
+    capsys, fake_adb, tmp_path, monkeypatch
+):
+    monkeypatch.setattr(pngfile, "_WINDOWS", True)
+    code, out, err = shoot(capsys, fake_adb, tmp_path / "a.png:hidden")
+    assert (code, out) == (2, "")
+    assert "names a stream of a file" in err
+    assert exec_requests(fake_adb) == []  # refused before the device was asked
+    assert list(tmp_path.iterdir()) == []
 
 
 def test_o_is_required(capsys, fake_adb):
@@ -511,6 +716,7 @@ def test_a_relative_path_is_used_as_given(capsys, fake_adb, tmp_path, monkeypatc
     assert (tmp_path / "shot.png").read_bytes() == PNG
 
 
+@pytest.mark.skipif(os.name == "nt", reason="Windows file names cannot hold controls")
 def test_control_characters_in_the_path_are_escaped(capsys, fake_adb, tmp_path):
     path = f"{tmp_path}/a\nb\x1b[2Jc.png"
     code, out, _ = shoot(capsys, fake_adb, path)
@@ -522,6 +728,27 @@ def test_control_characters_in_the_path_are_escaped(capsys, fake_adb, tmp_path):
     assert code == 2
     assert "\x1b" not in out
     assert json.loads(out)["error"]["code"] == "usage_error"
+
+
+def test_a_refused_name_is_reported_escaped(capsys, fake_adb, tmp_path, monkeypatch):
+    # What Windows does with a control character in a file name.
+    def refuse(*_args, **_kwargs):
+        raise OSError(errno.EINVAL, "Invalid argument")
+
+    monkeypatch.setattr(pngfile, "open", refuse, raising=False)
+    path = f"{tmp_path}/a\nb\x1b[2Jc.png"
+    code, out, err = shoot(capsys, fake_adb, path)
+    assert (code, out) == (1, "")
+    assert err.count("\n") == 1
+    assert "\x1b" not in err
+    assert "a\\nb\\x1b[2Jc.png" in err
+    code, out, _ = shoot(capsys, fake_adb, path, "--json")
+    assert code == 1
+    assert "\x1b" not in out
+    error = json.loads(out)["error"]
+    assert error["code"] == "file_error"
+    assert error["details"] == {"path": path, "created": False}
+    assert list(tmp_path.iterdir()) == []
 
 
 def test_common_options_work_before_and_after_the_command(capsys, fake_adb, tmp_path):

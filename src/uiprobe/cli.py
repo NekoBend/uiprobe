@@ -50,7 +50,7 @@ from uiprobe.errors import (
 )
 from uiprobe.guards import REASONS, Policy
 from uiprobe.model import MAX_CANDIDATES, _describe
-from uiprobe.pngfile import check_png, save_png
+from uiprobe.pngfile import PngInterruptedError, check_new_path, check_png, save_png
 from uiprobe.settings import (
     SETTINGS_FILE,
     IncompleteFileError,
@@ -1070,14 +1070,23 @@ def _cmd_init(args: argparse.Namespace) -> int:
 
 
 def _check_new_file(path: str) -> None:
-    """Refuse an empty path and anything that exists there, also a broken link."""
+    """Refuse what `save_png` would refuse before the device is asked.
+
+    That is an empty path, anything at the path (also a broken link) and, on
+    Windows, a path that names a stream of a file.
+    """
     shown = _printable(path)
     if not path:
         msg = "-o PATH must not be empty"
         raise _UsageError(msg)
-    if os.path.lexists(path):
+    try:
+        check_new_path(path)
+    except FileExistsError:
         msg = f"-o {shown}: already exists; give a new file name"
-        raise _UsageError(msg)
+        raise _UsageError(msg) from None
+    except ValueError as error:
+        msg = f"-o {shown}: {error}"
+        raise _UsageError(msg) from None
 
 
 def _cmd_screenshot(args: argparse.Namespace) -> int:
@@ -1228,6 +1237,22 @@ def _guided_failure(exc: _GuidedUsageError, *, as_json: bool) -> int:
     return USAGE_ERROR[1]
 
 
+def _interrupt_failure(exc: KeyboardInterrupt, *, as_json: bool) -> int:
+    """Report Ctrl+C, naming a file that was created and may be incomplete."""
+    if isinstance(exc, InterruptedFileError):
+        msg = (
+            f"interrupted; {_printable(exc.path)} was created and may be"
+            " incomplete, so delete it before running uiprobe init again"
+        )
+        return _fail(INTERRUPTED, msg, as_json=as_json)
+    if isinstance(exc, PngInterruptedError):
+        shown = _printable(exc.path)
+        msg = f"interrupted; {shown} was created and may be incomplete"
+        details: dict[str, object] = {"path": exc.path, "created": True}
+        return _fail(INTERRUPTED, msg, as_json=as_json, details=details)
+    return _fail(INTERRUPTED, "interrupted", as_json=as_json)
+
+
 def _failure_code(exc: BaseException, *, as_json: bool) -> int:
     """Report `exc` the way the contract says; return the exit code."""
     if isinstance(exc, BrokenPipeError):
@@ -1240,13 +1265,7 @@ def _failure_code(exc: BaseException, *, as_json: bool) -> int:
     if isinstance(exc, _UsageError | TypeError | ValueError):
         return _fail(USAGE_ERROR, str(exc), as_json=as_json)
     if isinstance(exc, KeyboardInterrupt):
-        msg = "interrupted"
-        if isinstance(exc, InterruptedFileError):
-            msg = (
-                f"interrupted; {_printable(exc.path)} was created and may be"
-                " incomplete, so delete it before running uiprobe init again"
-            )
-        return _fail(INTERRUPTED, msg, as_json=as_json)
+        return _interrupt_failure(exc, as_json=as_json)
     name = type(exc).__name__
     return _fail(
         INTERNAL_ERROR,

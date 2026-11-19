@@ -1372,9 +1372,10 @@ class Device:
     def screenshot(self) -> bytes:
         """Capture the screen as PNG bytes with ``screencap -p``.
 
-        The bytes are checked in memory before they are returned: they must
-        start with the PNG signature, hold a well-formed header chunk with a
-        width and height above 0, and end with the closing chunk. Nothing is
+        The bytes are checked in memory before they are returned, without
+        decoding them (see `uiprobe.pngfile.check_png`): the signature, a
+        well-formed header chunk, chunks that fit, image data and the closing
+        chunk at the end. Nothing is
         written to the device or to this computer, and `dump` state is not
         touched.
 
