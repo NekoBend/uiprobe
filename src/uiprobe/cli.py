@@ -50,11 +50,6 @@ from uiprobe.errors import (
     INTERNAL_ERROR,
     INTERRUPTED,
     USAGE_ERROR,
-    AdbServerUnavailableError,
-    DeviceNotFoundError,
-    DeviceOfflineError,
-    DeviceUnauthorizedError,
-    MultipleDevicesError,
     UiprobeError,
 )
 from uiprobe.guards import REASONS, Policy
@@ -205,11 +200,24 @@ def _add_type_parser(add_parser: Callable[..., _Parser]) -> None:
             " outside ASCII, a newline, a tab or another control character,"
             " and empty text are usage errors and nothing is sent; to press"
             " Enter use the key command. The text is not written to the"
-            " output and typing is not checked afterwards."
+            " output and typing is not checked afterwards. Give -s, --adb and"
+            " --adb-server before the command (uiprobe -s SERIAL type TEXT):"
+            " after it they are refused, so that no word of the text is ever"
+            " read as one of them."
         ),
     )
     type_.add_argument("--help", action="help", help="show this help message and exit")
-    _add_common_options(type_, in_command=True)
+    # Only the options that take no value; the device options go before type.
+    type_.add_argument(
+        "--no-start-server",
+        dest="start_server",
+        action="store_false",
+        default=argparse.SUPPRESS,
+        help="never start the adb server",
+    )
+    type_.add_argument(
+        "--json", action="store_true", default=argparse.SUPPRESS, help="print JSON"
+    )
     type_.add_argument("text", metavar="TEXT", help="the text to type")
 
 
@@ -917,66 +925,15 @@ def _cmd_key(args: argparse.Namespace) -> int:
     return 0
 
 
-# Why the device could not be chosen, in fixed words, when the values of
-# options given after the type command are hidden.
-_DEVICE_NOT_CHOSEN_BECAUSE = (
-    (AdbServerUnavailableError, "the adb server cannot be reached"),
-    (DeviceNotFoundError, "no device was found for the serial given"),
-    (MultipleDevicesError, "several devices are attached; choose one with -s"),
-    (DeviceOfflineError, "the device is offline"),
-    (DeviceUnauthorizedError, "the device has not authorized this computer"),
-)
-
-
-def _type_device(args: argparse.Namespace) -> Device:
-    """Choose the device for ``type``, hiding option values given after it.
-
-    Words after ``type`` can be part of an unquoted text that happens to
-    look like an option (``type first --adb-server Word``). When such an
-    option was given there, an error while choosing the device names the
-    option but shows neither its value nor anything that holds it.
-    """
-    hidden: list[str] = getattr(args, "type_hidden_options", [])
-    kind: type[BaseException] | None = None
-    message = ""
-    try:
-        return Device(
-            _single_serial(args),
-            adb_server=args.adb_server,
-            adb=args.adb,
-            start_server=args.start_server,
-        )
-    except (UiprobeError, ValueError, TypeError) as exc:
-        if not hidden:
-            raise
-        kind = type(exc)
-        message = str(exc)
-    names = ", ".join(hidden)
-    note = (
-        f"the value given to {names} after type is not shown, as it can be"
-        " part of the text to type; give TEXT as one quoted argument"
-    )
-    if issubclass(kind, UiprobeError):
-        reason = next(
-            (w for cls, w in _DEVICE_NOT_CHOSEN_BECAUSE if issubclass(kind, cls)),
-            "the device could not be used",
-        )
-        raise kind(f"{reason}; {note}")
-    if message.startswith("adb server argument") and "--adb-server" in hidden:
-        names = "--adb-server"
-    elif message.startswith("adb argument") and "--adb" in hidden:
-        names = "--adb"
-    msg = (
-        f"the value of {names} was not accepted (it is not shown, as it can"
-        " be part of the text to type); give TEXT as one quoted argument"
-    )
-    raise _UsageError(msg)
-
-
 def _cmd_type(args: argparse.Namespace) -> int:
     text = str.__str__(args.text)
     _text_pieces(text)  # a bad text is a usage error before any server contact
-    device = _type_device(args)
+    device = Device(
+        _single_serial(args),
+        adb_server=args.adb_server,
+        adb=args.adb,
+        start_server=args.start_server,
+    )
     device.type_text(text)
     if args.json:
         payload: dict[str, object] = {
@@ -1429,13 +1386,13 @@ _TYPE_USAGE_MESSAGE = (
 )
 # Options before the command that take a value: their value is not a command.
 _TOP_OPTIONS_WITH_VALUE = frozenset({"-s", "--serial", "--adb", "--adb-server"})
-# The options whose values are hidden after ``type``, by every spelling.
-_HIDDEN_AFTER_TYPE = {
-    "-s": "--serial",
-    "--serial": "--serial",
-    "--adb": "--adb",
-    "--adb-server": "--adb-server",
-}
+_DEVICE_OPTIONS = ("--serial", "--adb", "--adb-server")
+_DEVICE_OPTION_AFTER_TYPE = (
+    "-s, --serial, --adb and --adb-server go before the type command, as in"
+    " uiprobe -s SERIAL type TEXT; after it they are refused (the value is not"
+    " shown, as it can be part of the text to type). Give TEXT as one quoted"
+    " argument, after -- when it starts with -"
+)
 
 
 def _command_index(argv: Sequence[str]) -> int | None:
@@ -1448,43 +1405,55 @@ def _command_index(argv: Sequence[str]) -> int | None:
             skip = True
         elif word == "--":
             return index + 1 if index + 1 < len(argv) else None
-        elif not word.startswith("-"):
+        elif word == "-" or not word.startswith("-"):
             return index
     return None
 
 
-def _hidden_options(words: Sequence[str]) -> list[str]:
-    """The value-taking options named in `words` (before any ``--``)."""
-    found: set[str] = set()
+def _names_a_device_option(word: str) -> bool:
+    """Whether argparse could read `word` as -s, --serial, --adb or --adb-server.
+
+    That covers ``-s``, ``-sVALUE``, ``--serial=VALUE`` and every leading part
+    of a long name (``--ser``, ``--adb-s``), whether or not argparse would
+    accept the shortened form. A word with a space is read as text by
+    argparse, so it is not one.
+    """
+    if " " in word:
+        return False
+    name = word.split("=", 1)[0]
+    if name.startswith("-s"):
+        return True
+    return len(name) > 2 and any(option.startswith(name) for option in _DEVICE_OPTIONS)
+
+
+def _device_option_after_type(words: Sequence[str]) -> bool:
+    """Whether a device option comes in `words` before any ``--``."""
     for word in words:
         if word == "--":
-            break
-        name = word.split("=", 1)[0]
-        if name.startswith("-s") and not name.startswith("--"):
-            name = "-s"  # also -sVALUE
-        if name in _HIDDEN_AFTER_TYPE:
-            found.add(_HIDDEN_AFTER_TYPE[name])
-    return sorted(found)
+            return False
+        if _names_a_device_option(word):
+            return True
+    return False
 
 
 def _parse(argv: Sequence[str]) -> argparse.Namespace:
     """Read the command line.
 
-    When the command is ``type``, an argparse error is replaced by a message
-    that shows none of the arguments, raised outside the handler so that it
-    chains to nothing that holds them, and the value-taking options given
-    after ``type`` are noted so that their values stay hidden later too.
+    When the command is ``type``, a device option after it is refused before
+    anything else, and an argparse error is replaced by a message that shows
+    none of the arguments, raised outside the handler so that it chains to
+    nothing that holds them.
     """
     where = _command_index(argv)
     is_type = where is not None and argv[where] == "type"
+    if is_type and where is not None and _device_option_after_type(argv[where + 1 :]):
+        raise _UsageError(_DEVICE_OPTION_AFTER_TYPE)
     try:
         args = _build_parser().parse_args(argv)
     except _UsageError:
         if not is_type:
             raise
     else:
-        if is_type and where is not None:
-            args.type_hidden_options = _hidden_options(argv[where + 1 :])
         _single_serial(args)
         return args
     raise _UsageError(_TYPE_USAGE_MESSAGE)

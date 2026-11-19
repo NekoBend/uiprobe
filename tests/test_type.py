@@ -497,9 +497,10 @@ class _HidesItsText(str):
 
 
 def test_the_check_reads_the_plain_text_of_a_subclass(device, fake_adb):
+    before = list(fake_adb.requests)
     with pytest.raises(TextNotTypedError, match="U\\+00E9"):
         device.type_text(_HidesItsText("café"))
-    assert typed(fake_adb) == []
+    assert fake_adb.requests == before
 
 
 # --- arguments argparse cannot place ---
@@ -509,7 +510,7 @@ def test_the_check_reads_the_plain_text_of_a_subclass(device, fake_adb):
     "argv",
     [
         ["type", "one", "two-" + TYPED_TEXT],
-        ["type", "-Q" + TYPED_TEXT],  # -h would show the help instead
+        ["type", "-Q" + TYPED_TEXT],
         ["type", "--" + TYPED_TEXT],
         ["--json", "type", "one", TYPED_TEXT],
         ["type", "--json", "-Q" + TYPED_TEXT],
@@ -541,40 +542,64 @@ def test_the_exit_status_is_never_shown(device, android):
     _no_text_anywhere(info.value, "4242")
 
 
-# --- option values given after type ---
+# --- device options after type are refused ---
 
 
 SECRET_WORD = "Word-" + TYPED_TEXT
 
 
 @pytest.mark.parametrize(
-    ("words", "named"),
+    "words",
     [
-        (["--adb-server", SECRET_WORD], "--adb-server"),
-        (["--adb", SECRET_WORD], "--adb"),
-        ([f"--adb-server={SECRET_WORD}"], "--adb-server"),
+        ["-s", SECRET_WORD],
+        ["-s" + SECRET_WORD],
+        ["--serial", SECRET_WORD],
+        ["--serial=" + SECRET_WORD],
+        ["--ser", SECRET_WORD],
+        ["--adb", SECRET_WORD],
+        ["--adb=" + SECRET_WORD],
+        ["--ad", SECRET_WORD],
+        ["--adb-server", SECRET_WORD],
+        ["--adb-server=" + SECRET_WORD],
+        ["--adb-s", SECRET_WORD],
     ],
 )
-def test_a_bad_option_value_after_type_is_named_not_shown(
-    capsys, fake_adb, words, named
-):
+def test_a_device_option_after_type_is_refused(capsys, fake_adb, words):
     for json_flag in ([], ["--json"]):
         code, out, err = invoke(capsys, fake_adb, *json_flag, "type", "first", *words)
         assert code == 2
         assert TYPED_TEXT not in out + err
-        assert f"the value of {named} was not accepted" in out + err
+        assert "go before the type command" in out + err
+        assert "uiprobe -s SERIAL type TEXT" in out + err
     assert fake_adb.requests == []
 
 
-@pytest.mark.parametrize("words", [["-s", SECRET_WORD], ["-s" + SECRET_WORD]])
-def test_a_serial_after_type_is_not_shown_when_the_device_is_missing(
-    capsys, fake_adb, words
-):
-    code, out, err = invoke(capsys, fake_adb, "--json", "type", "first", *words)
-    assert code != 0
-    assert err == ""
-    assert TYPED_TEXT not in out
-    assert "--serial" in json.loads(out)["error"]["message"]
+def test_a_word_matching_the_attached_serial_is_not_used(capsys, fake_adb, android):
+    code, out, err = invoke(capsys, fake_adb, "--json", "type", "first", "-s", SERIAL)
+    assert (code, err) == (2, "")
+    assert SERIAL not in out
+    assert android.inputs == []
+    assert fake_adb.requests == []
+
+
+def test_after_double_dash_a_device_option_is_text(capsys, fake_adb):
+    code, out, _ = invoke(capsys, fake_adb, "-s", SERIAL, "type", "--", "-s")
+    assert (code, out) == (0, "typed 2 characters\n")
+    assert pieces(fake_adb) == ["-s"]
+
+
+def test_options_without_a_value_still_work_after_type(capsys, fake_adb):
+    code, out, _ = invoke(
+        capsys, fake_adb, "-s", SERIAL, "type", "hello", "--json", "--no-start-server"
+    )
+    assert code == 0
+    assert json.loads(out)["length"] == 5
+
+
+def test_a_lone_dash_is_the_command_word(capsys, fake_adb):
+    code, _, err = invoke(capsys, fake_adb, "-", "type")
+    assert code == 2
+    assert "'-'" in err  # argparse names the invalid command, nothing hidden
 
 
 def test_options_before_type_keep_their_values(capsys, fake_adb):

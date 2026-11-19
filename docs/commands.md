@@ -241,10 +241,11 @@ Only printable ASCII is typed: the characters from space (0x20) to `~` (0x7E). B
 
 Give the text as one quoted argument, and put `--` before a text that starts with `-` (as in `uiprobe type -- -5`; some such texts are read as options without it). The help of the command is `uiprobe type --help`; `-h` is not an option of `type`, so a text holding it is not taken for a help request.
 
+Unlike the other commands, `type` takes the device options `-s`/`--serial`, `--adb` and `--adb-server` only before the command, as in `uiprobe -s SERIAL type TEXT`. After `type` they are refused with a usage error (exit 2) before anything else happens, in every spelling argparse could read (`-sVALUE`, `--serial=VALUE`, and shortened names such as `--ser`), so that no word of an unquoted text is ever used as a serial or an address. The message does not show the value. After `--` everything is text: `uiprobe -s SERIAL type -- -s` types `-s`. `--json` and `--no-start-server`, which take no value, can still follow `type`.
+
 Words of an unquoted text can be read as arguments, so when the command is `type` uiprobe hides them in its errors:
 
 - When argparse cannot read the arguments (an unquoted text of two words, a text starting with `-` without `--`), the usage error shows none of them and points to `uiprobe type --help`.
-- When `-s`/`--serial`, `--adb` or `--adb-server` is given after `type` (where a split text can land), an error while choosing the device names that option but shows neither its value nor anything that holds it. The same options given before `type` are shown as with any other command.
 - A refused character is named by its code point, escaped form and position (see above), so that one character of the text does appear in the message.
 
 This hiding is best effort: how a shell splits an unquoted text, and how argparse reads the words, can still bring part of the text into an error in a case not listed here. The reliable way is to quote the text as one argument, with `--` before it when it starts with `-`, or to pass it from Python with `Device.type_text`, which takes the text as a value and never parses it.
