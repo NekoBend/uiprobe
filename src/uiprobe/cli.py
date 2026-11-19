@@ -187,6 +187,24 @@ def _add_common_options(parser: argparse.ArgumentParser, *, in_command: bool) ->
     )
 
 
+def _add_type_parser(add_parser: Callable[..., _Parser]) -> None:
+    type_ = add_parser(
+        "type",
+        allow_abbrev=False,
+        help="type text into the focused field",
+        description=(
+            "Type TEXT into the field that has focus, in whatever app is in"
+            " front. Only printable ASCII (space to ~) is typed. A character"
+            " outside ASCII, a newline, a tab or another control character,"
+            " and empty text are usage errors and nothing is sent; to press"
+            " Enter use the key command. The text is not written to the"
+            " output and typing is not checked afterwards."
+        ),
+    )
+    _add_common_options(type_, in_command=True)
+    type_.add_argument("text", metavar="TEXT", help="the text to type")
+
+
 def _add_launch_parser(add_parser: Callable[..., _Parser]) -> None:
     launch = add_parser(
         "launch",
@@ -375,21 +393,7 @@ def _build_parser() -> _Parser:
         ),
     )
     key.add_argument("name", metavar="NAME", help="an alias or a KEYCODE_ name")
-    type_ = commands.add_parser(
-        "type",
-        allow_abbrev=False,
-        help="type text into the focused field",
-        description=(
-            "Type TEXT into the field that has focus, in whatever app is in"
-            " front. Only printable ASCII (space to ~) is typed. A character"
-            " outside ASCII, a newline, a tab or another control character,"
-            " and empty text are usage errors and nothing is sent; to press"
-            " Enter use the key command. The text is not written to the"
-            " output and typing is not checked afterwards."
-        ),
-    )
-    _add_common_options(type_, in_command=True)
-    type_.add_argument("text", metavar="TEXT", help="the text to type")
+    _add_type_parser(commands.add_parser)
     screenshot = commands.add_parser(
         "screenshot",
         allow_abbrev=False,
