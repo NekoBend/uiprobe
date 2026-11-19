@@ -10,29 +10,32 @@ Two kinds of rule are kept apart here.
 
 SAFETY rules are what the engine guarantees: a tap is sent only for an element
 that judge put in ``pressable`` for that exact observation, at judge's point,
-on a target screen; `CrawlEngine.recheck` refuses a change of the element's
-compared fields (listed under Re-check), its screen id or judge's result, a shown
-keyboard and the deadline; no input
+on a target screen; `CrawlEngine.recheck` refuses any change of that element
+or its descendants (listed under Re-check), of its screen id or of judge's
+result for it, a shown keyboard and the deadline; no input
 other than tap, BACK, launch and relaunch exists; the action and time limits
-hold; there is no 4th relaunch without a sent tap; the crawl always terminates;
-``next`` and ``recheck`` never raise on valid arguments.
+hold; there is no 4th relaunch without a tap the driver reported as sent
+(`CrawlEngine.tap_sent`); the crawl always terminates; ``next``, ``recheck``
+and ``tap_sent`` never raise on valid arguments.
 
 BEST EFFORT is the estimate of the path (the depth of each path, and no
-navigation BACK on the real root). A BACK on the real root only leaves the app,
-which the off-target handling recovers, so a wrong estimate costs actions, not
-safety. The edge cases where screen ids change are listed under the stated
-limits below.
+navigation BACK on the real root), and so whether the depth limit, which
+holds per path, matches the real back stack. A BACK on the real root only
+leaves the app, which the off-target handling recovers, so a wrong estimate
+costs actions, not safety. The edge cases where screen ids change are listed
+under the stated limits below.
 
 * Range. A screen is the target only when the package of the dump
   and the foreground package both equal the target package; an unknown
   foreground (None) is not the target. Off target the engine presses BACK, and
   after 2 BACKs in a row without a target screen it relaunches the app. After 3
   relaunches in a row it stops with ``relaunch_limit``; the 4th relaunch is
-  never sent. Relaunches count as in a row until a tap is actually sent (an
-  allowed recheck, or a tap that was not rechecked and was followed by an
-  observation); seeing a target screen alone does not reset the count, so a
-  cycle of BACK, BACK, Relaunch with no tap in between ends with
-  ``relaunch_limit``. A permission dialog belongs to another package, so it is
+  never sent. Relaunches count as in a row until the driver reports with
+  `CrawlEngine.tap_sent` that a tap allowed by `CrawlEngine.recheck` was
+  sent; seeing a target screen, a tap handed out but dropped, a refused
+  recheck or an allowed recheck that is not reported does not reset the
+  count, so a cycle of BACK, BACK, Relaunch with no sent tap in between ends
+  with ``relaunch_limit``. A permission dialog belongs to another package, so it is
   off target and gets BACK (see Pressing).
 * Limits. Depth 5 screens, 300 actions and 30 minutes by default
   (`Limits`). Every input counts as an action: the first launch, taps, BACKs
@@ -44,15 +47,23 @@ limits below.
   tap is allowed only while that stack is shorter than the depth limit.
 * Pressing. The engine presses only an element that
   `uiprobe.guards.judge` put in ``pressable`` for that exact observation, at
-  the point judge gave; judge runs again on every target observation. The only
+  the point judge gave; judge runs on every target observation where the
+  engine considers a tap (a shown keyboard gets BACK first, a due relaunch is
+  sent first, and when no tap is allowed the root stops with ``exhausted``),
+  and again in the re-check. The only
   actions are `Launch`, `Tap`, `Back`, `Relaunch`, `Reread` and `Stop`: no text
   input, long press, other key or swipe can be built from them.
 * Keyboard. When the keyboard is shown on a target screen, press BACK once and
   read again; if it is still shown, stop with ``keyboard_stuck``. An unknown
   keyboard state (None) counts as not shown (judge already refuses text
   fields).
-* Dump failures. An observation without a screen asks for a re-read; 3 failed
-  dumps in a row stop with ``dump_failed_repeatedly``.
+* Dump failures. An observation without a screen, or with a screen whose
+  element ids are not unique (judge refuses such a hierarchy), asks for a
+  re-read; 3 failed dumps in a row stop with ``dump_failed_repeatedly``.
+* Clock. ``now`` and ``started_at`` must be numbers of seconds at least 0 and
+  below 2**40, so the deadline arithmetic in floats stays exact to well under
+  a millisecond; other values are refused when the `Observation` or the
+  engine is built, like any other invalid observation.
 * The root is the bottom of the path stack (path length 1) after a launch or a
   relaunch: the first target screen seen then becomes the root, whatever its
   id (only a launch or a relaunch makes a root, however the path was popped).
@@ -118,14 +129,19 @@ limits below.
   is pressed there and the engine goes back.
 * Re-check before pressing. The driver reads the screen again
   right before a tap and asks `CrawlEngine.recheck`. The press is allowed only
-  when the fresh screen is the target with the same screen id, the clock of the
-  fresh observation is before the deadline, and it has an element with the same
-  fingerprint, the same class, resource id, text, content description, hint and
-  bounds, whose descendants have the same class, resource id, text, content
-  description, hint and bounds, that judge still puts in ``pressable`` at the
-  same point, and the keyboard is not shown. At or past the deadline the
-  reserved tap is cancelled (not counted, not recorded, not marked tried) and
-  the next call of ``next`` returns ``max_duration``. Otherwise nothing is sent, the
+  when the fresh screen is the target with the same screen id and unique
+  element ids, the clock of the fresh observation is before the deadline, the
+  keyboard is not shown, and the element with the planned element id is in
+  judge's ``pressable`` for the fresh screen at exactly the planned point, and
+  that element and each of its descendants are equal in every field the
+  `uiprobe.model.Element` holds (id, parent, class, bounds, text, resource id,
+  content description, hint, package and flags such as checked, disabled,
+  selected or focused), and its fingerprint is the same. Another element that
+  looks the same never stands in for it. After an allowed re-check the driver
+  sends the tap and then reports it with `CrawlEngine.tap_sent`. At or past
+  the deadline the reserved tap is cancelled (not counted, not recorded, not
+  marked tried) and the next call of ``next`` returns ``max_duration``.
+  Otherwise nothing is sent, the
   element is recorded as skipped with the reason ``changed_before_press`` and
   marked tried, and the action is not counted. After 3 refusals in a row
   (``MAX_REFUSALS``), counted across all screens (for example a structure that
@@ -197,6 +213,8 @@ How a driver uses it::
                 continue
         if not isinstance(action, Reread):
             send(action)
+            if isinstance(action, Tap):
+                engine.tap_sent(action)          # only once it was really sent
         observation = observe()
 
 Everything the driver may want to write down is in `CrawlEngine.records`.
@@ -208,7 +226,7 @@ import hashlib
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Final
 
-from uiprobe.guards import judge
+from uiprobe.guards import MAX_ELEMENTS, judge
 from uiprobe.model import Screen
 
 if TYPE_CHECKING:
@@ -287,6 +305,9 @@ _ANCESTOR: Final = "\x00ancestor"
 _TOO_LARGE: Final = ("screen_too_large",)
 
 _SECONDS_PER_MINUTE: Final = 60
+# Clock values must be below this (about 34 800 years in seconds), so a float
+# holds them to well under a millisecond and the deadline arithmetic is sound.
+_MAX_CLOCK: Final = 2**40
 
 
 def _check_count(name: str, value: object, most: int | None = None) -> None:
@@ -305,14 +326,10 @@ def _check_clock(name: str, value: object) -> None:
     if isinstance(value, bool) or not isinstance(value, int | float):
         msg = f"{name} must be a number of seconds, not {type(value).__name__}"
         raise TypeError(msg)
-    if value - value != 0:  # infinity and NaN
-        msg = f"{name} must be a finite number, got {value}"
+    # NaN fails both comparisons; infinity and huge ints fail the second.
+    if not 0 <= value < _MAX_CLOCK:
+        msg = f"{name} must be at least 0 and below 2**40 seconds"
         raise ValueError(msg)
-    try:
-        float(value)
-    except OverflowError:
-        msg = f"{name} must be a finite number, got a value too large"
-        raise ValueError(msg) from None
 
 
 @dataclass(frozen=True, slots=True)
@@ -340,7 +357,12 @@ class Observation:
 
     ``screen`` is None for a failed dump. ``foreground`` is the foreground
     package, None when unknown. ``keyboard_shown`` is None when unknown. ``now``
-    is a monotonic clock in seconds, on the same clock as ``started_at``.
+    is a monotonic clock in seconds, on the same clock as ``started_at``, at
+    least 0 and below 2**40.
+
+    Raises (on construction):
+        TypeError: a field has the wrong type.
+        ValueError: ``now`` is below 0, not finite, or not below 2**40.
     """
 
     screen: Screen | None
@@ -479,6 +501,12 @@ def _part(value: str) -> str:
     return f"{len(value)}:{value}"
 
 
+def _ids_unique(screen: Screen) -> bool:
+    """Whether no two elements share an id (judge raises ValueError if not)."""
+    elements = screen.elements
+    return len({element.id for element in elements}) == len(elements)
+
+
 class _Prints:
     """Fingerprints of the elements of one screen."""
 
@@ -515,20 +543,6 @@ class _Prints:
                     below.setdefault(ancestor.id, []).append(other)
             self._below = below
         return tuple(self._below.get(element.id, ()))
-
-    def below_fields(self, element: Element) -> tuple[tuple[object, ...], ...]:
-        """Class, resource id, text, description, hint and bounds of descendants."""
-        return tuple(
-            (
-                d.class_name,
-                d.resource_id,
-                d.text,
-                d.content_desc,
-                d.hint,
-                tuple(d.bounds.to_list()),
-            )
-            for d in self.descendants(element)
-        )
 
     def shape(self, element: Element) -> tuple[object, ...]:
         """What stays the same when only labels change: classes, resource ids of
@@ -605,7 +619,7 @@ class _Plan:
 
     tap: Tap
     element: Element
-    below: tuple[tuple[object, ...], ...]
+    below: tuple[Element, ...]
     shape: tuple[object, ...]
     labels: tuple[tuple[str, str, str], ...]
 
@@ -616,12 +630,13 @@ class CrawlEngine:
     Call `start` once, then `next` with each observation. A `Tap` must be
     passed to `recheck` (with a fresh observation) before it is sent; when
     `recheck` returns False the tap is not sent, and `next` is called with the
-    fresh observation instead. After a `Stop`, `next` returns the same stop.
+    fresh observation instead. When it returns True, send the tap and report
+    it with `tap_sent`. After a `Stop`, `next` returns the same stop.
 
     Raises (on construction):
         TypeError: `package` is not a string, or `started_at` is not a number.
-        ValueError: `package` is empty, or `started_at` is not finite
-            or too large for a float.
+        ValueError: `package` is empty, or `started_at` is below 0, not
+            finite, or not below 2**40.
     """
 
     def __init__(
@@ -658,6 +673,7 @@ class CrawlEngine:
         self._seen: set[str] = set()
         self._pending: _Pending | None = None
         self._planned: _Plan | None = None
+        self._approved: Tap | None = None
         self._volatile: set[tuple[str, tuple[object, ...]]] = set()
         self._expired = False
         self._keyboard_back = False
@@ -728,10 +744,12 @@ class CrawlEngine:
         if self._stop is not None:
             return self._stop
         self._planned = None
-        if self._pending is not None and self._pending.kind == "tap":
-            self._tap_sent()
+        self._approved = None
         was_keyboard_back = self._keyboard_back
         screen = observation.screen
+        if screen is not None and not _ids_unique(screen):
+            # An invalid hierarchy (judge refuses it) counts as a failed dump.
+            screen = None
         if screen is None:
             self._note_failed_dump()
         else:
@@ -758,7 +776,8 @@ class CrawlEngine:
         """Say whether `tap` may be sent, judging the fresh observation.
 
         Call it right after `next` returned the tap, with a screen read just
-        before pressing. True: send the tap. False: do not send it, the action
+        before pressing. True: send the tap, then call `tap_sent`. False: do
+        not send it, the action
         is not counted, and the next step comes from `next`. There are two kinds
         of refusal. At or past the deadline the reserved tap is cancelled: it is
         not recorded as skipped and not marked tried, and `next` stops with
@@ -786,7 +805,7 @@ class CrawlEngine:
         if self._press_allowed(planned, observation):
             self._refused = 0
             self._label_run = 0
-            self._tap_sent()
+            self._approved = tap
             return True
         self._pending = None
         self._sent -= 1
@@ -807,13 +826,27 @@ class CrawlEngine:
             self._refused += 1
         return False
 
-    # -- internals ----------------------------------------------------------------
+    def tap_sent(self, tap: Tap) -> None:
+        """Note that `tap` was really sent to the device.
 
-    def _tap_sent(self) -> None:
-        # Only a tap that was really sent ends the run of relaunches and the
-        # watch for BACKs that go round in circles.
+        Call it once, right after sending a tap that `recheck` allowed and
+        before the next observation. Only this ends the run of relaunches in a
+        row (see Range in the module docstring) and the watch for BACKs that go
+        round in circles; a tap that was dropped, refused or failed to send must
+        not be reported here.
+
+        Raises:
+            ValueError: `tap` is not the tap `recheck` allowed last, or it was
+                reported already, or `next` was called since.
+        """
+        if self._approved is None or self._approved != tap:
+            msg = "tap is not the tap that recheck() allowed last"
+            raise ValueError(msg)
+        self._approved = None
         self._relaunches = 0
         self._landed.clear()
+
+    # -- internals ----------------------------------------------------------------
 
     def _is_target(self, screen: Screen, observation: Observation) -> bool:
         return (
@@ -1061,7 +1094,7 @@ class CrawlEngine:
             screen, self._package, self._policy, foreground=observation.foreground
         )
         prints: _Prints | None = None
-        if judgement.skipped and judgement.skipped[0].reasons == _TOO_LARGE:
+        if len(screen.elements) > MAX_ELEMENTS:
             # An oversized screen is not judged: one row for the whole screen,
             # with no fingerprint index built over its elements.
             self._add_skip(sid, sid, _TOO_LARGE)
@@ -1095,7 +1128,7 @@ class CrawlEngine:
                     _Plan(
                         Tap(sid, decision.element.id, fingerprint, decision.point),
                         decision.element,
-                        prints.below_fields(decision.element),
+                        prints.descendants(decision.element),
                         shape,
                         prints.labels(decision.element),
                     ),
@@ -1121,7 +1154,9 @@ class CrawlEngine:
         """Whether the fresh screen has the planned element's structure and
         bounds with other labels, and nothing with the planned labels there."""
         screen = observation.screen
-        if screen is None or not self._is_target(screen, observation):
+        if screen is None or not _ids_unique(screen):
+            return False
+        if not self._is_target(screen, observation):
             return False
         if observation.keyboard_shown is True:
             return False
@@ -1138,11 +1173,13 @@ class CrawlEngine:
         return changed
 
     def _press_allowed(self, plan: _Plan, observation: Observation) -> bool:
+        """Whether the fresh screen still has the planned element, unchanged,
+        pressable at the planned point."""
         tap = plan.tap
-        planned = plan.element
-        planned_below = plan.below
         screen = observation.screen
-        if screen is None or not self._is_target(screen, observation):
+        if screen is None or not _ids_unique(screen):
+            return False
+        if not self._is_target(screen, observation):
             return False
         if observation.keyboard_shown is True:
             return False
@@ -1151,19 +1188,18 @@ class CrawlEngine:
         judgement = judge(
             screen, self._package, self._policy, foreground=observation.foreground
         )
-        prints = _Prints(screen)
+        # The planned element itself (by its id), not another one that looks
+        # the same: judge must still put it in pressable at the same point, and
+        # every field of it and of its descendants must be unchanged.
         for decision in judgement.pressable:
             fresh = decision.element
-            if prints.of(fresh) != tap.fingerprint:
+            if fresh.id != tap.element_id:
                 continue
+            prints = _Prints(screen)
             return (
-                fresh.class_name == planned.class_name
-                and fresh.resource_id == planned.resource_id
-                and fresh.text == planned.text
-                and fresh.content_desc == planned.content_desc
-                and fresh.hint == planned.hint
-                and fresh.bounds == planned.bounds
-                and prints.below_fields(fresh) == planned_below
-                and decision.point == tap.point
+                decision.point == tap.point
+                and fresh == plan.element
+                and prints.descendants(fresh) == plan.below
+                and prints.of(fresh) == tap.fingerprint
             )
         return False

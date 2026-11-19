@@ -26,7 +26,7 @@ from uiprobe.crawl import (
     Tap,
     fingerprint_of,
 )
-from uiprobe.guards import Policy, judge
+from uiprobe.guards import MAX_ELEMENTS, Policy, judge
 from uiprobe.model import Bounds, Element, Screen
 
 PKG = "com.example.shop"
@@ -126,6 +126,15 @@ def started(limits=None, *, started_at=0.0, policy=POLICY):
     eng = engine(limits, started_at=started_at, policy=policy)
     assert eng.start() == Launch()
     return eng
+
+
+def press(eng, observation):
+    """Take a tap for the observation, recheck it on the same frame, send it."""
+    tap = eng.next(observation)
+    assert isinstance(tap, Tap)
+    assert eng.recheck(tap, observation)
+    eng.tap_sent(tap)
+    return tap
 
 
 # -- a phone made of a graph ---------------------------------------------------
@@ -232,6 +241,8 @@ def drive(eng, phone, *, policy=POLICY, max_steps=3000, depth=None, watch=None):
                 assert len(phone.stack) > 1
         log.append(action)
         phone.send(action)
+        if isinstance(action, Tap):
+            eng.tap_sent(action)
     msg = "the crawl did not stop"
     raise AssertionError(msg)
 
@@ -401,8 +412,11 @@ def test_a_sent_tap_resets_the_relaunch_count() -> None:
         for expected in (Back(), Back(), Relaunch()):
             assert eng.next(off_screen()) == expected
         relaunches += 1
-    tap = eng.next(on_screen(["Item a"]))
+    screen = on_screen(["Item a"])
+    tap = eng.next(screen)
     assert isinstance(tap, Tap)
+    assert eng.recheck(tap, screen)
+    eng.tap_sent(tap)
     # the tap led off target; three more relaunches fit before the limit
     for _ in range(3):
         for expected in (Back(), Back(), Relaunch()):
@@ -440,7 +454,7 @@ def test_an_unsent_tap_does_not_reset_the_relaunch_count() -> None:
     assert eng.next(off_screen()) == Stop("relaunch_limit")
 
 
-def test_an_allowed_recheck_resets_the_relaunch_count() -> None:
+def test_an_allowed_recheck_and_a_reported_send_reset_the_relaunch_count() -> None:
     eng = started()
     for _ in range(3):
         for expected in (Back(), Back(), Relaunch()):
@@ -449,8 +463,50 @@ def test_an_allowed_recheck_resets_the_relaunch_count() -> None:
     tap = eng.next(screen)
     assert isinstance(tap, Tap)
     assert eng.recheck(tap, screen)
+    eng.tap_sent(tap)
     for expected in (Back(), Back(), Relaunch()):
         assert eng.next(off_screen()) == expected
+
+
+def test_an_allowed_recheck_without_a_reported_send_does_not_reset() -> None:
+    eng = started()
+    for _ in range(3):
+        for expected in (Back(), Back(), Relaunch()):
+            assert eng.next(off_screen()) == expected
+    screen = on_screen(["Item a"])
+    tap = eng.next(screen)
+    assert isinstance(tap, Tap)
+    assert eng.recheck(tap, screen)  # allowed, but the send failed
+    assert eng.next(off_screen()) == Back()
+    assert eng.next(off_screen()) == Back()
+    assert eng.next(off_screen()) == Stop("relaunch_limit")
+
+
+def test_a_dropped_tap_does_not_permit_a_fourth_relaunch() -> None:
+    eng = started()
+    actions = [eng.next(off_screen()) for _ in range(9)]
+    assert actions == [Back(), Back(), Relaunch()] * 3
+    tap = eng.next(on_screen(["Item a"]))
+    assert isinstance(tap, Tap)  # the driver drops it: no recheck, never sent
+    assert eng.next(off_screen()) == Back()
+    assert eng.next(off_screen()) == Back()
+    assert eng.next(off_screen()) == Stop("relaunch_limit")
+
+
+def test_tap_sent_needs_the_tap_recheck_allowed_last() -> None:
+    eng = started()
+    screen = on_screen(["Item a", "Item b"])
+    tap = eng.next(screen)
+    assert isinstance(tap, Tap)
+    with pytest.raises(ValueError, match="allowed last"):
+        eng.tap_sent(tap)  # not rechecked yet
+    assert eng.recheck(tap, screen)
+    other = Tap(tap.screen_id, "e3", tap.fingerprint, tap.point)
+    with pytest.raises(ValueError, match="allowed last"):
+        eng.tap_sent(other)
+    eng.tap_sent(tap)
+    with pytest.raises(ValueError, match="allowed last"):
+        eng.tap_sent(tap)  # reported once only
 
 
 def test_a_target_screen_resets_the_back_count() -> None:
@@ -1120,6 +1176,151 @@ def test_recheck_picks_the_first_pressable_twin() -> None:
     assert not eng.recheck(tap, seen(_swapped_twins(twin.screen)))
 
 
+def test_recheck_refuses_a_look_alike_twin_at_the_planned_point() -> None:
+    # e2 is planned; in the fresh dump the twins swapped bounds and e2 is
+    # disabled, so only e3 is pressable, and it sits at e2's planned point.
+    twin = on_screen(["Same", "Same"], rid="x:id/same")
+    assert twin.screen is not None
+    eng = started()
+    tap = eng.next(twin)
+    assert isinstance(tap, Tap)
+    assert tap.element_id == "e2"
+    swapped = _swapped_twins(twin.screen)
+    root, e2, e3 = swapped.elements
+    fresh = _with_elements(
+        swapped, (root, clone(e2, flags=("clickable", "disabled")), e3)
+    )
+    observation = seen(fresh)
+    assert fresh.screen_id == tap.screen_id
+    pressable = judge(fresh, PKG, POLICY, foreground=PKG).pressable
+    assert [(d.element.id, d.point) for d in pressable] == [("e3", tap.point)]
+    assert fingerprint_of(fresh, e3) == tap.fingerprint
+    assert not eng.recheck(tap, observation)
+
+
+def _with_elements(screen, elements):
+    return Screen(
+        screen.serial,
+        screen.captured_at,
+        screen.package,
+        screen.activity,
+        screen.api_level,
+        screen.display,
+        tuple(elements),
+    )
+
+
+def test_recheck_refuses_a_checkbox_that_became_checked() -> None:
+    policy = Policy(skip_toggles=False)
+    box = on_screen(["Notify me"], cls="android.widget.CheckBox")
+    assert box.screen is not None
+    root, e2 = box.screen.elements
+    unchecked = _with_elements(
+        box.screen, (root, clone(e2, flags=("clickable", "checkable")))
+    )
+    checked = _with_elements(
+        box.screen, (root, clone(e2, flags=("clickable", "checkable", "checked")))
+    )
+    eng = started(policy=policy)
+    tap = eng.next(seen(unchecked))
+    assert isinstance(tap, Tap)
+    assert [
+        d.element.id for d in judge(checked, PKG, policy, foreground=PKG).pressable
+    ] == ["e2"]
+    assert not eng.recheck(tap, seen(checked))
+    # the same frame read again is still allowed
+    eng = started(policy=policy)
+    tap = eng.next(seen(unchecked))
+    assert isinstance(tap, Tap)
+    assert eng.recheck(tap, seen(unchecked))
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"flags": ("checkable", "checked")},
+        {"flags": ("checkable", "selected")},
+        {"flags": ("checkable", "focused")},
+        {"package": OTHER},
+        {"parent": "e1"},
+    ],
+)
+def test_recheck_refuses_any_change_of_a_descendant(change) -> None:
+    policy = Policy(skip_toggles=False)
+    row = Element(
+        "e2",
+        "e1",
+        BUTTON,
+        Bounds(40, 60, 280, 100),
+        text="Wi-Fi",
+        resource_id="x:id/row",
+        package=PKG,
+        flags=("clickable",),
+    )
+    check = Element(
+        "e3",
+        "e2",
+        "android.widget.CheckBox",
+        Bounds(240, 70, 270, 90),
+        resource_id="x:id/check",
+        package=PKG,
+        flags=("checkable",),
+    )
+    base = make_screen([])
+    before = _with_elements(base, (base.elements[0], row, check))
+    after = _with_elements(base, (base.elements[0], row, clone(check, **change)))
+    eng = started(policy=policy)
+    tap = eng.next(seen(before))
+    assert isinstance(tap, Tap)
+    assert tap.element_id == "e2"
+    assert not eng.recheck(tap, seen(after))
+
+
+def test_a_screen_with_duplicate_element_ids_counts_as_a_failed_dump() -> None:
+    good = make_screen(["Item a", "Item b"])
+    root, a, b = good.elements
+    bad = _with_elements(good, (root, a, clone(b, id="e2")))
+    with pytest.raises(ValueError, match="unique"):
+        judge(bad, PKG, POLICY, foreground=PKG)
+    eng = started()
+    assert eng.next(seen(bad)) == Reread()
+    assert eng.next(seen(bad)) == Reread()
+    assert eng.next(seen(bad)) == Stop("dump_failed_repeatedly")
+    assert eng.records.transitions[0].dump_failed
+
+
+def test_recheck_on_duplicate_element_ids_refuses_and_releases_the_tap() -> None:
+    good = make_screen(["Item a", "Item b"])
+    root, a, b = good.elements
+    bad = _with_elements(good, (root, a, clone(b, id="e2")))
+    eng = started()
+    tap = eng.next(seen(good))
+    assert isinstance(tap, Tap)
+    assert eng.actions_sent == 2
+    assert not eng.recheck(tap, seen(bad))
+    assert eng.actions_sent == 1  # the reserved tap was released
+    with pytest.raises(ValueError, match="allowed last"):
+        eng.tap_sent(tap)
+    # the engine goes on from the next good frame
+    assert isinstance(eng.next(seen(good)), Tap)
+
+
+def test_an_oversized_screen_without_candidates_gets_its_skip_row() -> None:
+    base = make_screen([], name="big")
+    rows = [
+        Element(f"e{i}", "e1", ROW, Bounds(0, 0, 10, 10), text="x", package=PKG)
+        for i in range(2, MAX_ELEMENTS + 3)
+    ]
+    big = _with_elements(base, (base.elements[0], *rows))
+    assert len(big.elements) > MAX_ELEMENTS
+    eng = started()
+    assert eng.next(seen(big)) == Stop("exhausted")
+    skipped = eng.records.skipped
+    assert [(r.screen_id, r.reasons) for r in skipped] == [
+        (big.screen_id, ("screen_too_large",))
+    ]
+
+
 def test_a_second_recheck_after_an_allowed_one_is_rejected() -> None:
     eng, first, tap = planned_tap()
     assert eng.recheck(tap, first)
@@ -1394,10 +1595,10 @@ def test_a_landing_on_a_screen_landed_on_before_the_last_tap_is_not_a_relaunch()
     root = on_screen(["Item a", "Item b"], name="root")
     mid = on_screen(["Item a"], name="mid")
     leaf = on_screen([], name="leaf")
-    assert isinstance(eng.next(root), Tap)  # a
+    press(eng, root)  # a
     assert eng.next(leaf) == Back()
-    assert isinstance(eng.next(root), Tap)  # b; the BACK landed on root before
-    assert isinstance(eng.next(mid), Tap)
+    press(eng, root)  # b; the BACK landed on root before
+    press(eng, mid)
     assert eng.next(leaf) == Back()
     # The BACK jumps to root, past mid, which the path does not predict. The tap
     # sent since cleared the set, so this is no repeat landing.
@@ -1603,9 +1804,9 @@ def test_constructor_and_observation_validation() -> None:
         CrawlEngine("", POLICY, Limits(), started_at=0.0)
     with pytest.raises(TypeError):
         CrawlEngine(PKG, POLICY, Limits(), started_at=True)
-    with pytest.raises(ValueError, match="finite"):
+    with pytest.raises(ValueError, match="below 2"):
         CrawlEngine(PKG, POLICY, Limits(), started_at=float("inf"))
-    with pytest.raises(ValueError, match="finite"):
+    with pytest.raises(ValueError, match="below 2"):
         Observation(None, None, None, float("nan"))
     with pytest.raises(TypeError):
         LooseObservation("screen", None, None, 0.0)
@@ -2395,10 +2596,28 @@ def test_a_stuck_keyboard_after_a_deferred_landing_stops() -> None:
 
 
 def test_a_huge_clock_value_is_refused_not_raised() -> None:
-    with pytest.raises(ValueError, match="too large"):
+    with pytest.raises(ValueError, match="below 2"):
         Observation(None, PKG, keyboard_shown=False, now=10**400)
-    with pytest.raises(ValueError, match="too large"):
+    with pytest.raises(ValueError, match="below 2"):
         CrawlEngine(PKG, POLICY, Limits(), started_at=10**400)
+
+
+@pytest.mark.parametrize("value", [-1, -0.5, 2**40, float(2**60), 2**60 - 60])
+def test_a_clock_outside_the_exact_range_is_refused(value) -> None:
+    with pytest.raises(ValueError, match="below 2"):
+        Observation(None, PKG, keyboard_shown=False, now=value)
+    with pytest.raises(ValueError, match="below 2"):
+        CrawlEngine(PKG, POLICY, Limits(), started_at=value)
+
+
+def test_the_deadline_is_exact_near_the_top_of_the_clock_range() -> None:
+    start = 2**40 - 61
+    eng = started(Limits(minutes=1), started_at=start)
+    screen = make_screen(["Item a"])
+    tap = eng.next(seen(screen, now=start + 59.999))
+    assert isinstance(tap, Tap)
+    assert not eng.recheck(tap, seen(screen, now=float(start + 60)))
+    assert eng.next(seen(screen, now=float(start + 60))) == Stop("max_duration")
 
 
 def test_the_depth_limit_has_an_upper_bound() -> None:
