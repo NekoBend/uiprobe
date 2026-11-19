@@ -59,12 +59,16 @@ uiprobe uses the device given with `-s`, else the one named in `ANDROID_SERIAL`,
 
 `uiprobe tap` presses one point of the screen that is showing: a tap, or with `--long` a long press. Name the element with `--text`, `--id` and `--desc` (the same options and the same rules as `find`; they combine with AND), or give a point with `--xy X Y`. `--xy` cannot be combined with the other three, and one way or the other is required; `X` and `Y` are plain decimal integers from 0 to 32767.
 
+By default a tap holds still for 10 ms: it is sent as a swipe from the point to itself, so the point never moves. A plain Android `input tap` is barely visible in the "Pointer location" developer option, while a 10 ms hold is (measured on a Galaxy S25 Ultra at 60 Hz: 10 ms was visible, 6 ms was not). `--press-ms N` sets the hold, an integer from 0 to 200; `--press-ms 0` sends the old plain `input tap X Y`. `--press-ms` cannot be combined with `--long`, which keeps its fixed 800 ms. The upper bound keeps a tap far below Android's default long-press timeout (about 400 to 500 ms, and longer when accessibility settings raise it): a tap held that long could be taken as a long press, so use `--long` for that on purpose. The point where the finger lands is decided exactly as before; only how the press is sent changed. uiprobe adds no movement to the press.
+
 ```console
 $ uiprobe tap --id email
 tapped e3 EditText id=email hint="メールアドレス" [tap] at 540,660
 $ uiprobe tap --id icon --desc "lock" --long
 long-tapped e5 ImageView id=icon desc="lock" at 120,1840
 $ uiprobe tap --xy 540 1860
+tapped 540,1860
+$ uiprobe tap --xy 540 1860 --press-ms 0
 tapped 540,1860
 ```
 
@@ -76,16 +80,17 @@ tapped 540,1860
 - A disabled element (the `[disabled]` tag) is still pressed; uiprobe prints a one-line warning on stderr, never on stdout.
 - With `--xy` there is no dump and no check: the point is pressed as given, because you named the point.
 - `tap` acts on the screen showing now. The foreground app is not checked, and there is no deny-word guard: it presses what you name, including a button called "Delete".
-- With `--json` the result is a `uiprobe.action/1` object (see [Output formats](output.md)).
+- With `--json` the result is a `uiprobe.action/1` object (see [Output formats](output.md)); `--press-ms` does not change it (`action` is `tap` or `long_tap`).
 
 The commands sent to the device are exactly these, with the numbers filled in:
 
 ```sh
+input swipe X Y X Y 10; echo uiprobe-exit:$?
 input tap X Y; echo uiprobe-exit:$?
 input swipe X Y X Y 800; echo uiprobe-exit:$?
 ```
 
-The long press is a swipe from a point to itself that lasts 800 ms. The `echo` reads the exit status of `input`, which the adb `shell:` service does not return. On Android 7 to 16 (API 24 to 36) that status is 0 even for an `input` subcommand that does not exist, so uiprobe counts a press as done only when the line `uiprobe-exit:0` is the last line of the output and no other line is non-empty (empty lines are ignored). Anything else is an `input_failed` error with exit code 14, whose details say why: `no_exit_status`, `exit_status` or `unexpected_output`.
+The first is the default tap (`10` is the `--press-ms` value), the second is `--press-ms 0`, and the third is `--long`: a swipe from a point to itself that lasts 800 ms. The `echo` reads the exit status of `input`, which the adb `shell:` service does not return. On Android 7 to 16 (API 24 to 36) that status is 0 even for an `input` subcommand that does not exist, so uiprobe counts a press as done only when the line `uiprobe-exit:0` is the last line of the output and no other line is non-empty (empty lines are ignored). Anything else is an `input_failed` error with exit code 14, whose details say why: `no_exit_status`, `exit_status` or `unexpected_output`.
 
 uiprobe sends each press once and never resends it, not even after a lost connection, because a resend could press twice. Exit 14 does not prove that nothing was pressed: `input` may have acted before it failed. Look at the screen before you repeat the command.
 

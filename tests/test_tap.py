@@ -39,16 +39,21 @@ if TYPE_CHECKING:
 
 SERIAL = "emulator-5554"
 SHOP = "com.example.shop"
-TAP_COMMAND = "input tap 80 35; echo uiprobe-exit:$?"
+TAP_COMMAND = "input swipe 80 35 80 35 10; echo uiprobe-exit:$?"
+PLAIN_TAP_COMMAND = "input tap 80 35; echo uiprobe-exit:$?"
 LONG_COMMAND = "input swipe 80 35 80 35 800; echo uiprobe-exit:$?"
 ADMITTED = (
     "input tap 1 2; echo uiprobe-exit:$?",
+    "input swipe 1 2 1 2 10; echo uiprobe-exit:$?",
     "input swipe 1 2 1 2 800; echo uiprobe-exit:$?",
 )
 INPUT_REQUEST = re.compile(r"^shell:input\b")
 MARKER_FORMS = (
     re.compile(r"^input tap [0-9]+ [0-9]+; echo uiprobe-exit:\$\?\Z"),
     re.compile(r"^input swipe ([0-9]+) ([0-9]+) \1 \2 800; echo uiprobe-exit:\$\?\Z"),
+    re.compile(
+        r"^input swipe ([0-9]+) ([0-9]+) \1 \2 [0-9]{1,3}; echo uiprobe-exit:\$\?\Z"
+    ),
 )
 
 SCREENS = (
@@ -406,7 +411,7 @@ def test_long_output_is_cut(device, android):
     ],
 )
 def test_a_marker_that_is_not_plain_decimal_is_no_exit_status(device, android, answer):
-    android.override(re.compile(r"^input tap"), answer)
+    android.override(re.compile(r"^input (?:tap|swipe)"), answer)
     error = tap_failure(device)
     assert error.details["reason"] == "no_exit_status"
     assert error.details["command"] == "tap"
@@ -415,7 +420,9 @@ def test_a_marker_that_is_not_plain_decimal_is_no_exit_status(device, android, a
 
 @pytest.mark.parametrize("value", ["00", "000", "007", "9" * 5000])
 def test_a_zero_padded_or_huge_marker_is_no_exit_status(device, android, value):
-    android.override(re.compile(r"^input tap"), f"uiprobe-exit:{value}\n".encode())
+    android.override(
+        re.compile(r"^input (?:tap|swipe)"), f"uiprobe-exit:{value}\n".encode()
+    )
     error = tap_failure(device)
     assert error.details["reason"] == "no_exit_status"
 
@@ -426,19 +433,21 @@ def test_output_is_stripped_after_the_cut(device, android):
 
 
 def test_empty_lines_are_ignored_and_a_trailing_cr_is_removed(device, android):
-    android.override(re.compile(r"^input tap"), b"\r\nuiprobe-exit:0\r\n\r\n")
+    android.override(re.compile(r"^input (?:tap|swipe)"), b"\r\nuiprobe-exit:0\r\n\r\n")
     assert device.tap((80, 35)) == (80, 35)
-    android.override(re.compile(r"^input tap"), b"\n\nuiprobe-exit:0\n\n")
+    android.override(re.compile(r"^input (?:tap|swipe)"), b"\n\nuiprobe-exit:0\n\n")
     assert device.tap((80, 35)) == (80, 35)
 
 
 def test_a_whitespace_only_line_is_other_output(device, android):
-    android.override(re.compile(r"^input tap"), b" \nuiprobe-exit:0\n")
+    android.override(re.compile(r"^input (?:tap|swipe)"), b" \nuiprobe-exit:0\n")
     assert tap_failure(device).details["reason"] == "unexpected_output"
 
 
 def test_a_second_marker_line_is_unexpected_output(device, android):
-    android.override(re.compile(r"^input tap"), b"uiprobe-exit:0\r\nuiprobe-exit:0\r\n")
+    android.override(
+        re.compile(r"^input (?:tap|swipe)"), b"uiprobe-exit:0\r\nuiprobe-exit:0\r\n"
+    )
     assert tap_failure(device).details["reason"] == "unexpected_output"
 
 
@@ -464,7 +473,7 @@ def test_no_resend_when_the_marker_is_missing(device, android, fake_adb):
 
 
 def test_no_resend_after_a_reset_reply(device, android, fake_adb):
-    android.override(re.compile(r"^input tap"), Reset())
+    android.override(re.compile(r"^input (?:tap|swipe)"), Reset())
     with pytest.raises(UiprobeError):
         device.tap((80, 35))
     assert sent_inputs(fake_adb) == [TAP_COMMAND]
@@ -796,10 +805,13 @@ def test_element_not_visible_shares_the_exit_code_of_not_found():
 def test_strict_mode_rejects_other_compound_commands(device, android, fake_adb):
     device._shell("input tap 1 2; echo uiprobe-exit:$?")
     device._shell("input swipe 1 2 1 2 800; echo uiprobe-exit:$?")
+    device._shell("input swipe 1 2 1 2 10; echo uiprobe-exit:$?")
     assert fake_adb.unexpected == []
     for command in (
         "input swipe 1 2 3 4 800; echo uiprobe-exit:$?",
         "input swipe 1 2 1 2 900; echo uiprobe-exit:$?",
+        "input swipe 1 2 1 2 201; echo uiprobe-exit:$?",
+        "input swipe 1 2 1 2 0; echo uiprobe-exit:$?",
         "input tap 1 2; echo uiprobe-exit:$?; reboot",
         "input tap 1 2; echo hi",
         "input tap 1 2;echo uiprobe-exit:$?",
@@ -808,12 +820,12 @@ def test_strict_mode_rejects_other_compound_commands(device, android, fake_adb):
     ):
         with pytest.raises(AdbError):
             device._shell(command)
-    assert len(fake_adb.unexpected) == 7
+    assert len(fake_adb.unexpected) == 9
     fake_adb.unexpected.clear()  # the fixture would otherwise fail this test
     # the server also logged the refused commands; the autouse fixture checks
     # only what a device could have run
     fake_adb.commands[:] = [c for c in fake_adb.commands if c[2] in ADMITTED]
-    assert [i.kind for i in android.inputs] == ["tap", "long_press"]
+    assert [i.kind for i in android.inputs] == ["tap", "long_press", "tap"]
 
 
 def test_the_fake_answers_the_marker_by_default(device):
@@ -1131,3 +1143,168 @@ def test_dump_details_must_be_a_bool(device, fake_adb, details):
     with pytest.raises(TypeError, match="details must be a bool"):
         device.dump(details=details)
     assert len(fake_adb.commands) == before
+
+
+# --- the hold of a tap (press_ms, --press-ms) ---
+
+
+def test_default_tap_is_a_10_ms_hold_in_place(device, android, fake_adb):
+    assert device.tap((80, 35)) == (80, 35)
+    assert sent_inputs(fake_adb) == ["input swipe 80 35 80 35 10; echo uiprobe-exit:$?"]
+    assert [(i.kind, i.point) for i in android.inputs] == [("tap", (80, 35))]
+    assert android.stack == ["main", "next"]
+
+
+def test_press_ms_zero_sends_the_plain_input_tap(device, android, fake_adb):
+    assert device.tap((80, 35), press_ms=0) == (80, 35)
+    assert sent_inputs(fake_adb) == [PLAIN_TAP_COMMAND]
+    assert [(i.kind, i.point) for i in android.inputs] == [("tap", (80, 35))]
+
+
+@pytest.mark.parametrize("ms", [1, 10, 50, 200])
+def test_press_ms_is_sent_as_the_hold(device, android, fake_adb, ms):
+    device.tap((80, 35), press_ms=ms)
+    assert sent_inputs(fake_adb) == [
+        f"input swipe 80 35 80 35 {ms}; echo uiprobe-exit:$?"
+    ]
+    assert [i.kind for i in android.inputs] == ["tap"]
+
+
+def test_a_held_tap_with_an_element_presses_the_same_point(device, android, screen):
+    assert device.tap(element(screen, "Login"), press_ms=30) == (80, 35)
+    assert [i.point for i in android.inputs] == [(80, 35)]
+
+
+def test_long_keeps_the_800_ms_command(device, fake_adb):
+    device.tap((80, 35), long=True)
+    assert sent_inputs(fake_adb) == [LONG_COMMAND]
+
+
+def test_long_with_the_default_press_ms_is_still_long(device, fake_adb):
+    device.tap((80, 35), long=True, press_ms=10)
+    assert sent_inputs(fake_adb) == [LONG_COMMAND]
+
+
+@pytest.mark.parametrize("ms", [0, 11, 200])
+def test_long_with_another_press_ms_is_refused(device, fake_adb, ms):
+    before = len(fake_adb.requests)
+    with pytest.raises(ValueError, match="long"):
+        device.tap((80, 35), long=True, press_ms=ms)
+    assert len(fake_adb.requests) == before
+
+
+@pytest.mark.parametrize("ms", [-1, 201, 800, 10**9])
+def test_press_ms_out_of_range_is_refused_before_sending(device, fake_adb, ms):
+    before = len(fake_adb.requests)
+    with pytest.raises(ValueError, match="press_ms"):
+        device.tap((80, 35), press_ms=ms)
+    assert len(fake_adb.requests) == before
+
+
+@pytest.mark.parametrize("ms", [True, False, 1.0, "10", None, [10]])
+def test_press_ms_of_the_wrong_type_is_refused_before_sending(device, fake_adb, ms):
+    before = len(fake_adb.requests)
+    with pytest.raises(TypeError, match="press_ms"):
+        device.tap((80, 35), press_ms=ms)  # type: ignore[arg-type]
+    assert len(fake_adb.requests) == before
+
+
+def test_press_ms_takes_the_int_value_of_an_int_subclass(device, fake_adb):
+    class Odd(int):
+        def __str__(self) -> str:
+            return "7"
+
+    device.tap((80, 35), press_ms=Odd(25))
+    assert sent_inputs(fake_adb) == ["input swipe 80 35 80 35 25; echo uiprobe-exit:$?"]
+
+
+def test_a_held_tap_failure_reports_the_tap_command(device, android):
+    android.answer_input(status=1, output="Error\n")
+    with pytest.raises(InputFailedError) as info:
+        device.tap((80, 35), press_ms=40)
+    assert info.value.details["command"] == "tap"
+    assert len(android.inputs) == 1
+
+
+def test_cli_tap_default_is_a_10_ms_hold(capsys, fake_adb, android):
+    code, out, err = invoke(capsys, fake_adb, "tap", "--xy", "80", "35")
+    assert (code, out, err) == (0, "tapped 80,35\n", "")
+    assert sent_inputs(fake_adb) == ["input swipe 80 35 80 35 10; echo uiprobe-exit:$?"]
+    assert android.stack == ["main", "next"]
+
+
+@pytest.mark.usefixtures("android")
+def test_cli_tap_press_ms_zero_sends_the_plain_tap(capsys, fake_adb):
+    code, out, _ = invoke(
+        capsys, fake_adb, "tap", "--xy", "80", "35", "--press-ms", "0"
+    )
+    assert (code, out) == (0, "tapped 80,35\n")
+    assert sent_inputs(fake_adb) == [PLAIN_TAP_COMMAND]
+
+
+@pytest.mark.usefixtures("android")
+def test_cli_tap_press_ms_50(capsys, fake_adb):
+    code, out, _ = invoke(capsys, fake_adb, "tap", "--id", "login", "--press-ms", "50")
+    assert code == 0
+    assert out == 'tapped e2 TextView "Login" id=login [tap] at 80,35\n'
+    assert sent_inputs(fake_adb) == ["input swipe 80 35 80 35 50; echo uiprobe-exit:$?"]
+
+
+@pytest.mark.usefixtures("android")
+@pytest.mark.parametrize("ms", ["0", "10", "200"])
+def test_cli_tap_json_does_not_change_with_press_ms(capsys, fake_adb, ms):
+    code, out, err = invoke(
+        capsys, fake_adb, "tap", "--xy", "1", "2", "--press-ms", ms, "--json"
+    )
+    assert (code, err) == (0, "")
+    assert json.loads(out) == {
+        "schema": "uiprobe.action/1",
+        "action": "tap",
+        "point": [1, 2],
+    }
+
+
+@pytest.mark.usefixtures("android")
+def test_cli_tap_long_is_unchanged_by_the_new_option(capsys, fake_adb):
+    code, out, _ = invoke(capsys, fake_adb, "tap", "--xy", "80", "35", "--long")
+    assert (code, out) == (0, "long-tapped 80,35\n")
+    assert sent_inputs(fake_adb) == [LONG_COMMAND]
+
+
+@pytest.mark.parametrize("ms", ["0", "10", "20"])
+def test_cli_tap_long_with_press_ms_is_a_usage_error(capsys, fake_adb, android, ms):
+    code, out, _ = invoke(
+        capsys, fake_adb, "tap", "--xy", "1", "2", "--long", "--press-ms", ms, "--json"
+    )
+    assert code == 2
+    error = json.loads(out)["error"]
+    assert error["code"] == "usage_error"
+    assert "--press-ms cannot be combined with --long" in error["message"]
+    assert fake_adb.requests == []
+    assert android.inputs == []
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "-1",
+        "201",
+        "1000",
+        "1.5",
+        "+5",
+        "",
+        " 5",
+        "5 ",
+        "0x10",
+        "\N{ARABIC-INDIC DIGIT FIVE}",
+        "ten",
+    ],
+)
+def test_cli_tap_bad_press_ms_is_a_usage_error(capsys, fake_adb, android, value):
+    code, out, _ = invoke(
+        capsys, fake_adb, "tap", "--xy", "1", "2", "--press-ms", value, "--json"
+    )
+    assert code == 2
+    assert json.loads(out)["error"]["code"] == "usage_error"
+    assert fake_adb.requests == []
+    assert android.inputs == []
