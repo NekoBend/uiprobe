@@ -334,15 +334,14 @@ def test_start_screen_with_nothing_to_try_is_exhausted_without_back() -> None:
 
 def test_a_relaunch_that_lands_elsewhere_makes_that_screen_the_root() -> None:
     eng = started()
-    assert isinstance(eng.next(on_screen(["Item a"], name="n0")), Tap)
+    press(eng, on_screen(["Item a"], name="n0"))
     alt = on_screen(["Item b", "Item c"], name="alt")
-    assert isinstance(eng.next(alt), Tap)  # alt is known at depth 2
+    press(eng, alt)  # alt is known at depth 2
     assert eng.depth_of(alt.screen.screen_id) == 2
     for expected in (Back(), Back(), Relaunch()):
         assert eng.next(off_screen()) == expected
     # the relaunch lands on alt: it is the root now, whatever depth it had
-    second = eng.next(alt)
-    assert isinstance(second, Tap)
+    second = press(eng, alt)
     assert second.screen_id == alt.screen.screen_id
     assert eng.depth_of(alt.screen.screen_id) == 1
     assert eng.next(on_screen([], name="leaf")) == Back()
@@ -493,6 +492,103 @@ def test_a_dropped_tap_does_not_permit_a_fourth_relaunch() -> None:
     assert eng.next(off_screen()) == Stop("relaunch_limit")
 
 
+def test_an_unreported_allowed_tap_does_not_reset_the_refusal_count() -> None:
+    eng = started()
+    screen = on_screen(["Item a", "Item b", "Item c", "Item d", "Item e"])
+    for _ in range(2):
+        tap = eng.next(screen)
+        assert isinstance(tap, Tap)
+        assert not eng.recheck(tap, off_screen())  # a counted refusal
+    tap = eng.next(screen)
+    assert isinstance(tap, Tap)
+    assert eng.recheck(tap, screen)  # allowed, then dropped by the driver
+    # the drop does not reset the count and itself counts as the third
+    assert eng.next(screen) == Stop("exhausted")  # nothing more is pressed
+
+
+def test_a_driver_that_drops_every_tap_still_ends_the_crawl() -> None:
+    eng = started()
+    for count in range(100):
+        # a new screen id every time on a frozen clock, and the tap is dropped
+        observation = on_screen([f"Item {count}", "Next"], name=f"s{count}")
+        action = eng.next(observation)
+        if isinstance(action, Stop):
+            break
+        if isinstance(action, Tap):
+            assert eng.recheck(action, observation)
+    assert eng.stopped is not None
+
+
+def test_a_reported_tap_resets_the_refusal_count() -> None:
+    eng = started()
+    screen = on_screen(["Item a", "Item b", "Item c", "Item d", "Item e"])
+    for _ in range(2):
+        tap = eng.next(screen)
+        assert isinstance(tap, Tap)
+        assert not eng.recheck(tap, off_screen())
+    press(eng, screen)  # sent: the tap stays on the same screen
+    tap = eng.next(screen)
+    assert isinstance(tap, Tap)
+    assert not eng.recheck(tap, off_screen())
+    assert isinstance(eng.next(screen), Tap)  # one refusal in a row only
+
+
+@pytest.mark.parametrize("rechecked", [True, False])
+def test_a_dropped_tap_is_not_counted_recorded_or_placed(rechecked) -> None:
+    eng = started(Limits(actions=2))
+    screen = on_screen(["Item a", "Item b"])
+    tap = eng.next(screen)
+    assert isinstance(tap, Tap)
+    if rechecked:
+        assert eng.recheck(tap, screen)
+    assert eng.actions_sent == 1
+    # the driver drops the tap and reads the same screen again
+    second = eng.next(screen)
+    assert isinstance(second, Tap)  # no max_actions: only the launch was sent
+    assert second.element_id == "e3"  # the dropped element stays tried
+    assert eng.actions_sent == 1
+    records = eng.records
+    assert [t.kind for t in records.transitions] == ["launch"]
+    assert SkippedElement(tap.screen_id, tap.fingerprint, (crawl.TAP_NOT_SENT,)) in (
+        records.skipped
+    )
+    assert eng._path == [screen.screen.screen_id]  # the path did not move
+    # the second tap is sent: now it is counted, recorded and placed
+    assert eng.recheck(second, screen)
+    eng.tap_sent(second)
+    assert eng.actions_sent == 2
+    assert eng.next(on_screen([], name="leaf")) == Stop("max_actions")
+    transitions = eng.records.transitions
+    assert [(t.kind, t.action_id) for t in transitions] == [("launch", 1), ("tap", 2)]
+    assert transitions[1].fingerprint == second.fingerprint
+
+
+def test_recheck_and_tap_sent_accept_only_the_issued_tap_instance() -> None:
+    a = started()
+    for _ in range(3):
+        for expected in (Back(), Back(), Relaunch()):
+            assert a.next(off_screen()) == expected
+    screen = on_screen(["Item a"])
+    tap_a = a.next(screen)
+    b = started()
+    tap_b = b.next(screen)
+    assert isinstance(tap_a, Tap)
+    assert isinstance(tap_b, Tap)
+    assert tap_a == tap_b
+    assert tap_a is not tap_b
+    with pytest.raises(ValueError, match="returned last"):
+        a.recheck(tap_b, screen)
+    assert a.recheck(tap_a, screen)
+    with pytest.raises(ValueError, match="allowed last"):
+        a.tap_sent(tap_b)
+    with pytest.raises(ValueError, match="allowed last"):
+        a.tap_sent(Tap(*(getattr(tap_a, f.name) for f in fields(Tap))))
+    # nothing was reported for engine A: its fourth relaunch is still refused
+    assert a.next(off_screen()) == Back()
+    assert a.next(off_screen()) == Back()
+    assert a.next(off_screen()) == Stop("relaunch_limit")
+
+
 def test_tap_sent_needs_the_tap_recheck_allowed_last() -> None:
     eng = started()
     screen = on_screen(["Item a", "Item b"])
@@ -512,7 +608,7 @@ def test_tap_sent_needs_the_tap_recheck_allowed_last() -> None:
 def test_a_target_screen_resets_the_back_count() -> None:
     eng = started()
     assert eng.next(off_screen()) == Back()
-    assert isinstance(eng.next(on_screen(["Item a"])), Tap)
+    press(eng, on_screen(["Item a"]))
     assert eng.next(off_screen()) == Back()
     assert eng.next(off_screen()) == Back()
     assert eng.next(off_screen()) == Relaunch()
@@ -540,7 +636,7 @@ def test_target_needs_dump_package_and_foreground_to_match(
 
 def test_a_tap_that_opens_a_permission_dialog_is_answered_with_back() -> None:
     eng = started()
-    assert isinstance(eng.next(on_screen(["Item a"])), Tap)
+    press(eng, on_screen(["Item a"]))
     dialog = seen(
         make_screen(["Allow", "Deny"], name="dialog", package=PERMISSION),
         fg=PERMISSION,
@@ -571,7 +667,7 @@ def test_the_keyboard_back_counts_as_an_action() -> None:
 
 def test_navigation_backs_do_not_count_toward_the_off_target_backs() -> None:
     eng = started()
-    assert isinstance(eng.next(on_screen(["Item a"])), Tap)
+    press(eng, on_screen(["Item a"]))
     assert eng.next(on_screen([], name="leaf")) == Back()  # navigation BACK
     assert [eng.next(off_screen()) for _ in range(3)] == [Back(), Back(), Relaunch()]
 
@@ -584,7 +680,7 @@ def test_the_keyboard_back_does_not_count_toward_the_off_target_backs() -> None:
 
 def test_the_keyboard_back_keeps_the_path() -> None:
     eng = started(Limits(depth=2))
-    assert isinstance(eng.next(on_screen(["Item a"])), Tap)
+    press(eng, on_screen(["Item a"]))
     deep = on_screen(["Item a"], name="deep", keyboard=True)
     assert eng.next(deep) == Back()
     # still the second screen of the path: nothing is pressed at the limit
@@ -594,20 +690,20 @@ def test_the_keyboard_back_keeps_the_path() -> None:
 def test_keyboard_gone_after_back_continues() -> None:
     eng = started()
     assert eng.next(on_screen(["Item a"], keyboard=True)) == Back()
-    assert isinstance(eng.next(on_screen(["Item a"])), Tap)
+    press(eng, on_screen(["Item a"]))
 
 
 def test_keyboard_back_is_forgotten_after_a_good_reading() -> None:
     eng = started()
     assert eng.next(on_screen(["Item a"], keyboard=True)) == Back()
-    assert isinstance(eng.next(on_screen(["Item a"])), Tap)
+    press(eng, on_screen(["Item a"]))
     assert eng.next(on_screen(["Item b"], name="two", keyboard=True)) == Back()
 
 
 def test_unknown_keyboard_state_counts_as_not_shown() -> None:
     eng = started()
     screen = make_screen(["Item a"])
-    assert isinstance(eng.next(Observation(screen, PKG, None, 0.0)), Tap)
+    press(eng, Observation(screen, PKG, None, 0.0))
 
 
 def test_keyboard_stuck_survives_a_failed_dump_between() -> None:
@@ -636,17 +732,16 @@ def test_a_good_dump_resets_the_failure_count() -> None:
     eng = started()
     assert eng.next(failed()) == Reread()
     assert eng.next(failed()) == Reread()
-    assert isinstance(eng.next(on_screen(["Item a"])), Tap)
+    press(eng, on_screen(["Item a"]))
     assert eng.next(failed()) == Reread()
     assert eng.next(failed()) == Reread()
-    assert isinstance(eng.next(on_screen(["Item b"], name="two")), Tap)
+    press(eng, on_screen(["Item b"], name="two"))
     assert eng.stopped is None
 
 
 def test_a_failed_dump_after_an_action_is_recorded_once_and_resolved_later() -> None:
     eng = started()
-    tap = eng.next(on_screen(["Item a"]))
-    assert isinstance(tap, Tap)
+    tap = press(eng, on_screen(["Item a"]))
     assert eng.next(failed()) == Reread()
     assert eng.next(on_screen([], name="leaf")) == Back()
     first, second = eng.records.transitions[:2]
@@ -683,8 +778,8 @@ def test_max_actions_counts_launch_taps_backs_and_relaunches() -> None:
     assert eng.next(off_screen()) == Relaunch()  # 4
     assert eng.next(off_screen()) == Stop("max_actions")
     eng = started(Limits(actions=3))
-    assert isinstance(eng.next(on_screen(["Item a", "Item b"])), Tap)  # 2
-    assert isinstance(eng.next(on_screen(["Item a"], name="two")), Tap)  # 3
+    press(eng, on_screen(["Item a", "Item b"]))  # 2
+    press(eng, on_screen(["Item a"], name="two"))  # 3
     assert eng.next(on_screen(["Item a"], name="three")) == Stop("max_actions")
 
 
@@ -697,12 +792,12 @@ def test_failed_dumps_do_not_count_as_actions() -> None:
     eng = started(Limits(actions=2))
     assert eng.next(failed()) == Reread()
     assert eng.next(failed()) == Reread()
-    assert isinstance(eng.next(on_screen(["Item a"])), Tap)  # the 2nd action
+    press(eng, on_screen(["Item a"]))  # the 2nd action
 
 
 def test_max_duration_uses_the_clock_in_the_observation() -> None:
     eng = started(Limits(minutes=2), started_at=1000.0)
-    assert isinstance(eng.next(on_screen(["Item a"], now=1119.9)), Tap)
+    press(eng, on_screen(["Item a"], now=1119.9))
     assert eng.next(on_screen(["Item a"], name="two", now=1120.0)) == Stop(
         "max_duration"
     )
@@ -780,7 +875,7 @@ def test_depth_numbers_follow_the_path() -> None:
 
 def test_a_screen_with_unknown_depth_gets_the_limit_and_nothing_is_pressed() -> None:
     eng = started(Limits(depth=3))
-    assert isinstance(eng.next(on_screen(["Item a"])), Tap)
+    press(eng, on_screen(["Item a"]))
     assert eng.next(on_screen([], name="leaf")) == Back()
     stranger = on_screen(["Item a", "Item b"], name="stranger")
     assert eng.next(stranger) == Back()
@@ -789,20 +884,18 @@ def test_a_screen_with_unknown_depth_gets_the_limit_and_nothing_is_pressed() -> 
 
 def test_the_smallest_known_depth_is_kept() -> None:
     eng = started(Limits(depth=5))
-    first = eng.next(on_screen(["Item a", "Item b"]))
-    assert isinstance(first, Tap)
+    press(eng, on_screen(["Item a", "Item b"]))
     mid = on_screen(["Item a", "Item b"], name="mid")
-    assert isinstance(eng.next(mid), Tap)  # mid is depth 2
+    press(eng, mid)  # mid is depth 2
     far = on_screen([], name="far")
     assert eng.next(far) == Back()  # far is depth 3
     assert eng.depth_of(far.screen.screen_id) == 3
-    assert isinstance(eng.next(mid), Tap)  # back on mid: the second button
+    press(eng, mid)  # back on mid: the second button
     assert eng.next(far) == Back()
     assert eng.depth_of(far.screen.screen_id) == 3
     assert eng.next(mid) == Back()
     start = on_screen(["Item a", "Item b"])
-    tap = eng.next(start)
-    assert isinstance(tap, Tap)  # the start screen's second button
+    press(eng, start)  # the start screen's second button
     assert eng.next(far) == Back()  # reached from depth 1: far is now depth 2
     assert eng.depth_of(far.screen.screen_id) == 2
 
@@ -810,13 +903,13 @@ def test_the_smallest_known_depth_is_kept() -> None:
 def test_dialogs_later_do_not_raise_the_known_depth_of_a_screen() -> None:
     eng = started(Limits(depth=5))
     root = on_screen(["Item a", "Item b"], name="root")
-    assert isinstance(eng.next(root), Tap)
+    press(eng, root)
     shared = on_screen([], name="shared")
     assert eng.next(shared) == Back()  # shared is depth 2
     assert eng.depth_of(shared.screen.screen_id) == 2
-    assert isinstance(eng.next(root), Tap)  # the second button
+    press(eng, root)  # the second button
     mid = on_screen(["Item a"], name="mid")
-    assert isinstance(eng.next(mid), Tap)  # mid is depth 2
+    press(eng, mid)  # mid is depth 2
     # the tap on mid opens shared with two dialogs over it: real length 3
     assert eng.next(off_screen(package=PERMISSION)) == Back()
     assert eng.next(off_screen(package=PERMISSION)) == Back()
@@ -833,17 +926,14 @@ def test_a_list_that_changes_text_keeps_different_rows_distinct() -> None:
     def rows(*labels):
         return on_screen(list(labels), name="list", rid="rows:id/row", cls=ROW)
 
-    first = eng.next(rows("Alpha", "Beta"))
-    assert isinstance(first, Tap)
+    first = press(eng, rows("Alpha", "Beta"))
     assert first.element_id == "e2"
     assert eng.next(on_screen([], name="leaf")) == Back()
-    second = eng.next(rows("Beta", "Gamma"))  # same screen id, Beta moved up
-    assert isinstance(second, Tap)
+    second = press(eng, rows("Beta", "Gamma"))  # same screen id, Beta moved up
     assert second.element_id == "e2"  # the same element id is not "tried"
     assert second.fingerprint != first.fingerprint
     assert eng.next(on_screen([], name="leaf")) == Back()
-    third = eng.next(rows("Beta", "Gamma"))
-    assert isinstance(third, Tap)
+    third = press(eng, rows("Beta", "Gamma"))
     assert third.element_id == "e3"
     assert eng.next(on_screen([], name="leaf")) == Back()
     assert eng.next(rows("Beta", "Gamma")) == Stop("exhausted")
@@ -855,8 +945,7 @@ def test_two_pressable_elements_with_one_fingerprint_try_only_the_first() -> Non
     def twin():
         return on_screen(["Same", "Same"], rid="x:id/same")
 
-    first = eng.next(twin())
-    assert isinstance(first, Tap)
+    first = press(eng, twin())
     assert first.element_id == "e2"
     assert eng.next(on_screen([], name="leaf")) == Back()
     assert eng.next(twin()) == Stop("exhausted")
@@ -918,7 +1007,7 @@ def test_fingerprints_cannot_be_confused_by_moving_text_between_fields() -> None
 def test_skipped_elements_are_recorded_once_with_their_reasons() -> None:
     eng = started()
     screen = on_screen(["Delete", "Item a"])
-    assert isinstance(eng.next(screen), Tap)
+    press(eng, screen)
     assert eng.next(on_screen([], name="leaf")) == Back()
     assert eng.next(screen) == Stop("exhausted")
     skipped = eng.records.skipped
@@ -944,6 +1033,7 @@ def planned_tap(labels=("Item a",)):
 def test_recheck_allows_the_same_element() -> None:
     eng, first, tap = planned_tap()
     assert eng.recheck(tap, first)
+    eng.tap_sent(tap)
     assert eng.records.skipped == ()
     assert eng.actions_sent == 2
 
@@ -1032,8 +1122,7 @@ def test_a_refused_tap_leaves_no_pending_transition_behind() -> None:
     eng, _first, tap = planned_tap()
     fresh = seen(_changed_screen(resource_id="x:id/y"))
     assert not eng.recheck(tap, fresh)
-    second = eng.next(fresh)
-    assert isinstance(second, Tap)
+    second = press(eng, fresh)
     assert eng.next(on_screen([], name="leaf")) == Back()
     transitions = eng.records.transitions
     assert [t.kind for t in transitions] == ["launch", "tap"]
@@ -1054,6 +1143,7 @@ def test_refusals_alternating_between_two_screens_still_reach_the_cap() -> None:
     action = eng.next(screen_a(0))
     assert isinstance(action, Tap)
     assert eng.recheck(action, screen_a(0))  # sent: the count is zero
+    eng.tap_sent(action)
     action = eng.next(screen_b(0))
     assert isinstance(action, Tap)  # b is depth 2
     sent = eng.actions_sent
@@ -1102,7 +1192,7 @@ def test_a_structure_that_changes_on_every_read_does_not_livelock() -> None:
 
 def test_refusals_on_an_inner_screen_end_with_back() -> None:
     eng = started()
-    assert isinstance(eng.next(on_screen(["Item a"])), Tap)
+    press(eng, on_screen(["Item a"]))
     action = eng.next(on_screen(["Timer"], name="inner", rid="x:id/r0"))
     for i in range(3):
         assert isinstance(action, Tap)
@@ -1124,6 +1214,7 @@ def test_an_allowed_recheck_resets_the_refusal_count() -> None:
     assert isinstance(action, Tap)
     same = on_screen(["Timer", "Item b"], rid="x:id/a2")
     assert eng.recheck(action, same)
+    eng.tap_sent(action)
 
 
 def test_recheck_judge_decides_again_on_the_fresh_screen() -> None:
@@ -1168,6 +1259,7 @@ def test_recheck_picks_the_first_pressable_twin() -> None:
     tap = eng.next(twin)
     assert isinstance(tap, Tap)
     assert eng.recheck(tap, twin)
+    eng.tap_sent(tap)
     # the twins swapped places: the first one now has the other one's bounds
     eng = started()
     tap = eng.next(twin)
@@ -1233,6 +1325,7 @@ def test_recheck_refuses_a_checkbox_that_became_checked() -> None:
     tap = eng.next(seen(unchecked))
     assert isinstance(tap, Tap)
     assert eng.recheck(tap, seen(unchecked))
+    eng.tap_sent(tap)
 
 
 @pytest.mark.parametrize(
@@ -1296,13 +1389,13 @@ def test_recheck_on_duplicate_element_ids_refuses_and_releases_the_tap() -> None
     eng = started()
     tap = eng.next(seen(good))
     assert isinstance(tap, Tap)
-    assert eng.actions_sent == 2
+    assert eng.actions_sent == 1  # a proposed tap is not counted
     assert not eng.recheck(tap, seen(bad))
-    assert eng.actions_sent == 1  # the reserved tap was released
+    assert eng.actions_sent == 1
     with pytest.raises(ValueError, match="allowed last"):
         eng.tap_sent(tap)
     # the engine goes on from the next good frame
-    assert isinstance(eng.next(seen(good)), Tap)
+    press(eng, seen(good))
 
 
 def test_an_oversized_screen_without_candidates_gets_its_skip_row() -> None:
@@ -1326,7 +1419,9 @@ def test_a_second_recheck_after_an_allowed_one_is_rejected() -> None:
     assert eng.recheck(tap, first)
     with pytest.raises(ValueError, match="last"):
         eng.recheck(tap, seen(_changed_screen(text="Other")))
-    assert eng.actions_sent == 2  # the sent tap stays counted
+    assert eng.actions_sent == 1  # allowed, but not counted before tap_sent
+    eng.tap_sent(tap)
+    assert eng.actions_sent == 2  # the sent tap is counted
 
 
 # -- determinism, actions, imports ---------------------------------------------
@@ -1537,7 +1632,7 @@ def test_p3_a_cycle_back_to_the_start_still_reaches_the_other_leaf() -> None:
 def test_a_back_that_returns_the_same_screen_leads_to_a_relaunch() -> None:
     eng = started()
     root = on_screen(["Item a"], name="root")
-    assert isinstance(eng.next(root), Tap)
+    press(eng, root)
     stuck = on_screen([], name="stuck")
     assert eng.next(stuck) == Back()
     assert eng.next(stuck) == Relaunch()  # the BACK did nothing
@@ -1548,7 +1643,7 @@ def test_a_back_that_returns_the_same_screen_leads_to_a_relaunch() -> None:
 def test_backs_that_alternate_between_two_screens_lead_to_a_relaunch() -> None:
     eng = started()
     root = on_screen(["Item a"], name="root")
-    assert isinstance(eng.next(root), Tap)
+    press(eng, root)
     first = on_screen([], name="first")
     second = on_screen([], name="second")
     assert eng.next(first) == Back()
@@ -1564,10 +1659,10 @@ def test_a_sent_tap_clears_the_screens_that_backs_landed_on() -> None:
     root = on_screen(["Item a", "Item b"], name="root")
     mid = on_screen(["Item a"], name="mid")
     leaf = on_screen([], name="leaf")
-    assert isinstance(eng.next(root), Tap)
+    press(eng, root)
     assert eng.next(leaf) == Back()
-    assert isinstance(eng.next(root), Tap)  # a tap: the set starts again
-    assert isinstance(eng.next(mid), Tap)
+    press(eng, root)  # a tap: the set starts again
+    press(eng, mid)
     assert eng.next(leaf) == Back()
     assert eng.next(mid) == Back()
     assert eng.next(root) == Stop("exhausted")
@@ -1610,8 +1705,8 @@ def test_an_off_target_back_is_not_a_navigation_back() -> None:
     root = on_screen(["Item a"], name="root")
     mid = on_screen(["Item a"], name="mid")
     leaf = on_screen([], name="leaf")
-    assert isinstance(eng.next(root), Tap)
-    assert isinstance(eng.next(mid), Tap)
+    press(eng, root)
+    press(eng, mid)
     assert eng.next(leaf) == Back()
     assert eng.next(mid) == Back()  # a navigation BACK landed on mid
     assert eng.next(off_screen()) == Back()  # the app was left; an off-target BACK
@@ -1624,7 +1719,7 @@ def test_an_off_target_back_is_not_a_navigation_back() -> None:
 def test_dialogs_over_a_new_target_screen_place_it_at_its_true_depth() -> None:
     eng = started(Limits(depth=3))
     root = on_screen(["Item a"], name="root")
-    assert isinstance(eng.next(root), Tap)
+    press(eng, root)
     # the tap opened a target screen with two dialogs over it
     assert eng.next(off_screen(package=PERMISSION)) == Back()
     assert eng.next(off_screen(package=PERMISSION)) == Back()
@@ -1733,14 +1828,14 @@ def test_the_keyboard_back_is_not_a_navigation_back() -> None:
     eng = started()
     assert eng.next(on_screen(["Item a"], keyboard=True)) == Back()
     # the same screen again without the keyboard: no relaunch
-    assert isinstance(eng.next(on_screen(["Item a"])), Tap)
+    press(eng, on_screen(["Item a"]))
 
 
 def test_the_keyboard_back_on_the_root_is_still_allowed() -> None:
     eng = started()
     root = on_screen(["Item a"], keyboard=True)
     assert eng.next(root) == Back()
-    assert isinstance(eng.next(on_screen(["Item a"])), Tap)
+    press(eng, on_screen(["Item a"]))
 
 
 def test_a_screen_with_the_roots_id_higher_up_gets_back_when_it_is_done() -> None:
@@ -1749,7 +1844,7 @@ def test_a_screen_with_the_roots_id_higher_up_gets_back_when_it_is_done() -> Non
     tap = eng.next(root)
     assert isinstance(tap, Tap)
     mid = on_screen(["Item a"], name="mid")
-    assert isinstance(eng.next(mid), Tap)
+    press(eng, mid)
     # mid links back to the root screen: path of 3, at the limit
     assert eng.next(root) == Back()
 
@@ -1776,6 +1871,7 @@ def test_the_same_observations_replayed_give_the_same_actions() -> None:
         action = first.next(observation)
         if isinstance(action, Tap):
             assert first.recheck(action, observation)
+            first.tap_sent(action)
         actions.append(action)
         if not isinstance(action, Stop):
             phone.send(action)
@@ -1785,6 +1881,7 @@ def test_the_same_observations_replayed_give_the_same_actions() -> None:
         action = second.next(observation)
         if isinstance(action, Tap):
             assert second.recheck(action, observation)
+            second.tap_sent(action)
         replay.append(action)
     assert replay == actions
     assert second.records == first.records
@@ -1927,6 +2024,7 @@ def test_a_refused_tap_on_a_deeper_screen_keeps_its_depth() -> None:
     tap = eng.next(root)
     assert isinstance(tap, Tap)
     assert eng.recheck(tap, root)
+    eng.tap_sent(tap)
     mid = on_screen(["a"], name="mid")
     tap = eng.next(mid)
     assert isinstance(tap, Tap)
@@ -1937,6 +2035,7 @@ def test_a_refused_tap_on_a_deeper_screen_keeps_its_depth() -> None:
     assert fresh.screen is not None
     assert eng.depth_of(fresh.screen.screen_id) == 2
     assert eng.recheck(action, fresh)
+    eng.tap_sent(action)
     leaf = on_screen(["z"], name="leaf")
     assert isinstance(eng.next(leaf), Back)  # the depth limit 3 binds
     assert leaf.screen is not None
@@ -1949,6 +2048,7 @@ def test_a_singleton_unknown_path_does_not_crash_the_recovery() -> None:
     tap = eng.next(root)
     assert isinstance(tap, Tap)
     assert eng.recheck(tap, root)
+    eng.tap_sent(tap)
     assert isinstance(eng.next(on_screen([], name="mid")), Back)
     assert isinstance(eng.next(on_screen([], name="unknown")), Back)
     assert isinstance(eng.next(on_screen([], name="mid")), Back)
@@ -2038,8 +2138,20 @@ class _ModelStack:
                 self.stack = None
 
 
+def _report_or_drop(eng, tap, model, drops):
+    """Report the allowed tap as sent, or (one time in five) drop it."""
+    if drops.random() < 0.8:
+        eng.tap_sent(tap)
+        model.sent("tap", tap.screen_id)
+        return True
+    return False
+
+
 def test_random_observation_sequences_never_raise_and_keep_the_rules() -> None:
     rng = random.Random(7_061_118)  # noqa: S311
+    # A separate stream decides which allowed taps the driver drops, so the
+    # observations drawn from ``rng`` do not shift.
+    drops = random.Random(5_310_007)  # noqa: S311
     for _ in range(600):
         limits = Limits(
             depth=rng.randint(1, 5),
@@ -2090,8 +2202,8 @@ def test_random_observation_sequences_never_raise_and_keep_the_rules() -> None:
                     check_tap(action, fresh, POLICY)
                     assert fresh.keyboard_shown is not True
                     assert fresh.now - 0.0 < limits.minutes * 60
-                    relaunches = 0
-                    model.sent("tap", action.screen_id)
+                    sent = _report_or_drop(eng, action, model, drops)
+                    relaunches = 0 if sent else relaunches
                 else:
                     assert eng.actions_sent <= limits.actions
                     if fresh.now >= limits.minutes * 60:
@@ -2126,6 +2238,7 @@ def test_recheck_refuses_at_the_deadline_and_cancels_the_tap() -> None:
 def test_recheck_just_before_the_deadline_still_allows_the_tap() -> None:
     eng, _first, tap = _timed()
     assert eng.recheck(tap, on_screen(["Item a"], now=59.5))
+    eng.tap_sent(tap)
     assert eng.actions_sent == 2
 
 
@@ -2198,6 +2311,7 @@ def test_an_unchanged_child_label_passes_recheck() -> None:
     tap = eng.next(first)
     assert isinstance(tap, Tap)
     assert eng.recheck(tap, seen(_row_screen("Item a")))
+    eng.tap_sent(tap)
 
 
 def test_a_moved_child_refuses_the_tap() -> None:
@@ -2230,6 +2344,7 @@ def test_rows_labelled_only_by_children_get_different_fingerprints_and_all_run()
     first = eng.next(observation)
     assert isinstance(first, Tap)
     assert eng.recheck(first, observation)
+    eng.tap_sent(first)
     # the tap led nowhere new: the same screen again, the second row is next
     second = eng.next(observation)
     assert isinstance(second, Tap)
@@ -2272,6 +2387,7 @@ def test_a_keyboard_that_returns_after_every_relaunch_never_backs_out_of_the_roo
         current = {"keyboard": with_keyboard, "full": full, "gone": gone}[state]
         if isinstance(action, Tap):
             assert eng.recheck(action, current)
+            eng.tap_sent(action)
             state = "full"
             current = full
         action = eng.next(current)
@@ -2298,7 +2414,7 @@ def test_an_off_target_back_landing_without_a_mark_is_the_same_frame() -> None:
 def test_a_keyboard_back_that_lands_on_the_screen_below_pops_the_top() -> None:
     eng = started()
     root = on_screen(["Item a"], name="root")
-    assert isinstance(eng.next(root), Tap)
+    press(eng, root)
     mid = on_screen(["Item a"], name="mid", keyboard=True)
     assert eng.next(mid) == Back()  # keyboard BACK on mid, path is [root, mid]
     assert len(eng._path) == 2
@@ -2321,11 +2437,11 @@ def test_a_keyboard_back_landing_replaces_the_top_in_place_and_keeps_the_depth()
         action = eng.next(observation)
         if isinstance(action, Tap):
             assert eng.recheck(action, observation)
+            eng.tap_sent(action)
             real += 1
     assert real == 3
     # the keyboard BACK; the screen comes back with the first row labels
-    action = eng.next(on_screen(["Go", "Two"], name="R"))
-    assert isinstance(action, Tap)
+    action = press(eng, on_screen(["Go", "Two"], name="R"))
     assert len(eng._path) == 3  # the real stack: R, A, R
     real += 1
     # the tap opens a screen at the real depth 4, the limit: nothing is pressed
@@ -2384,6 +2500,7 @@ def test_two_rows_labelled_by_children_are_both_tried_when_the_labels_change_too
     assert isinstance(second, Tap)
     assert second.element_id != first.element_id
     assert eng.recheck(second, seen(_row_screen("Wi-Fi 2", "Bluetooth", rows=2)))
+    eng.tap_sent(second)
     assert eng.next(seen(_row_screen("Wi-Fi 2", "Bluetooth", rows=2))) == Stop(
         "exhausted"
     )
@@ -2460,6 +2577,7 @@ def test_a_ticking_row_inside_a_list_does_not_block_the_other_rows() -> None:
             break
         assert isinstance(action, Tap)
         assert eng.recheck(action, seen(_row_screen(f"T {clock}x", "B", "C", rows=3)))
+        eng.tap_sent(action)
         taps.append(action.element_id)
     assert taps == ["e4", "e6"]
     assert action == Stop("exhausted")
@@ -2486,6 +2604,7 @@ def test_a_keyboard_after_a_navigation_back_does_not_resync_the_path() -> None:
     go = eng.next(root)
     assert isinstance(go, Tap)
     assert eng.recheck(go, root)
+    eng.tap_sent(go)
     assert eng.next(on_screen([], name="A")) == Back()  # navigation BACK
     shown = on_screen(["Go", "Two", "Extra"], name="R", keyboard=True)
     assert eng.next(shown) == Back()  # the keyboard BACK, not navigation
@@ -2493,6 +2612,7 @@ def test_a_keyboard_after_a_navigation_back_does_not_resync_the_path() -> None:
     assert isinstance(action, Tap)
     assert action.element_id == "e3"  # "Two"
     assert eng.recheck(action, root)
+    eng.tap_sent(action)
     assert len(eng._path) == 1
 
 
@@ -2502,6 +2622,7 @@ def test_a_refused_recheck_reread_below_the_top_pops_instead_of_a_back() -> None
     go = eng.next(root)
     assert isinstance(go, Tap)
     assert eng.recheck(go, root)
+    eng.tap_sent(go)
     inner = eng.next(on_screen(["x"], name="A"))
     assert isinstance(inner, Tap)
     assert not eng.recheck(inner, root)  # A closed by itself; R is shown
@@ -2536,6 +2657,7 @@ def test_label_only_refusals_in_a_row_on_an_inner_screen_end_with_a_back() -> No
     go = eng.next(root)
     assert isinstance(go, Tap)
     assert eng.recheck(go, root)
+    eng.tap_sent(go)
 
     def screen(index, tick):
         return seen(_row_screen(f"Synced {tick} s ago", name=f"i{index}"))
@@ -2557,6 +2679,7 @@ def _deferred_base():
     go = eng.next(root)
     assert isinstance(go, Tap)
     assert eng.recheck(go, root)
+    eng.tap_sent(go)
     assert eng.next(on_screen([], name="X")) == Back()  # navigation BACK
     return eng
 
@@ -2632,6 +2755,7 @@ def test_the_depth_limit_has_an_upper_bound() -> None:
     go = eng.next(root)
     assert isinstance(go, Tap)
     assert eng.recheck(go, root)
+    eng.tap_sent(go)
     assert eng.next(on_screen([], name="X")) == Back()
     assert isinstance(eng.next(on_screen(["Z"], name="Z")), Back | Tap)
 
@@ -2652,6 +2776,7 @@ def test_a_former_root_reached_by_back_is_not_a_root() -> None:
     tap = eng.next(a)
     assert isinstance(tap, Tap)
     assert eng.recheck(tap, a)
+    eng.tap_sent(tap)
     assert eng.next(off_screen()) == Back()
     assert eng.next(off_screen()) == Back()
     assert eng.next(off_screen()) == Relaunch()
@@ -2659,6 +2784,7 @@ def test_a_former_root_reached_by_back_is_not_a_root() -> None:
     tap = eng.next(c)
     assert isinstance(tap, Tap)
     assert eng.recheck(tap, c)
+    eng.tap_sent(tap)
     assert eng.next(on_screen([], name="D")) == Back()  # navigation BACK
     # the BACK lands on A, the former root: it is above the real root
     assert eng.next(a) == Back()
@@ -2670,13 +2796,14 @@ def test_a_former_root_reached_by_back_is_not_a_root() -> None:
 def _root_replaced_then_unpredicted_landing(eng, root):
     # The root was replaced in place. Then root -> X -> Y (navigation BACK) and
     # an unpredicted landing Z is left by BACK onto the root: it stays the root.
-    assert isinstance(eng.next(root), Tap)
-    assert isinstance(eng.next(on_screen(["x1"], name="X")), Tap)
+    press(eng, root)
+    press(eng, on_screen(["x1"], name="X"))
     assert eng.next(on_screen([], name="Y")) == Back()
     assert eng.next(on_screen([], name="Z")) == Back()
     last = eng.next(root)
     assert isinstance(last, Tap)  # the root still has its second element
     assert eng.recheck(last, root)
+    eng.tap_sent(last)
     assert eng.next(on_screen([], name="W")) == Back()
     assert eng.next(root) == Stop("exhausted")
 

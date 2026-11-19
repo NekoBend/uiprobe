@@ -41,10 +41,24 @@ under the stated limits below.
   (`Limits`). Every input counts as an action: the first launch, taps, BACKs
   and relaunches; a re-read sends nothing and does not count. The time limit
   uses the ``now`` the caller puts in each observation (seconds, monotonic).
-  Depth limits each path only: on a screen at the depth limit nothing is
-  pressed and the engine goes back; the whole crawl stops only at the action or
-  time limit. The engine keeps the stack of screens of the current path, and a
-  tap is allowed only while that stack is shorter than the depth limit.
+  The engine keeps the stack of screens of the current path, and a tap is
+  planned only while that stack is shorter than the depth limit: the depth
+  limit prevents another tap on the current path, it does not stop the crawl.
+  On a screen at the depth limit nothing is pressed and the engine sends BACK,
+  except on the root (path length 1, which is at the limit when the depth is
+  1), where it stops with ``exhausted``. The whole crawl stops at the action
+  or time limit, at an exhausted root, or for one of the other stop reasons.
+* Sent taps. A `Tap` from ``next`` is only a proposal: it is counted as an
+  action, recorded as a transition and allowed to move the path only when the
+  driver reports it with `CrawlEngine.tap_sent` after an allowed
+  `CrawlEngine.recheck`. When ``next`` is called with a tap it handed out still
+  unreported (dropped, never rechecked, refused or failed to send), that tap is
+  released: not counted, no transition, path unchanged; it stays marked tried
+  and, unless the re-check refused it, is recorded as skipped with the reason
+  ``tap_not_sent`` and counts toward ``MAX_REFUSALS`` like a refused re-check,
+  so a driver that never sends a tap still ends the crawl. Both `recheck` and
+  `tap_sent` accept only the very `Tap` instance ``next`` returned, never an
+  equal one.
 * Pressing. The engine presses only an element that
   `uiprobe.guards.judge` put in ``pressable`` for that exact observation, at
   the point judge gave; judge runs on every target observation where the
@@ -146,11 +160,12 @@ under the stated limits below.
   marked tried, and the action is not counted. After 3 refusals in a row
   (``MAX_REFUSALS``), counted across all screens (for example a structure that
   changes on every read, even when two screens alternate), nothing more is
-  pressed until an action is actually sent (an allowed recheck, a BACK, a
-  relaunch). The count is not reset by anything else, so a clock that does not
-  move cannot keep it going: on the root the engine stops with ``exhausted``,
-  elsewhere it sends BACK. Refusals because only labels changed (below) are not
-  counted here.
+  pressed until an action is actually sent (a tap reported with
+  `CrawlEngine.tap_sent`, a BACK, a relaunch); an allowed re-check whose tap is
+  not reported does not reset it. The count is not reset by anything else, so
+  a clock that does not move cannot keep it going: on the root the engine
+  stops with ``exhausted``, elsewhere it sends BACK. Refusals because only
+  labels changed (below) are not counted here.
 * Volatile elements. When a refusal happens because only labels changed (the
   fresh screen has the same screen id and an element with the same classes and
   resource ids for itself, its descendants and its ancestors, and the same
@@ -162,10 +177,11 @@ under the stated limits below.
   ``MAX_REFUSALS``; they have their own bound: at most ``MAX_VOLATILE`` (10)
   volatile keys per screen id, after which that screen has nothing left to
   press (BACK, or ``exhausted`` on the root). A second bound counts label-only
-  refusals in a row across all screens, reset only when an action is sent (an
-  allowed recheck, a BACK or a relaunch); at ``MAX_VOLATILE`` the current
-  screen has nothing left to press either, so a screen id that changes on every
-  read cannot keep the crawl going on a frozen clock.
+  refusals in a row across all screens, reset only when an action is sent (a
+  tap reported with `CrawlEngine.tap_sent`, a BACK or a relaunch); at
+  ``MAX_VOLATILE`` the current screen has nothing left to press either, so a
+  screen id that changes on every read cannot keep the crawl going on a frozen
+  clock.
 * Order. Candidates are tried in document order, depth first: tap the first
   untried candidate, and when none is left press BACK (or stop with
   ``exhausted`` on the root).
@@ -248,6 +264,7 @@ __all__ = [
     "MAX_RELAUNCHES",
     "MAX_VOLATILE",
     "RELAUNCH_LIMIT",
+    "TAP_NOT_SENT",
     "Action",
     "Back",
     "CrawlEngine",
@@ -280,6 +297,9 @@ DUMP_FAILED_REPEATEDLY: Final = "dump_failed_repeatedly"
 CHANGED_BEFORE_PRESS: Final = "changed_before_press"
 # The reason recorded once for an element whose labels change on every read.
 LABEL_CHANGES: Final = "label_changes"
+# The reason recorded for a tap that next() handed out and the driver never
+# reported as sent with `CrawlEngine.tap_sent`.
+TAP_NOT_SENT: Final = "tap_not_sent"
 
 # BACKs in a row off target before the app is relaunched; relaunches in a row
 # without a sent tap before the crawl stops; failed dumps in a row before
@@ -472,9 +492,9 @@ class Transition:
 @dataclass(frozen=True, slots=True)
 class SkippedElement:
     """An element that was not pressed, and why (reasons of judge,
-    ``changed_before_press`` or ``label_changes``). A screen judge does not
-    judge (``screen_too_large``) has one row for the whole screen, with the
-    screen id as its fingerprint."""
+    ``changed_before_press``, ``label_changes`` or ``tap_not_sent``). A screen
+    judge does not judge (``screen_too_large``) has one row for the whole
+    screen, with the screen id as its fingerprint."""
 
     screen_id: str
     fingerprint: str
@@ -743,8 +763,7 @@ class CrawlEngine:
             raise RuntimeError(msg)
         if self._stop is not None:
             return self._stop
-        self._planned = None
-        self._approved = None
+        self._drop_unsent_tap()
         was_keyboard_back = self._keyboard_back
         screen = observation.screen
         if screen is not None and not _ids_unique(screen):
@@ -776,9 +795,11 @@ class CrawlEngine:
         """Say whether `tap` may be sent, judging the fresh observation.
 
         Call it right after `next` returned the tap, with a screen read just
-        before pressing. True: send the tap, then call `tap_sent`. False: do
-        not send it, the action
-        is not counted, and the next step comes from `next`. There are two kinds
+        before pressing, passing the very `Tap` instance `next` returned (an
+        equal tap from elsewhere is refused). True: send the tap, then call
+        `tap_sent`; nothing is counted or reset until then. False: do not send
+        it, nothing is counted, and the next step comes from `next`. There are
+        two kinds
         of refusal. At or past the deadline the reserved tap is cancelled: it is
         not recorded as skipped and not marked tried, and `next` stops with
         ``max_duration``. Any other refusal records the element as skipped
@@ -787,10 +808,10 @@ class CrawlEngine:
         (see the module docstring).
 
         Raises:
-            ValueError: `tap` is not the tap `next` returned last.
+            ValueError: `tap` is not the instance `next` returned last.
         """
         planned = self._planned
-        if planned is None or planned.tap != tap:
+        if planned is None or planned.tap is not tap:
             msg = "tap is not the tap that next() returned last"
             raise ValueError(msg)
         self._planned = None
@@ -798,17 +819,11 @@ class CrawlEngine:
             # Time is up: the reserved tap is cancelled, not refused, and the
             # next call of next() stops the crawl.
             self._expired = True
-            self._pending = None
-            self._sent -= 1
             self._tried.discard((tap.screen_id, tap.fingerprint))
             return False
         if self._press_allowed(planned, observation):
-            self._refused = 0
-            self._label_run = 0
             self._approved = tap
             return True
-        self._pending = None
-        self._sent -= 1
         self._tried.add((tap.screen_id, tap.fingerprint))
         self._add_skip(tap.screen_id, tap.fingerprint, (CHANGED_BEFORE_PRESS,))
         if self._only_labels_changed(planned, observation):
@@ -830,23 +845,48 @@ class CrawlEngine:
         """Note that `tap` was really sent to the device.
 
         Call it once, right after sending a tap that `recheck` allowed and
-        before the next observation. Only this ends the run of relaunches in a
-        row (see Range in the module docstring) and the watch for BACKs that go
-        round in circles; a tap that was dropped, refused or failed to send must
-        not be reported here.
+        before the next observation, passing the very `Tap` instance `next`
+        returned (an equal tap from elsewhere is refused). Only this counts the
+        tap as an action, records its transition (settled by the next
+        observation), lets it move the path, and ends the runs of relaunches,
+        refused re-checks and label-only refusals and the watch for BACKs that
+        go round in circles. A tap that was dropped, refused or failed to send
+        must not be reported here; `next` releases it.
 
         Raises:
-            ValueError: `tap` is not the tap `recheck` allowed last, or it was
-                reported already, or `next` was called since.
+            ValueError: `tap` is not the instance `recheck` allowed last, or it
+                was reported already, or `next` was called since.
         """
-        if self._approved is None or self._approved != tap:
+        if self._approved is None or self._approved is not tap:
             msg = "tap is not the tap that recheck() allowed last"
             raise ValueError(msg)
         self._approved = None
+        self._sent += 1
+        self._pending = _Pending(
+            self._sent, "tap", tap.screen_id, tap.fingerprint, tap.point
+        )
         self._relaunches = 0
+        self._refused = 0
+        self._label_run = 0
         self._landed.clear()
 
     # -- internals ----------------------------------------------------------------
+
+    def _drop_unsent_tap(self) -> None:
+        # A tap handed out by next() (rechecked or not) that was never reported
+        # with tap_sent was not sent: it is not counted, has no transition and
+        # leaves the path alone. It stays marked tried, so it is not picked
+        # again forever, and it is recorded as skipped with TAP_NOT_SENT. It
+        # counts toward MAX_REFUSALS, so a driver that never sends cannot keep
+        # the crawl going without counted actions.
+        unsent = self._approved
+        if unsent is None and self._planned is not None:
+            unsent = self._planned.tap
+        self._planned = None
+        self._approved = None
+        if unsent is not None:
+            self._refused += 1
+            self._add_skip(unsent.screen_id, unsent.fingerprint, (TAP_NOT_SENT,))
 
     def _is_target(self, screen: Screen, observation: Observation) -> bool:
         return (
@@ -1139,10 +1179,10 @@ class CrawlEngine:
 
     def _send_tap(self, sid: str, plan: _Plan) -> Tap:
         tap = plan.tap
+        # Nothing is counted and nothing is pending until tap_sent reports
+        # that the tap was really sent.
         self._tried.add((sid, tap.fingerprint))
         self._planned = plan
-        self._sent += 1
-        self._pending = _Pending(self._sent, "tap", sid, tap.fingerprint, tap.point)
         return tap
 
     def _add_skip(self, sid: str, fingerprint: str, reasons: tuple[str, ...]) -> None:
