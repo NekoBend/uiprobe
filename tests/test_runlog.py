@@ -16,7 +16,7 @@ from pathlib import Path
 
 import pytest
 
-from uiprobe import runlog
+from uiprobe import pngfile, runlog
 from uiprobe.crawl import Limits
 from uiprobe.errors import UiprobeError
 from uiprobe.model import Bounds, Element, Screen
@@ -182,6 +182,114 @@ def test_limits_may_be_a_plain_dict_and_the_time_defaults_to_now(tmp_path):
     assert data["limits"] == {"depth": 2, "actions": 9, "minutes": 1}
     stamp = datetime.fromisoformat(data["started_at"])
     assert stamp.utcoffset() is not None
+
+
+def _create(path) -> RunWriter:
+    writer = RunWriter.create(
+        path, package="p", limits=Limits(), deny_words=[], serial="s"
+    )
+    _WRITERS.append(writer)
+    return writer
+
+
+def test_an_existing_folder_is_named_in_the_message(tmp_path):
+    (tmp_path / "run").mkdir()
+    with pytest.raises(RunFolderError, match="already exists; give a new folder"):
+        make(tmp_path)
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["run:x", "run::$INDEX_ALLOCATION", "dir:x/run"],
+    ids=["named", "type", "parent"],
+)
+def test_on_windows_a_stream_path_is_refused(tmp_path, monkeypatch, name):
+    monkeypatch.setattr(pngfile, "_WINDOWS", True)
+    with pytest.raises(RunFolderError, match="names a stream") as raised:
+        _create(tmp_path / name)
+    assert raised.value.details["path"] == str(tmp_path / name)
+    assert names(tmp_path) == []
+
+
+@pytest.mark.parametrize("kind", ["file", "folder"])
+def test_on_windows_a_stream_of_an_existing_entry_is_refused(
+    tmp_path, monkeypatch, kind
+):
+    target = tmp_path / "base"
+    if kind == "file":
+        target.write_bytes(b"mine")
+    else:
+        target.mkdir()
+    before = target.stat().st_mtime_ns
+    monkeypatch.setattr(pngfile, "_WINDOWS", True)
+    with pytest.raises(RunFolderError, match="names a stream"):
+        _create(f"{target}:x")
+    assert names(tmp_path) == ["base"]
+    assert target.stat().st_mtime_ns == before
+    if kind == "file":
+        assert target.read_bytes() == b"mine"
+
+
+@pytest.mark.skipif(os.name != "nt", reason="streams exist on Windows")
+@pytest.mark.parametrize("kind", ["file", "folder"])
+def test_on_this_windows_a_stream_run_folder_is_not_made(tmp_path, kind):
+    target = tmp_path / "base"
+    if kind == "file":
+        target.write_bytes(b"mine")
+    else:
+        target.mkdir()
+    stream = f"{target}:x"
+    with pytest.raises(RunFolderError, match="names a stream"):
+        _create(stream)
+    with pytest.raises(FileNotFoundError):
+        os.stat(stream)  # noqa: PTH116
+    assert names(tmp_path) == ["base"]
+
+
+def test_elsewhere_a_colon_is_part_of_the_folder_name(tmp_path, monkeypatch):
+    monkeypatch.setattr(pngfile, "_WINDOWS", False)
+    if os.name == "nt":
+        pytest.skip("Windows names a stream with a colon")
+    _create(tmp_path / "run:x").close()
+    assert (tmp_path / "run:x" / "run-start.json").is_file()
+
+
+def test_a_null_character_is_refused(tmp_path):
+    with pytest.raises(RunFolderError, match="null"):
+        _create(f"{tmp_path}{os.sep}r\x00un")
+    assert names(tmp_path) == []
+
+
+def test_a_broken_link_is_refused(tmp_path):
+    link = tmp_path / "run"
+    try:
+        link.symlink_to(tmp_path / "missing", target_is_directory=True)
+    except OSError:
+        pytest.skip("this system cannot make a link here")
+    with pytest.raises(RunFolderError, match="already exists"):
+        _create(link)
+    assert not (tmp_path / "missing").exists()
+
+
+def test_a_path_that_cannot_be_looked_up_is_not_taken_as_missing(tmp_path, monkeypatch):
+    target = tmp_path / "run"
+    real = os.lstat
+    made = []
+
+    def lstat(path, *args, **kwargs):
+        if os.fspath(path) == str(target):
+            raise PermissionError(errno.EACCES, "Permission denied", str(target))
+        return real(path, *args, **kwargs)
+
+    with monkeypatch.context() as scoped:  # os is global: keep the patch short
+        scoped.setattr(pngfile.os, "lstat", lstat)
+        scoped.setattr(runlog, "_make_dir", made.append)
+        with pytest.raises(RunFolderError, match="cannot check") as raised:
+            _create(target)
+    assert raised.value.details == {"path": str(target)}
+    assert "Permission denied" in raised.value.message
+    assert made == []
+    assert names(tmp_path) == []
 
 
 # --- transitions ---

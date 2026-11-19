@@ -50,6 +50,7 @@ from uiprobe._json import dumps
 from uiprobe.crawl import Limits
 from uiprobe.errors import UiprobeError
 from uiprobe.model import Element, Screen, _name, _quote
+from uiprobe.pngfile import check_new_path
 
 if TYPE_CHECKING:
     from collections.abc import Generator, Iterable, Mapping, Sequence
@@ -294,10 +295,16 @@ class RunWriter:
         and ``minutes``. `deny_words` are the words in use, written in the
         given order. `started_at` must carry a time zone (default: now).
 
+        Before anything is made, `out` gets the checks of
+        `uiprobe.pngfile.check_new_path`: it must not be empty, hold a null
+        character or, on Windows, name a stream of a file or folder (a colon
+        after the drive), and nothing may be at it, a broken link included.
+
         Raises:
-            RunFolderError: `out` exists, its parent is missing, or the first
-                file cannot be written. Nothing is written in the first two
-                cases; no parent is ever created.
+            RunFolderError: `out` fails those checks, whether something is at
+                it cannot be told (``cannot check``), its parent is missing,
+                or the first file cannot be written. Nothing is written in the
+                first three cases; no parent is ever created.
             TypeError, ValueError: an argument is wrong; nothing is written.
         """
         _check_text("package", package)
@@ -315,6 +322,21 @@ class RunWriter:
             "device": {"serial": serial},
         }
         text = _json_text(record, indent=2) + "\n"
+        details = {"path": str(path)}
+        try:
+            check_new_path(str(path))
+        except FileExistsError as error:
+            msg = (
+                f"cannot make the run folder {path}: already exists; give a new"
+                " folder name"
+            )
+            raise RunFolderError(msg, details=details) from error
+        except ValueError as error:
+            msg = f"cannot make the run folder {path}: {error}"
+            raise RunFolderError(msg, details=details) from error
+        except OSError as error:
+            msg = f"cannot check {path}: {error.strerror or error}"
+            raise RunFolderError(msg, details=details) from error
         try:
             _make_dir(path)
         except OSError as error:
