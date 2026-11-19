@@ -382,7 +382,8 @@ class FakeAndroid:
             re.compile(
                 "^am start -n (?:" + "|".join(re.escape(c) for c in components) + r")\Z"
             ),
-            re.compile(rf"^am force-stop (?:{monkey})\Z"),
+            # ``uiprobe launch --restart`` sends the stop in the marker form.
+            re.compile(rf"^am force-stop (?:{monkey}); echo uiprobe-exit:\$\?\Z"),
         ]
         if extra:
             missing = "|".join(re.escape(p) for p in extra)
@@ -481,6 +482,8 @@ class FakeAndroid:
         self.launch_in_front = True
         # Packages stopped with ``am force-stop``, in order.
         self.stopped: list[str] = []
+        # Packages whose task a stop removed while all screens were theirs.
+        self._gone: set[str] = set()
         self.dropped: list[str] = []
         self.dropped_at: list[int] = []
         self.props = {"ro.build.version.sdk": str(api), "ro.kernel.qemu": "1"}
@@ -493,8 +496,8 @@ class FakeAndroid:
         # Replaces the text of ``dumpsys window displays`` when not None.
         self.displays_output: str | None = None
         self._drop_after: set[int] = set()
-        self._input_status = 0
-        self._input_marker = True
+        # What input commands in the marker form answer (see answer_input).
+        self._input_status, self._input_marker = 0, True
         self._input_output = ""
         self._server = server
         self._lock = threading.RLock()
@@ -759,14 +762,17 @@ class FakeAndroid:
     def _stop(self, package: str) -> None:
         """Remove the screens of `package` from the stack (``am force-stop``).
 
-        The fake has no home screen, so a stack that would become empty is left
-        as it is.
+        The fake has no home screen, so a stack that would become empty keeps
+        its screens on show, but the task is gone: the next launch of the
+        package starts it fresh from its first screen.
         """
         self.stopped.append(package)
         kept = [n for n in self.stack if self.screens[n].package != package]
         if kept:
             self.stack = kept
             self._keyboard_hidden = False
+        else:
+            self._gone.add(package)
 
     def _launch(self, package: str, component: str | None = None) -> bool:
         """Bring a package, or one component of it, to the front.
@@ -786,6 +792,12 @@ class FakeAndroid:
 
         if not any(wanted(screen) for screen in self.screens.values()):
             return False  # an unknown activity fails even if the app runs
+        if package in self._gone:
+            self._gone.discard(package)
+            first = next(s.name for s in self.screens.values() if wanted(s))
+            self.stack = [first]
+            self._keyboard_hidden = False
+            return True
         owned = [
             i
             for i, name in enumerate(self.stack)

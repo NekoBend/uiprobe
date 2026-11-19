@@ -20,7 +20,7 @@ from uiprobe.adb import (
     resolve_server_address,
     start_blocked_by_environment,
 )
-from uiprobe.crawl_preview import check_package
+from uiprobe.crawl_preview import MAX_PACKAGE_LENGTH, check_package
 from uiprobe.errors import (
     AdbError,
     AdbServerUnavailableError,
@@ -64,6 +64,7 @@ DEFAULT_LAUNCH_TIMEOUT: Final = 10.0
 LAUNCH_POLL_INTERVAL: Final = 0.5
 MAX_LAUNCH_TIMEOUT: Final = 600.0
 _EVENTS_INJECTED = re.compile(r"Events injected: ([0-9]+)")
+_NO_ACTIVITIES: Final = "** No activities found"
 DUMP_DIRECTORY: Final = "/data/local/tmp"
 DUMP_MESSAGE_LIMIT: Final = 500
 # `uiautomator dump` prints nothing until it finishes, and on an animating
@@ -517,15 +518,27 @@ def _key_code(name: object, refused: RefusedKeys | None = None) -> str:
 
 
 def _check_launch_timeout(timeout: object) -> float:
+    """Return `timeout` as a float, read through the base type's own method.
+
+    An int or float subclass cannot change the value checked here: the
+    number is converted first, with ``int.__float__`` or ``float.__float__``,
+    and the converted value is the one checked and used.
+    """
     if isinstance(timeout, bool) or not isinstance(timeout, int | float):
         msg = f"timeout must be a number, not {type(timeout).__name__}"
         raise TypeError(msg)
-    if not 0 <= timeout <= MAX_LAUNCH_TIMEOUT:  # also false for NaN
-        msg = (
-            f"timeout must be from 0 to {MAX_LAUNCH_TIMEOUT:g} seconds, not {timeout!r}"
+    try:
+        value = (
+            float.__float__(timeout)
+            if isinstance(timeout, float)
+            else int.__float__(timeout)
         )
+    except OverflowError:
+        value = float("inf")
+    if not 0 <= value <= MAX_LAUNCH_TIMEOUT:  # also false for NaN
+        msg = f"timeout must be from 0 to {MAX_LAUNCH_TIMEOUT:g} seconds, not {value!r}"
         raise ValueError(msg)
-    return float(timeout)
+    return value
 
 
 def _escaped(text: str, limit: int = 200) -> str:
@@ -533,9 +546,17 @@ def _escaped(text: str, limit: int = 200) -> str:
     return ascii(text[:limit])[1:-1]
 
 
+def _lines(text: str) -> list[str]:
+    """Split shell output at line feeds only, dropping one CR before each."""
+    return [line.removesuffix("\r") for line in text.split("\n")]
+
+
 def _escaped_line(text: str) -> str:
-    """Return the first non-empty line of `text`, cut and escaped."""
-    lines = (line.strip() for line in text.splitlines())
+    """Return the first line of `text` that is not blank, cut and escaped.
+
+    Spaces and tabs around it are removed; a line made only of them is blank.
+    """
+    lines = (line.strip(" \t") for line in _lines(text))
     return _escaped(next((line for line in lines if line), ""))
 
 
@@ -1297,15 +1318,22 @@ class Device:
     ) -> None:
         """Start the app `package` and wait until it is in front.
 
-        With ``restart=True`` the command ``am force-stop PACKAGE`` is sent
-        first. It stops the app, so the next launch starts a fresh task; state
-        the app has not saved is lost. Then exactly ``monkey -p PACKAGE -c
-        android.intent.category.LAUNCHER 1`` is sent (no other monkey option,
-        and always a count of 1). Monkey must print the line ``Events
-        injected: 1``. The command is sent once and never resent, not even
-        after a connection error. Then `foreground` is read about every 0.5
-        seconds until it equals `package`, for at most `timeout` seconds (it is
-        read at least once).
+        With ``restart=True`` the command ``am force-stop PACKAGE; echo
+        uiprobe-exit:$?`` is sent first. It stops the app, so the next launch
+        starts a fresh task; state the app has not saved is lost. It must
+        report exit status 0 and print nothing else, or nothing more is sent.
+        Then exactly ``monkey -p PACKAGE -c android.intent.category.LAUNCHER
+        1`` is sent (no other monkey option, and always a count of 1). Monkey
+        must print the line ``Events injected: 1`` exactly once. Each command
+        is sent once and never resent, not even after a connection error.
+
+        Then `foreground` is read about every 0.5 seconds until it equals
+        `package`. It is read at least once, and no read starts after
+        `timeout` seconds have passed: the timeout bounds when the last read
+        may start, so the whole wait can last up to the timeout plus the time
+        of one read.
+
+        A str subclass is used as a plain str with the same text.
 
         Raises:
             TypeError: `package` is not a str, `restart` is not a bool, or
@@ -1315,9 +1343,13 @@ class Device:
                 not from 0 to 600 seconds. Both are raised before the adb
                 server is contacted.
             LaunchFailedError: ``details`` hold ``package`` and ``reason``:
-                ``not_installed_or_no_launcher`` (monkey found no launcher
-                activity), ``unexpected_output`` (monkey did not report exactly
-                one injected event; ``output`` is its first line, escaped) or
+                ``stop_failed`` (``am force-stop`` did not report success;
+                ``exit_status`` when it reported a status other than 0,
+                ``output`` when it printed something else, escaped; monkey
+                was not sent), ``not_installed_or_no_launcher`` (monkey found
+                no launcher activity), ``unexpected_output`` (monkey did not
+                report exactly one injected event; ``output`` is its first
+                line that is not blank, stripped and escaped) or
                 ``not_in_front`` (the app was not the foreground app in time;
                 ``foreground`` is the last package seen, or None, and
                 ``timeout`` the limit). The app may still have started.
@@ -1327,29 +1359,46 @@ class Device:
             DeviceOfflineError: The device is offline.
             DeviceUnauthorizedError: The device has not authorized this host.
         """
-        check_package(package)
+        if isinstance(package, str):
+            package = str.__str__(package)  # a plain str, whatever the subclass
+        package = check_package(package)
         if not isinstance(restart, bool):
             msg = f"restart must be a bool, not {type(restart).__name__}"
             raise TypeError(msg)
         limit = _check_launch_timeout(timeout)
+        details: dict[str, object] = {"package": package}
         if restart:
-            self._shell(quote_args("am", "force-stop", package))
+            stop = self._shell(quote_args("am", "force-stop", package) + _EXIT_SUFFIX)
+            failure = _input_failure("force-stop", {}, stop)
+            if failure is not None:
+                details["reason"] = "stop_failed"
+                if "exit_status" in failure.details:
+                    details["exit_status"] = failure.details["exit_status"]
+                output = failure.details.get("output")
+                if isinstance(output, str):
+                    details["output"] = _escaped(output)
+                msg = (
+                    f"am force-stop {package} did not report success, so the app"
+                    " was not launched"
+                )
+                raise LaunchFailedError(msg, details=details)
         output = self._shell(
             quote_args(
                 "monkey", "-p", package, "-c", "android.intent.category.LAUNCHER", "1"
             )
         )
-        details: dict[str, object] = {"package": package}
-        if "No activities found" in output:
-            details["reason"] = "not_installed_or_no_launcher"
-            msg = f"{package} has no launcher activity (not installed, or it has none)"
-            raise LaunchFailedError(msg, details=details)
+        lines = [line.strip(" \t") for line in _lines(output)]
         counts = [
-            m.group(1)
-            for line in output.splitlines()
-            if (m := _EVENTS_INJECTED.fullmatch(line.strip()))
+            m.group(1) for line in lines if (m := _EVENTS_INJECTED.fullmatch(line))
         ]
         if counts != ["1"]:
+            if any(line.startswith(_NO_ACTIVITIES) for line in lines):
+                details["reason"] = "not_installed_or_no_launcher"
+                msg = (
+                    f"{package} has no launcher activity (not installed, or it has"
+                    " none)"
+                )
+                raise LaunchFailedError(msg, details=details)
             first = _escaped_line(output)
             details["reason"] = "unexpected_output"
             details["output"] = first
@@ -1362,11 +1411,12 @@ class Device:
             seen = self.foreground()
             if seen == package:
                 return
-            remaining = deadline - self._clock()
-            if remaining <= 0:
+            if self._clock() >= deadline:
                 break
-            self._sleep(min(LAUNCH_POLL_INTERVAL, remaining))
-        shown = None if seen is None else _escaped(seen)
+            self._sleep(max(0.0, min(LAUNCH_POLL_INTERVAL, deadline - self._clock())))
+            if self._clock() > deadline:
+                break  # no read starts after the deadline
+        shown = None if seen is None else _escaped(seen, MAX_PACKAGE_LENGTH)
         details.update(reason="not_in_front", foreground=shown, timeout=limit)
         last = "unknown" if shown is None else shown
         msg = f"{package} was not in front after {limit:g} seconds (foreground: {last})"

@@ -24,7 +24,7 @@ SERIAL = "emulator-5554"
 SHOP = "com.example.shop"
 MISSING = "com.example.missing"
 MONKEY = f"monkey -p {SHOP} -c android.intent.category.LAUNCHER 1"
-STOP = f"am force-stop {SHOP}"
+STOP = f"am force-stop {SHOP}; echo uiprobe-exit:$?"
 
 SCREENS = (
     Screen("launcher", "com.example.launcher/.Home", (El((0, 0, 320, 640)),)),
@@ -181,12 +181,21 @@ def test_launch_accepts_padding_around_the_events_line(device, android):
     device.launch(SHOP)
 
 
-def test_launch_timeout_zero_reads_once(device, android, clock):
+def test_launch_timeout_zero_reads_once(device, android, clock, monkeypatch):
     android.launch_in_front = False
+    reads = []
+    real = device.foreground
+
+    def counted() -> str | None:
+        reads.append(clock.now)
+        return real()
+
+    monkeypatch.setattr(device, "foreground", counted)
     with pytest.raises(LaunchFailedError) as info:
         device.launch(SHOP, timeout=0)
     assert info.value.details["reason"] == "not_in_front"
     assert clock.pauses == []
+    assert reads == [1000.0]
 
 
 def test_launch_last_pause_is_cut_to_the_deadline(device, android, clock):
@@ -337,6 +346,207 @@ def test_launch_refuses_bad_options_before_any_request(device, fake_adb, kwargs,
     assert fake_adb.requests == before
 
 
+# --- the stop of restart ---
+
+
+@pytest.mark.parametrize(
+    ("answer", "extra"),
+    [
+        ({"status": 1}, {"exit_status": 1}),
+        ({"status": 255, "output": "Error\n"}, {"exit_status": 255, "output": "Error"}),
+        ({"output": "Permission denied\n"}, {"output": "Permission denied"}),
+        ({"output": "bad\x1b[2J\n"}, {"output": "bad\\x1b[2J"}),
+        ({"marker": False}, {}),
+    ],
+)
+def test_restart_stop_failure_sends_no_monkey(device, android, fake_adb, answer, extra):
+    android.show("main")
+    android.answer_input(**answer)
+    before = len(fake_adb.commands)
+    with pytest.raises(LaunchFailedError) as info:
+        device.launch(SHOP, restart=True)
+    assert info.value.details == {"package": SHOP, "reason": "stop_failed", **extra}
+    assert info.value.exit_code == 15
+    assert sent(fake_adb, before) == [STOP]
+    assert not any(c.startswith("monkey") for _, _, c in fake_adb.commands)
+    assert "\x1b" not in info.value.message
+
+
+def test_restart_starts_fresh_when_every_screen_is_the_app(device, android):
+    android.show("main")
+    android.show("detail")
+    android.stack = ["main", "detail"]  # no screen of another app below
+    device.launch(SHOP, restart=True)
+    assert android.stack == ["main"]
+    assert android.screen.name == "main"
+
+
+# --- the deadline ---
+
+
+class _Reads:
+    """A foreground that records when each read starts."""
+
+    def __init__(self, clock: Clock, answer, *, takes: float = 0.0) -> None:
+        self.clock = clock
+        self.answer = answer
+        self.takes = takes
+        self.started: list[float] = []
+
+    def __call__(self) -> str | None:
+        self.started.append(self.clock.now)
+        self.clock.now += self.takes
+        return self.answer(self.clock.now)
+
+
+@pytest.mark.usefixtures("android")
+def test_a_read_that_starts_at_the_deadline_counts(device, clock, monkeypatch):
+    reads = _Reads(clock, lambda now: SHOP if now >= 1001.0 else "com.example.launcher")
+    monkeypatch.setattr(device, "foreground", reads)
+    device.launch(SHOP, timeout=1)
+    assert reads.started == [1000.0, 1000.5, 1001.0]
+
+
+@pytest.mark.usefixtures("android")
+def test_no_read_starts_after_the_deadline(device, clock, monkeypatch):
+    def oversleep(seconds: float) -> None:
+        clock.pauses.append(seconds)
+        clock.now += seconds + 0.25  # the pause runs late
+
+    monkeypatch.setattr(device, "_sleep", oversleep)
+    # The app would be in front from 1001.0 on, but no read starts after it.
+    reads = _Reads(clock, lambda now: SHOP if now > 1001.0 else "com.example.launcher")
+    monkeypatch.setattr(device, "foreground", reads)
+    with pytest.raises(LaunchFailedError) as info:
+        device.launch(SHOP, timeout=1)
+    assert info.value.details["reason"] == "not_in_front"
+    assert reads.started == [1000.0, 1000.75]
+    assert clock.pauses == [0.5, 0.25]
+
+
+@pytest.mark.usefixtures("android")
+def test_a_slow_read_started_in_time_counts(device, clock, monkeypatch):
+    reads = _Reads(clock, lambda _now: SHOP, takes=2.0)
+    monkeypatch.setattr(device, "foreground", reads)
+    device.launch(SHOP, timeout=1)
+    assert reads.started == [1000.0]
+    assert clock.pauses == []
+
+
+@pytest.mark.usefixtures("android")
+def test_a_slow_read_past_the_deadline_ends_the_wait(device, clock, monkeypatch):
+    reads = _Reads(clock, lambda _now: "com.example.launcher", takes=2.0)
+    monkeypatch.setattr(device, "foreground", reads)
+    with pytest.raises(LaunchFailedError):
+        device.launch(SHOP, timeout=1)
+    assert reads.started == [1000.0]
+    assert clock.pauses == []
+
+
+# --- monkey output ---
+
+
+def test_a_quoted_no_activities_line_does_not_beat_success(device, android):
+    android.override(
+        re.compile(r"^monkey"),
+        b"  bash arg: ** No activities found\nEvents injected: 1\n",
+    )
+    android.show("main")
+    device.launch(SHOP)
+
+
+def test_no_activities_counts_only_at_the_start_of_a_line(device, android):
+    android.override(re.compile(r"^monkey"), b"note: ** No activities found\n")
+    with pytest.raises(LaunchFailedError) as info:
+        device.launch(SHOP)
+    assert info.value.details["reason"] == "unexpected_output"
+
+
+@pytest.mark.parametrize("separator", ["\v", "\f", "\x1c", "\x85", "\u2028"])
+def test_only_a_line_feed_ends_a_line(device, android, separator):
+    output = f"warning{separator}Events injected: 1\n".encode()
+    android.override(re.compile(r"^monkey"), output)
+    android.show("main")
+    with pytest.raises(LaunchFailedError) as info:
+        device.launch(SHOP)
+    assert info.value.details["reason"] == "unexpected_output"
+
+
+def test_unexpected_output_names_the_first_line_that_is_not_blank(device, android):
+    android.override(re.compile(r"^monkey"), b"\n  \t\n  stderr  \nmore\n")
+    with pytest.raises(LaunchFailedError) as info:
+        device.launch(SHOP)
+    assert info.value.details["output"] == "stderr"
+
+
+# --- argument values ---
+
+
+class _OddText(str):
+    """Text that is false, compares without case and prints as something else."""
+
+    __hash__ = str.__hash__
+
+    def __bool__(self) -> bool:
+        return False
+
+    def __eq__(self, other: object) -> bool:
+        return isinstance(other, str) and str.lower(self) == str.lower(other)
+
+    def __str__(self) -> str:
+        return ""
+
+    def __format__(self, spec: str) -> str:
+        return ""
+
+
+def test_a_str_subclass_is_used_as_plain_text(device, android, fake_adb, monkeypatch):
+    android.launch_in_front = False
+    monkeypatch.setattr(device, "foreground", lambda: SHOP.upper())
+    with pytest.raises(LaunchFailedError) as info:
+        device.launch(_OddText(SHOP), restart=True, timeout=0)
+    assert sent(fake_adb) == [STOP, MONKEY]
+    assert type(info.value.details["package"]) is str
+    assert info.value.details["package"] == SHOP
+
+
+class _HugeFloat(int):
+    def __float__(self) -> float:
+        return float("inf")
+
+
+def test_timeout_value_comes_from_the_base_type(device, android, clock):
+    android.launch_in_front = False
+    with pytest.raises(LaunchFailedError) as info:
+        device.launch(SHOP, timeout=_HugeFloat(1))
+    assert info.value.details["timeout"] == 1.0
+    assert sum(clock.pauses) == 1.0
+
+
+def test_a_timeout_too_large_for_a_float_is_refused(device, fake_adb):
+    before = list(fake_adb.requests)
+    with pytest.raises(ValueError, match="from 0 to 600"):
+        device.launch(SHOP, timeout=10**400)
+    assert fake_adb.requests == before
+
+
+@pytest.mark.usefixtures("android")
+def test_the_last_foreground_is_not_cut(device, monkeypatch):
+    long_name = "com." + "a" * 251
+    assert len(long_name) == 255
+    monkeypatch.setattr(device, "foreground", lambda: long_name)
+    with pytest.raises(LaunchFailedError) as info:
+        device.launch(SHOP, timeout=0)
+    assert info.value.details["foreground"] == long_name
+
+
+def test_launch_does_not_resend_after_an_error_while_waiting(device, android, fake_adb):
+    android.override(re.compile(r"^dumpsys"), Reset())
+    with pytest.raises(AdbError):
+        device.launch(SHOP, restart=True)
+    assert sent(fake_adb) == [STOP, MONKEY]
+
+
 # --- uiprobe launch ---
 
 
@@ -376,9 +586,11 @@ def test_cli_launch_restart_json_and_commands(capsys, fake_adb):
 
 @pytest.mark.usefixtures("android", "clock")
 def test_cli_launch_options_before_the_command(capsys, fake_adb):
+    fake_adb.add_device("emulator-5556")  # without -s the choice is ambiguous
     code, out, _ = invoke(capsys, fake_adb, "--json", "-s", SERIAL, "launch", SHOP)
     assert code == 0
     assert json.loads(out)["device"] == {"serial": SERIAL}
+    assert invoke(capsys, fake_adb, "--json", "launch", SHOP)[0] != 0
 
 
 @pytest.mark.usefixtures("android", "clock")
@@ -459,3 +671,41 @@ def test_cli_launch_default_timeout_is_ten_seconds(capsys, fake_adb, android):
     code, out, _ = invoke(capsys, fake_adb, "launch", SHOP, "--json")
     assert code == 15
     assert json.loads(out)["error"]["details"]["timeout"] == 10.0
+
+
+@pytest.mark.parametrize(
+    ("text", "seconds"),
+    [("1.0000000000000", 1.0), ("0" * 32, 0.0), ("599.999999999999999999999", 600.0)],
+)
+@pytest.mark.usefixtures("clock")
+def test_cli_launch_timeout_takes_long_plain_decimals(
+    capsys, fake_adb, android, text, seconds
+):
+    android.launch_in_front = False
+    code, out, _ = invoke(capsys, fake_adb, "launch", SHOP, "--timeout", text, "--json")
+    assert code == 15
+    assert json.loads(out)["error"]["details"]["timeout"] == seconds
+
+
+@pytest.mark.parametrize(
+    "text", ["600.0000000000000001", "0" * 33, "0" * 10000, "1." + "0" * 40]
+)
+@pytest.mark.usefixtures("android")
+def test_cli_launch_timeout_refuses_long_or_too_large_text(capsys, fake_adb, text):
+    code, out, err = invoke(
+        capsys, fake_adb, "launch", SHOP, "--timeout", text, "--json"
+    )
+    assert (code, err) == (2, "")
+    message = json.loads(out)["error"]["message"]
+    assert "at most 32 characters" in message
+    assert len(message) < 200
+    assert fake_adb.requests == []
+
+
+@pytest.mark.usefixtures("clock")
+def test_cli_launch_stop_failure_exits_15(capsys, fake_adb, android):
+    android.answer_input(status=1)
+    code, out, _ = invoke(capsys, fake_adb, "launch", SHOP, "--restart", "--json")
+    assert code == 15
+    assert json.loads(out)["error"]["details"]["reason"] == "stop_failed"
+    assert sent(fake_adb) == [STOP]

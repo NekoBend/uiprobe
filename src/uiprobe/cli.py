@@ -89,6 +89,8 @@ SCREENSHOT_SCHEMA = "uiprobe.screenshot/1"
 _MAX_COORDINATE = 32767
 _COORDINATE_RE = re.compile(r"[0-9]{1,5}")
 _MAX_MS = 10000
+_MAX_TIMEOUT_TEXT = 32
+_TIMEOUT_TEXT = re.compile(r"[0-9]+(?:\.[0-9]+)?")
 _PLAIN_PATH_RE = re.compile(r"[A-Za-z0-9_./][A-Za-z0-9_./-]*")
 # On Windows a backslash and a colon need no quoting in cmd or PowerShell, so a
 # drive path such as C:\Users\me\uiprobe.toml is named as it is.
@@ -193,9 +195,9 @@ def _add_launch_parser(add_parser: Callable[..., _Parser]) -> None:
             " it is the foreground app. With --restart the app is stopped"
             " first (am force-stop), so it starts a fresh task; state it has"
             " not saved is lost. It starts the app on whatever device is"
-            " selected. Exit 15 (launch_failed) when the app has no launcher"
-            " activity, monkey prints something unexpected, or the app is not"
-            " in front within the timeout."
+            " selected. Exit 15 (launch_failed) when the stop of --restart"
+            " fails, the app has no launcher activity, monkey prints something"
+            " unexpected, or the app is not in front within the timeout."
         ),
     )
     _add_common_options(launch, in_command=True)
@@ -887,17 +889,25 @@ def _cmd_key(args: argparse.Namespace) -> int:
 
 
 def _parse_timeout(value: str | None) -> float:
-    """Read ``--timeout``: a plain decimal number of seconds from 0 to 600."""
+    """Read ``--timeout``: a plain decimal number of seconds from 0 to 600.
+
+    It has at most 32 characters. The range is checked on the exact decimal
+    value, so a number just above 600 is refused even when it rounds to 600.
+    """
     if value is None:
         return DEFAULT_LAUNCH_TIMEOUT
-    if not re.fullmatch(r"[0-9]{1,12}(?:\.[0-9]{1,12})?", value):
-        msg = f"--timeout needs a number of seconds from 0 to 600, not {value!r}"
+    shown = value if len(value) <= 40 else value[:40] + "..."
+    msg = (
+        "--timeout needs a plain decimal number of seconds from 0 to 600 (at"
+        f" most {_MAX_TIMEOUT_TEXT} characters), not {shown!r}"
+    )
+    if len(value) > _MAX_TIMEOUT_TEXT or not _TIMEOUT_TEXT.fullmatch(value):
         raise _UsageError(msg)
-    seconds = float(value)
-    if seconds > MAX_LAUNCH_TIMEOUT:
-        msg = f"--timeout needs a number of seconds from 0 to 600, not {value!r}"
+    whole, _, fraction = value.partition(".")
+    limit = int(MAX_LAUNCH_TIMEOUT)
+    if int(whole) > limit or (int(whole) == limit and fraction.strip("0")):
         raise _UsageError(msg)
-    return seconds
+    return float(value)
 
 
 def _cmd_launch(args: argparse.Namespace) -> int:
