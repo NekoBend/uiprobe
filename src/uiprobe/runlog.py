@@ -50,7 +50,7 @@ from uiprobe._json import dumps
 from uiprobe.crawl import Limits
 from uiprobe.errors import UiprobeError
 from uiprobe.model import Element, Screen, _name, _quote
-from uiprobe.pngfile import check_new_path
+from uiprobe.pngfile import check_new_path, depends_on_a_drive_folder
 
 if TYPE_CHECKING:
     from collections.abc import Generator, Iterable, Mapping, Sequence
@@ -271,6 +271,13 @@ def _new_folder(out: object) -> str:
         raise TypeError(msg)
     text = str.__str__(text)  # a plain str, whatever the subclass
     _check_folder(text)
+    if depends_on_a_drive_folder(text):
+        msg = (
+            f"cannot make the run folder {text}: on Windows give a full path"
+            " with its drive (such as C:\\runs\\x) or a path relative to the"
+            " working folder (such as runs\\x)"
+        )
+        raise RunFolderError(msg, details={"path": text})
     if os.path.isabs(text):  # noqa: PTH117 - Path would normalize the text
         return text
     try:
@@ -357,14 +364,20 @@ class RunWriter:
         `out` is read once with `os.fspath` and used as a plain str. It is
         checked as given, and a relative path again after it is joined to the
         working folder (not normalized); the folder is made with that same
-        str. A path that would pass only after normalizing it is refused.
+        str. A path that would pass only after normalizing it is refused. On
+        Windows a path relative to a drive's own folder (``C:run``, a drive
+        without a separator after it, or ``\\run``, a separator without a
+        drive) is refused, so the folder never depends on which folder or
+        drive is current later; a relative path is fixed to the working
+        folder when the run starts.
 
         Raises:
-            RunFolderError: `out` fails those checks, whether something is at
-                it cannot be told (``cannot check``), the working folder cannot
-                be read, its parent is missing, or the first file cannot be
-                written. Nothing is written in the
-                first three cases; no parent is ever created.
+            RunFolderError: `out` fails those checks, is on Windows relative
+                to a drive's own folder (``C:run``, ``\\run``), whether
+                something is at it cannot be told (``cannot check``), the
+                working folder cannot be read, its parent is missing, or the
+                first file cannot be written. Nothing is written in any case
+                but the last; no parent is ever created.
             TypeError, ValueError: an argument is wrong (`out` that is not a
                 str or an os.PathLike of str is a `TypeError`); nothing is
                 written.

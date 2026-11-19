@@ -264,11 +264,12 @@ def test_a_broken_link_is_refused(tmp_path):
         link.symlink_to(tmp_path / "missing", target_is_directory=True)
     except OSError:
         pytest.skip("this system cannot make a link here")
+    target = link.readlink()
     with pytest.raises(RunFolderError, match="already exists"):
         _create(link)
     assert not (tmp_path / "missing").exists()
     assert link.is_symlink()
-    assert link.readlink() == tmp_path / "missing"
+    assert link.readlink() == target
 
 
 def test_a_path_that_cannot_be_looked_up_is_not_taken_as_missing(tmp_path, monkeypatch):
@@ -1611,18 +1612,19 @@ def test_the_fspath_of_a_path_subclass_is_what_is_checked(tmp_path):
 
 
 class _ShapeShifter(str):
-    """Text that would join, divide and convert to something else."""
+    """Text that would join, divide and convert to `elsewhere`."""
 
     __slots__ = ()
+    elsewhere = ""
 
     def __add__(self, other):
-        return "/elsewhere"
+        return self.elsewhere
 
     def __truediv__(self, other):
-        return Path("/elsewhere")
+        return Path(self.elsewhere)
 
     def __str__(self) -> str:
-        return "/elsewhere"
+        return self.elsewhere
 
 
 def _record_checks_and_creation(monkeypatch):
@@ -1647,13 +1649,14 @@ def _record_checks_and_creation(monkeypatch):
 def test_one_plain_str_goes_from_the_check_to_the_creation(tmp_path, monkeypatch):
     checked, made = _record_checks_and_creation(monkeypatch)
     expected = str(tmp_path / "run")
+    _ShapeShifter.elsewhere = str(tmp_path / "elsewhere")
     writer = _create(_ShapeShifter(expected))
     assert checked == [expected]
     assert made == [expected]
     assert all(type(value) is str for value in [*checked, *made])
     assert writer.path == Path(expected)
     assert (tmp_path / "run" / "run-start.json").is_file()
-    assert not Path("/elsewhere").exists()
+    assert names(tmp_path) == ["run", "run/run-start.json"]
 
 
 def test_a_relative_path_is_checked_as_given_and_as_joined(tmp_path, monkeypatch):
@@ -1701,3 +1704,79 @@ def test_out_that_is_not_text_is_refused(tmp_path, monkeypatch, out):
     with pytest.raises(TypeError):
         _create(out)
     assert names(tmp_path) == []
+
+
+@pytest.mark.parametrize(
+    "path",
+    ["C:run", "c:runs/x", "C:", "\\run", "/uiprobe-no-such-run", "\\runs\\x"],
+    ids=[
+        "drive",
+        "drive-slash-inside",
+        "drive-only",
+        "root",
+        "root-slash",
+        "root-deep",
+    ],
+)
+def test_on_windows_a_path_relative_to_a_drive_folder_is_refused(
+    tmp_path, monkeypatch, path
+):
+    monkeypatch.setattr(pngfile, "_WINDOWS", True)
+    monkeypatch.chdir(tmp_path)
+    checked, made = _record_checks_and_creation(monkeypatch)
+    with pytest.raises(
+        RunFolderError, match="give a full path with its drive"
+    ) as raised:
+        _create(path)
+    assert raised.value.details == {"path": path}
+    assert "relative to the working folder" in raised.value.message
+    assert (checked, made) == ([path], [])  # only looked up, never made
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "C:\\runs\\x",
+        "c:/runs/x",
+        "\\\\server\\share\\x",
+        "//server/share/x",
+        "\\\\?\\C:\\x",
+        "runs\\x",
+        "runs/x",
+    ],
+)
+def test_on_windows_other_forms_do_not_depend_on_a_drive_folder(monkeypatch, path):
+    monkeypatch.setattr(pngfile, "_WINDOWS", True)
+    assert not pngfile.depends_on_a_drive_folder(path)
+
+
+@pytest.mark.parametrize("path", ["C:run", "\\run", "/run"])
+def test_elsewhere_no_path_depends_on_a_drive_folder(monkeypatch, path):
+    monkeypatch.setattr(pngfile, "_WINDOWS", False)
+    assert not pngfile.depends_on_a_drive_folder(path)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="drive folders exist on Windows")
+def test_on_this_windows_a_path_relative_to_a_drive_folder_is_refused(tmp_path):
+    drive = os.path.splitdrive(str(tmp_path))[0]
+    name = f"uiprobe-{tmp_path.name}"
+    for path in (f"{drive}{name}", f"\\{name}", f"/{name}"):
+        with pytest.raises(RunFolderError, match="give a full path with its drive"):
+            _create(path)
+        assert not os.path.lexists(path)
+
+
+def test_a_relative_path_is_fixed_when_the_run_starts(tmp_path, monkeypatch):
+    (tmp_path / "runs").mkdir()
+    (tmp_path / "other").mkdir()
+    monkeypatch.chdir(tmp_path)
+    writer = _create(os.path.join("runs", "x"))  # noqa: PTH118
+    monkeypatch.chdir(tmp_path / "other")
+    writer.finish("exhausted", screens=0, actions=0)
+    assert writer.path == tmp_path / "runs" / "x"
+    assert names(tmp_path / "runs" / "x") == [
+        "run-start.json",
+        "run.json",
+        "summary.txt",
+    ]
+    assert names(tmp_path / "other") == []

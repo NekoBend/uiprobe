@@ -55,6 +55,7 @@ _WINDOWS: Final = os.name == "nt"
 # A Windows drive at the start of a path: an optional ``\\?\`` or ``\\.\``
 # prefix, then a letter and a colon. Any other colon names a stream.
 _DRIVE: Final = re.compile(r"(?:[\\/]{2}[?.][\\/])?[A-Za-z]:")
+_LETTER_DRIVE: Final = re.compile(r"[A-Za-z]:")
 
 
 class PngFileError(UiprobeError):
@@ -207,6 +208,25 @@ def _names_a_stream(path: str) -> bool:
         return False
     drive = _DRIVE.match(path)
     return ":" in path[drive.end() if drive else 0 :]
+
+
+def depends_on_a_drive_folder(path: str) -> bool:
+    """Whether `path` is, on Windows, relative to a drive's own working folder.
+
+    ``C:run`` (a drive without a separator after it) is relative to the
+    working folder of drive C, and ``\\run`` or ``/run`` (a separator without
+    a drive) to the root of the current drive. A program that keeps such a
+    path writes elsewhere once that folder or drive changes. Elsewhere, and
+    for a full path, a UNC path (``\\\\server\\share\\...``) or a path
+    relative to the working folder, the answer is False. The text is read as
+    given; ``os.path.isabs`` is not used, as its answer for ``\\run``
+    changed between Python versions.
+    """
+    if not _WINDOWS or path.startswith(("\\\\", "//", "\\/", "/\\")):
+        return False
+    if _LETTER_DRIVE.match(path):
+        return path[2:3] not in ("\\", "/")
+    return path.startswith(("\\", "/"))
 
 
 def check_new_path(path: str) -> None:
