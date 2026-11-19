@@ -27,6 +27,7 @@ __all__ = [
     "InputFailedError",
     "MultipleDevicesError",
     "MultipleElementsError",
+    "ScreenshotFailedError",
     "UiprobeError",
 ]
 
@@ -156,3 +157,16 @@ class InputFailedError(UiprobeError):
 
     code = "input_failed"
     exit_code = 14
+
+
+class ScreenshotFailedError(UiprobeError):
+    """The device gave no usable screenshot.
+
+    A screen that forbids screenshots (``FLAG_SECURE``, for example a private
+    browser tab) gives empty output on older Android, so empty output and data
+    that is not a PNG image both end here. ``details["reason"]`` is ``empty``
+    or ``invalid`` and ``details["bytes"]`` is the size of what came back.
+    """
+
+    code = "screenshot_failed"
+    exit_code = 16

@@ -18,6 +18,7 @@ from uiprobe.errors import (
     InputFailedError,
     MultipleDevicesError,
     MultipleElementsError,
+    ScreenshotFailedError,
     UiprobeError,
 )
 from uiprobe.guards import Policy
@@ -42,6 +43,7 @@ __all__ = [
     "Policy",
     "Preview",
     "Screen",
+    "ScreenshotFailedError",
     "UiprobeError",
     "devices",
     "preview",

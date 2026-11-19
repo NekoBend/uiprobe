@@ -28,6 +28,7 @@ from uiprobe.errors import (
     DumpError,
     InputFailedError,
     MultipleDevicesError,
+    ScreenshotFailedError,
     UiprobeError,
 )
 from uiprobe.model import (
@@ -37,6 +38,7 @@ from uiprobe.model import (
     parse_uiautomator_dump,
     shorten_activity,
 )
+from uiprobe.pngfile import check_png
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -61,6 +63,9 @@ DUMP_MESSAGE_LIMIT: Final = 500
 # screen it can wait about 10 s for the UI to settle before it gives up. The
 # client's 10 s silence limit would fire first, so the dump gets its own.
 DUMP_TIMEOUT: Final = 60.0
+# `screencap` prints nothing until the image is encoded, which a slow device
+# can take longer than the client's 10 s silence limit.
+SCREENSHOT_TIMEOUT: Final = 30.0
 # Failures that leave optional metadata unknown instead of failing the call.
 _OPTIONAL_ERRORS: Final = (
     AdbError,
@@ -1363,6 +1368,57 @@ class Device:
         self._latest_screen = screen
         self._latest_display_measured = measured is not None
         return screen
+
+    def screenshot(self) -> bytes:
+        """Capture the screen as PNG bytes with ``screencap -p``.
+
+        The bytes are checked in memory before they are returned, without
+        decoding them (see `uiprobe.pngfile.check_png`): the signature, a
+        well-formed header chunk, chunks that fit, image data and the closing
+        chunk at the end. Nothing is
+        written to the device or to this computer, and `dump` state is not
+        touched.
+
+        A screen that forbids screenshots (``FLAG_SECURE``, for example a
+        private browser tab) gives empty output on older Android, and on newer
+        Android a mostly black image; the latter is a valid PNG and is
+        returned as it is.
+
+        Raises:
+            ScreenshotFailedError: The output is empty or is not a complete
+                PNG image.
+        """
+        data = self._client.exec_out(
+            self.serial,
+            quote_args("screencap", "-p"),
+            timeout=SCREENSHOT_TIMEOUT,
+        )
+        try:
+            check_png(data)
+        except ValueError as error:
+            reason = "empty" if not data else "invalid"
+            raise ScreenshotFailedError(
+                f"{error}; the screen may forbid screenshots (for example a "
+                "private browser tab), and its structure can still be dumped "
+                "with uiprobe dump",
+                details={"reason": reason, "bytes": len(data)},
+            ) from error
+        return data
+
+    def display_for_image(self, width: int, height: int) -> tuple[int, int] | None:
+        """Return the display size that `dump` reports, turned like an image.
+
+        The size comes from ``wm size``, as in `dump`. A screenshot has no
+        rotation of its own, so the size is turned to the orientation of an
+        image that is `width` x `height` pixels (a square image keeps the
+        natural orientation). None means the size could not be read.
+        """
+        size = self._display_size(0)
+        if size is None:
+            return None
+        if width != height and (width > height) != (size[0] > size[1]):
+            return (size[1], size[0])
+        return size
 
     def _dump_xml(self) -> bytes:
         path = f"{DUMP_DIRECTORY}/uiprobe-{secrets.token_hex(8)}.xml"

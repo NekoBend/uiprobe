@@ -21,6 +21,7 @@ import os
 import re
 import stat
 import sys
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, NoReturn, TextIO, override
 
@@ -49,6 +50,7 @@ from uiprobe.errors import (
 )
 from uiprobe.guards import REASONS, Policy
 from uiprobe.model import MAX_CANDIDATES, _describe
+from uiprobe.pngfile import PngInterruptedError, check_new_path, check_png, save_png
 from uiprobe.settings import (
     SETTINGS_FILE,
     IncompleteFileError,
@@ -75,6 +77,7 @@ FIND_SCHEMA = "uiprobe.find/1"
 ACTION_SCHEMA = "uiprobe.action/1"
 CRAWL_PREVIEW_SCHEMA = "uiprobe.crawl_preview/1"
 INIT_SCHEMA = "uiprobe.init/1"
+SCREENSHOT_SCHEMA = "uiprobe.screenshot/1"
 _MAX_COORDINATE = 32767
 _COORDINATE_RE = re.compile(r"[0-9]{1,5}")
 _MAX_MS = 10000
@@ -331,6 +334,28 @@ def _build_parser() -> _Parser:
         ),
     )
     key.add_argument("name", metavar="NAME", help="an alias or a KEYCODE_ name")
+    screenshot = commands.add_parser(
+        "screenshot",
+        allow_abbrev=False,
+        help="save a screenshot as a new PNG file",
+        description=(
+            "Take a screenshot of the screen showing now and save it as a PNG"
+            " file at PATH, which must not exist (an existing file, link or"
+            " folder is a usage error and is left as it is). The image is"
+            " checked before the file is made; a failed screenshot (exit 16,"
+            " screenshot_failed) makes no file. A screen can forbid"
+            " screenshots, for example a private browser tab; its structure can"
+            " still be dumped. A screenshot can contain personal data."
+        ),
+    )
+    _add_common_options(screenshot, in_command=True)
+    screenshot.add_argument(
+        "-o",
+        "--output",
+        required=True,
+        metavar="PATH",
+        help="the new PNG file to write (required)",
+    )
     crawl = commands.add_parser(
         "crawl",
         allow_abbrev=False,
@@ -1044,6 +1069,64 @@ def _cmd_init(args: argparse.Namespace) -> int:
     return 0
 
 
+def _check_new_file(path: str) -> None:
+    """Refuse what `save_png` would refuse before the device is asked.
+
+    That is an empty path, anything at the path (also a broken link) and, on
+    Windows, a path that names a stream of a file.
+    """
+    shown = _printable(path)
+    if not path:
+        msg = "-o PATH must not be empty"
+        raise _UsageError(msg)
+    try:
+        check_new_path(path)
+    except FileExistsError:
+        msg = f"-o {shown}: already exists; give a new file name"
+        raise _UsageError(msg) from None
+    except ValueError as error:
+        msg = f"-o {shown}: {error}"
+        raise _UsageError(msg) from None
+
+
+def _cmd_screenshot(args: argparse.Namespace) -> int:
+    path = args.output
+    _check_new_file(path)
+    device = Device(
+        _single_serial(args),
+        adb_server=args.adb_server,
+        adb=args.adb,
+        start_server=args.start_server,
+    )
+    png = device.screenshot()
+    captured_at = datetime.now(UTC).astimezone()
+    width, height = check_png(png)
+    # Asked before the file is made, so that nothing slow or failing comes
+    # between saving and reporting the saved file.
+    display = device.display_for_image(width, height) if args.json else None
+    try:
+        save_png(path, png)
+    except FileExistsError:
+        msg = f"-o {_printable(path)}: already exists; give a new file name"
+        raise _UsageError(msg) from None
+    if args.json:
+        payload: dict[str, object] = {
+            "schema": SCREENSHOT_SCHEMA,
+            "captured_at": captured_at.isoformat(timespec="seconds"),
+            "device": {"serial": device.serial},
+            "path": path,
+            "bytes": len(png),
+            "width": width,
+            "height": height,
+        }
+        if display is not None:
+            payload["display"] = {"width": display[0], "height": display[1]}
+        _emit(dumps(payload, indent=2))
+    else:
+        _emit(f"saved {_printable(path)} ({width}x{height}, {len(png)} bytes)")
+    return 0
+
+
 _HANDLERS: dict[str, Callable[[argparse.Namespace], int]] = {
     "devices": _cmd_devices,
     "dump": _cmd_dump,
@@ -1051,6 +1134,7 @@ _HANDLERS: dict[str, Callable[[argparse.Namespace], int]] = {
     "tap": _cmd_tap,
     "swipe": _cmd_swipe,
     "key": _cmd_key,
+    "screenshot": _cmd_screenshot,
     "crawl": _cmd_crawl,
     "init": _cmd_init,
 }
@@ -1155,6 +1239,22 @@ def _guided_failure(exc: _GuidedUsageError, *, as_json: bool) -> int:
     return USAGE_ERROR[1]
 
 
+def _interrupt_failure(exc: KeyboardInterrupt, *, as_json: bool) -> int:
+    """Report Ctrl+C, naming a file that was created and may be incomplete."""
+    if isinstance(exc, InterruptedFileError):
+        msg = (
+            f"interrupted; {_printable(exc.path)} was created and may be"
+            " incomplete, so delete it before running uiprobe init again"
+        )
+        return _fail(INTERRUPTED, msg, as_json=as_json)
+    if isinstance(exc, PngInterruptedError):
+        shown = _printable(exc.path)
+        msg = f"interrupted; {shown} was created and may be incomplete"
+        details: dict[str, object] = {"path": exc.path, "created": True}
+        return _fail(INTERRUPTED, msg, as_json=as_json, details=details)
+    return _fail(INTERRUPTED, "interrupted", as_json=as_json)
+
+
 def _failure_code(exc: BaseException, *, as_json: bool) -> int:
     """Report `exc` the way the contract says; return the exit code."""
     if isinstance(exc, BrokenPipeError):
@@ -1167,13 +1267,7 @@ def _failure_code(exc: BaseException, *, as_json: bool) -> int:
     if isinstance(exc, _UsageError | TypeError | ValueError):
         return _fail(USAGE_ERROR, str(exc), as_json=as_json)
     if isinstance(exc, KeyboardInterrupt):
-        msg = "interrupted"
-        if isinstance(exc, InterruptedFileError):
-            msg = (
-                f"interrupted; {_printable(exc.path)} was created and may be"
-                " incomplete, so delete it before running uiprobe init again"
-            )
-        return _fail(INTERRUPTED, msg, as_json=as_json)
+        return _interrupt_failure(exc, as_json=as_json)
     name = type(exc).__name__
     return _fail(
         INTERNAL_ERROR,

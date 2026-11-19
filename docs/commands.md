@@ -52,6 +52,33 @@ e4 ScrollView [scroll]
 - A folded label is at most 60 characters, counted before escaping. A longer label is cut and ends with `...`, which counts in the 60; spaces left at the cut are removed, so a cut label can be a little shorter than 60. Text is then escaped as in the full view, so a line break or control character shows as `\n` or `\u202e` and the printed value can be longer than 60 characters.
 - `--brief` cannot be used with `--json`, because the JSON stays complete. The command exits with 2 (`usage_error`) and sends nothing to the device. `find`, `tap` and the other commands are not affected.
 
+## Taking a screenshot
+
+Save the screen that is showing on the device as a PNG file:
+
+```console
+$ uiprobe -s emulator-5554 screenshot -o login.png
+saved login.png (1080x2400, 84213 bytes)
+```
+
+`-o PATH` is required and names a new file. The file is created and never replaced: if a file, a link (also one whose target is missing) or a folder exists at `PATH`, the command exits with 2 (a usage error) before it asks the device for anything, and the existing item is left untouched. The folder of `PATH` must exist. `PATH` is written as you typed it, in the output too; on Windows a path such as `shots\login.png` or `C:\shots\login.png` works as usual, but a colon after the drive (`login.png:extra`, which names a stream inside a file) is a usage error, because creating a stream changes the file it belongs to.
+
+The file is then opened create-only, so an item that appears at `PATH` while the screenshot is taken is still left untouched (the same usage error). Two limits remain: on Windows a link made at `PATH` in the instant between the check and the creation is followed (as for `uiprobe init`), and on every system a link or junction in a folder above `PATH` decides where the file goes. Use a folder that other programs cannot change while the command runs.
+
+The screenshot is taken with exactly this command, through the binary-safe `exec:` service, and the bytes are saved as they come:
+
+```sh
+screencap -p
+```
+
+With `--json` uiprobe also asks for `wm size`, after the screenshot and before the file is made, for the optional `display` field; when that cannot be read the field is left out and the command still succeeds.
+
+The image is checked in memory before the file is made, without decoding it: it must start with the PNG signature; its first chunk must be a well-formed header (`IHDR`) with a width and a height above 0, a bit depth that its color type allows, and standard compression, filter and interlace methods; every chunk must have a length that fits in the data and a four-letter type; there must be no second header; a palette (`PLTE`, 1 to 256 colors) may appear once, before the image data, is required for a palette image and refused for a gray one; the image data chunks (`IDAT`) must form one unbroken run; and an empty closing `IEND` chunk must end the data. Checksums (except the fixed one of `IEND`), the order and contents of other chunks, and the pixels are not checked. Empty output, a cut-off image or data that fails these checks exits with 16 (`screenshot_failed`) and makes no file. An app can forbid screenshots of a screen, for example a private browser tab: on older Android (an emulator at API 24, for example) `screencap` then gives empty output, so the command fails, but `uiprobe dump` still returns the structure of that screen. On newer Android (API 36, for example) such a screen gives a mostly black image instead. That is a valid PNG, so it is saved like any other; look at the image before you rely on it.
+
+If the file was created but writing it failed (a full disk, for example), the partial file stays where it is and the error (exit 1, `file_error`) names it; uiprobe never deletes it. If the file could not be created at all (the folder is missing, access is denied, or Windows refuses the name), the error names the path and no file exists. Ctrl+C while the file is written exits with 130 (`interrupted`) and names the file, which stays and may be incomplete. A Ctrl+C at another instant (inside the creation itself, right after it before writing starts, or after the file is complete while the result is printed) may only say "interrupted" and can leave a partial or a complete file.
+
+With `--json` the result is a `uiprobe.screenshot/1` document, see [Output formats](output.md). A screenshot can contain personal data, like a dump; see [Safety](safety.md#personal-data-in-dumps).
+
 ## Finding elements
 
 `uiprobe find` lists the elements of the current screen that match all the criteria you give. At least one is needed:

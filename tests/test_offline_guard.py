@@ -6,7 +6,7 @@ Network and process rules: no network library anywhere, `socket` and
 Rules for files (an allowlist, not a denylist):
 
 uiprobe's code (src/uiprobe) must never delete, rename, truncate or overwrite
-a file. It creates files in two places only, each through the call sites
+a file. It creates files in three places only, each through the call sites
 listed in ALLOWED_CALLS. settings.py creates the settings file through its
 create-only `open(path, 'x', encoding='utf-8', newline='\\n')` (an existing
 file is an error) and has one read-only `os.open(path, _READ_FLAGS)` (see
@@ -15,7 +15,9 @@ exactly one call site there: `os.mkdir(path, 0o700)` (a new folder only its
 owner can open; no `exist_ok`, no parents),
 `open(path, 'x', encoding='utf-8', newline='\\n')` and `open(path, 'xb')`
 (create-only: an existing file is an error), and `handle.write(data)` (the
-write into a file that was just created). Each
+write into a file that was just created). pngfile.py (the screenshot file)
+has only two of them, `open(path, 'xb')` and `handle.write(data)`, each with
+exactly one call site there. Each
 allowance holds only in its own file: a changed call, or an allowed call in a
 file whose entry does not list it, is flagged. Instead of listing what is
 dangerous after the fact, this check flags every REFERENCE (a call, but also
@@ -381,6 +383,8 @@ RUNLOG_OPEN_TEXT = "open(path, 'x', encoding='utf-8', newline='\\n')"
 RUNLOG_OPEN_BINARY = "open(path, 'xb')"
 RUNLOG_WRITE = "handle.write(data)"
 RUNLOG_CALLS = (RUNLOG_MKDIR, RUNLOG_OPEN_TEXT, RUNLOG_OPEN_BINARY, RUNLOG_WRITE)
+# The screenshot file: one create-only binary open and the one write after it.
+PNGFILE_CALLS = (RUNLOG_OPEN_BINARY, RUNLOG_WRITE)
 
 # The permitted call sites: file name in src/uiprobe -> calls as `ast.unparse`
 # prints them. Each has a reason; keep the list short.
@@ -408,6 +412,10 @@ ALLOWED_CALLS: dict[str, frozenset[str]] = {
     # never opens an existing one: mode 'x' fails when the file exists and
     # os.mkdir fails when the folder exists or its parent is missing.
     "runlog.py": frozenset(RUNLOG_CALLS),
+    # The screenshot writer creates one new file and writes the image into it:
+    # mode 'xb' fails when anything is at the path, a link and a folder
+    # included. It makes no folder and opens no text file.
+    "pngfile.py": frozenset(PNGFILE_CALLS),
 }
 
 
@@ -1748,19 +1756,26 @@ def test_a_changed_runlog_call_is_flagged(source, filename):
 
 
 # Where each runlog call is accepted, written out by hand. settings.py has its
-# own allowance for the identical create-only text open (the settings file).
+# own allowance for the identical create-only text open (the settings file),
+# and pngfile.py for the binary open and the write (the screenshot file).
 RUNLOG_CALL_FILES = {
     RUNLOG_MKDIR: {"runlog.py"},
     RUNLOG_OPEN_TEXT: {"runlog.py", "settings.py"},
-    RUNLOG_OPEN_BINARY: {"runlog.py"},
-    RUNLOG_WRITE: {"runlog.py"},
+    RUNLOG_OPEN_BINARY: {"runlog.py", "pngfile.py"},
+    RUNLOG_WRITE: {"runlog.py", "pngfile.py"},
 }
 
 
 @pytest.mark.parametrize("call", RUNLOG_CALLS)
 def test_a_runlog_call_is_accepted_only_where_listed(call):
     source = "import os\n" + call
-    files = (*sorted(ALLOWED_CALLS), "sub/runlog.py", "sub/settings.py", "other.py")
+    files = (
+        *sorted(ALLOWED_CALLS),
+        "sub/runlog.py",
+        "sub/settings.py",
+        "sub/pngfile.py",
+        "other.py",
+    )
     accepted = {name for name in files if not file_changes(source, name)}
     assert accepted == RUNLOG_CALL_FILES[call]
     assert file_changes(source)
@@ -1776,3 +1791,196 @@ def test_a_runlog_call_still_has_its_arguments_checked():
     assert not file_changes("import os\nos.mkdir(\n    path, 0o700)", "runlog.py")
     two = "import os\nos.mkdir(path, 0o700)\nopen(path, 'w')"
     assert file_changes(two, "runlog.py") == [3]
+
+
+# --- the screenshot file writer: two allowed calls, each with one call site ---
+
+
+def test_each_pngfile_call_has_exactly_one_call_site():
+    tree = ast.parse(SOURCE_DIR.joinpath("pngfile.py").read_text(encoding="utf-8"))
+    texts = [ast.unparse(n) for n in ast.walk(tree) if isinstance(n, ast.Call)]
+    for call in PNGFILE_CALLS:
+        assert texts.count(call) == 1, call
+    assert ALLOWED_CALLS["pngfile.py"] == frozenset(PNGFILE_CALLS)
+
+
+_NESTED_SCOPES = (
+    ast.FunctionDef,
+    ast.AsyncFunctionDef,
+    ast.ClassDef,
+    ast.Lambda,
+    ast.GeneratorExp,
+    ast.ListComp,
+    ast.SetComp,
+    ast.DictComp,
+)
+
+
+def _own_scope(node: ast.AST):
+    """Yield the nodes below `node` that run in its own scope, in order.
+
+    Nested defs, classes, lambdas, comprehensions and generator expressions are
+    not entered: their bodies may run later, or never.
+    """
+    for child in ast.iter_child_nodes(node):
+        yield child
+        if not isinstance(child, _NESTED_SCOPES):
+            yield from _own_scope(child)
+
+
+def write_handle_problems(source: str) -> list[str]:
+    """Why the one write in `source` may not go to the file `save_png` creates.
+
+    The write must sit in `save_png`'s own scope, inside `with handle:`, where
+    `handle` is bound exactly once in the module: by the create-only open in
+    `save_png`. Any other binding of `handle` anywhere (a parameter, a match
+    capture, an except name, `with ... as handle`, `del`, ...) is a problem.
+    """
+    tree = ast.parse(source)
+    problems = []
+    functions = [n for n in tree.body if isinstance(n, ast.FunctionDef)]
+    save = next((f for f in functions if f.name == "save_png"), None)
+    if save is None:
+        return ["no save_png"]
+    all_writes = [
+        n
+        for n in ast.walk(tree)
+        if isinstance(n, ast.Call) and ast.unparse(n) == RUNLOG_WRITE
+    ]
+    blocks = [
+        n
+        for n in _own_scope(save)
+        if isinstance(n, ast.With)
+        and len(n.items) == 1
+        and ast.unparse(n.items[0]) == "handle"
+    ]
+    guarded = [
+        n
+        for block in blocks
+        for n in _own_scope(block)
+        if isinstance(n, ast.Call) and ast.unparse(n) == RUNLOG_WRITE
+    ]
+    if len(all_writes) != 1 or len(guarded) != 1:
+        problems.append("the write is not the one inside `with handle:` in save_png")
+    opens = [
+        n
+        for n in _own_scope(save)
+        if isinstance(n, ast.Assign)
+        and [ast.unparse(t) for t in n.targets] == ["handle"]
+        and ast.unparse(n.value) == RUNLOG_OPEN_BINARY
+    ]
+    if unapproved_bindings(source, frozenset({"handle"})) != ["name store"] or (
+        len(opens) != 1
+    ):
+        problems.append("handle is not bound only by the create-only open")
+    return problems
+
+
+def test_the_pngfile_write_goes_to_the_file_it_created():
+    source = SOURCE_DIR.joinpath("pngfile.py").read_text(encoding="utf-8")
+    assert write_handle_problems(source) == []
+
+
+MOVED_WRITE = """
+def _put(handle, data):
+    handle.write(data)
+
+def save_png(path, data):
+    handle = open(path, 'xb')
+    _put(handle, data)
+"""
+REBOUND_HANDLE = """
+def save_png(path, data, other):
+    handle = open(path, 'xb')
+    handle = other
+    handle.write(data)
+"""
+WITH_AS_HANDLE = """
+def save_png(path, data, other):
+    with other as handle:
+        handle.write(data)
+    open(path, 'xb')
+"""
+WRITE_AFTER_WITH = """
+def save_png(path, data):
+    handle = open(path, 'xb')
+    with handle:
+        pass
+    handle.write(data)
+"""
+MATCH_CAPTURE = """
+def save_png(path, data, other):
+    handle = open(path, 'xb')
+    match other:
+        case handle:
+            pass
+    with handle:
+        handle.write(data)
+"""
+GENERATOR_WRITE = """
+def save_png(path, data):
+    handle = open(path, 'xb')
+    with handle:
+        pending = (handle.write(data) for _ in [0])
+"""
+LIST_WRITE = """
+def save_png(path, data):
+    handle = open(path, 'xb')
+    with handle:
+        done = [handle.write(data) for _ in [0]]
+"""
+NESTED_WRITE = """
+def save_png(path, data):
+    handle = open(path, 'xb')
+    with handle:
+        later = lambda: handle.write(data)
+"""
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        MOVED_WRITE,
+        REBOUND_HANDLE,
+        WITH_AS_HANDLE,
+        WRITE_AFTER_WITH,
+        MATCH_CAPTURE,
+        NESTED_WRITE,
+        GENERATOR_WRITE,
+        LIST_WRITE,
+    ],
+)
+def test_a_write_to_another_handle_is_caught(source):
+    assert write_handle_problems(source)
+    assert not file_changes(source, "pngfile.py")  # the call guard alone misses it
+
+
+# What runlog.py may do beyond this stays forbidden in pngfile.py.
+PNGFILE_ONLY_VARIANTS = [RUNLOG_MKDIR, RUNLOG_OPEN_TEXT]
+
+
+@pytest.mark.parametrize("source", [*RUNLOG_VARIANTS, *PNGFILE_ONLY_VARIANTS])
+@pytest.mark.parametrize("filename", ["pngfile.py", "other.py"])
+def test_a_changed_pngfile_call_is_flagged(source, filename):
+    source = source if source.startswith(("import", "from")) else "import os\n" + source
+    assert file_changes(source, filename)
+
+
+@pytest.mark.parametrize("call", PNGFILE_CALLS)
+def test_a_pngfile_call_is_accepted_only_in_pngfile(call):
+    source = "import os\n" + call
+    assert not file_changes(source, "pngfile.py")
+    for other in ("cli.py", "device.py", "sub/pngfile.py", "other.py"):
+        assert file_changes(source, other)
+    assert file_changes(source)
+
+
+def test_a_pngfile_call_still_has_its_arguments_checked():
+    # The outer call is allowed as a whole; only its argument can be flagged.
+    outer = "open(os.remove('x'), 'xb')"
+    allowed = {"pngfile.py": frozenset({outer})}
+    nested = "import os\nopen(\n    os.remove('x'), 'xb')"
+    assert ast.unparse(ast.parse(nested).body[1]) == outer
+    assert file_changes(nested, "pngfile.py", allowed) == [3]
+    two = "import os\nopen(path, 'xb')\nopen(path, 'w')"
+    assert file_changes(two, "pngfile.py") == [3]
