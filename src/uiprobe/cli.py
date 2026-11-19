@@ -183,6 +183,35 @@ def _add_common_options(parser: argparse.ArgumentParser, *, in_command: bool) ->
     )
 
 
+def _add_launch_parser(add_parser: Callable[..., _Parser]) -> None:
+    launch = add_parser(
+        "launch",
+        allow_abbrev=False,
+        help="start an app and wait until it is in front",
+        description=(
+            "Start the app PACKAGE through its launcher activity and wait until"
+            " it is the foreground app. With --restart the app is stopped"
+            " first (am force-stop), so it starts a fresh task; state it has"
+            " not saved is lost. It starts the app on whatever device is"
+            " selected. Exit 15 (launch_failed) when the app has no launcher"
+            " activity, monkey prints something unexpected, or the app is not"
+            " in front within the timeout."
+        ),
+    )
+    _add_common_options(launch, in_command=True)
+    launch.add_argument("package", metavar="PACKAGE", help="the app's package name")
+    launch.add_argument(
+        "--restart",
+        action="store_true",
+        help="stop the app first, so it starts a fresh task",
+    )
+    launch.add_argument(
+        "--timeout",
+        metavar="SECONDS",
+        help="how long to wait for the app to come to the front (default 10)",
+    )
+
+
 def _build_parser() -> _Parser:
     parser = _Parser(prog="uiprobe", allow_abbrev=False)
     parser.add_argument(
@@ -364,32 +393,7 @@ def _build_parser() -> _Parser:
         metavar="PATH",
         help="the new PNG file to write (required)",
     )
-    launch = commands.add_parser(
-        "launch",
-        allow_abbrev=False,
-        help="start an app and wait until it is in front",
-        description=(
-            "Start the app PACKAGE through its launcher activity and wait until"
-            " it is the foreground app. With --restart the app is stopped"
-            " first (am force-stop), so it starts a fresh task; state it has"
-            " not saved is lost. It starts the app on whatever device is"
-            " selected. Exit 15 (launch_failed) when the app has no launcher"
-            " activity, monkey prints something unexpected, or the app is not"
-            " in front within the timeout."
-        ),
-    )
-    _add_common_options(launch, in_command=True)
-    launch.add_argument("package", metavar="PACKAGE", help="the app's package name")
-    launch.add_argument(
-        "--restart",
-        action="store_true",
-        help="stop the app first, so it starts a fresh task",
-    )
-    launch.add_argument(
-        "--timeout",
-        metavar="SECONDS",
-        help="how long to wait for the app to come to the front (default 10)",
-    )
+    _add_launch_parser(commands.add_parser)
     crawl = commands.add_parser(
         "crawl",
         allow_abbrev=False,
