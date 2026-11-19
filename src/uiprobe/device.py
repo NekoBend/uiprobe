@@ -644,7 +644,8 @@ def _typing_stopped(kind: type[UiprobeError], piece: int, pieces: int) -> Uiprob
 def _piece_failure(output: str, piece: int, pieces: int) -> InputFailedError | None:
     """Judge the answer to one piece; None means exit status 0 and nothing else.
 
-    The answer itself never goes into the error: it can repeat the text.
+    The answer itself never goes into the error, not even the exit status:
+    the device prints the status line, and a reply can repeat the text in it.
     """
     failure = _input_failure("type", {}, output)
     if failure is None:
@@ -658,11 +659,9 @@ def _piece_failure(output: str, piece: int, pieces: int) -> InputFailedError | N
         "pieces": pieces,
         "pieces_done": done,
     }
-    if "exit_status" in failure.details:
-        details["exit_status"] = failure.details["exit_status"]
     what = {
         "no_exit_status": "the device did not report an exit status",
-        "exit_status": f"input exited with status {details.get('exit_status')}",
+        "exit_status": "input reported an exit status other than 0",
         "unexpected_output": "input printed something besides its exit status",
     }[str(reason)]
     msg = (
@@ -1506,8 +1505,9 @@ class Device:
                 The error is a `TextNotTypedError`; its ``details`` hold
                 ``character`` (``U+XXXX``), ``escaped`` and ``position``.
             InputFailedError: A piece did not report success; ``details``
-                hold ``reason``, ``piece``, ``pieces``, ``pieces_done`` and,
-                when the device reported one, ``exit_status``.
+                hold ``reason``, ``piece``, ``pieces`` and ``pieces_done``
+                (no exit status: the device prints it, so it could repeat
+                the text).
             AdbError: The adb protocol or the command failed.
             AdbServerUnavailableError: The adb server cannot be reached.
             DeviceNotFoundError: The device is gone.
@@ -1518,7 +1518,8 @@ class Device:
         An error while sending is a new error of the same class whose message
         and ``details`` hold only fixed words and numbers (``piece``,
         ``pieces``, ``pieces_done``): never the text, and nothing the device or
-        adb answered, which can repeat it. It is raised with no chained error.
+        adb answered, which can repeat it. It does not chain to the error uiprobe
+        caught (a caller's own exception being handled stays its context).
         Typing that stops can leave the earlier pieces typed, and the piece it
         stopped at typed in part or in full.
         """

@@ -50,6 +50,11 @@ from uiprobe.errors import (
     INTERNAL_ERROR,
     INTERRUPTED,
     USAGE_ERROR,
+    AdbServerUnavailableError,
+    DeviceNotFoundError,
+    DeviceOfflineError,
+    DeviceUnauthorizedError,
+    MultipleDevicesError,
     UiprobeError,
 )
 from uiprobe.guards import REASONS, Policy
@@ -191,6 +196,8 @@ def _add_type_parser(add_parser: Callable[..., _Parser]) -> None:
     type_ = add_parser(
         "type",
         allow_abbrev=False,
+        add_help=False,  # only --help: an unquoted text holding -h must not
+        # end the run with the help and exit 0 while nothing is typed
         help="type text into the focused field",
         description=(
             "Type TEXT into the field that has focus, in whatever app is in"
@@ -201,6 +208,7 @@ def _add_type_parser(add_parser: Callable[..., _Parser]) -> None:
             " output and typing is not checked afterwards."
         ),
     )
+    type_.add_argument("--help", action="help", help="show this help message and exit")
     _add_common_options(type_, in_command=True)
     type_.add_argument("text", metavar="TEXT", help="the text to type")
 
@@ -909,15 +917,66 @@ def _cmd_key(args: argparse.Namespace) -> int:
     return 0
 
 
+# Why the device could not be chosen, in fixed words, when the values of
+# options given after the type command are hidden.
+_DEVICE_NOT_CHOSEN_BECAUSE = (
+    (AdbServerUnavailableError, "the adb server cannot be reached"),
+    (DeviceNotFoundError, "no device was found for the serial given"),
+    (MultipleDevicesError, "several devices are attached; choose one with -s"),
+    (DeviceOfflineError, "the device is offline"),
+    (DeviceUnauthorizedError, "the device has not authorized this computer"),
+)
+
+
+def _type_device(args: argparse.Namespace) -> Device:
+    """Choose the device for ``type``, hiding option values given after it.
+
+    Words after ``type`` can be part of an unquoted text that happens to
+    look like an option (``type first --adb-server Word``). When such an
+    option was given there, an error while choosing the device names the
+    option but shows neither its value nor anything that holds it.
+    """
+    hidden: list[str] = getattr(args, "type_hidden_options", [])
+    kind: type[BaseException] | None = None
+    message = ""
+    try:
+        return Device(
+            _single_serial(args),
+            adb_server=args.adb_server,
+            adb=args.adb,
+            start_server=args.start_server,
+        )
+    except (UiprobeError, ValueError, TypeError) as exc:
+        if not hidden:
+            raise
+        kind = type(exc)
+        message = str(exc)
+    names = ", ".join(hidden)
+    note = (
+        f"the value given to {names} after type is not shown, as it can be"
+        " part of the text to type; give TEXT as one quoted argument"
+    )
+    if issubclass(kind, UiprobeError):
+        reason = next(
+            (w for cls, w in _DEVICE_NOT_CHOSEN_BECAUSE if issubclass(kind, cls)),
+            "the device could not be used",
+        )
+        raise kind(f"{reason}; {note}")
+    if message.startswith("adb server argument") and "--adb-server" in hidden:
+        names = "--adb-server"
+    elif message.startswith("adb argument") and "--adb" in hidden:
+        names = "--adb"
+    msg = (
+        f"the value of {names} was not accepted (it is not shown, as it can"
+        " be part of the text to type); give TEXT as one quoted argument"
+    )
+    raise _UsageError(msg)
+
+
 def _cmd_type(args: argparse.Namespace) -> int:
     text = str.__str__(args.text)
     _text_pieces(text)  # a bad text is a usage error before any server contact
-    device = Device(
-        _single_serial(args),
-        adb_server=args.adb_server,
-        adb=args.adb,
-        start_server=args.start_server,
-    )
+    device = _type_device(args)
     device.type_text(text)
     if args.json:
         payload: dict[str, object] = {
@@ -1366,24 +1425,66 @@ def _json_requested(argv: Sequence[str]) -> bool:
 _TYPE_USAGE_MESSAGE = (
     "the arguments could not be read (they are not shown, as they can hold the"
     " text to type); give TEXT as one quoted argument, after -- when it starts"
-    " with -"
+    " with -; for how to use it see uiprobe type --help"
 )
+# Options before the command that take a value: their value is not a command.
+_TOP_OPTIONS_WITH_VALUE = frozenset({"-s", "--serial", "--adb", "--adb-server"})
+# The options whose values are hidden after ``type``, by every spelling.
+_HIDDEN_AFTER_TYPE = {
+    "-s": "--serial",
+    "--serial": "--serial",
+    "--adb": "--adb",
+    "--adb-server": "--adb-server",
+}
+
+
+def _command_index(argv: Sequence[str]) -> int | None:
+    """Return where the command word is in `argv`, or None if there is none."""
+    skip = False
+    for index, word in enumerate(argv):
+        if skip:
+            skip = False
+        elif word in _TOP_OPTIONS_WITH_VALUE:
+            skip = True
+        elif word == "--":
+            return index + 1 if index + 1 < len(argv) else None
+        elif not word.startswith("-"):
+            return index
+    return None
+
+
+def _hidden_options(words: Sequence[str]) -> list[str]:
+    """The value-taking options named in `words` (before any ``--``)."""
+    found: set[str] = set()
+    for word in words:
+        if word == "--":
+            break
+        name = word.split("=", 1)[0]
+        if name.startswith("-s") and not name.startswith("--"):
+            name = "-s"  # also -sVALUE
+        if name in _HIDDEN_AFTER_TYPE:
+            found.add(_HIDDEN_AFTER_TYPE[name])
+    return sorted(found)
 
 
 def _parse(argv: Sequence[str]) -> argparse.Namespace:
     """Read the command line.
 
-    When it holds the word ``type`` anywhere, an argparse error is replaced by
-    a message that shows none of the arguments. The replacement is raised
-    outside the handler, so the error chains to nothing that holds them.
+    When the command is ``type``, an argparse error is replaced by a message
+    that shows none of the arguments, raised outside the handler so that it
+    chains to nothing that holds them, and the value-taking options given
+    after ``type`` are noted so that their values stay hidden later too.
     """
-    hide = "type" in argv
+    where = _command_index(argv)
+    is_type = where is not None and argv[where] == "type"
     try:
         args = _build_parser().parse_args(argv)
     except _UsageError:
-        if not hide:
+        if not is_type:
             raise
     else:
+        if is_type and where is not None:
+            args.type_hidden_options = _hidden_options(argv[where + 1 :])
         _single_serial(args)
         return args
     raise _UsageError(_TYPE_USAGE_MESSAGE)

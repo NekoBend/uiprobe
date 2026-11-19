@@ -192,10 +192,10 @@ def test_the_fake_records_the_typed_text(device, android):
 def test_non_ascii_is_refused_before_anything_is_sent(
     device, fake_adb, text, char, position
 ):
-    before = len(fake_adb.commands)
+    before = list(fake_adb.requests)
     with pytest.raises(TextNotTypedError, match="not ASCII") as info:
         device.type_text(text)
-    assert len(fake_adb.commands) == before
+    assert fake_adb.requests == before
     error = info.value
     assert isinstance(error, TextNotTypedError)
     assert error.details == {
@@ -224,10 +224,10 @@ def test_the_first_offending_character_is_reported(device):
     "char", ["\n", "\t", "\r", "\x00", "\x01", "\x1b", "\x1f", "\x7f"]
 )
 def test_control_characters_are_refused_before_anything_is_sent(device, fake_adb, char):
-    before = len(fake_adb.commands)
+    before = list(fake_adb.requests)
     with pytest.raises(TextNotTypedError, match="position 2") as info:
         device.type_text("ab" + char + "cd")
-    assert len(fake_adb.commands) == before
+    assert fake_adb.requests == before
     assert info.value.details["position"] == 2
     assert info.value.details["character"] == f"U+{ord(char):04X}"
     assert "not ASCII" not in str(info.value)
@@ -251,18 +251,18 @@ def test_carriage_return_gets_the_control_message(device):
 
 
 def test_empty_text_is_refused(device, fake_adb):
-    before = len(fake_adb.commands)
+    before = list(fake_adb.requests)
     with pytest.raises(ValueError, match="empty"):
         device.type_text("")
-    assert len(fake_adb.commands) == before
+    assert fake_adb.requests == before
 
 
 @pytest.mark.parametrize("value", [None, 5, b"abc", ["a"]])
 def test_a_non_str_is_a_type_error(device, fake_adb, value):
-    before = len(fake_adb.commands)
+    before = list(fake_adb.requests)
     with pytest.raises(TypeError):
         device.type_text(value)
-    assert len(fake_adb.commands) == before
+    assert fake_adb.requests == before
 
 
 # --- uiprobe type ---
@@ -420,13 +420,14 @@ def test_a_failure_after_the_first_piece_names_the_pieces(device, android):
 @pytest.mark.parametrize(
     ("answer", "reason", "extra"),
     [
-        ({"status": 1}, "exit_status", {"exit_status": 1}),
+        ({"status": 1}, "exit_status", {}),
+        ({"status": 1000}, "exit_status", {}),
         ({"output": "input: permission denied\n"}, "unexpected_output", {}),
         ({"output": TYPED_TEXT + "\n"}, "unexpected_output", {}),
         (
             {"status": 255, "output": TYPED_TEXT + "\n"},
             "exit_status",
-            {"exit_status": 255},
+            {},
         ),
         ({"marker": False}, "no_exit_status", {}),
     ],
@@ -531,3 +532,83 @@ def test_other_commands_keep_their_argument_errors(capsys, fake_adb):
     code, _, err = invoke(capsys, fake_adb, "key", "enter", "extra")
     assert code == 2
     assert "unrecognized arguments: extra" in err
+
+
+def test_the_exit_status_is_never_shown(device, android):
+    android.answer_input(status=4242)
+    with pytest.raises(InputFailedError) as info:
+        device.type_text("4242")
+    _no_text_anywhere(info.value, "4242")
+
+
+# --- option values given after type ---
+
+
+SECRET_WORD = "Word-" + TYPED_TEXT
+
+
+@pytest.mark.parametrize(
+    ("words", "named"),
+    [
+        (["--adb-server", SECRET_WORD], "--adb-server"),
+        (["--adb", SECRET_WORD], "--adb"),
+        ([f"--adb-server={SECRET_WORD}"], "--adb-server"),
+    ],
+)
+def test_a_bad_option_value_after_type_is_named_not_shown(
+    capsys, fake_adb, words, named
+):
+    for json_flag in ([], ["--json"]):
+        code, out, err = invoke(capsys, fake_adb, *json_flag, "type", "first", *words)
+        assert code == 2
+        assert TYPED_TEXT not in out + err
+        assert f"the value of {named} was not accepted" in out + err
+    assert fake_adb.requests == []
+
+
+@pytest.mark.parametrize("words", [["-s", SECRET_WORD], ["-s" + SECRET_WORD]])
+def test_a_serial_after_type_is_not_shown_when_the_device_is_missing(
+    capsys, fake_adb, words
+):
+    code, out, err = invoke(capsys, fake_adb, "--json", "type", "first", *words)
+    assert code != 0
+    assert err == ""
+    assert TYPED_TEXT not in out
+    assert "--serial" in json.loads(out)["error"]["message"]
+
+
+def test_options_before_type_keep_their_values(capsys, fake_adb):
+    code, _, err = invoke(capsys, fake_adb, "--adb", "missing-adb", "type", "hello")
+    assert code == 2
+    assert "missing-adb" in err
+
+
+def test_h_inside_an_unquoted_text_is_not_help(capsys, fake_adb):
+    code, out, err = invoke(
+        capsys, fake_adb, "type", "--json", "Beforeword", "-h", "Afterword"
+    )
+    assert (code, err) == (2, "")
+    message = json.loads(out)["error"]["message"]
+    assert "uiprobe type --help" in message
+    assert "Beforeword" not in message
+    assert "Afterword" not in message
+    assert fake_adb.requests == []
+
+
+def test_type_help_is_double_dash_help(capsys, fake_adb):
+    assert cli.run(["type", "--help"]) == 0
+    assert "TEXT" in capsys.readouterr().out
+    assert fake_adb.requests == []
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["find", "--text", "type", "--wrong"],
+        ["-s", "type", "key", "enter", "--wrong"],
+    ],
+)
+def test_type_as_a_value_keeps_other_errors_visible(capsys, fake_adb, argv):
+    code, _, err = invoke(capsys, fake_adb, *argv)
+    assert code == 2
+    assert "unrecognized arguments: --wrong" in err
