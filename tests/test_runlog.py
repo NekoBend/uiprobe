@@ -1722,14 +1722,21 @@ def test_on_windows_a_path_relative_to_a_drive_folder_is_refused(
 ):
     monkeypatch.setattr(pngfile, "_WINDOWS", True)
     monkeypatch.chdir(tmp_path)
-    checked, made = _record_checks_and_creation(monkeypatch)
+    checked: list[str] = []
+
+    def never_make(folder):
+        pytest.fail(f"the folder {folder!r} was about to be made")
+
+    # Nothing outside the test folder is looked up or made, whatever is there.
+    monkeypatch.setattr(runlog, "check_new_path", checked.append)
+    monkeypatch.setattr(runlog, "_make_dir", never_make)
     with pytest.raises(
         RunFolderError, match="give a full path with its drive"
     ) as raised:
         _create(path)
     assert raised.value.details == {"path": path}
     assert "relative to the working folder" in raised.value.message
-    assert (checked, made) == ([path], [])  # only looked up, never made
+    assert checked == [path]  # checked as given, then refused before joining
 
 
 def test_on_windows_a_bare_drive_depends_on_its_folder(monkeypatch):
