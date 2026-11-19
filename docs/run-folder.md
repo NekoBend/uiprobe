@@ -11,7 +11,7 @@ A crawl run is recorded in one new folder. The library part that writes it is `u
 - File names are fixed names, or a screen id (`s-` and 12 lowercase hex digits, such as `s-0123456789ab`). Text that comes from the app never becomes part of a path.
 - Every line or file is flushed and then synced to the disk (`fsync`) before the method returns. A line is therefore complete on disk when the writer returns, also if the program is killed right after.
 - If a write fails, the file stays as far as it got, `RunFolderError` names it (`details.path`), and the writer refuses all later writes.
-- An interrupt such as Ctrl+C that arrives during a write is not turned into `RunFolderError`: it propagates as `KeyboardInterrupt` itself (or `SystemExit` and the like), without `details.path`. The writer then refuses all later writes, as after a failed write.
+- An interrupt such as Ctrl+C that arrives during a write is not turned into `RunFolderError`: it propagates as `KeyboardInterrupt` itself (or `SystemExit` and the like), without `details.path`. The writer then refuses all later writes, as after a failed write. If closing the file also fails after the interrupt, `RunFolderError` (naming the file) may be raised instead of the interrupt; either way the writer refuses all later writes. Marking the writer on an interrupt is best effort (see [Interrupts](#interrupts)).
 - At the end, the line files are closed first, then `summary.txt` is written, and `run.json` last. A folder whose `run.json` is missing or is not complete JSON did not end normally. This holds one way only: a `run.json` that looks complete does not prove a normal end, because `finish()` can still fail at the final sync after the bytes are in the file. Only a `finish()` that returned without an error proves it.
 - A writer is made only with `RunWriter.create`, which makes the folder. Calling `RunWriter(...)` directly raises `TypeError`, so a writer can never write into a folder it did not make.
 
@@ -49,10 +49,12 @@ For each screen that was written, one heading line (package, activity and the sc
 
 `RunWriter.critical()` is a context manager that marks the time while a line or file is written; the read-only property `writing` is `True` inside it. Each write method keeps the write and the writer's record of it (for example that a screen or a skip was already written) inside one such block, so `writing` stays `True` until the write is recorded. A program that handles Ctrl+C can look at `writing` and postpone the interrupt until the write is complete. The library installs no signal handler.
 
+When an interrupt does reach a write, the writer marks itself as failed and refuses later writes, but only as far as it can: an asynchronous exception such as `KeyboardInterrupt` can arrive between any two steps, also after the point where the mark is made, so the mark is best effort and cannot be complete. The reliable way is the one above: a program that handles Ctrl+C postpones it while `writing` is `True`.
+
 ## Limits
 
 Files and folders are only ever created new: an existing file is never opened. But if another program running with the same rights replaces the run folder or the `screens` folder with a link (or, on Windows, a junction) during a run, later new files can be created where that link points. uiprobe does not defend against such a program, which could just as well write there itself.
 
 The same holds for a program that appends to `transitions.jsonl` or `skipped.jsonl` during a run: the writer keeps its own position in the file, so its next line can overwrite what was appended. The writer assumes it is the only one writing into its run folder.
 
-The offline file guard (`tests/test_offline_guard.py`) checks that each of the four file-creating calls appears once, in `runlog.py`. It does not stop another uiprobe module from importing runlog's private helpers that make those calls. Those helpers can only create new files and folders (an existing file or folder is an error), and review covers who calls them.
+The offline file guard (`tests/test_offline_guard.py`) checks that each of the four file-creating calls appears once, in `runlog.py`. It does not stop another uiprobe module from importing runlog's private helpers that make those calls. The two open helpers (`_create_text`, `_create_binary`) and `_make_dir` can only create new files and folders (an existing file or folder is an error). `_put` writes to whatever handle it is given and does not check where the handle came from. Review covers who calls these helpers.

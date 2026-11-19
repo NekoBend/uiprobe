@@ -330,7 +330,10 @@ class RunWriter:
         An exception that is not an `Exception` (`KeyboardInterrupt`,
         `SystemExit`, ...) leaving the block marks the writer as failed: a
         write or its record may be incomplete, so every later write is
-        refused. The exception itself propagates unchanged.
+        refused. The exception itself propagates unchanged. This mark is best
+        effort only: an asynchronous exception can arrive at any point,
+        including after the mark would be made. The reliable way is the one
+        above: postpone Ctrl+C while `writing` is True.
         """
         self._depth += 1
         try:
@@ -425,12 +428,12 @@ class RunWriter:
         checked = _check_screen_id(screen_id)
         _check_text("fingerprint", fingerprint)
         listed = tuple(_check_texts("reasons", reasons))
-        body = _element_dict(element)
         key = (checked, fingerprint, listed)
         with self.critical():
             self._check_usable()
             if key in self._skipped:
                 return False
+            body = _element_dict(element)
             line = _json_text(
                 {
                     "schema": SKIP_SCHEMA,
@@ -441,6 +444,9 @@ class RunWriter:
                     "element": body,
                 }
             )
+            # Reading the element may have called back into this writer.
+            if key in self._skipped:
+                return False
             self._append("skipped.jsonl", line + "\n")
             self._skipped.add(key)
         return True
@@ -565,14 +571,20 @@ class RunWriter:
         """Close the line files; the first failure breaks the writer."""
         first: tuple[str, OSError] | None = None
         while self._streams:
-            # Take out only the handle being closed: if an interrupt stops
-            # this close, the others stay reachable for a later close().
-            name = next(iter(self._streams))
-            handle = self._streams.pop(name)
+            # A handle leaves the cache only once its close() has returned or
+            # raised: an interrupt before that leaves it, and the ones after
+            # it, reachable for a later close().
+            name, handle = next(iter(self._streams.items()))
+            close = handle.close
             try:
-                handle.close()
+                close()
             except OSError as error:
                 first = first or (name, error)
+            except BaseException:
+                self._failed = self._root / name
+                raise
+            finally:
+                self._streams.pop(name, None)
         if first is not None:
             raise self._broken(self._root / first[0], first[1]) from first[1]
 

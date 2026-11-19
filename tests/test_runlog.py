@@ -8,6 +8,7 @@ import errno
 import json
 import os
 import re
+from collections.abc import Mapping
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta, timezone, tzinfo
 from enum import Enum
@@ -1279,3 +1280,134 @@ def test_a_repeated_skip_on_a_failed_writer_reports_the_failure(tmp_path, monkey
     monkeypatch.undo()
     with pytest.raises(RunFolderError, match="earlier write failed"):
         writer.write_skip(ID_A, "fp", ["r"], {"x": object()})
+
+
+# --- third review ---
+
+
+class _CloseRaises:
+    def __init__(self, handle, error):
+        self.handle = handle
+        self.error = error
+
+    def close(self):
+        self.handle.close()
+        raise self.error
+
+
+@pytest.mark.parametrize("error", [RuntimeError("boom"), KeyboardInterrupt()])
+def test_any_failed_stream_close_at_finish_is_remembered(tmp_path, error):
+    writer = make(tmp_path)
+    writer.write_transition_start(1, "launch")
+    path = tmp_path / "run" / "transitions.jsonl"
+    real = writer._streams["transitions.jsonl"]
+    writer._streams["transitions.jsonl"] = _CloseRaises(real, error)  # ty: ignore[invalid-assignment]
+    with pytest.raises(type(error)):
+        writer.finish("done", screens=0, actions=1)
+    with pytest.raises(RunFolderError, match="earlier write failed") as raised:
+        writer.finish("done", screens=0, actions=1)
+    assert raised.value.details["path"] == str(path)
+    assert names(tmp_path / "run") == ["run-start.json", "transitions.jsonl"]
+
+
+class _InterruptBeforeClose:
+    """Interrupts once when close is looked up, before close() starts."""
+
+    def __init__(self, handle):
+        self.handle = handle
+        self.interrupted = False
+
+    @property
+    def close(self):
+        if not self.interrupted:
+            self.interrupted = True
+            raise KeyboardInterrupt
+        return self.handle.close
+
+
+def test_an_interrupt_before_a_close_keeps_that_stream_reachable(tmp_path):
+    writer = make(tmp_path)
+    writer.write_transition_start(1, "launch")
+    writer.write_skip(ID_A, "fp", ["r"], {})
+    skipped = writer._streams["skipped.jsonl"]
+    real = writer._streams["transitions.jsonl"]
+    stream = _InterruptBeforeClose(real)
+    writer._streams["transitions.jsonl"] = stream  # ty: ignore[invalid-assignment]
+    with pytest.raises(KeyboardInterrupt):
+        writer.close()
+    assert writer._streams == {"transitions.jsonl": stream, "skipped.jsonl": skipped}
+    assert not real.closed
+    writer.close()
+    assert real.closed
+    assert skipped.closed
+    assert writer._streams == {}
+
+
+class _Unreadable(Mapping):
+    """A mapping that fails as soon as it is read."""
+
+    def __getitem__(self, key):
+        raise LookupError(key)
+
+    def __iter__(self):
+        msg = "read"
+        raise RuntimeError(msg)
+
+    def __len__(self):
+        return 1
+
+
+def test_a_repeated_skip_does_not_read_the_element(tmp_path, monkeypatch):
+    writer = make(tmp_path)
+    assert writer.write_skip(ID_A, "fp", ["r"], {})
+    assert writer.write_skip(ID_A, "fp", ["r"], _Unreadable()) is False
+
+    def broken(*_arguments):
+        raise OSError(errno.EIO, "I/O error")
+
+    monkeypatch.setattr(runlog, "_put", broken)
+    with pytest.raises(RunFolderError):
+        writer.write_transition_start(1, "launch")
+    monkeypatch.undo()
+    with pytest.raises(RunFolderError, match="earlier write failed"):
+        writer.write_skip(ID_A, "fp", ["r"], _Unreadable())
+
+
+def test_a_skip_element_that_calls_back_gives_one_line(tmp_path):
+    writer = make(tmp_path)
+    results = []
+
+    class _CallsBack(dict):
+        def items(self):
+            if not results:
+                results.append(writer.write_skip(ID_A, "fp", ["r"], {}))
+            return super().items()
+
+    assert writer.write_skip(ID_A, "fp", ["r"], {"nested": _CallsBack(a=1)}) is False
+    assert results == [True]
+    assert len(lines_of(tmp_path / "run" / "skipped.jsonl")) == 1
+
+
+def test_each_record_is_encoded_once_and_strictly(tmp_path, monkeypatch):
+    calls = []
+    real = runlog.dumps
+
+    def spy(value, **kwargs):
+        calls.append((value.get("schema"), kwargs.get("allow_nan", True)))
+        return real(value, **kwargs)
+
+    monkeypatch.setattr(runlog, "dumps", spy)
+    writer = make(tmp_path)
+    writer.write_transition_start(1, "launch")
+    writer.write_transition_end(1, ID_A)
+    writer.write_skip(ID_A, "fp", ["r"], {})
+    writer.write_screen(make_screen())
+    writer.finish("done", screens=1, actions=1)
+    assert calls == [
+        ("uiprobe.run_start/1", False),
+        ("uiprobe.transition_start/1", False),
+        ("uiprobe.transition_end/1", False),
+        ("uiprobe.skip/1", False),
+        ("uiprobe.screen/1", False),
+        ("uiprobe.run/1", False),
+    ]
