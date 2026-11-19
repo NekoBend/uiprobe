@@ -1101,6 +1101,9 @@ def _cmd_screenshot(args: argparse.Namespace) -> int:
     png = device.screenshot()
     captured_at = datetime.now(UTC).astimezone()
     width, height = check_png(png)
+    # Asked before the file is made, so that nothing slow or failing comes
+    # between saving and reporting the saved file.
+    display = device.display_for_image(width, height) if args.json else None
     try:
         save_png(path, png)
     except FileExistsError:
@@ -1116,7 +1119,6 @@ def _cmd_screenshot(args: argparse.Namespace) -> int:
             "width": width,
             "height": height,
         }
-        display = device.display_for_image(width, height)
         if display is not None:
             payload["display"] = {"width": display[0], "height": display[1]}
         _emit(dumps(payload, indent=2))

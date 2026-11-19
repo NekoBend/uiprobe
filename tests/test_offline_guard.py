@@ -1804,12 +1804,23 @@ def test_each_pngfile_call_has_exactly_one_call_site():
     assert ALLOWED_CALLS["pngfile.py"] == frozenset(PNGFILE_CALLS)
 
 
+def _own_scope(node: ast.AST):
+    """Yield the nodes below `node` outside any nested def, class or lambda."""
+    for child in ast.iter_child_nodes(node):
+        yield child
+        if not isinstance(
+            child, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef | ast.Lambda
+        ):
+            yield from _own_scope(child)
+
+
 def write_handle_problems(source: str) -> list[str]:
     """Why the one write in `source` may not go to the file `save_png` creates.
 
-    The write must sit in `save_png`, whose name `handle` must be bound exactly
-    once, from the create-only open; no other code in the module may bind or
-    take a `handle`.
+    The write must sit in `save_png`'s own scope, inside `with handle:`, where
+    `handle` is bound exactly once in the module: by the create-only open in
+    `save_png`. Any other binding of `handle` anywhere (a parameter, a match
+    capture, an except name, `with ... as handle`, `del`, ...) is a problem.
     """
     tree = ast.parse(source)
     problems = []
@@ -1817,31 +1828,36 @@ def write_handle_problems(source: str) -> list[str]:
     save = next((f for f in functions if f.name == "save_png"), None)
     if save is None:
         return ["no save_png"]
-    writes = [
-        n
-        for n in ast.walk(save)
-        if isinstance(n, ast.Call) and ast.unparse(n) == RUNLOG_WRITE
-    ]
-    if len(writes) != 1:
-        problems.append(f"save_png has {len(writes)} writes")
-    binds = [
+    all_writes = [
         n
         for n in ast.walk(tree)
-        if (
-            isinstance(n, ast.Name)
-            and n.id == "handle"
-            and isinstance(n.ctx, ast.Store)
-        )
-        or (isinstance(n, ast.arg) and n.arg == "handle")
+        if isinstance(n, ast.Call) and ast.unparse(n) == RUNLOG_WRITE
     ]
+    blocks = [
+        n
+        for n in _own_scope(save)
+        if isinstance(n, ast.With)
+        and len(n.items) == 1
+        and ast.unparse(n.items[0]) == "handle"
+    ]
+    guarded = [
+        n
+        for block in blocks
+        for n in _own_scope(block)
+        if isinstance(n, ast.Call) and ast.unparse(n) == RUNLOG_WRITE
+    ]
+    if len(all_writes) != 1 or len(guarded) != 1:
+        problems.append("the write is not the one inside `with handle:` in save_png")
     opens = [
         n
-        for n in ast.walk(save)
+        for n in _own_scope(save)
         if isinstance(n, ast.Assign)
         and [ast.unparse(t) for t in n.targets] == ["handle"]
         and ast.unparse(n.value) == RUNLOG_OPEN_BINARY
     ]
-    if len(binds) != 1 or len(opens) != 1 or binds[0] is not opens[0].targets[0]:
+    if unapproved_bindings(source, frozenset({"handle"})) != ["name store"] or (
+        len(opens) != 1
+    ):
         problems.append("handle is not bound only by the create-only open")
     return problems
 
@@ -1871,9 +1887,41 @@ def save_png(path, data, other):
         handle.write(data)
     open(path, 'xb')
 """
+WRITE_AFTER_WITH = """
+def save_png(path, data):
+    handle = open(path, 'xb')
+    with handle:
+        pass
+    handle.write(data)
+"""
+MATCH_CAPTURE = """
+def save_png(path, data, other):
+    handle = open(path, 'xb')
+    match other:
+        case handle:
+            pass
+    with handle:
+        handle.write(data)
+"""
+NESTED_WRITE = """
+def save_png(path, data):
+    handle = open(path, 'xb')
+    with handle:
+        later = lambda: handle.write(data)
+"""
 
 
-@pytest.mark.parametrize("source", [MOVED_WRITE, REBOUND_HANDLE, WITH_AS_HANDLE])
+@pytest.mark.parametrize(
+    "source",
+    [
+        MOVED_WRITE,
+        REBOUND_HANDLE,
+        WITH_AS_HANDLE,
+        WRITE_AFTER_WITH,
+        MATCH_CAPTURE,
+        NESTED_WRITE,
+    ],
+)
 def test_a_write_to_another_handle_is_caught(source):
     assert write_handle_problems(source)
     assert not file_changes(source, "pngfile.py")  # the call guard alone misses it

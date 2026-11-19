@@ -47,6 +47,9 @@ _DEPTHS: Final = {
     6: frozenset({8, 16}),
 }
 _PALETTE: Final = 3
+# Gray and gray with alpha must not have a palette; it holds 1 to 256 colors.
+_NO_PALETTE: Final = frozenset({0, 4})
+_MAX_PALETTE: Final = 3 * 256
 _WINDOWS: Final = os.name == "nt"
 # A Windows drive at the start of a path: an optional ``\\?\`` or ``\\.\``
 # prefix, then a letter and a colon. Any other colon names a stream.
@@ -102,11 +105,39 @@ def _header(data: bytes) -> tuple[int, int, int]:
     return width, height, color
 
 
+def _check_chunk(kind: bytes, length: int, color: int, seen: set[str]) -> None:
+    """Check the order rules for one chunk between IHDR and IEND."""
+    if kind == b"IHDR":
+        msg = "the PNG image has a second header chunk"
+        raise ValueError(msg)
+    if kind == b"IDAT":
+        if "after data" in seen:
+            msg = "the PNG image data is split by other chunks"
+            raise ValueError(msg)
+        if color == _PALETTE and "PLTE" not in seen:
+            msg = "the PNG image has no palette before its image data"
+            raise ValueError(msg)
+        seen.add("IDAT")
+        return
+    if "IDAT" in seen:
+        seen.add("after data")
+    if kind == b"PLTE":
+        if (
+            seen & {"PLTE", "IDAT"}
+            or color in _NO_PALETTE
+            or length % 3
+            or not 3 <= length <= _MAX_PALETTE
+        ):
+            msg = "the PNG image has a misplaced or malformed palette"
+            raise ValueError(msg)
+        seen.add("PLTE")
+
+
 def _walk_chunks(data: bytes, color: int) -> None:
     """Check the chunks after IHDR up to the closing IEND at the end of `data`."""
     cut = "the PNG image is cut off"
     position = len(_SIGNATURE) + 12 + _IHDR_LENGTH
-    palette = image = False
+    seen: set[str] = set()
     while True:
         if position + 12 > len(data):
             raise ValueError(cut)
@@ -120,18 +151,12 @@ def _walk_chunks(data: bytes, color: int) -> None:
             raise ValueError(cut)
         if kind == b"IEND":
             break
-        if kind == b"PLTE":
-            palette = True
-        elif kind == b"IDAT":
-            if color == _PALETTE and not palette:
-                msg = "the PNG image has no palette before its image data"
-                raise ValueError(msg)
-            image = True
+        _check_chunk(kind, length, color, seen)
         position = end
-    if end != len(data) or not data.endswith(_IEND):
+    if length != 0 or end != len(data) or not data.endswith(_IEND):
         msg = "the PNG image does not end with its closing chunk"
         raise ValueError(msg)
-    if not image:
+    if "IDAT" not in seen:
         msg = "the PNG image has no image data"
         raise ValueError(msg)
 
@@ -143,10 +168,12 @@ def check_png(data: bytes) -> tuple[int, int]:
     width and height from 1 to 2**31 - 1, a bit depth that its color type
     allows, compression and filter method 0 and interlace method 0 or 1;
     every chunk's length (at most 2**31 - 1) and a four-letter type, each
-    chunk fitting inside `data`; a ``PLTE`` chunk before the image data when
-    the color type is 3; at least one ``IDAT`` chunk; and the closing ``IEND``
-    chunk exactly at the end. Chunk checksums (except the fixed one of
-    ``IEND``) and the image data are not checked.
+    chunk fitting inside `data`; no second ``IHDR``; at most one ``PLTE``
+    (1 to 256 colors), before the image data, required for color type 3 and
+    refused for gray types; ``IDAT`` chunks in one unbroken run, at least
+    one; and an empty closing ``IEND`` chunk exactly at the end. Chunk
+    checksums (except the fixed one of ``IEND``), other chunks' order and
+    contents, and the image data are not checked.
 
     Raises:
         TypeError: `data` is not bytes.
@@ -178,15 +205,20 @@ def check_new_path(path: str) -> None:
     """Refuse a path that `save_png` would refuse, before anything is written.
 
     Raises:
-        TypeError: `path` is not a str.
-        ValueError: `path` is empty, or on Windows names a stream of a file.
+        TypeError: `path` is not exactly a str (a subclass could make
+            `open` take it as a descriptor).
+        ValueError: `path` is empty, holds a null character, or on Windows
+            names a stream of a file.
         FileExistsError: Something is at `path`, also a broken link.
     """
-    if not isinstance(path, str):
+    if type(path) is not str:
         msg = f"path must be a str or an os.PathLike of str, not {type(path).__name__}"
         raise TypeError(msg)
     if not path:
         msg = "the path must not be empty"
+        raise ValueError(msg)
+    if "\0" in path:
+        msg = "the path must not hold a null character"
         raise ValueError(msg)
     if _names_a_stream(path):
         msg = (
@@ -204,8 +236,9 @@ def save_png(path: str | os.PathLike[str], data: bytes) -> None:
     Raises:
         FileExistsError: Something is at `path` already, also a broken link;
             nothing was changed.
-        TypeError: `path` is not a str or an os.PathLike of str (an int is not
-            taken as an open descriptor), or `data` is not bytes.
+        TypeError: `path` is not a str or an os.PathLike that gives exactly a
+            str (an int, or text that can act as one, is never taken as an
+            open descriptor), or `data` is not bytes.
         ValueError: `data` is not a PNG, or `path` cannot be used (it is
             empty, holds a null character, or on Windows names a stream of a
             file); nothing was created.
@@ -216,7 +249,7 @@ def save_png(path: str | os.PathLike[str], data: bytes) -> None:
             KeyboardInterrupt); the file stays, possibly incomplete.
     """
     path = os.fspath(path)  # refuses an int, which open() takes as a descriptor
-    check_new_path(path)
+    check_new_path(path)  # refuses a str subclass, which could act as one
     check_png(data)
     try:
         handle = open(path, "xb")  # noqa: PTH123, SIM115
@@ -226,14 +259,19 @@ def save_png(path: str | os.PathLike[str], data: bytes) -> None:
         msg = f"cannot create {path}: {error.strerror or error}"
         details = {"path": path, "created": False}
         raise PngFileError(msg, details=details) from error
+    interrupted = False
     try:
         with handle:
-            handle.write(data)
-            handle.flush()
-            os.fsync(handle.fileno())
+            try:
+                handle.write(data)
+                handle.flush()
+                os.fsync(handle.fileno())
+            except KeyboardInterrupt:
+                interrupted = True
+                raise
     except OSError as error:
         # A failing close must not hide a Ctrl+C that arrived while writing.
-        if isinstance(error.__context__, KeyboardInterrupt):
+        if interrupted:
             raise PngInterruptedError(path) from error
         msg = f"cannot complete {path}: {error.strerror or error}"
         details = {"path": path, "created": True}

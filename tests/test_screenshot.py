@@ -148,11 +148,32 @@ BAD_IMAGES.update(
             ihdr(), struct.pack(">I", 2**31) + b"IDAT", IEND
         ),
         "data after the end": png_with(ihdr(), IDAT, IEND, IDAT),
+        # The last 12 bytes look like the closing chunk, but IEND claims 8 bytes.
+        "closing chunk with data": png_with(
+            ihdr(), IDAT, struct.pack(">I", 8) + b"IEND\0\0\0\0IEND\xaeB`\x82"
+        ),
+        "second header": png_with(ihdr(), chunk(b"IHDR", ihdr()), IDAT, IEND),
+        "empty palette": png_with(ihdr(8, 3), chunk(b"PLTE", b""), IDAT, IEND),
+        "palette of 4 bytes": png_with(
+            ihdr(8, 3), chunk(b"PLTE", b"\0" * 4), IDAT, IEND
+        ),
+        "palette of 257 colors": png_with(
+            ihdr(8, 3), chunk(b"PLTE", b"\0" * 771), IDAT, IEND
+        ),
+        "palette for gray": png_with(ihdr(8, 0), chunk(b"PLTE", b"\0" * 3), IDAT, IEND),
+        "two palettes": png_with(
+            ihdr(8, 2), chunk(b"PLTE", b"\0" * 3), chunk(b"PLTE", b"\0" * 3), IDAT, IEND
+        ),
+        "split image data": png_with(ihdr(), IDAT, chunk(b"tEXt", b"a\0b"), IDAT, IEND),
     }
 )
 
 GOOD_IMAGES = {
     "palette": png_with(ihdr(4, 3), chunk(b"PLTE", b"\0\0\0"), IDAT, IEND),
+    "256 colors": png_with(ihdr(8, 3), chunk(b"PLTE", b"\0" * 768), IDAT, IEND),
+    "suggested palette for color": png_with(
+        ihdr(8, 2), chunk(b"PLTE", b"\0" * 6), IDAT, IEND
+    ),
     "interlaced 16-bit color": png_with(ihdr(16, 6, 0, 0, 1), IDAT, IEND),
     "1-bit gray": png_with(ihdr(1, 0), IDAT, IEND),
     "ancillary chunks and split data": png_with(
@@ -164,12 +185,6 @@ GOOD_IMAGES = {
 @pytest.mark.parametrize("name", sorted(GOOD_IMAGES))
 def test_well_formed_images_pass(name):
     assert check_png(GOOD_IMAGES[name]) == (2, 3)
-
-
-@pytest.mark.parametrize("name", sorted(BAD_IMAGES))
-def test_a_malformed_image_is_refused(name):
-    with pytest.raises(ValueError, match=r"screenshot|PNG"):
-        check_png(BAD_IMAGES[name])
 
 
 def test_the_fake_images_are_valid():
@@ -296,6 +311,40 @@ def test_save_png_does_not_take_a_descriptor(tmp_path):
     with pytest.raises(TypeError, match="bytes"):
         save_png(os.fsencode(tmp_path / "b.png"), PNG)  # ty: ignore[invalid-argument-type]
     assert sorted(p.name for p in tmp_path.iterdir()) == ["old.bin"]
+
+
+def test_save_png_does_not_take_text_that_acts_as_a_descriptor(tmp_path):
+    target = tmp_path / "old.bin"
+    target.write_bytes(b"old")
+    fd = os.open(target, os.O_RDWR)
+
+    class Indexable(str):
+        __slots__ = ()
+
+        def __index__(self) -> int:
+            return fd
+
+    try:
+        with pytest.raises(TypeError, match="Indexable"):
+            save_png(Indexable(str(tmp_path / "new.png")), PNG)
+        assert os.fstat(fd).st_size == 3  # still open
+    finally:
+        os.close(fd)
+    assert target.read_bytes() == b"old"
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["old.bin"]
+
+
+def test_an_os_error_inside_a_callers_interrupt_handler_is_a_file_error(
+    tmp_path, monkeypatch
+):
+    fail_writes(monkeypatch)
+    target = tmp_path / "shot.png"
+    try:
+        raise KeyboardInterrupt  # the caller's own handler
+    except KeyboardInterrupt:
+        with pytest.raises(PngFileError) as raised:
+            save_png(target, PNG)
+    assert raised.value.details == {"path": str(target), "created": True}
 
 
 def test_save_png_refuses_a_dangling_link_and_makes_no_target(tmp_path):
@@ -629,7 +678,7 @@ def test_a_stream_path_on_windows_is_a_usage_error(
     code, out, err = shoot(capsys, fake_adb, tmp_path / "a.png:hidden")
     assert (code, out) == (2, "")
     assert "names a stream of a file" in err
-    assert exec_requests(fake_adb) == []  # refused before the device was asked
+    assert fake_adb.requests == []  # refused before the device was asked
     assert list(tmp_path.iterdir()) == []
 
 
@@ -643,6 +692,27 @@ def test_o_is_required(capsys, fake_adb):
     assert code == 2
     assert json.loads(out)["error"]["code"] == "usage_error"
     assert exec_requests(fake_adb) == []
+
+
+def test_a_null_character_is_refused_before_the_device_is_asked(capsys, fake_adb):
+    code, out, err = shoot(capsys, fake_adb, "a\0b.png")
+    assert (code, out) == (2, "")
+    assert "null character" in err
+    assert fake_adb.requests == []
+
+
+def test_an_interrupt_while_reading_the_display_makes_no_file(
+    capsys, fake_adb, tmp_path, monkeypatch
+):
+    def interrupt(*_args):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(Device, "display_for_image", interrupt)
+    target = tmp_path / "shot.png"
+    code, out, _ = shoot(capsys, fake_adb, target, "--json")
+    assert code == 130
+    assert json.loads(out)["error"]["code"] == "interrupted"
+    assert list(tmp_path.iterdir()) == []  # the size is read before the file is made
 
 
 def test_an_empty_path_is_a_usage_error(capsys, fake_adb):
