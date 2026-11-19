@@ -212,8 +212,9 @@ def _build_parser() -> _Parser:
         description=(
             "Tap (or, with --long, press for 800 ms) the element chosen by"
             " --text, --id and --desc, or the point given with --xy. A tap holds"
-            f" still for {DEFAULT_PRESS_MS} ms by default so that the Pointer"
-            " location developer option shows it; --press-ms changes the hold"
+            f" still for {DEFAULT_PRESS_MS} ms by default (visible in the Pointer"
+            " location developer option on a Galaxy S25 Ultra at 60 Hz);"
+            " --press-ms changes the hold"
             f" (0 sends a plain input tap; the cap of {MAX_PRESS_MS} ms stays below"
             " Android's usual default long-press time, but an app may use a"
             " shorter threshold). The"
