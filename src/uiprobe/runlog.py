@@ -9,6 +9,8 @@ Rules that hold for every file:
 
 * The run folder is made with ``os.mkdir`` and must not exist; its parent must
   exist. Nothing is created silently and an existing folder is never reused.
+  The run folder and ``screens`` are made with mode 0o700, so that only their
+  owner can open them: the files hold screen text, which may be personal.
 * Every file is opened create-only (mode ``x``). No file is overwritten,
   renamed, truncated or deleted, also not after an error: a file that could not
   be completed stays as it is and the error names it.
@@ -228,8 +230,14 @@ def _create_binary(path: Path) -> IO[bytes]:
 
 
 def _make_dir(path: Path) -> None:
-    """Make one new folder; its parent must exist and the folder must not."""
-    os.mkdir(path)  # noqa: PTH102
+    """Make one new folder that only its owner can open.
+
+    Its parent must exist and the folder must not. Mode 0o700 keeps other
+    users out on POSIX (the umask can only narrow it); on Windows, Python
+    3.12.4 and later give the folder access control for the current user and
+    administrators only, and older 3.12 releases ignore the mode.
+    """
+    os.mkdir(path, 0o700)  # noqa: PTH102
 
 
 def _put(handle: IO[Any], data: str | bytes) -> None:
@@ -444,7 +452,9 @@ class RunWriter:
                     "element": body,
                 }
             )
-            # Reading the element may have called back into this writer.
+            # Reading the element may have called back into this writer, which
+            # may since have failed or been closed.
+            self._check_usable()
             if key in self._skipped:
                 return False
             self._append("skipped.jsonl", line + "\n")
@@ -579,8 +589,15 @@ class RunWriter:
             try:
                 close()
             except OSError as error:
-                first = first or (name, error)
+                if first is None:
+                    first = (name, error)
+                    # Record it now: a later failure while closing the others
+                    # must not leave the writer usable.
+                    self._failed = self._root / name
             except BaseException:
+                if first is not None:
+                    raise
+
                 self._failed = self._root / name
                 raise
             finally:

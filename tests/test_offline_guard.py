@@ -11,10 +11,11 @@ listed in ALLOWED_CALLS. settings.py creates the settings file through its
 create-only `open(path, 'x', encoding='utf-8', newline='\\n')` (an existing
 file is an error) and has one read-only `os.open(path, _READ_FLAGS)` (see
 below). runlog.py creates files and folders through four calls, each with
-exactly one call site there: `os.mkdir(path)` (a new folder; no `exist_ok`, no
-parents), `open(path, 'x', encoding='utf-8', newline='\\n')` and
-`open(path, 'xb')` (create-only: an existing file is an error), and
-`handle.write(data)` (the write into a file that was just created). Each
+exactly one call site there: `os.mkdir(path, 0o700)` (a new folder only its
+owner can open; no `exist_ok`, no parents),
+`open(path, 'x', encoding='utf-8', newline='\\n')` and `open(path, 'xb')`
+(create-only: an existing file is an error), and `handle.write(data)` (the
+write into a file that was just created). Each
 allowance holds only in its own file: a changed call, or an allowed call in a
 file whose entry does not list it, is flagged. Instead of listing what is
 dangerous after the fact, this check flags every REFERENCE (a call, but also
@@ -374,7 +375,8 @@ STRING_LOOKUPS = frozenset(
 )
 _FLAGGED_LEAVES = frozenset(name.rsplit(".", 1)[-1] for name in FLAGGED_NAMES)
 
-RUNLOG_MKDIR = "os.mkdir(path)"
+# ast.unparse prints the literal 0o700 as 448.
+RUNLOG_MKDIR = "os.mkdir(path, 448)"
 RUNLOG_OPEN_TEXT = "open(path, 'x', encoding='utf-8', newline='\\n')"
 RUNLOG_OPEN_BINARY = "open(path, 'xb')"
 RUNLOG_WRITE = "handle.write(data)"
@@ -1705,6 +1707,9 @@ def test_each_runlog_call_has_exactly_one_call_site():
 RUNLOG_VARIANTS = [
     "import os\nos.mkdir(path, exist_ok=True)",
     "import os\nos.mkdir(path, 0o777)",
+    "import os\nos.mkdir(path)",
+    "import os\nos.mkdir(path, 0o755)",
+    "import os\nos.mkdir(path, mode=0o700)",
     "import os\nos.mkdir(path=path)",
     "import os\nos.makedirs(path)",
     "import os\nos.makedirs(path, exist_ok=True)",
@@ -1768,6 +1773,6 @@ def test_a_runlog_call_still_has_its_arguments_checked():
     nested = "import os\nos.mkdir(\n    os.remove('x'))"
     assert ast.unparse(ast.parse(nested).body[1]) == outer
     assert file_changes(nested, "runlog.py", allowed) == [3]
-    assert not file_changes("import os\nos.mkdir(\n    path)", "runlog.py")
-    two = "import os\nos.mkdir(path)\nopen(path, 'w')"
+    assert not file_changes("import os\nos.mkdir(\n    path, 0o700)", "runlog.py")
+    two = "import os\nos.mkdir(path, 0o700)\nopen(path, 'w')"
     assert file_changes(two, "runlog.py") == [3]

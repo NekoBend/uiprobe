@@ -1388,6 +1388,76 @@ def test_a_skip_element_that_calls_back_gives_one_line(tmp_path):
     assert len(lines_of(tmp_path / "run" / "skipped.jsonl")) == 1
 
 
+def test_a_skip_element_that_closes_the_writer_is_refused(tmp_path):
+    writer = make(tmp_path)
+
+    class _WritesThenCloses(dict):
+        def items(self):
+            if not writer._skipped:
+                writer.write_skip(ID_A, "fp", ["r"], {})
+                writer.close()
+            return super().items()
+
+    with pytest.raises(RunFolderError, match="closed"):
+        writer.write_skip(ID_A, "fp", ["r"], {"nested": _WritesThenCloses(a=1)})
+    assert len(lines_of(tmp_path / "run" / "skipped.jsonl")) == 1
+
+
+class _CloseLookupFails:
+    """A handle whose close cannot even be looked up."""
+
+    def __init__(self, error):
+        self.error = error
+
+    @property
+    def close(self):
+        raise self.error
+
+
+def test_a_close_failure_stays_recorded_when_the_next_close_fails(tmp_path):
+    writer = make(tmp_path)
+    writer.write_transition_start(1, "launch")
+    writer.write_skip(ID_A, "fp", ["r"], {})
+    path = tmp_path / "run" / "transitions.jsonl"
+    real = writer._streams["transitions.jsonl"]
+    skipped = writer._streams["skipped.jsonl"]
+    failing = _CloseRaises(real, OSError(errno.EIO, "I/O error"))
+    writer._streams["transitions.jsonl"] = failing  # ty: ignore[invalid-assignment]
+    lookup = _CloseLookupFails(MemoryError())
+    writer._streams["skipped.jsonl"] = lookup  # ty: ignore[invalid-assignment]
+    with pytest.raises(MemoryError):
+        writer.finish("done", screens=0, actions=1)
+    skipped.close()
+    writer._streams.clear()
+    with pytest.raises(RunFolderError, match="earlier write failed") as raised:
+        writer.finish("done", screens=0, actions=1)
+    assert raised.value.details["path"] == str(path)
+    assert "run.json" not in names(tmp_path / "run")
+
+
+def test_folders_are_made_with_mode_0o700(tmp_path, monkeypatch):
+    modes = []
+    real = os.mkdir
+
+    def spy(path, mode=0o777):
+        modes.append(mode)
+        real(path, mode)
+
+    monkeypatch.setattr(runlog.os, "mkdir", spy)
+    writer = make(tmp_path)
+    writer.write_screen(make_screen())
+    monkeypatch.undo()
+    assert modes == [0o700, 0o700]
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX permission bits")
+def test_only_the_owner_can_open_the_run_folders(tmp_path):
+    writer = make(tmp_path)
+    writer.write_screen(make_screen())
+    for folder in (tmp_path / "run", tmp_path / "run" / "screens"):
+        assert folder.stat().st_mode & 0o077 == 0
+
+
 def test_each_record_is_encoded_once_and_strictly(tmp_path, monkeypatch):
     calls = []
     real = runlog.dumps
