@@ -46,6 +46,9 @@ MAX_NODES = 100_000
 # depth, from exploding.
 MAX_DEPTH = 256
 MAX_CANDIDATES = 20
+# Longest folded row label in the brief view, the "..." that ends a cut one
+# included, counted before escaping.
+BRIEF_LABEL_LIMIT = 60
 # An element counts as visible only when the part of it on the display is at
 # least this many pixels wide and this many pixels high. Thinner slivers (two
 # pixels of a list row at the bottom edge, the thin strip Android reports for a
@@ -255,34 +258,59 @@ class Screen:
         """
         return dumps(self.to_dict(), indent=indent)
 
-    def to_tree(self) -> str:
-        """Render the indented, human-readable view of the screen."""
+    def to_tree(self, *, brief: bool = False) -> str:
+        """Render the indented, human-readable view of the screen.
+
+        With ``brief`` only the elements that say something are listed: see
+        `_brief_lines`. The default view lists every element.
+        """
         head = _name(self.package)
         if self.activity is not None:
             head += "/" + _name(self.activity)
         lines = [f"{head}  ({self.screen_id})"]
-        lines.extend(self._tree_lines())
+        lines.extend(self._brief_lines() if brief else self._tree_lines())
         return "\n".join(lines)
 
-    def _tree_lines(self) -> list[str]:
+    def _children_map(self) -> dict[str | None, list[Element]]:
         known = {element.id for element in self.elements}
         children: dict[str | None, list[Element]] = {}
         for element in self.elements:
             parent = element.parent if element.parent in known else None
             children.setdefault(parent, []).append(element)
-        lines: list[str] = []
-        # Each entry: element, prefix of its own line, prefix for its children.
-        stack = [(top, "", "") for top in reversed(children.get(None, []))]
+        return children
+
+    def _tree_lines(self) -> list[str]:
+        return _render_tree(self._children_map(), {})
+
+    def _brief_lines(self) -> list[str]:
+        """Render only the elements with a label or a [tap] or [scroll] mark.
+
+        A kept element sits under its nearest kept ancestor. A pressable element
+        with no label of its own whose labeled descendants are all plain (none
+        has a tag such as [tap] or [checked]) shows their labels on its own line
+        (``labels="..."``) and those descendants are left out. The fold does not
+        reach into a nested [tap] or [scroll] element.
+        """
+        children = self._children_map()
+        kept: dict[str | None, list[Element]] = {}
+        labels: dict[str, str] = {}
+        dropped: set[str] = set()
+        # Each entry: element and its nearest kept ancestor id.
+        stack = [(top, None) for top in reversed(children.get(None, []))]
         while stack:
-            element, line_prefix, child_prefix = stack.pop()
-            lines.append(line_prefix + _describe(element))
+            element, anchor = stack.pop()
+            keep = _is_brief_kept(element) and element.id not in dropped
+            if keep:
+                kept.setdefault(anchor, []).append(element)
+                anchor = element.id
+                if "clickable" in element.flags:
+                    folded = _fold_labels(element, children)
+                    if folded is not None:
+                        labels[element.id] = folded[0]
+                        dropped.update(folded[1])
             kids = children.get(element.id, [])
-            for index in range(len(kids) - 1, -1, -1):
-                last = index == len(kids) - 1
-                branch = "└ " if last else "├ "
-                cont = "  " if last else "│ "
-                stack.append((kids[index], child_prefix + branch, child_prefix + cont))
-        return lines
+            stack.extend((kid, anchor) for kid in reversed(kids))
+        return _render_tree(kept, labels)
 
     def _clip(self, element: Element) -> Bounds | None:
         """Return the element's bounds cut to the display, or None when empty."""
@@ -688,8 +716,11 @@ def _quote(value: str) -> str:
     return f'"{_escape(value)}"'
 
 
-def _describe(element: Element) -> str:
-    """Render one element as a tree line without its tree prefix."""
+def _describe(element: Element, labels: str | None = None) -> str:
+    """Render one element as a tree line without its tree prefix.
+
+    ``labels`` is the folded label of a row in the brief view, if any.
+    """
     parts = [element.id, _name(element.class_name.rsplit(".", 1)[-1])]
     if element.text:
         parts.append(_quote(element.text))
@@ -700,6 +731,8 @@ def _describe(element: Element) -> str:
         parts.append(f"desc={_quote(element.content_desc)}")
     if element.hint:
         parts.append(f"hint={_quote(element.hint)}")
+    if labels is not None:
+        parts.append(f"labels={_quote(labels)}")
     parts.extend(tag for flag, tag in _FLAG_TAGS if flag in element.flags)
     return " ".join(parts)
 
@@ -846,3 +879,86 @@ def parse_uiautomator_dump(data: bytes | str) -> UiautomatorDump:
     return UiautomatorDump(
         elements, int(rotation) if rotation in {"0", "1", "2", "3"} else 0
     )
+
+
+def _render_tree(
+    children: dict[str | None, list[Element]], labels: dict[str, str]
+) -> list[str]:
+    """Draw the elements reachable from the top level with tree characters."""
+    lines: list[str] = []
+    # Each entry: element, prefix of its own line, prefix for its children.
+    stack = [(top, "", "") for top in reversed(children.get(None, []))]
+    while stack:
+        element, line_prefix, child_prefix = stack.pop()
+        lines.append(line_prefix + _describe(element, labels.get(element.id)))
+        kids = children.get(element.id, [])
+        for index in range(len(kids) - 1, -1, -1):
+            last = index == len(kids) - 1
+            branch = "\u2514 " if last else "\u251c "
+            cont = "  " if last else "\u2502 "
+            stack.append((kids[index], child_prefix + branch, child_prefix + cont))
+    return lines
+
+
+def _is_labeled(element: Element) -> bool:
+    return bool(element.text or element.content_desc or element.hint)
+
+
+def _is_brief_kept(element: Element) -> bool:
+    """True when the brief view lists the element."""
+    return (
+        _is_labeled(element)
+        or "clickable" in element.flags
+        or "scrollable" in element.flags
+    )
+
+
+def _is_control(element: Element) -> bool:
+    """True for an element that can be pressed or scrolled (a [tap] or [scroll])."""
+    return "clickable" in element.flags or "scrollable" in element.flags
+
+
+def _first_label(element: Element) -> str:
+    """Return the stripped text, else description, else hint that is not blank."""
+    for field in (element.text, element.content_desc, element.hint):
+        if field.strip():
+            return field.strip()
+    return ""
+
+
+def _fold_labels(
+    row: Element, children: dict[str | None, list[Element]]
+) -> tuple[str, list[str]] | None:
+    """Return the folded label of a pressable row and the descendants it replaces.
+
+    None when the row has a label of its own, when no descendant gives a
+    label, or when a labeled descendant carries a tag (it is shown on its own
+    line then). A descendant gives the first of its text, content description
+    and hint that is not blank once stripped; the labels are joined by one
+    space in document order. The walk stops at a nested pressable or scrollable
+    element: its subtree keeps its own labels. A descendant that gives no label
+    is not replaced and stays listed.
+    """
+    if _is_labeled(row):
+        return None
+    parts: list[str] = []
+    ids: list[str] = []
+    stack = list(reversed(children.get(row.id, [])))
+    while stack:
+        element = stack.pop()
+        if _is_labeled(element):
+            if any(flag in element.flags for flag, _ in _FLAG_TAGS):
+                return None
+            label = _first_label(element)
+            if label:
+                ids.append(element.id)
+                parts.append(label)
+        elif _is_control(element):
+            continue
+        stack.extend(reversed(children.get(element.id, [])))
+    if not parts:
+        return None
+    joined = " ".join(parts)
+    if len(joined) > BRIEF_LABEL_LIMIT:
+        joined = joined[: BRIEF_LABEL_LIMIT - 3].rstrip() + "..."
+    return joined, ids
