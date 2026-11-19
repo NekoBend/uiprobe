@@ -200,8 +200,8 @@ def test_an_existing_folder_is_named_in_the_message(tmp_path):
 
 @pytest.mark.parametrize(
     "name",
-    ["run:x", "run::$INDEX_ALLOCATION", "dir:x/run"],
-    ids=["named", "type", "parent"],
+    ["run:x", "run::$INDEX_ALLOCATION", "dir:x/run", "run:"],
+    ids=["named", "type", "parent", "trailing"],
 )
 def test_on_windows_a_stream_path_is_refused(tmp_path, monkeypatch, name):
     monkeypatch.setattr(pngfile, "_WINDOWS", True)
@@ -246,10 +246,8 @@ def test_on_this_windows_a_stream_run_folder_is_not_made(tmp_path, kind):
     assert names(tmp_path) == ["base"]
 
 
-def test_elsewhere_a_colon_is_part_of_the_folder_name(tmp_path, monkeypatch):
-    monkeypatch.setattr(pngfile, "_WINDOWS", False)
-    if os.name == "nt":
-        pytest.skip("Windows names a stream with a colon")
+@pytest.mark.skipif(os.name == "nt", reason="Windows names a stream with a colon")
+def test_elsewhere_a_colon_is_part_of_the_folder_name(tmp_path):
     _create(tmp_path / "run:x").close()
     assert (tmp_path / "run:x" / "run-start.json").is_file()
 
@@ -269,6 +267,8 @@ def test_a_broken_link_is_refused(tmp_path):
     with pytest.raises(RunFolderError, match="already exists"):
         _create(link)
     assert not (tmp_path / "missing").exists()
+    assert link.is_symlink()
+    assert link.readlink() == tmp_path / "missing"
 
 
 def test_a_path_that_cannot_be_looked_up_is_not_taken_as_missing(tmp_path, monkeypatch):
@@ -1589,3 +1589,115 @@ def test_each_record_is_encoded_once_and_strictly(tmp_path, monkeypatch):
         ("uiprobe.screen/1", False),
         ("uiprobe.run/1", False),
     ]
+
+
+class _PathNamingAnother(Path):
+    """A path whose own parts name one place and whose fspath names another."""
+
+    other = ""
+
+    def __fspath__(self) -> str:
+        return self.other
+
+
+def test_the_fspath_of_a_path_subclass_is_what_is_checked(tmp_path):
+    existing = tmp_path / "exists"
+    existing.mkdir()
+    out = _PathNamingAnother(tmp_path / "new")
+    out.other = str(existing)
+    with pytest.raises(RunFolderError, match="already exists"):
+        _create(out)
+    assert names(tmp_path) == ["exists"]
+
+
+class _ShapeShifter(str):
+    """Text that would join, divide and convert to something else."""
+
+    __slots__ = ()
+
+    def __add__(self, other):
+        return "/elsewhere"
+
+    def __truediv__(self, other):
+        return Path("/elsewhere")
+
+    def __str__(self) -> str:
+        return "/elsewhere"
+
+
+def _record_checks_and_creation(monkeypatch):
+    checked: list[object] = []
+    made: list[object] = []
+    real_check = runlog.check_new_path
+    real_make = runlog._make_dir
+
+    def check(path):
+        checked.append(path)
+        return real_check(path)
+
+    def make_dir(path):
+        made.append(path)
+        return real_make(path)
+
+    monkeypatch.setattr(runlog, "check_new_path", check)
+    monkeypatch.setattr(runlog, "_make_dir", make_dir)
+    return checked, made
+
+
+def test_one_plain_str_goes_from_the_check_to_the_creation(tmp_path, monkeypatch):
+    checked, made = _record_checks_and_creation(monkeypatch)
+    expected = str(tmp_path / "run")
+    writer = _create(_ShapeShifter(expected))
+    assert checked == [expected]
+    assert made == [expected]
+    assert all(type(value) is str for value in [*checked, *made])
+    assert writer.path == Path(expected)
+    assert (tmp_path / "run" / "run-start.json").is_file()
+    assert not Path("/elsewhere").exists()
+
+
+def test_a_relative_path_is_checked_as_given_and_as_joined(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    checked, made = _record_checks_and_creation(monkeypatch)
+    _create("run")
+    joined = os.path.join(os.getcwd(), "run")  # noqa: PTH109, PTH118
+    assert checked == ["run", joined]
+    assert made == [joined]
+
+
+def test_an_empty_path_is_refused_as_given(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    with pytest.raises(RunFolderError, match="must not be empty"):
+        _create("")
+    assert names(tmp_path) == []
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the limit differs on Windows")
+def test_a_path_that_passes_only_once_normalized_is_refused(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    given = "./" * 2100 + "run"  # too long as given; "run" once normalized
+    with pytest.raises(RunFolderError, match="cannot check"):
+        _create(given)
+    assert names(tmp_path) == []
+
+
+def test_an_unreadable_working_folder_is_a_run_folder_error(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+
+    def getcwd():
+        raise FileNotFoundError(errno.ENOENT, "No such file or directory")
+
+    with monkeypatch.context() as scoped:  # os is global: keep the patch short
+        scoped.setattr(runlog.os, "getcwd", getcwd)
+        with pytest.raises(RunFolderError, match="working folder") as raised:
+            _create("run")
+    assert raised.value.details == {"path": "run"}
+    assert names(tmp_path) == []
+
+
+@pytest.mark.parametrize("out", [b"run", 5, None])
+def test_out_that_is_not_text_is_refused(tmp_path, monkeypatch, out):
+    monkeypatch.chdir(tmp_path)
+    with pytest.raises(TypeError):
+        _create(out)
+    assert names(tmp_path) == []

@@ -230,7 +230,62 @@ def _create_binary(path: Path) -> IO[bytes]:
     return open(path, "xb")  # noqa: PTH123
 
 
-def _make_dir(path: Path) -> None:
+def _check_folder(path: str) -> None:
+    """Run `check_new_path` on `path`; a refusal is a `RunFolderError`."""
+    details = {"path": path}
+    try:
+        check_new_path(path)
+    except FileExistsError as error:
+        msg = (
+            f"cannot make the run folder {path}: already exists; give a new folder name"
+        )
+        raise RunFolderError(msg, details=details) from error
+    except ValueError as error:
+        msg = f"cannot make the run folder {path}: {error}"
+        raise RunFolderError(msg, details=details) from error
+    except OSError as error:
+        msg = f"cannot check {path}: {error.strerror or error}"
+        raise RunFolderError(msg, details=details) from error
+
+
+def _new_folder(out: object) -> str:
+    """Return the absolute path of the new run folder `out`, checked.
+
+    `out` is read once with `os.fspath` and kept as a plain str, so a str or
+    `os.PathLike` subclass cannot hand over one spelling for the check and
+    another for the creation. That spelling is checked as given; a relative
+    one is then joined to the working folder (without normalizing it) and
+    checked again. The caller makes the folder with exactly the returned str.
+
+    Raises:
+        TypeError: `out` is not a str or an `os.PathLike` of str.
+        RunFolderError: a check refused the path, or the working folder
+            cannot be read.
+    """
+    if not isinstance(out, str | os.PathLike):
+        msg = f"out must be a str or an os.PathLike of str, not {type(out).__name__}"
+        raise TypeError(msg)
+    text = os.fspath(out)
+    if not isinstance(text, str):
+        msg = f"out must name a path as str, not {type(text).__name__}"
+        raise TypeError(msg)
+    text = str.__str__(text)  # a plain str, whatever the subclass
+    _check_folder(text)
+    if os.path.isabs(text):  # noqa: PTH117 - Path would normalize the text
+        return text
+    try:
+        folder = os.path.join(os.getcwd(), text)  # noqa: PTH109, PTH118
+    except OSError as error:
+        msg = (
+            f"cannot make the run folder {text}: the working folder cannot be"
+            f" read ({error.strerror or error})"
+        )
+        raise RunFolderError(msg, details={"path": text}) from error
+    _check_folder(folder)
+    return folder
+
+
+def _make_dir(path: str | Path) -> None:
     """Make one new folder that only its owner can open.
 
     Its parent must exist and the folder must not. Mode 0o700 keeps other
@@ -299,20 +354,27 @@ class RunWriter:
         `uiprobe.pngfile.check_new_path`: it must not be empty, hold a null
         character or, on Windows, name a stream of a file or folder (a colon
         after the drive), and nothing may be at it, a broken link included.
+        `out` is read once with `os.fspath` and used as a plain str. It is
+        checked as given, and a relative path again after it is joined to the
+        working folder (not normalized); the folder is made with that same
+        str. A path that would pass only after normalizing it is refused.
 
         Raises:
             RunFolderError: `out` fails those checks, whether something is at
-                it cannot be told (``cannot check``), its parent is missing,
-                or the first file cannot be written. Nothing is written in the
+                it cannot be told (``cannot check``), the working folder cannot
+                be read, its parent is missing, or the first file cannot be
+                written. Nothing is written in the
                 first three cases; no parent is ever created.
-            TypeError, ValueError: an argument is wrong; nothing is written.
+            TypeError, ValueError: an argument is wrong (`out` that is not a
+                str or an os.PathLike of str is a `TypeError`); nothing is
+                written.
         """
         _check_text("package", package)
         _check_text("serial", serial)
         words = _check_texts("deny_words", deny_words)
         limit_values = _limits_dict(limits)
         when = _check_moment("started_at", _now() if started_at is None else started_at)
-        path = Path(out).absolute()
+        folder = _new_folder(out)
         record: dict[str, object] = {
             "schema": RUN_START_SCHEMA,
             "started_at": _stamp(when),
@@ -322,28 +384,14 @@ class RunWriter:
             "device": {"serial": serial},
         }
         text = _json_text(record, indent=2) + "\n"
-        details = {"path": str(path)}
         try:
-            check_new_path(str(path))
-        except FileExistsError as error:
-            msg = (
-                f"cannot make the run folder {path}: already exists; give a new"
-                " folder name"
-            )
-            raise RunFolderError(msg, details=details) from error
-        except ValueError as error:
-            msg = f"cannot make the run folder {path}: {error}"
-            raise RunFolderError(msg, details=details) from error
+            _make_dir(folder)  # the very str that was checked
         except OSError as error:
-            msg = f"cannot check {path}: {error.strerror or error}"
-            raise RunFolderError(msg, details=details) from error
-        try:
-            _make_dir(path)
-        except OSError as error:
-            msg = f"cannot make the run folder {path}: {error.strerror or error}"
-            raise RunFolderError(msg, details={"path": str(path)}) from error
-        writer = cls(path, _token=_CREATED)
-        writer._write_new(path / "run-start.json", text)
+            msg = f"cannot make the run folder {folder}: {error.strerror or error}"
+            raise RunFolderError(msg, details={"path": folder}) from error
+        root = Path(folder)
+        writer = cls(root, _token=_CREATED)
+        writer._write_new(root / "run-start.json", text)
         return writer
 
     # -- marking a write --
