@@ -671,7 +671,9 @@ def test_on_this_windows_a_stream_of_an_existing_file_is_not_made(tmp_path):
 def test_an_os_error_inside_a_callers_interrupt_handler_is_a_write_failure(
     tmp_path, monkeypatch
 ):
-    _break_buffered_write(monkeypatch, always=True)
+    # Only the first write fails, so close() succeeds and the flush error is
+    # the one raised; its context is the caller's KeyboardInterrupt.
+    _break_buffered_write(monkeypatch, always=False)
     target = tmp_path / "u.toml"
     try:
         raise KeyboardInterrupt  # the caller's own handler
