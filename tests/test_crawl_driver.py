@@ -8,6 +8,8 @@ sleeps: the clock and the pause are injected.
 from __future__ import annotations
 
 import json
+import time
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, cast
 
 import pytest
@@ -23,7 +25,8 @@ from tests.fake_device import (
     assert_no_text_input,
     assert_only_back_keys,
 )
-from uiprobe.crawl import Limits
+from uiprobe import crawl_driver
+from uiprobe.crawl import TAP_NOT_SENT, CrawlEngine, Limits, Observation, Tap
 from uiprobe.crawl_driver import CrawlResult, crawl
 from uiprobe.device import Device
 from uiprobe.errors import AdbError, LaunchFailedError, NotEmulatorError
@@ -35,6 +38,8 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from tests.fake_adb_server import FakeAdbServer
+    from uiprobe.crawl import Action
+    from uiprobe.model import Screen as ModelScreen
 
 SERIAL = "emulator-5554"
 SHOP = "com.example.shop"
@@ -732,3 +737,252 @@ def test_a_clock_that_returns_a_bad_value_leaves_no_folder(tmp_path, device, fak
         )
     assert not out.exists()
     assert not any(c.startswith(("monkey", "am ")) for c in commands(fake_adb))
+
+
+# --- the engine's tap protocol: recheck, send once, then tap_sent ---
+
+
+@dataclass(frozen=True)
+class Event:
+    """One call the driver made: to the engine, or a tap or dump on the device."""
+
+    kind: str
+    tap: Tap | None = None
+    allowed: bool | None = None
+    point: tuple[int, int] | None = None
+
+
+class EngineLog:
+    """The engines `crawl` built, and the calls in the order they were made."""
+
+    def __init__(self) -> None:
+        self.engines: list[CrawlEngine] = []
+        self.events: list[Event] = []
+
+    def proposed(self) -> list[tuple[int, Tap]]:
+        """The taps next() returned, with the index of that event."""
+        return [
+            (index, event.tap)
+            for index, event in enumerate(self.events)
+            if event.kind == "next" and event.tap is not None
+        ]
+
+    def reported(self) -> list[Tap]:
+        return [e.tap for e in self.events if e.kind == "tap_sent" and e.tap]
+
+
+@pytest.fixture
+def engine_log(monkeypatch: pytest.MonkeyPatch, device: Device) -> EngineLog:
+    log = EngineLog()
+
+    class RecordingEngine(CrawlEngine):
+        def __init__(
+            self, package: str, policy: Policy, limits: Limits, *, started_at: float
+        ) -> None:
+            super().__init__(package, policy, limits, started_at=started_at)
+            log.engines.append(self)
+
+        def next(self, observation: Observation) -> Action:
+            action = super().next(observation)
+            tap = action if isinstance(action, Tap) else None
+            log.events.append(Event("next", tap=tap))
+            return action
+
+        def recheck(self, tap: Tap, observation: Observation) -> bool:
+            allowed = super().recheck(tap, observation)
+            log.events.append(Event("recheck", tap=tap, allowed=allowed))
+            return allowed
+
+        def tap_sent(self, tap: Tap) -> None:
+            log.events.append(Event("tap_sent", tap=tap))
+            super().tap_sent(tap)
+
+    monkeypatch.setattr(crawl_driver, "CrawlEngine", RecordingEngine)
+
+    def on_tap(_number: int, *args: object, **_kwargs: object) -> None:
+        log.events.append(Event("send", point=cast("tuple[int, int]", args[0])))
+
+    def on_dump(_number: int, *_args: object, **_kwargs: object) -> None:
+        log.events.append(Event("dump"))
+
+    spy(monkeypatch, device, "tap", on_tap)
+    spy(monkeypatch, device, "dump", on_dump)
+    return log
+
+
+def test_an_allowed_tap_is_sent_once_and_reported_once(
+    tmp_path, device, android, clock, engine_log
+):
+    result = run(device, clock, tmp_path / "run")
+    assert result.stop_reason == "exhausted"
+    events = engine_log.events
+    proposed = engine_log.proposed()
+    assert proposed
+    for index, tap in proposed:
+        # next() -> fresh read -> recheck(same object) -> send -> tap_sent(same
+        # object) -> the next observation.
+        assert events[index + 1].kind == "dump"
+        recheck = events[index + 2]
+        assert recheck.kind == "recheck"
+        assert recheck.tap is tap
+        assert recheck.allowed is True
+        assert events[index + 3] == Event("send", point=tap.point)
+        assert events[index + 4].kind == "tap_sent"
+        assert events[index + 4].tap is tap
+        assert events[index + 5].kind == "dump"
+    reported = engine_log.reported()
+    assert [id(t) for t in reported] == [id(t) for _, t in proposed]
+    sent = [i for i in android.inputs if i.kind == "tap"]
+    assert len(sent) == len(reported)
+    engine = engine_log.engines[0]
+    assert engine.actions_sent == result.actions
+    assert not any(TAP_NOT_SENT in s.reasons for s in engine.records.skipped)
+
+
+def test_a_refused_recheck_sends_nothing_and_reports_nothing(
+    tmp_path, device, android, clock, engine_log
+):
+    # Dump 1 follows the launch; dump 2 is the re-read before the first tap.
+    android.switch_before_dump(2, "cart")
+    out = tmp_path / "run"
+    result = run(device, clock, out)
+    assert result.stop_reason in STOP_REASONS
+    events = engine_log.events
+    refused = [
+        (index, e.tap)
+        for index, e in enumerate(events)
+        if e.kind == "recheck" and e.allowed is False
+    ]
+    assert len(refused) == 1
+    index, tap = refused[0]
+    assert tap is not None
+    assert events[index + 1].kind == "next"  # no send, no report in between
+    assert all(t is not tap for t in engine_log.reported())
+    allowed = [e.tap for e in events if e.kind == "recheck" and e.allowed]
+    assert [id(t) for t in engine_log.reported()] == [id(t) for t in allowed]
+    sends = [e for e in events if e.kind == "send"]
+    assert len(sends) == len(allowed)
+    assert tap.point not in [e.point for e in sends]
+    rows = lines(out / "skipped.jsonl")
+    assert [r["reasons"] for r in rows if r["fingerprint"] == tap.fingerprint] == [
+        ["changed_before_press"]
+    ]
+    assert not [r for r in rows if TAP_NOT_SENT in r["reasons"]]
+
+
+def test_a_tap_whose_send_fails_is_not_reported_and_the_engine_releases_it(
+    tmp_path, device, android, monkeypatch, clock, engine_log
+):
+    def fail(call: int, *_args: object, **_kwargs: object) -> None:
+        if call == 2:
+            raise AdbError("the adb server answered FAIL")
+
+    spy(monkeypatch, device, "tap", fail)
+    out = tmp_path / "run"
+    with pytest.raises(AdbError):
+        run(device, clock, out)
+    proposed = engine_log.proposed()
+    assert len(proposed) == 2
+    first, failed = proposed[0][1], proposed[1][1]
+    assert [id(t) for t in engine_log.reported()] == [id(first)]
+    assert [e.allowed for e in engine_log.events if e.kind == "recheck"] == [
+        True,
+        True,
+    ]
+    assert len([i for i in android.inputs if i.kind == "tap"]) == 1
+    engine = engine_log.engines[0]
+    counted = engine.actions_sent
+    transitions = len(engine.records.transitions)
+    # The start line of the failed tap is on disk with the next number; the
+    # engine did not count it.
+    starts = [r for r in lines(out / "transitions.jsonl") if "action" in r]
+    assert starts[-1]["action"]["kind"] == "tap"
+    assert starts[-1]["action_id"] == counted + 1
+    run_json = json.loads((out / "run.json").read_text(encoding="utf-8"))
+    assert run_json["stop_reason"] == "error"
+    assert run_json["actions"] == starts[-1]["action_id"]
+    # The next step releases the unreported tap with a tap_not_sent row.
+    engine.next(Observation(None, SHOP, keyboard_shown=False, now=clock.now))
+    released = [
+        s
+        for s in engine.records.skipped
+        if (s.screen_id, s.fingerprint) == (failed.screen_id, failed.fingerprint)
+    ]
+    assert [s.reasons for s in released] == [(TAP_NOT_SENT,)]
+    assert engine.actions_sent == counted
+    assert len(engine.records.transitions) == transitions
+
+
+def test_the_clock_values_given_to_the_engine_stay_in_range(
+    tmp_path, device, monkeypatch
+):
+    nows: list[float] = []
+    real = Observation
+
+    def observation(
+        screen: ModelScreen | None,
+        foreground: str | None,
+        keyboard_shown: bool | None,  # noqa: FBT001 - the driver passes it so
+        now: float,
+    ) -> Observation:
+        nows.append(now)
+        return real(screen, foreground, keyboard_shown, now)
+
+    monkeypatch.setattr(crawl_driver, "Observation", observation)
+    result = crawl(
+        device,
+        SHOP,
+        tmp_path / "run",
+        policy=Policy(),
+        limits=Limits(),
+        settle=0.0,
+        clock=time.monotonic,
+        sleep=lambda _s: None,
+    )
+    assert result.stop_reason == "exhausted"
+    assert nows
+    assert all(0 <= now < 2**40 for now in nows)
+    assert nows == sorted(nows)
+
+
+def test_a_clock_out_of_range_leaves_no_folder(tmp_path, device, fake_adb):
+    for number, value in enumerate((-1.0, float(2**40), float("inf"))):
+        out = tmp_path / f"run{number}"
+        with pytest.raises(ValueError, match="below 2"):
+            crawl(
+                device,
+                SHOP,
+                out,
+                policy=Policy(),
+                limits=Limits(),
+                clock=lambda value=value: value,
+                sleep=lambda _s: None,
+            )
+        assert not out.exists()
+    assert not any(c.startswith(("monkey", "am ")) for c in commands(fake_adb))
+
+
+def test_a_dump_with_duplicate_element_ids_is_recorded_as_a_failed_dump(
+    tmp_path, device, monkeypatch, clock
+):
+    original = device.dump
+    calls: list[int] = []
+
+    def dump() -> ModelScreen:
+        screen = original()
+        calls.append(1)
+        if len(calls) != 3:
+            return screen
+        # Dump 3 follows the first tap: give two elements the same id.
+        first, second, *rest = screen.elements
+        twin = replace(second, id=first.id)
+        return replace(screen, elements=(first, twin, *rest))
+
+    monkeypatch.setattr(device, "dump", dump)
+    out = tmp_path / "run"
+    result = run(device, clock, out)
+    assert result.stop_reason == "exhausted"
+    ends = end_lines(out)
+    assert ends[1]["action_id"] == 2
+    assert ends[1]["dump_failed"] is True
+    assert [e for e in ends if e["dump_failed"]] == [ends[1]]

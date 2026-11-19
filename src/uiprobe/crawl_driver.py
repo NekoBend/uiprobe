@@ -7,11 +7,14 @@ clock or file), and the writer imports it, so the driver sits above both.
 
 The command line does not use it yet; the function is alpha.
 
-What is sent. Only what the engine returned, and for a tap only what a
-`CrawlEngine.recheck` allowed (unless ``recheck=False``, see `crawl`): the
-first launch, a relaunch (``force-stop`` then start), a tap at the point judge
-gave, and the BACK key. Text, long presses, swipes and other keys are never
-sent. Every action is sent once and never retried.
+What is sent. Only what the engine returned, and for a tap only what
+`CrawlEngine.recheck` allowed for that very `Tap` object: the first launch, a
+relaunch (``force-stop`` then start), a tap at the point judge gave, and the
+BACK key. Text, long presses, swipes and other keys are never sent. Every
+action is sent once and never retried. A tap is reported to the engine with
+`CrawlEngine.tap_sent` only after it was sent without an error; a refused tap,
+or one whose send raised, is never reported, and the engine releases it on the
+next `CrawlEngine.next` with a ``tap_not_sent`` skip row.
 
 The loop (the protocol of the `CrawlEngine` docstring)::
 
@@ -21,12 +24,15 @@ The loop (the protocol of the `CrawlEngine` docstring)::
         action = engine.next(observation)
         Stop:    end with the engine's reason
         Reread:  observe again (nothing is sent, no transition line)
-        Tap:     observe again; engine.recheck(tap, fresh); when it refuses,
-                 nothing is sent and the fresh observation goes to
-                 engine.next
+        Tap:     observe again (with recheck=False: keep the observation
+                 just used); engine.recheck(tap, fresh); when it refuses,
+                 nothing is sent, nothing is reported and the fresh
+                 observation goes to engine.next
         send:    transition start line, then the input, then (tap and BACK)
-                 sleep(settle), then observe; the first observation after a
-                 sent action gets the transition end line
+                 sleep(settle); for a tap engine.tap_sent(tap) with the same
+                 object, once, only when sending did not raise; then observe;
+                 the first observation after a sent action gets the
+                 transition end line
 
 How a run ends. The engine's stop reason, ``interrupted`` (the ``stop``
 callable returned True between two actions, or Ctrl+C arrived while it
@@ -67,6 +73,7 @@ from uiprobe.crawl import (
     Stop,
     Tap,
     _check_clock,
+    _ids_unique,
     _Prints,
 )
 from uiprobe.crawl_preview import check_package
@@ -202,29 +209,42 @@ class _Run:
             if isinstance(action, Reread):
                 observation = self.observe()
                 continue
-            if isinstance(action, Tap) and self.recheck:
-                fresh = self.observe()
+            if isinstance(action, Tap):
+                # The engine's protocol: recheck the very Tap object next()
+                # returned, send it once only when that allows it, and report
+                # it with tap_sent only after the send returned. A send that
+                # raises ends the run before tap_sent, so it is never reported.
+                fresh = self.observe() if self.recheck else observation
                 allowed = engine.recheck(action, fresh)
                 self.write_skips(observation.screen, fresh.screen)
                 if not allowed:
                     observation = fresh
                     continue
-            self.send(action, observation)
+                self.send(action, fresh)
+                engine.tap_sent(action)
+            else:
+                self.send(action, observation)
             observation = self.observe()
 
     def stopped(self) -> bool:
         return self.stop is not None and bool(self.stop())
 
     def count(self) -> tuple[int, int]:
-        """The screens seen and the actions that were really attempted."""
-        records = self.engine.records
-        return records.screens_seen, min(records.actions_sent, self.attempted)
+        """The screens seen and the actions whose start line was written."""
+        return self.engine.records.screens_seen, self.attempted
 
     # -- sending --
 
     def send(self, action: Action, observation: Observation | None) -> None:
-        """Write the start line, then send one action of the engine, once."""
+        """Write the start line, then send one action of the engine, once.
+
+        The engine counts a launch, relaunch or BACK when it returns it, and a
+        tap only when `CrawlEngine.tap_sent` reports it, so a tap gets the next
+        number.
+        """
         action_id = self.engine.actions_sent
+        if isinstance(action, Tap):
+            action_id += 1
         screen = None if observation is None else observation.screen
         from_id = None if screen is None else screen.screen_id
         element: Element | None = None
@@ -281,6 +301,10 @@ class _Run:
         try:
             screen: Screen | None = self.device.dump()
         except DumpError:
+            screen = None
+        if screen is not None and not _ids_unique(screen):
+            # The engine counts a screen whose element ids are not unique as
+            # a failed dump (judge refuses it), so it is recorded as one.
             screen = None
         foreground = self.device.foreground()
         keyboard = self.device.keyboard_shown()
@@ -405,12 +429,15 @@ def crawl(
     emulator; an answer that cannot be read counts as a real device.
 
     `recheck` (default True) reads the screen again right before every tap and
-    sends it only when `CrawlEngine.recheck` allows it. False sends the tap
-    straight after the engine chose it, so the screen may have changed
-    between the read and the press; keep True unless that is acceptable.
+    sends it only when `CrawlEngine.recheck` allows it. False does not read
+    again: the engine rechecks the tap against the observation it was chosen
+    from, so the screen may have changed between the read and the press; keep
+    True unless that is acceptable. Either way a tap is reported to the engine
+    with `CrawlEngine.tap_sent` only after it was sent.
     `settle` is the pause in seconds after a tap or BACK. `stop` is called
     between actions; when it returns True the crawl ends with ``interrupted``.
-    `clock` (monotonic seconds) and `sleep` are replaceable for tests.
+    `clock` (monotonic seconds, at least 0 and below 2**40, as the engine
+    requires) and `sleep` are replaceable for tests.
     `screenshots` also saves a screenshot of each new screen; a screen that
     cannot be captured is noted in the summary and the crawl goes on. The
     image is taken after the dump, so it can differ if the app changed
@@ -431,8 +458,9 @@ def crawl(
 
     Raises:
         TypeError: An argument has the wrong type.
-        ValueError: `package` is not a valid package name, or `settle` is
-            negative or not finite.
+        ValueError: `package` is not a valid package name, `settle` is
+            negative, not finite or not below 2**40, or `clock` returned a
+            value outside [0, 2**40) before the run folder was made.
         NotEmulatorError: The device is not an emulator (or the check cannot
             be read) and `allow_real_device` is False. Nothing was written.
         RunFolderError: `out` exists, its parent is missing, or a file cannot
