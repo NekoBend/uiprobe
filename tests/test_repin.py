@@ -908,52 +908,152 @@ def test_the_kept_failure_holds_no_exception(fake_adb):
     assert not any(isinstance(part, BaseException) for part in kept)
 
 
-def test_without_a_boot_id_a_failed_request_is_proven_in_place(
-    fake_adb, android, monkeypatch
-):
-    android.boot_id = None
-    device = pinned(fake_adb)
+def _fail_once(
+    monkeypatch: pytest.MonkeyPatch,
+    device: Device,
+    command: str,
+    make: Callable[[], Exception],
+    at_failure: Callable[[], None] = lambda: None,
+) -> list[bool]:
+    """Fail the first shell request of `command` with `make()`; call
+    `at_failure` right before. The list holds True once it failed."""
     original = device._client.shell
-    failed = [False]
+    failed: list[bool] = []
 
-    def shell(serial: str, command: str, **kwargs: object) -> bytes:
-        if command == "wm size" and not failed[0]:
-            failed[0] = True
-            raise DeviceOfflineError("device offline", details={"serial": serial})
-        return original(serial, command, **kwargs)  # ty: ignore[invalid-argument-type]
+    def shell(serial: str, sent: str, **kwargs: object) -> bytes:
+        if sent == command and not failed:
+            failed.append(True)
+            at_failure()
+            raise make()
+        return original(serial, sent, **kwargs)  # ty: ignore[invalid-argument-type]
 
     monkeypatch.setattr(device._client, "shell", shell)
+    return failed
+
+
+def _offline() -> Exception:
+    return DeviceOfflineError("device offline", details={"serial": SERIAL})
+
+
+def test_without_a_boot_id_an_input_after_a_failure_ends_the_pin(
+    fake_adb, android, monkeypatch
+):
+    # Without a boot id the device cannot be proven again after a failed
+    # request (another emulator of the same image would pass the same
+    # reads), so the input is refused and the pin fails.
+    android.boot_id = None
+    device = pinned(fake_adb)
+    _fail_once(monkeypatch, device, "wm size", _offline)
     with contextlib.suppress(DeviceOfflineError):
         device._shell("wm size")
-    with pytest.raises(DeviceNotFoundError):
-        device.key("back")  # an input right after a failure is refused
+    since = len(fake_adb.requests)
+    with pytest.raises(DeviceNotFoundError) as caught:
+        device.key("back")
+    assert caught.value.details["reason"] == "device_changed"
+    assert len(fake_adb.requests) == since  # not even the listing is read
     assert android.inputs == []
 
 
-def test_without_a_boot_id_a_read_after_a_failure_proves_the_device(
+def test_without_a_boot_id_a_read_after_a_failure_ends_the_pin(
     fake_adb, android, monkeypatch
 ):
     android.boot_id = None
     device = pinned(fake_adb)
     epoch = device.pin_epoch
-    original = device._client.shell
-    failed = [False]
+    _fail_once(monkeypatch, device, "wm size", _offline)
+    with contextlib.suppress(DeviceOfflineError):
+        device._shell("wm size")
+    since = len(fake_adb.requests)
+    with pytest.raises(DeviceNotFoundError) as caught:
+        device.foreground()  # not proven in place: the identity is not read
+    assert caught.value.details["reason"] == "device_changed"
+    refused_at = len(fake_adb.requests)
+    assert refused_at == since  # not even the listing is read
+    assert device.pin_epoch > epoch
+    assert device.reconnects == 0
+    with pytest.raises(DeviceNotFoundError) as again:
+        device.key("back")  # the failed pin is kept
+    assert again.value.details["reason"] == "device_changed"
+    assert str(again.value) == str(caught.value)
+    assert len(fake_adb.requests) == refused_at
+    assert android.inputs == []
 
-    def shell(serial: str, command: str, **kwargs: object) -> bytes:
-        if command == "wm size" and not failed[0]:
-            failed[0] = True
-            raise DeviceOfflineError("device offline", details={"serial": serial})
-        return original(serial, command, **kwargs)  # ty: ignore[invalid-argument-type]
 
-    monkeypatch.setattr(device._client, "shell", shell)
+def test_without_a_boot_id_an_unreachable_server_still_ends_the_pin(
+    fake_adb, android, monkeypatch
+):
+    # A reader swallows a failed request while the adb server cannot be
+    # reached; the server stays away. The next request fails the pin at once,
+    # without asking the server for its list, and the failure is kept.
+    android.boot_id = None
+    device = pinned(fake_adb)
+    fake_adb.stop()
+    original = device._client.devices
+    listings = [0]
+
+    def devices() -> object:
+        listings[0] += 1
+        return original()
+
+    monkeypatch.setattr(device._client, "devices", devices)
+    assert device.api_level() is None  # the failed read is swallowed
+    assert listings[0] == 1
+    with pytest.raises(DeviceNotFoundError) as caught:
+        device.foreground()
+    assert caught.value.details["reason"] == "device_changed"
+    assert listings[0] == 1  # no new host request
+    assert device._broken is not None
+    with pytest.raises(DeviceNotFoundError) as again:
+        device.foreground()
+    assert str(again.value) == str(caught.value)
+    assert again.value.details == caught.value.details
+    assert listings[0] == 1
+    assert android.inputs == []
+
+
+def test_with_a_boot_id_a_read_after_a_failure_still_proves_the_device(
+    fake_adb, android, monkeypatch
+):
+    device = pinned(fake_adb)
+    Waits(device, [])
+    _fail_once(monkeypatch, device, "wm size", _offline)
     with contextlib.suppress(DeviceOfflineError):
         device._shell("wm size")
     since = len(fake_adb.requests)
     assert device.foreground() is not None  # proven again, then read
     assert through(fake_adb, TRANSPORT, since)[0] == f"shell:{IDENTITY_COMMAND}"
-    assert device.pin_epoch > epoch
-    device.key("back")  # proven: inputs go out again
+    assert device.reconnects == 1
+    device.key("back")
     assert [i.kind for i in android.inputs] == ["key"]
+
+
+def test_a_crawl_without_a_boot_id_sends_nothing_after_a_lost_read(
+    tmp_path: Path, fake_adb, android, clock, monkeypatch
+):
+    # The review's case: the boot id cannot be read; the API-level read loses
+    # the connection, and at that moment another emulator of the same image
+    # takes the same serial, transport number, fingerprint and ro.serialno.
+    # Nothing can tell it from the first one, so no input may reach it.
+    android.boot_id = None
+    device = pinned(fake_adb)
+    sent_before: list[int] = []
+    failed = _fail_once(
+        monkeypatch,
+        device,
+        "getprop ro.build.version.sdk",
+        lambda: AdbError("connection closed", details={}),
+        lambda: sent_before.append(len(fake_adb.commands)),
+    )
+    out = tmp_path / "run"
+    with pytest.raises(DeviceNotFoundError) as caught:
+        run(device, clock, out)
+    assert failed
+    assert caught.value.details["reason"] == "device_changed"
+    after = [c for _, _, c in fake_adb.commands[sent_before[0] :]]
+    assert not [c for c in after if c.startswith(("input ", "monkey ", "am "))]
+    assert after == []  # not even the identity is read again
+    end = json.loads((out / "run.json").read_bytes())
+    assert end["stop_reason"] == "error"
 
 
 @pytest.mark.usefixtures("android")
