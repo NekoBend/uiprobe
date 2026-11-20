@@ -95,12 +95,18 @@ PIN_WAIT_STOPPED: Final = "pin_wait_stopped"
 PIN_NOT_PROVEN: Final = "pin_not_proven"
 
 
+# Android gives each user this many uids: uid = user * 100000 + app id.
+_UIDS_PER_USER: Final = 100000
+
+
 class FocusedWindow(NamedTuple):
     """The window that has input focus: its owner package, title and hash.
 
     ``window`` is the hash ``dumpsys window`` prints for the window, which
     tells two windows with the same owner and title apart. ``user`` is the
-    Android user it belongs to (the ``u<N>`` of ``Window{<hash> u<N> ...}``).
+    Android user it belongs to (the ``u<N>`` of ``Window{<hash> u<N> ...}``),
+    or -1 when the window's owner uid (``mOwnerUid=``, user * 100000 + app
+    id) names another user.
     """
 
     owner: str
@@ -969,8 +975,10 @@ _WINDOW_HEAD: Final = re.compile(
 )
 # The system writes this line; 24 has mShowToOwnerOnly, 30 and 36 showForAllUsers.
 _WINDOW_OWNER: Final = re.compile(
-    r"    mOwnerUid=[0-9]{1,10} (?:mShowToOwnerOnly|showForAllUsers)=(?:true|false)"
-    r" package=([A-Za-z][A-Za-z0-9_]{0,254}(?:\.[A-Za-z][A-Za-z0-9_]{0,254}){0,64})"
+    r"    mOwnerUid=(?P<uid>[0-9]{1,10})"
+    r" (?:mShowToOwnerOnly|showForAllUsers)=(?:true|false)"
+    r" package=(?P<package>[A-Za-z][A-Za-z0-9_]{0,254}"
+    r"(?:\.[A-Za-z][A-Za-z0-9_]{0,254}){0,64})"
     r" appop=[A-Z_]{1,64}"
 )
 
@@ -1015,7 +1023,12 @@ def _read_window_owner(
     if head is None or head[1] != window or head[2] != user or head[3] != title:
         return None
     owner = _WINDOW_OWNER.fullmatch(lines[index + 2])
-    return None if owner is None else FocusedWindow(owner[1], title, window, int(user))
+    if owner is None:
+        return None
+    # The owner uid tells the user too (user * 100000 + app id); when it
+    # disagrees with u<N>, the user is not known: -1, which no check takes.
+    known = int(user) if int(owner["uid"]) // _UIDS_PER_USER == int(user) else -1
+    return FocusedWindow(owner["package"], title, window, known)
 
 
 _BOOL = r"(true|false)"

@@ -154,3 +154,51 @@ def test_only_the_stanza_level_is_read():
     assert parse_package_uid(crlf, "com.android.calculator2") == PackageUid(
         10044, shared=False
     )
+
+
+# --- round 3 ---
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "    sharedUser=",
+        "    sharedUser=android.uid.systemui",
+        "    sharedUser=SharedUserSetting{d5f3dd5 android.uid.systemui/10183}",
+        "    sharedUser=SharedUserSetting{d5f3dd5 android.uid.systemui/10182} x",
+    ],
+)
+def test_a_malformed_shared_user_line_is_none(line):
+    good = "    sharedUser=SharedUserSetting{d5f3dd5 android.uid.systemui/10182}"
+    text = SYSTEMUI36.replace(good, line)
+    assert text != SYSTEMUI36
+    assert parse_package_uid(text, "com.android.systemui") is None
+
+
+def test_a_package_header_inside_another_stanza_is_not_the_package():
+    nested = (
+        "Packages:\n"
+        "  Package [example.other] (a):\n"
+        "    appId=10044\n"
+        "    Package [example.target] (b):\n"
+        "      appId=10044\n"
+        "      User 0: installed=true\n"
+        "Queries:\n"
+    )
+    assert parse_package_uid(nested, "example.target") is None
+    # A target stanza at the right indent, plus a nested header naming it.
+    both = CALCULATOR24.replace(
+        "    User 0:", "    Package [com.android.calculator2] (b):\n    User 0:"
+    )
+    assert parse_package_uid(both, "com.android.calculator2") is None
+
+
+def test_a_number_of_another_user_is_none():
+    other = CALCULATOR24.replace("userId=10044", "userId=1010044")
+    assert parse_package_uid(other, "com.android.calculator2") is None
+    edge = CALCULATOR24.replace("userId=10044", "userId=100000")
+    assert parse_package_uid(edge, "com.android.calculator2") is None
+    below = CALCULATOR24.replace("userId=10044", "userId=99999")
+    assert parse_package_uid(below, "com.android.calculator2") == PackageUid(
+        99999, shared=False
+    )

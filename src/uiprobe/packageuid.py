@@ -21,7 +21,10 @@ line would make a shared uid look unshared) is not read. A later ``Shared
 users:`` section repeats the number under ``SharedUser [...]`` and is not
 read, nor are other packages' stanzas or ``Hidden system packages:``. The
 package must be installed for user 0: its stanza has a ``User 0: ...
-installed=true ...`` line (as on every emulator checked).
+installed=true ...`` line (as on every emulator checked). The stanza's header
+must be at the stanza indent (two spaces, its fields at four); a header of
+the package anywhere else in the section gives None, and so do a number of
+100000 or more and a ``sharedUser=`` line of another form.
 """
 
 from __future__ import annotations
@@ -33,10 +36,18 @@ from typing import Final
 __all__ = ["PackageUid", "parse_package_uid"]
 
 _NUMBER = re.compile(r"^(?:userId|appId)=(\d{1,10})(?:\s.*)?$")
-_SHARED = re.compile(r"^sharedUser=\S")
+_SHARED = re.compile(
+    r"^sharedUser=SharedUserSetting\{[0-9a-f]{1,16} [A-Za-z0-9_.]{1,255}/(\d{1,10})\}$"
+)
 _USER0 = re.compile(r"^User 0:(?: |$)")
 _INSTALLED = re.compile(r"^User 0: (?:.* )?installed=true(?: |$)")
 _SECTION: Final = "Packages:"
+# The indents the emulators printed: a stanza's header under Packages:, and
+# its fields.
+_HEADER_INDENT: Final = 2
+_FIELD_INDENT: Final = 4
+# Android gives each user 100000 uids: an app id is below that (user 0's uid).
+_PER_USER: Final = 100000
 
 
 @dataclass(frozen=True, slots=True)
@@ -75,9 +86,11 @@ def _stanza(lines: list[str], package: str) -> list[str] | None:
         return None
     header = re.compile(rf"^ +Package \[{re.escape(package)}\] \([0-9a-f]+\):$")
     heads = [i for i, line in enumerate(section) if header.match(line)]
-    if len(heads) != 1:
+    # A header of the package at another indent (inside another stanza) is
+    # not its stanza, and makes the section unclear.
+    if len(heads) != 1 or _indent(section[heads[0]]) != _HEADER_INDENT:
         return None
-    level = _indent(section[heads[0]])
+    level = _HEADER_INDENT
     stanza: list[str] = []
     for line in section[heads[0] + 1 :]:
         if not line.strip():
@@ -87,17 +100,22 @@ def _stanza(lines: list[str], package: str) -> list[str] | None:
         stanza.append(line)
     else:
         return None  # the text ends inside the stanza
-    fields = min((_indent(line) for line in stanza), default=0)
-    return [line.strip() for line in stanza if _indent(line) == fields]
+    if min((_indent(line) for line in stanza), default=0) != _FIELD_INDENT:
+        return None
+    return [line.strip() for line in stanza if _indent(line) == _FIELD_INDENT]
 
 
 def parse_package_uid(text: str, package: str) -> PackageUid | None:
     """Read `package`'s app id from the text of ``dumpsys package``.
 
     Returns None unless the ``Packages:`` section holds exactly one stanza of
-    the package, ended by the next stanza or section (not cut off), with one
-    number (``userId=`` or ``appId=``; two different ones are None) and a
-    ``User 0:`` line that says ``installed=true``.
+    the package, headed at the stanza indent (two spaces) and ended by the
+    next stanza or section (not cut off), with one number (``userId=`` or
+    ``appId=``; two different ones are None) below 100000 (an app id, not a
+    uid of another user), a ``User 0:`` line that says ``installed=true``
+    and, when there is a ``sharedUser=`` line, one of the form
+    ``sharedUser=SharedUserSetting{<hash> <name>/<app id>}`` (an empty or
+    other ``sharedUser=`` would hide that the uid is shared).
     """
     lines = [line.removesuffix("\r") for line in text.split("\n")]
     stanza = _stanza(lines, package)
@@ -107,5 +125,11 @@ def parse_package_uid(text: str, package: str) -> PackageUid | None:
     users = [line for line in stanza if _USER0.match(line)]
     if len(numbers) != 1 or len(users) != 1 or not _INSTALLED.match(users[0]):
         return None
-    shared = any(_SHARED.match(line) for line in stanza)
-    return PackageUid(next(iter(numbers)), shared)
+    uid = next(iter(numbers))
+    claims = [line for line in stanza if line.startswith("sharedUser")]
+    shared = [_SHARED.match(line) for line in claims]
+    if uid >= _PER_USER or len(claims) > 1:
+        return None
+    if any(match is None or int(match[1]) != uid for match in shared):
+        return None
+    return PackageUid(uid, bool(claims))

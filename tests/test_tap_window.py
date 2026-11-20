@@ -373,3 +373,19 @@ def test_a_rotated_dump_refuses_the_tap_even_with_viewport_0(
     assert {r["reason"] for r in refused} == {"cover_unknown"}
     assert refused[0]["details"] == {"unreadable": "rotation"}
     assert not [c for _, _, c in fake_adb.commands if c == "dumpsys input"]
+
+
+def test_a_focused_window_whose_owner_uid_is_of_another_user_refuses(
+    tmp_path: Path, device, android, clock, fake_adb
+):
+    # The record says u0, but the window's owner uid is user 10's
+    # (10 * 100000 + 10150): the user is not known, so no tap goes out.
+    android.focus_owner_uid = 1010150
+    focus = device.focused_window()
+    assert focus is not None
+    assert focus.user == -1
+    out = tmp_path / "run"
+    run(device, clock, out, limits=Limits(actions=3))
+    assert _taps(android) == []
+    assert _covered(out)[0]["details"] == {"unreadable": "target_user"}
+    assert not [c for _, _, c in fake_adb.commands if c == "dumpsys input"]

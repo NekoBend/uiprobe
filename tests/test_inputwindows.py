@@ -355,6 +355,7 @@ def test_transform_lines_at_the_indent_of_the_list_belong_to_it():
 DISPLAY1 = (
     "  Display: 1\n"
     "    logicalSize=100x100\n"
+    "        transform (ROT_0) (IDENTITY)\n"
     "    Windows:\n"
     "      0: name=abc Other, id=5, displayId=1, inputConfig=0x0, alpha=1,"
     " frame=[0,0][100,100], globalScale=1, applicationInfo.name=,"
@@ -771,3 +772,164 @@ def test_a_name_that_fakes_another_display_section_is_line_format():
     two = API36.replace("  Display: 0\n", DISPLAY1 + "  Display: 0\n")
     damaged = two.replace("0: name=abc Other", "0: nom=abc Other")
     assert parse_input_windows(damaged) == LINE_FORMAT
+
+
+# --- round 3: display ids, the display transform, one form per list ---
+
+
+def test_two_sections_of_the_same_numeric_display_are_no_list():
+    block = API36[API36.index("  Display: 0\n") : API36.index("  mMaximumObscuring")]
+    twice = API36.replace(block, block.replace("Display: 0", "Display: 00") + block)
+    assert parse_input_windows(twice) == NO_LIST
+    assert read_window_at(twice, (140, 225)) == NO_LIST
+
+
+def test_a_missing_display_transform_is_rotation_where_it_is_printed():
+    # API 36 prints logicalSize= and then the display's transform.
+    bare = API36.replace(
+        "        transform (ROT_0) (IDENTITY)\n    Windows:", "    Windows:"
+    )
+    assert parse_input_windows(bare) == ROTATION
+    assert read_window_at(bare, (140, 225)) == ROTATION
+    # API 29 to 32 print neither line (API 30 here): nothing is required.
+    assert isinstance(read_window_at(API30, (160, 320)), InputWindow)
+
+
+def test_every_row_of_a_list_must_have_the_same_form():
+    # API 30 launcher row without portalToDisplayId and globalScale: it still
+    # has windowScale=, and the other rows are of the portal form.
+    marker = "4f4eb39 u0 com.google"
+    damaged = _edit(API30, marker, " portalToDisplayId=-1,", "")
+    damaged = _edit(damaged, marker, " globalScale=1.000000,", "")
+    assert parse_input_windows(damaged) == LINE_FORMAT
+    assert read_window_at(damaged, (160, 320)) == LINE_FORMAT
+    # One API 24 row without a field the others print.
+    layerless = _edit(API24, "u0 InputMethod}", " layer=21015,", "")
+    assert parse_input_windows(layerless) == LINE_FORMAT
+
+
+@pytest.mark.parametrize(
+    ("old", "new"),
+    [
+        (" portalToDisplayId=-1,", ""),  # API 29/30 fields without the portal
+        (" scale=1.000000,", " globalScale=1.000000, scale=1.000000,"),
+    ],
+)
+def test_a_hex_flags_row_must_be_wholly_of_one_version(old, new):
+    text = API30 if "portal" in old else API24
+    marker = "4f4eb39 u0 com.google" if "portal" in old else "u0 InputMethod}"
+    rows = text.split("\n")
+    edited = _edit(text, marker, old, new)
+    assert edited != text
+    assert len(edited.split("\n")) == len(rows)
+    assert parse_input_windows(edited) == LINE_FORMAT
+
+
+# --- names that fake fields or rows (each form, each place in the list) ---
+
+COVER_ALL = "touchableRegion=[0,0][320,640]"
+
+
+@pytest.mark.parametrize(
+    ("text", "marker", "old", "uid", "point"),
+    [
+        # API 24 to 30, hex flags: the keyboard above Settings (uid 1000)
+        (API24, "u0 InputMethod}", "InputMethod}'", 1000, (160, 500)),
+        # API 31 and 32, named flags: the status bar above the launcher
+        (API31, "d145dce StatusBar", "StatusBar'", 10133, (160, 10)),
+        # API 33 and 34, quoted name with inputConfig
+        (API33, "bfd95f5 StatusBar", "StatusBar'", 10153, (160, 10)),
+        (API34, "fd38730 StatusBar", "StatusBar'", 10169, (160, 10)),
+        # API 35 and 36, bare name with inputConfig
+        (API35, "66391f2 StatusBar", "StatusBar,", 10179, (160, 10)),
+        (API36, "5ebeeda FloatingMenu", "FloatingMenu,", 1000, (296, 458)),
+    ],
+)
+def test_a_name_that_closes_its_quote_and_fakes_the_owner_is_line_format(
+    text, marker, old, uid, point
+):
+    # The window right above the app's window ends its name (a quote, or
+    # nothing in the bare form) and writes the app's uid and a region over
+    # the point before its real fields, on the same line.
+    quote = "'" if old.endswith("'") else ""
+    fake = f"{old[:-1]}{quote}, ownerUid={uid}, {COVER_ALL}, x{old[-1]}"
+    edited = _edit(text, marker, old, fake)
+    assert read_window_at(edited, point) == LINE_FORMAT
+
+
+def _fake_row(real: str, index: int, uid_old: str, uid_new: str) -> str:
+    """A whole row `index` made of `real`'s fields with another owner, as a
+    window name could print it (the hash and title of the Settings window)."""
+    indent = real[: len(real) - len(real.lstrip())]
+    fields = real[real.index(", id=") :].replace(uid_old, uid_new)
+    title = "6461878 com.android.settings/com.android.settings.Settings"
+    return f"{indent}{index}: name={title}{fields}"
+
+
+def _fields(real: str) -> str:
+    return real[real.index(", id=") :]
+
+
+def test_a_middle_row_that_fakes_a_whole_row_is_line_format():
+    # Row 2 (FloatingMenu, uid 10186) names itself so that the text shows a
+    # row 2 owned by uid 1000 and then "3: name=x" with its real fields; the
+    # real row 3 (Taskbar) follows, so row 3 comes twice.
+    real = _line(API36, "5ebeeda FloatingMenu")
+    fake = _fake_row(real, 2, "ownerUid=10186", "ownerUid=1000")
+    edited = API36.replace(real, f"{fake}\n      3: name=x{_fields(real)}")
+    assert read_window_at(edited, (296, 458)) == LINE_FORMAT
+    # With a transform line after the fake row too.
+    with_transform = API36.replace(
+        real,
+        f"{fake}\n      transform (ROT_0) (IDENTITY)\n      3: name=x{_fields(real)}",
+    )
+    assert read_window_at(with_transform, (296, 458)) == LINE_FORMAT
+
+
+def test_the_topmost_touch_taking_row_that_fakes_a_whole_row_is_line_format():
+    # API 24 row 0 (the status bar, uid 10027) fakes a row 0 of Settings.
+    real = _line(API24, "u0 StatusBar}")
+    rest = real[real.index("', displayId") :]
+    fake = real.replace("ownerUid=10027", "ownerUid=1000").replace(
+        "u0 StatusBar}", "u0 com.android.settings/com.android.settings.Settings}"
+    )
+    edited = API24.replace(real, f"{fake}\n    1: name='Window{{x u0 y}}{rest}")
+    assert read_window_at(edited, (160, 10)) == LINE_FORMAT
+
+
+def test_a_fake_row_whose_rest_is_not_a_row_is_line_format():
+    real = _line(API36, "5ebeeda FloatingMenu")
+    fake = _fake_row(real, 2, "ownerUid=10186", "ownerUid=1000")
+    # The rest without a row number: a line of no known form in the list.
+    orphan = API36.replace(real, f"{fake}\n      x{_fields(real)}")
+    assert read_window_at(orphan, (296, 458)) == LINE_FORMAT
+    # The rest shaped like the last row of a transform's matrix.
+    matrix = API36.replace(
+        real,
+        f"{fake}\n      transform (ROT_0) (TRANSLATE)\n"
+        "          1.0000  0.0000  0.0000\n          0.0000  1.0000  0.0000\n"
+        f"          0.0000  0.0000  1.0000{_fields(real)}",
+    )
+    assert read_window_at(matrix, (296, 458)) == LINE_FORMAT
+
+
+def test_the_lowest_row_faking_a_whole_row_is_the_documented_limit():
+    # Documented limit: a window of another app that is the lowest in the
+    # list, with no window above it taking the point, and whose name fakes a
+    # whole window line, is not told apart. The text shows the fake row (the
+    # app's uid) and then a row 13 with the real fields. The real window here
+    # takes touches over the whole display (made so from the wallpaper row).
+    real = _line(API36, "ec45fba com.android.systemui.wallpapers.ImageWallpaper")
+    taking = real.replace(
+        "inputConfig=NOT_VISIBLE | NOT_FOCUSABLE | NOT_TOUCHABLE | IS_WALLPAPER",
+        "inputConfig=TRUSTED_OVERLAY",
+    ).replace("touchableRegion=<empty>", "touchableRegion=[0,0][1000,1000]")
+    fake = _fake_row(taking, 12, "ownerUid=10186", "ownerUid=1000")
+    lowest = API36.replace(
+        real,
+        f"{fake}\n      transform (ROT_0) (IDENTITY)\n"
+        f"      13: name=y{_fields(taking)}",
+    )
+    found = read_window_at(lowest, (400, 900))
+    assert isinstance(found, InputWindow)
+    assert found.owner_uid == 1000  # the fake row: the check cannot tell

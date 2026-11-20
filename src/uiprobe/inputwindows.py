@@ -29,24 +29,33 @@ Four forms of the window line were seen on emulators (API 24 to 36):
   indent).
 
 All four have ``displayId=``, ``touchableRegion=[l,t][r,b]`` or ``<empty>``
-and ``ownerUid=``. On API 34 to 36 the windows are listed per display
-(``Display: <id>``, on API 36 with the display's own ``transform`` line above
-its ``Windows:``); on API 24 to 28 there is one list of every display; on API
-29 to 33 the lines above ``Windows:`` were not captured, and both layouts are
-read. Anything that does not read as one of these forms makes the whole list
-unknown, because a line that cannot be read could be the window on top: a
-window line of no known form, one with a read field twice (a window's title
-and ``applicationInfo.name`` are printed as the app gave them, so text there
-must not pass for a field), a field whose value is followed by more text
-before the next ``, key=`` field, a flag name that is not known, row numbers
-that do not run 0, 1, 2, ..., any other line inside the list, more than one
-list that could be the display's, a list that does not end at a line it is
-known to end at (`_LIST_END`), a line outside every window list that holds
-``ownerUid=``, or a line of another display's list of no known form (those
-lists are read too). The last three matter because a window name may hold
-line breaks: it could fake a whole row and the end of the list, and the real
-rest of its line, with the real owner and display, would then land outside
-the list or in another display's list.
+and ``ownerUid=``. On API 24 to 28 there is one list of every display; on API
+29 to 36 the windows are listed per display (``Display: <id>``, right above
+``Windows:`` on API 29 to 32; on API 36 with ``logicalSize=`` and the
+display's own ``transform`` line in between; API 33 to 35 also print two lines
+there, which were not captured). Anything that does not read as one of these
+forms makes the whole list unknown, because a line that cannot be read could
+be the window on top: a window line of no known form, one with a read field
+twice (a window's title and ``applicationInfo.name`` are printed as the app
+gave them, so text there must not pass for a field), a field whose value is
+followed by more text before the next ``, key=`` field, a flag name that is
+not known, row numbers that do not run 0, 1, 2, ..., any other line inside the
+list, more than one list that could be the display's, a list that does not end
+at a line it is known to end at (`_LIST_END`), rows of one list that differ in
+form (a quoted or bare name, or which of `_FORM_FIELDS` they print; on the hex
+form ``scale=`` alone for API 24 to 28, or ``globalScale=``, ``windowScale=``
+and ``portalToDisplayId=`` together for API 29 and 30) or in having transform
+lines, two ``Display:`` sections of the same number (``Display: 00`` and
+``Display: 0``), a line outside every window list that holds ``ownerUid=``, or
+a line of another display's list of no known form (those lists are read too).
+The list's end, the rows' form, the stray owner and the other displays' lists
+matter because a window name may hold line breaks: it could fake a whole row
+and the end of the list, and the real rest of its line, with the real owner
+and display, would then land outside the list or in another display's list, or
+start a row whose number another row has. One case remains (a documented
+limit): the lowest window of the list, when no window above it takes the
+point, can fake a whole row in its name, and the real rest of its line then
+reads as one more row below it.
 
 The legacy dispatcher (API 24 to 32) gives a touch anywhere on the display to
 a visible touchable window that is "touch modal", one with neither
@@ -80,7 +89,8 @@ form, none at all, or lines that disagree are `ROTATION` as well. In
 addition a ``transform`` line in the list whose rotation is not ``ROT_0``, a
 ``displayOrientation=`` other than 0 (API 32) or a display transform that is
 not ``(ROT_0) (IDENTITY)`` (API 36; a display scaled with ``wm size`` is not
-the identity either) is `ROTATION`.
+the identity either) is `ROTATION`, and so is a display section that prints
+``logicalSize=`` (as API 36 does) without a display transform line.
 """
 
 from __future__ import annotations
@@ -200,6 +210,30 @@ _ONCE: Final = (
     "portalToDisplayId=",
 )
 _HEADER: Final = "Input Dispatcher State:"
+# Fields every row of one version printed: which of them a row has tells its
+# form, and all rows of a list must have the same (`_form`).
+_FORM_FIELDS: Final = (
+    "id",
+    "portalToDisplayId",
+    "paused",
+    "hasFocus",
+    "focusable",
+    "hasWallpaper",
+    "visible",
+    "canReceiveKeys",
+    "alpha",
+    "flags",
+    "inputConfig",
+    "type",
+    "layer",
+    "frame",
+    "scale",
+    "globalScale",
+    "windowScale",
+    "applicationInfo.name",
+    "inputFeatures",
+    "ownerPid",
+)
 # A field's value ends where the next field begins (or the line ends), so a
 # value is read whole: text after it that is not another field is no form.
 _NEXT = r"(?=, [A-Za-z][A-Za-z0-9_.]*=|$)"
@@ -377,7 +411,10 @@ def _window_list(lines: list[str], display_id: int) -> _List | None:
         taken, ended = _listed(lines, lists[0])
         problem = _stray(lines, taken, ended=ended)
         return _List([lines[i] for i in taken], None, rotated=False, problem=problem)
-    ours = [i for i in sections if lines[i].strip() == f"Display: {display_id}"]
+    ids = [_display_of(lines[i]) for i in sections]
+    if len(set(ids)) != len(ids):  # "Display: 00" and "Display: 0" included
+        return None
+    ours = [i for i, shown in zip(sections, ids, strict=True) if shown == display_id]
     if lists or len(ours) != 1:
         return None
     return _sections(lines, sections, ours[0], display_id)
@@ -403,13 +440,15 @@ def _sections(
         taken, ended = _listed(lines, listed[0])
         every += taken
         ended_all = ended_all and ended
-        transforms = [
-            lines[i].strip()
-            for i in section
-            if i < listed[0] and lines[i].strip().startswith("transform ")
-        ]
-        rotated = len(transforms) > 1 or any(line != _IDENTITY for line in transforms)
-        shown = int(lines[head].strip().removeprefix("Display: "))
+        above = [lines[i].strip() for i in section if i < listed[0]]
+        transforms = [line for line in above if line.startswith("transform ")]
+        sized = any(line.startswith("logicalSize=") for line in above)
+        rotated = (
+            len(transforms) > 1
+            or (sized and not transforms)
+            or any(line != _IDENTITY for line in transforms)
+        )
+        shown = _display_of(lines[head])
         read = _List([lines[i] for i in taken], shown, rotated=rotated)
         if head == ours:
             mine = read
@@ -425,6 +464,11 @@ def _sections(
         problem=problem,
         others=tuple(others),
     )
+
+
+def _display_of(line: str) -> int:
+    """The display id of a ``Display: <id>`` line, as a number."""
+    return int(line.strip().removeprefix("Display: "))
 
 
 def _stray(lines: list[str], inside: list[int], *, ended: bool) -> str | None:
@@ -451,6 +495,23 @@ def _names(value: str, known: frozenset[str]) -> frozenset[str] | None:
     return frozenset(names)
 
 
+def _hex_form(line: str) -> bool | None:
+    """Whether a line of the hex flags form is of API 29 and 30 (with
+    ``globalScale=``, ``windowScale=`` and ``portalToDisplayId=``) rather
+    than of API 24 to 28 (with ``scale=``); None when it is neither whole."""
+    legacy = ", scale=" in line
+    newer = [
+        ", globalScale=" in line,
+        ", windowScale=" in line,
+        ", portalToDisplayId=" in line,
+    ]
+    if legacy and not any(newer):
+        return False
+    if all(newer) and not legacy:
+        return True
+    return None
+
+
 def _touch(line: str) -> tuple[bool, bool, bool] | None:
     """Whether the window takes touches, whether it is touch modal and whether
     its form prints ``portalToDisplayId`` (API 29 to 32); None when the line
@@ -471,9 +532,8 @@ def _touch(line: str) -> tuple[bool, bool, bool] | None:
         bits = int(hex_flags["hex"], 16)
         takes = shown and not bits & _FLAG_NOT_TOUCHABLE
         not_modal = bits & (_FLAG_NOT_FOCUSABLE | _FLAG_NOT_TOUCH_MODAL)
-        # API 29 and 30 print globalScale= and portalToDisplayId=; API 24 to
-        # 28 print scale= and no portal.
-        return takes, takes and not not_modal, ", globalScale=" in line
+        newer = _hex_form(line)
+        return None if newer is None else (takes, takes and not not_modal, newer)
     names = None if named is None else _names(named["names"], _FLAG_NAMES)
     if names is None:  # neither form
         return None
@@ -587,11 +647,23 @@ def parse_input_windows(
     return _read(found, display_id)
 
 
+def _form(line: str) -> tuple[bool, tuple[str, ...]]:
+    """What tells the form of a window line apart: whether its name is quoted
+    and which of `_FORM_FIELDS` it has. Every row of a list must agree (they
+    did in every capture)."""
+    quoted = line.partition(": name=")[2].startswith("'")
+    return quoted, tuple(key for key in _FORM_FIELDS if f", {key}=" in line)
+
+
 def _read(found: _List, display_id: int) -> tuple[InputWindow, ...] | str:
     """Read the windows of `display_id` in the list `found` (see
     `parse_input_windows`)."""
     groups = _group(found.lines)
-    if groups is None:
+    if (
+        groups is None
+        or len({_form(line) for line, _ in groups}) > 1
+        or len({bool(rest) for _, rest in groups}) > 1  # transform lines: all or none
+    ):
         return LINE_FORMAT
     windows: list[InputWindow] = []
     rotated = found.rotated
