@@ -950,7 +950,7 @@ def test_without_a_boot_id_an_input_after_a_failure_ends_the_pin(
     with pytest.raises(DeviceNotFoundError) as caught:
         device.key("back")
     assert caught.value.details["reason"] == "device_changed"
-    assert through(fake_adb, TRANSPORT, since) == []
+    assert len(fake_adb.requests) == since  # not even the listing is read
     assert android.inputs == []
 
 
