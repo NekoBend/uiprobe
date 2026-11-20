@@ -1648,3 +1648,33 @@ def test_a_refused_connect_has_a_readable_reason_on_windows() -> None:
     assert "Unknown error" not in reason
     assert "timed out" not in reason
     assert "10061" in reason or "refused" in reason.lower()
+
+
+def test_a_transport_id_selects_that_transport(fake_adb: FakeAdbServer) -> None:
+    fake_adb.add_device("d1", transport_id=4)
+    fake_adb.on_shell("d1", "id", b"uid=2000\n")
+    fake_adb.on_exec("d1", "cat f", b"x")
+    client = client_for(fake_adb)
+    assert client.shell("d1", "id", transport_id=4) == b"uid=2000\n"
+    assert client.exec_out("d1", "cat f", transport_id=4) == b"x"
+    assert fake_adb.requests == [
+        "host:transport-id:4",
+        "shell:id",
+        "host:transport-id:4",
+        "exec:cat f",
+    ]
+
+
+def test_a_gone_transport_id_is_device_not_found(fake_adb: FakeAdbServer) -> None:
+    fake_adb.add_device("d1", transport_id=5)  # the serial is there, the id is not
+    with pytest.raises(DeviceNotFoundError) as info:
+        client_for(fake_adb).shell("d1", "id", transport_id=4)
+    assert info.value.details["serial"] == "d1"
+    assert fake_adb.requests == ["host:transport-id:4"]
+
+
+@pytest.mark.parametrize("value", [True, "4", 4.0])
+def test_a_transport_id_must_be_an_int(fake_adb: FakeAdbServer, value: object) -> None:
+    with pytest.raises(TypeError):
+        client_for(fake_adb).shell("d1", "id", transport_id=value)  # ty: ignore[invalid-argument-type]
+    assert fake_adb.requests == []

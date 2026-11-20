@@ -8,8 +8,8 @@ from typing import TYPE_CHECKING
 import pytest
 
 from tests.fake_adb_server import Fail
-from tests.fake_device import El, FakeAndroid, Screen
-from uiprobe.device import Device
+from tests.fake_device import El, FakeAndroid, Screen, _hex
+from uiprobe.device import Device, DeviceIdentity, FocusedWindow
 from uiprobe.errors import AdbError, AdbServerUnavailableError
 
 if TYPE_CHECKING:
@@ -347,3 +347,156 @@ def test_is_emulator_unreachable_server_propagates(fake_adb):
     with pytest.raises(AdbServerUnavailableError):
         device.is_emulator()
     assert_no_input(fake_adb, android)
+
+
+# --- focused_window ---
+
+# Captured on emulators (dumpsys window windows): the focused window's block
+# head and, two lines below, the owner line the system writes.
+SETTINGS = "com.android.settings/com.android.settings.Settings"
+CAPTURED_BLOCKS = {
+    24: (
+        "5eed814",
+        SETTINGS,
+        "    mDisplayId=0 stackId=1 mSession=Session{ec14794 1855:1000} mClient=x",
+        "    mOwnerUid=1000 mShowToOwnerOnly=true package=com.android.settings"
+        " appop=NONE",
+    ),
+    30: (
+        "ff01d0e",
+        "NotificationShade",
+        "    mDisplayId=0 rootTaskId=1 mSession=Session{c0af70d 631:u0a10157} mC=x",
+        "    mOwnerUid=10157 showForAllUsers=true package=com.android.systemui"
+        " appop=NONE",
+    ),
+    36: (
+        "498ad4f",
+        SETTINGS,
+        "    mDisplayId=0 taskId=57 mSession=Session{9196a2d 2532:1000} mClient=x",
+        "    mOwnerUid=1000 showForAllUsers=false package=com.android.settings"
+        " appop=NONE",
+    ),
+}
+
+
+def focus(window: str, title: str) -> str:
+    return f"  mCurrentFocus=Window{{{window} u0 {title}}}\n"
+
+
+def block(
+    window: str, title: str, second: str, owner_line: str, number: int = 4
+) -> str:
+    return (
+        f"  Window #{number} Window{{{window} u0 {title}}}:\n{second}\n{owner_line}\n"
+    )
+
+
+def owner_line(package: str) -> str:
+    return f"    mOwnerUid=10150 showForAllUsers=false package={package} appop=NONE"
+
+
+SECOND = "    mDisplayId=0 taskId=5 mSession=Session{1 2:3} mClient=x"
+WINDOWS = re.compile(r"^dumpsys window windows\Z")
+
+
+@pytest.mark.parametrize("api", APIS)
+def test_focused_window_names_the_app_in_front(fake_adb, api):
+    _, device = make(fake_adb, api=api)
+    title = f"{SHOP}/{SHOP}.Main"
+    assert device.focused_window() == FocusedWindow(SHOP, title, _hex(title))
+
+
+@pytest.mark.parametrize("api", sorted(CAPTURED_BLOCKS))
+def test_focused_window_reads_the_captured_owner_line(fake_adb, api):
+    window, title, second, owner = CAPTURED_BLOCKS[api]
+    android, device = make(fake_adb)
+    android.override(WINDOW, focus(window, title).encode())
+    android.override(WINDOWS, block(window, title, second, owner).encode())
+    expected = (
+        "com.android.systemui"
+        if title == "NotificationShade"
+        else "com.android.settings"
+    )
+    assert device.focused_window() == FocusedWindow(expected, title, window)
+    assert_no_input(fake_adb, android)
+
+
+def test_the_shade_belongs_to_the_system_ui(fake_adb):
+    android, device = make(fake_adb)
+    android.focus_window = ("NotificationShade", "com.android.systemui")
+    assert device.focused_window() == FocusedWindow(
+        "com.android.systemui", "NotificationShade", _hex("NotificationShade")
+    )
+
+
+def test_a_title_shaped_like_the_target_does_not_make_it_the_owner(fake_adb):
+    android, device = make(fake_adb)
+    title = f"{SHOP}/{SHOP}.Main"
+    android.override(WINDOW, focus("abc123", title).encode())
+    android.override(
+        WINDOWS, block("abc123", title, SECOND, owner_line(OTHER)).encode()
+    )
+    assert device.focused_window() == FocusedWindow(OTHER, title, "abc123")
+
+
+@pytest.mark.parametrize(
+    ("window_text", "windows_text"),
+    [
+        ("  mCurrentFocus=null\n", block("abc", "x", SECOND, owner_line(SHOP))),
+        ("", block("abc", "x", SECOND, owner_line(SHOP))),
+        (
+            focus("abc", "x") + focus("def", "y"),
+            block("abc", "x", SECOND, owner_line(SHOP)),
+        ),
+        ("  mCurrentFocus=Window{zz u0 x}\n", ""),
+        (focus("abc", "a" * 600), ""),
+        (focus("abc", "x"), ""),
+        (
+            focus("abc", "x"),
+            block("abc", "x", SECOND, owner_line(SHOP))
+            + block("abc", "x", SECOND, owner_line(OTHER), number=9),
+        ),
+        (focus("abc", "x"), block("abc", "y", SECOND, owner_line(SHOP))),
+        (focus("abc", "x"), block("abc", "x", SECOND, "    package=" + SHOP)),
+        (focus("abc", "x"), block("abc", "x", owner_line(SHOP), SECOND)),
+        (focus("abc", "x"), "  Window #4 Window{abc u0 x}:\n" + SECOND + "\n"),
+    ],
+    ids=[
+        "null",
+        "absent",
+        "focus-lines-disagree",
+        "bad-hash",
+        "too-long",
+        "no-block",
+        "two-blocks",
+        "title-differs",
+        "owner-line-shape",
+        "owner-line-not-two-below",
+        "cut-off",
+    ],
+)
+def test_focused_window_is_unknown_unless_everything_agrees(
+    fake_adb, window_text, windows_text
+):
+    android, device = make(fake_adb)
+    android.override(WINDOW, window_text.encode())
+    android.override(WINDOWS, windows_text.encode())
+    assert device.focused_window() is None
+    assert_no_input(fake_adb, android)
+
+
+def test_identity_reads_three_properties_at_once(fake_adb):
+    android, device = make(fake_adb)
+    found = device.identity()
+    assert found == DeviceIdentity(
+        emulator=True,
+        serialno=android.props["ro.serialno"],
+        fingerprint=android.props["ro.build.fingerprint"],
+    )
+
+
+@pytest.mark.parametrize("answer", [b"", b"1\n", b"1\na\nb\nc\n"])
+def test_identity_of_another_shape_is_unknown(fake_adb, answer):
+    android, device = make(fake_adb)
+    android.override(re.compile(r"^getprop ro\.kernel\.qemu;"), answer)
+    assert device.identity() is None

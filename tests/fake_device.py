@@ -274,6 +274,11 @@ class FakeAndroid:
     _CLASS = r"\.?[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*"
     # `cat` and `screencap` go through the binary-safe ``exec:`` service
     # (`Device` reads the dump with `exec_out`); everything else is ``shell:``.
+    # The window with input focus as (title, owner package) when it is not the
+    # screen in front's own (the notification shade, for example). A tuple, so
+    # the class default is safe to share; tests set it on an instance.
+    focus_window: tuple[str, str] | None = None
+
     SHELL_ALLOWED = (
         re.compile(rf"^uiautomator dump {_TMP}\Z"),
         re.compile(rf"^rm -f {_TMP}\Z"),
@@ -281,6 +286,11 @@ class FakeAndroid:
         re.compile(r"^getprop (?:ro\.build\.version\.sdk|ro\.kernel\.qemu)\Z"),
         re.compile(r"^dumpsys (?:window|activity activities|input_method)\Z"),
         re.compile(r"^dumpsys window displays\Z"),
+        re.compile(r"^dumpsys window windows\Z"),
+        re.compile(
+            r"^getprop ro\.kernel\.qemu; getprop ro\.serialno;"
+            r" getprop ro\.build\.fingerprint\Z"
+        ),
         re.compile(r"^input tap [0-9]+ [0-9]+\Z"),
         re.compile(r"^input swipe ([0-9]+) ([0-9]+) \1 \2 800\Z"),
         # The marker forms ``uiprobe tap`` sends; no other compound command.
@@ -411,6 +421,7 @@ class FakeAndroid:
         display: tuple[int, int] = (320, 640),
         extra_attributes: bool | None = None,
         focused_app_line: bool = True,
+        transport_id: int | None = None,
         keyboard_in_dump: bool = False,
         secure_screencap: str | None = None,
         strict: bool = True,
@@ -489,7 +500,12 @@ class FakeAndroid:
         self._gone: set[str] = set()
         self.dropped: list[str] = []
         self.dropped_at: list[int] = []
-        self.props = {"ro.build.version.sdk": str(api), "ro.kernel.qemu": "1"}
+        self.props = {
+            "ro.build.version.sdk": str(api),
+            "ro.kernel.qemu": "1",
+            "ro.serialno": "EMULATOR35X1X2X0",
+            "ro.build.fingerprint": f"google/sdk_gphone64/emu64xa:{api}/T/1:user/k",
+        }
         self.faults = _Faults()
         self._files: dict[str, bytes] = {}
         self._keyboard_hidden = False
@@ -508,7 +524,8 @@ class FakeAndroid:
         # touched, so a refused construction leaves the server as it was.
         rules = self.allowed(extra_packages)
         if not any(d["serial"] == serial for d in server.devices):
-            server.add_device(serial)
+            # ``transport_id`` is listed only when given, as old servers omit it.
+            server.add_device(serial, transport_id=transport_id)
         server.on_shell(serial, re.compile(""), self._shell)
         server.on_exec(serial, re.compile(""), self._shell)
         if strict:
@@ -644,11 +661,16 @@ class FakeAndroid:
                     self._files.pop(path, None)
                 case ["wm", "size"]:
                     out = b"Physical size: %dx%d\n" % self.display
-                case ["getprop", name]:
-                    out = self.props.get(name, "").encode() + b"\n"
-                case ["dumpsys", "window", *more] if more in ([], ["displays"]):
-                    text = self._dumpsys_displays() if more else self._dumpsys_window()
-                    out = text.encode()
+                case ["getprop", *names]:
+                    # One name, or the identity command: ``getprop a; getprop b``.
+                    wanted = [n.removesuffix(";") for n in names if n != "getprop"]
+                    out = "".join(self.props.get(n, "") + "\n" for n in wanted).encode()
+                case ["dumpsys", "window", *more] if more in (
+                    [],
+                    ["displays"],
+                    ["windows"],
+                ):
+                    out = self._dumpsys_window_part(more).encode()
                 case ["dumpsys", "activity", "activities"]:
                     out = self._dumpsys_activities().encode()
                 case ["dumpsys", "input_method"]:
@@ -912,7 +934,38 @@ class FakeAndroid:
 
     def _title_component(self) -> str:
         """The component with the class name in full, as window titles print it."""
+        if self.focus_window is not None:
+            return self.focus_window[0]
         return _full_component(self.screen.component)
+
+    def _dumpsys_window_part(self, more: list[str]) -> str:
+        if more == ["displays"]:
+            return self._dumpsys_displays()
+        return self._dumpsys_windows() if more else self._dumpsys_window()
+
+    def _dumpsys_windows(self) -> str:
+        """``dumpsys window windows``: the focused window's block, as API 36 prints it.
+
+        The owner line is the one the system writes (captured on emulators at
+        API 24, 30 and 36); the window above it stands for the others.
+        """
+        title = self._title_component()
+        owner = (
+            self.focus_window[1]
+            if self.focus_window is not None
+            else self.screen.package
+        )
+        lines = [
+            "WINDOW MANAGER WINDOWS (dumpsys window windows)",
+            "  Window #0 Window{1a2b3c u0 InputMethod}:",
+            "    mDisplayId=0 mSession=Session{77 1:u0a1} mClient=BinderProxy@1",
+            f"    mOwnerUid=10100 showForAllUsers=false package={KEYBOARD_PACKAGE}"
+            " appop=NONE",
+            f"  Window #1 Window{{{_hex(title)} u0 {title}}}:",
+            "    mDisplayId=0 taskId=5 mSession=Session{88 2:u0a2} mClient=Proxy@2",
+            f"    mOwnerUid=10150 showForAllUsers=false package={owner} appop=NONE",
+        ]
+        return "\n".join(lines) + "\n" + self.extra_dumpsys.get("windows", "")
 
     def _dumpsys_input_method(self) -> str:
         shown = _bool(self.keyboard_visible)

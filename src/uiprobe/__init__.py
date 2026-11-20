@@ -4,6 +4,8 @@
 __version__ = "0.1.0a1.dev0"
 
 from uiprobe.adb import DeviceInfo
+from uiprobe.crawl_driver import CrawlResult
+from uiprobe.crawl_driver import crawl as crawl_run
 from uiprobe.crawl_preview import Preview, preview
 from uiprobe.device import Device, devices, select_device
 from uiprobe.errors import (
@@ -19,6 +21,7 @@ from uiprobe.errors import (
     LaunchFailedError,
     MultipleDevicesError,
     MultipleElementsError,
+    NotEmulatorError,
     ScreenshotFailedError,
     UiprobeError,
 )
@@ -29,6 +32,7 @@ __all__ = [
     "AdbError",
     "AdbServerUnavailableError",
     "Bounds",
+    "CrawlResult",
     "Device",
     "DeviceInfo",
     "DeviceNotFoundError",
@@ -42,11 +46,13 @@ __all__ = [
     "LaunchFailedError",
     "MultipleDevicesError",
     "MultipleElementsError",
+    "NotEmulatorError",
     "Policy",
     "Preview",
     "Screen",
     "ScreenshotFailedError",
     "UiprobeError",
+    "crawl_run",
     "devices",
     "preview",
     "select_device",
