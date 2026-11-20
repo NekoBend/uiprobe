@@ -116,13 +116,18 @@ another display's row in a list of every display (read before the row is
 skipped; the ``displayOrientation=`` of such a row is not read, as before).
 So is a ``Viewport`` line whose ``displayId=`` is that long. With leading
 zeros such a number could still be 0, or display 0.
+
+Every refusal also names the check that made it, one of `RULES` (the
+``rule`` of `Unreadable`, which `parse_input_windows` and `read_window_at`
+return); `explain_input_windows` adds the line it refused at, for
+``uiprobe diagnose tap-window`` (`uiprobe.windowdiag`).
 """
 
 from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from typing import Final
+from typing import Final, Self
 
 __all__ = [
     "LINE_FORMAT",
@@ -131,8 +136,13 @@ __all__ = [
     "PORTAL",
     "REGION_FORMAT",
     "ROTATION",
+    "RULES",
     "InputWindow",
+    "ListSpan",
+    "Unreadable",
+    "Verdict",
     "display_orientation",
+    "explain_input_windows",
     "parse_input_windows",
     "read_window_at",
     "window_at",
@@ -145,6 +155,55 @@ REGION_FORMAT: Final = "region_format"
 NO_WINDOW: Final = "no_window"
 ROTATION: Final = "rotation"
 PORTAL: Final = "portal"
+# The checks that can refuse, each under its reason (`Unreadable.rule`,
+# `Verdict.rule`); docs/commands.md says what each one means.
+RULES: Final = {
+    NO_LIST: (
+        "no_dispatcher",
+        "dispatcher_twice",
+        "no_list",
+        "lists_twice",
+        "list_heading",
+        "list_and_sections",
+        "display_twice",
+        "display_missing",
+        "no_rows",
+    ),
+    LINE_FORMAT: (
+        "list_end",
+        "stray_owner",
+        "orphan_line",
+        "legacy_row_in_display_list",
+        "form_mismatch",
+        "transform_mismatch",
+        "unknown_line",
+        "transform_shape",
+        "row_shape",
+        "row_number",
+        "field_twice",
+        "display_mismatch",
+        "field_value",
+        "field_missing",
+        "unknown_flag",
+        "mixed_flags",
+        "hex_form",
+        "portal_missing",
+        "samsung_fields",
+    ),
+    REGION_FORMAT: ("region_missing", "region_format", "region_reversed"),
+    ROTATION: (
+        "display_transform_missing",
+        "display_transform",
+        "row_rotated",
+        "row_orientation",
+        "viewport_malformed",
+        "scaled",
+        "viewport_missing",
+        "viewport_disagree",
+        "rotated",
+        "number_too_long",
+    ),
+}
 
 _FLAG_NOT_FOCUSABLE: Final = 0x8
 _FLAG_NOT_TOUCHABLE: Final = 0x10
@@ -367,15 +426,61 @@ class InputWindow:
         return left <= x < right and top <= y < bottom
 
 
+class Unreadable(str):
+    """Why the window at a point is not known: equal to one of the reasons
+    (`NO_LIST`, `LINE_FORMAT`, `REGION_FORMAT`, `ROTATION`), and carrying in
+    ``rule`` the check that refused (one of `RULES`)."""
+
+    rule: str
+
+    def __new__(cls, reason: str, rule: str) -> Self:
+        made = super().__new__(cls, reason)
+        made.rule = rule
+        return made
+
+
+@dataclass(frozen=True, slots=True)
+class _Refusal:
+    """Why a list is not read: the public reason, the rule that refused (one
+    of `RULES`) and the index, in the text's lines, of the line it refused at
+    (None when no one line is to blame)."""
+
+    reason: str
+    rule: str
+    line: int | None = None
+
+
 @dataclass(frozen=True, slots=True)
 class _List:
     """The lines of one window list and what is known about its display."""
 
     lines: list[str]
+    at: list[int]  # the index of each line in the whole text
     display: int | None  # the list's ``Display:`` section; None: one list
-    rotated: bool  # the section's display transform is not the identity
-    problem: str | None = None  # why the list cannot be read as a whole
+    rotated: _Refusal | None  # why the section's display transform turns
+    problem: _Refusal | None = None  # why the list cannot be read as a whole
     others: tuple[_List, ...] = ()  # the lists of the other displays
+
+
+@dataclass(frozen=True, slots=True)
+class _Group:
+    """A window line of a list (stripped) with the lines that follow it up to
+    the next window line, each with its index in the whole text."""
+
+    line: str
+    at: int
+    rest: list[str]
+    rest_at: list[int]
+
+
+@dataclass(frozen=True, slots=True)
+class _Span:
+    """Where a list is: the index of its end line (None: the end of the
+    text) and whether that line is one a list is known to end at."""
+
+    taken: list[int]
+    end: int | None
+    ended: bool
 
 
 def _indent(line: str) -> int:
@@ -383,7 +488,12 @@ def _indent(line: str) -> int:
 
 
 class _TooLongError(Exception):
-    """A number in ``dumpsys input`` too long to read (see `_number`)."""
+    """A number in ``dumpsys input`` too long to read (see `_number`), on the
+    line with index ``line`` when it is known."""
+
+    def __init__(self, line: int | None = None) -> None:
+        super().__init__(line)
+        self.line = line
 
 
 def _number(digits: str) -> int:
@@ -416,7 +526,7 @@ def _under(lines: list[str], start: int) -> tuple[list[int], int]:
     return found, nearest
 
 
-def _listed(lines: list[str], head: int) -> tuple[list[int], bool]:
+def _listed(lines: list[str], head: int) -> _Span:
     """The window list that ``lines[head]`` begins, and whether it ends well.
 
     The list is the non-blank lines more indented than ``lines[head]``, and
@@ -431,15 +541,20 @@ def _listed(lines: list[str], head: int) -> tuple[list[int], bool]:
         if not line.strip():
             continue
         if _indent(line) <= level and not line.lstrip().startswith("transform ("):
-            return taken, _LIST_END.match(line.strip()) is not None
+            return _Span(taken, i, _LIST_END.match(line.strip()) is not None)
         taken.append(i)
-    return taken, False
+    return _Span(taken, None, ended=False)
 
 
-def _dispatcher_start(lines: list[str]) -> int | None:
-    """The index of the dispatcher's header line, None unless exactly one."""
+def _dispatcher_start(lines: list[str]) -> int | _Refusal:
+    """The index of the dispatcher's header line, unless there is not exactly
+    one (`NO_LIST`)."""
     found = [i for i, line in enumerate(lines) if line.strip() == _HEADER]
-    return found[0] if len(found) == 1 else None
+    if not found:
+        return _Refusal(NO_LIST, "no_dispatcher")
+    if len(found) > 1:
+        return _Refusal(NO_LIST, "dispatcher_twice", found[1])
+    return found[0]
 
 
 def _heads(lines: list[str], found: list[int], level: int) -> list[int]:
@@ -451,9 +566,9 @@ def _heads(lines: list[str], found: list[int], level: int) -> list[int]:
     ]
 
 
-def _window_list(lines: list[str], display_id: int) -> _List | None:
-    """The window list of `display_id` in the dispatcher's part, or None when
-    there is none or it cannot be told which one it is.
+def _window_list(lines: list[str], display_id: int) -> _List | _Refusal:
+    """The window list of `display_id` in the dispatcher's part, or why there
+    is none or it cannot be told which one it is (`NO_LIST`).
 
     Either one ``Windows:`` list directly under the header (API 24 to 28,
     every display in one list) or ``Display: <id>`` sections there, each with
@@ -471,70 +586,106 @@ def _window_list(lines: list[str], display_id: int) -> _List | None:
     in the captures) makes the list `LINE_FORMAT`.
     """
     start = _dispatcher_start(lines)
-    if start is None:
-        return None
+    if isinstance(start, _Refusal):
+        return start
     found, level = _under(lines, start)
     tops = [i for i in found if _indent(lines[i]) == level]
     lists = _heads(lines, tops, level)
     sections = [i for i in tops if _DISPLAY.match(lines[i].strip())]
     if lists and not sections:
-        if len(lists) != 1 or lines[lists[0]].strip() != "Windows:":
-            return None
-        taken, ended = _listed(lines, lists[0])
-        problem = _stray(lines, taken, ended=ended)
-        return _List([lines[i] for i in taken], None, rotated=False, problem=problem)
-    ids = [_display_of(lines[i]) for i in sections]
-    if len(set(ids)) != len(ids):  # "Display: 00" and "Display: 0" included
-        return None
-    ours = [i for i, shown in zip(sections, ids, strict=True) if shown == display_id]
-    if lists or len(ours) != 1:
-        return None
+        return _one_list(lines, lists)
+    twice = _twice(lines, sections)
+    if twice is not None:
+        return twice
+    if lists:
+        return _Refusal(NO_LIST, "list_and_sections", lists[0])
+    ours = [i for i in sections if _display_of(lines[i]) == display_id]
+    if not ours:
+        return _Refusal(NO_LIST, "display_missing" if sections else "no_list")
     return _sections(lines, sections, ours[0], display_id)
+
+
+def _one_list(lines: list[str], lists: list[int]) -> _List | _Refusal:
+    """The one list of every display (API 24 to 28), whose ``Windows:`` line
+    must be the only one at `lists` and say nothing more."""
+    if len(lists) != 1:
+        return _Refusal(NO_LIST, "lists_twice", lists[1])
+    if lines[lists[0]].strip() != "Windows:":
+        return _Refusal(NO_LIST, "list_heading", lists[0])
+    span = _listed(lines, lists[0])
+    taken = span.taken
+    return _List([lines[i] for i in taken], taken, None, None, _stray(lines, [span]))
+
+
+def _twice(lines: list[str], sections: list[int]) -> _Refusal | None:
+    """``display_twice`` at the second ``Display:`` section of one number
+    (``Display: 00`` and ``Display: 0`` included), or None."""
+    seen: set[int] = set()
+    for i in sections:
+        shown = _display_of(lines[i])
+        if shown in seen:
+            return _Refusal(NO_LIST, "display_twice", i)
+        seen.add(shown)
+    return None
+
+
+def _display_turn(
+    lines: list[str], above: list[int], head: int, *, configured: bool
+) -> _Refusal | None:
+    """Why the display of a section turns its coordinates (`ROTATION`), from
+    the section's lines `above` its list (whose ``Windows:`` line is at
+    `head`), or None. `configured`: the list has rows of the
+    ``inputConfig`` forms (API 33 to 36), which print ``logicalSize=`` and
+    the display's transform above every list; without them the coordinates
+    are not known."""
+    transforms = [i for i in above if lines[i].strip().startswith("transform ")]
+    sized = any(lines[i].strip().startswith("logicalSize=") for i in above)
+    if (sized or configured) and not (sized and transforms):
+        return _Refusal(ROTATION, "display_transform_missing", head)
+    if len(transforms) > 1:
+        return _Refusal(ROTATION, "display_transform", transforms[1])
+    turned = [i for i in transforms if lines[i].strip() != _IDENTITY]
+    return _Refusal(ROTATION, "display_transform", turned[0]) if turned else None
 
 
 def _sections(
     lines: list[str], sections: list[int], ours: int, display_id: int
-) -> _List | None:
+) -> _List | _Refusal:
     """The list of the ``Display:`` section at `ours`, with the lists of the
     other sections at `sections` (see `_window_list`)."""
-    every: list[int] = []
-    ended_all = True
+    spans: list[_Span] = []
     mine: _List | None = None
     others: list[_List] = []
     for head in sections:
         section, inner = _under(lines, head)
         heads = _heads(lines, section, inner)
         listed = [i for i in heads if lines[i].strip() == "Windows:"]
-        if len(heads) > 1 or (head == ours and len(listed) != 1):
-            return None
+        if len(heads) > 1:
+            return _Refusal(NO_LIST, "lists_twice", heads[1])
+        if head == ours and not listed:
+            if heads:
+                return _Refusal(NO_LIST, "list_heading", heads[0])
+            return _Refusal(NO_LIST, "no_list", head)
         if not listed:
             continue
-        taken, ended = _listed(lines, listed[0])
-        every += taken
-        ended_all = ended_all and ended
-        above = [lines[i].strip() for i in section if i < listed[0]]
-        transforms = [line for line in above if line.startswith("transform ")]
-        sized = any(line.startswith("logicalSize=") for line in above)
-        # API 33 to 36 (the inputConfig forms) print logicalSize= and the
-        # display's transform above every list; without them the coordinates
-        # are not known.
+        span = _listed(lines, listed[0])
+        spans.append(span)
+        taken = span.taken
+        above = [i for i in section if i < listed[0]]
         configured = any(", inputConfig=" in _meta(lines[i].strip()) for i in taken)
-        rotated = (
-            len(transforms) > 1
-            or ((sized or configured) and not (sized and transforms))
-            or any(line != _IDENTITY for line in transforms)
-        )
+        rotated = _display_turn(lines, above, listed[0], configured=configured)
         shown = _display_of(lines[head])
-        read = _List([lines[i] for i in taken], shown, rotated=rotated)
+        read = _List([lines[i] for i in taken], taken, shown, rotated)
         if head == ours:
             mine = read
         else:
             others.append(read)
-    if mine is None:
-        return None
-    problem = _stray(lines, every, ended=ended_all)
+    if mine is None:  # not reached: the display's own section has a list
+        return _Refusal(NO_LIST, "no_list", ours)
+    problem = _stray(lines, spans)
     return _List(
         mine.lines,
+        mine.at,
         display_id,
         rotated=mine.rotated,
         problem=problem,
@@ -547,12 +698,20 @@ def _display_of(line: str) -> int:
     return int(line.strip().removeprefix("Display: "))
 
 
-def _stray(lines: list[str], inside: list[int], *, ended: bool) -> str | None:
-    """`LINE_FORMAT` when a list did not end well or a line outside the lists
-    (indices `inside`) holds ``ownerUid=``; None otherwise."""
-    taken = set(inside)
-    stray = any("ownerUid=" in line for i, line in enumerate(lines) if i not in taken)
-    return LINE_FORMAT if stray or not ended else None
+def _stray(lines: list[str], spans: list[_Span]) -> _Refusal | None:
+    """`LINE_FORMAT` when a list (of `spans`) did not end at a known line
+    (``list_end``) or a line outside the lists holds ``ownerUid=``
+    (``stray_owner``); None otherwise."""
+    for span in spans:
+        if not span.ended:
+            last = span.taken[-1] if span.taken else None
+            end = span.end if span.end is not None else last
+            return _Refusal(LINE_FORMAT, "list_end", end)
+    taken = {i for span in spans for i in span.taken}
+    stray = [
+        i for i, line in enumerate(lines) if i not in taken and "ownerUid=" in line
+    ]
+    return _Refusal(LINE_FORMAT, "stray_owner", stray[0]) if stray else None
 
 
 def _title(name: str) -> str:
@@ -588,13 +747,12 @@ def _hex_form(line: str) -> bool | None:
     return None
 
 
-def _touch(line: str) -> tuple[bool, bool, bool] | None:
+def _touch(line: str) -> tuple[bool, bool, bool] | str:
     """Whether the window takes touches, whether it is touch modal and whether
-    its form prints ``portalToDisplayId`` (API 29 to 32); None when the line
-    has no known form."""
+    its form prints ``portalToDisplayId`` (API 29 to 32); the rule that
+    refuses the line when it has no known form."""
     config = _INPUT_CONFIG.search(line)
     visible = _VISIBLE.search(line)
-    hex_flags = _HEX_FLAGS.search(line)
     named = _NAMED_FLAGS.search(line)
     # A field named anywhere in the line must read as that field (text in a
     # name such as "inputConfig=0x0, x" is no field and no form).
@@ -602,25 +760,39 @@ def _touch(line: str) -> tuple[bool, bool, bool] | None:
         ("inputConfig=" in line) != (config is not None)
         or ("visible=" in line) != (visible is not None)
         or ("flags=" in line) != (named is not None)
-        or (config is None and visible is None)
     ):
-        return None
+        return "field_value"
     if config is not None:  # API 33 on
         names = _names(config["names"], _INPUT_CONFIG_NAMES)
-        if names is None or visible is not None or named is not None:
-            return None
+        if names is None:
+            return "unknown_flag"
+        if visible is not None or named is not None:
+            return "mixed_flags"
         return not names & _NOT_TAKING, False, False
-    assert visible is not None  # noqa: S101 - refused above when both are None
-    shown = visible["visible"] == "true"
+    if visible is None:
+        return "field_missing"
+    return _flags_touch(line, named, shown=visible["visible"] == "true")
+
+
+def _flags_touch(
+    line: str, named: re.Match[str] | None, *, shown: bool
+) -> tuple[bool, bool, bool] | str:
+    """`_touch` for the forms with ``visible=`` and ``flags=`` (API 24 to
+    32), `shown` being the visible field and `named` the flags field."""
+    hex_flags = _HEX_FLAGS.search(line)
     if hex_flags is not None:  # API 24 to 30
         bits = int(hex_flags["hex"], 16)
         takes = shown and not bits & _FLAG_NOT_TOUCHABLE
         not_modal = bits & (_FLAG_NOT_FOCUSABLE | _FLAG_NOT_TOUCH_MODAL)
         newer = _hex_form(_meta(line))
-        return None if newer is None else (takes, takes and not not_modal, newer)
-    names = None if named is None else _names(named["names"], _FLAG_NAMES)
-    if names is None:  # neither form
-        return None
+        if newer is None:
+            return "hex_form"
+        return takes, takes and not not_modal, newer
+    if named is None:  # neither form
+        return "field_missing"
+    names = _names(named["names"], _FLAG_NAMES)
+    if names is None:
+        return "unknown_flag"
     takes = shown and "NOT_TOUCHABLE" not in names  # API 31 and 32
     return takes, takes and not names & {"NOT_FOCUSABLE", "NOT_TOUCH_MODAL"}, True
 
@@ -641,26 +813,30 @@ def _samsung(line: str) -> bool | None:
     return True
 
 
-def _window(line: str, name: str) -> InputWindow | str:
-    """Read one window line (stripped) whose name field is `name`."""
+def _missing(line: str, key: str) -> str:
+    """The rule for a field `key` that does not read: named but malformed
+    (``field_value``) or not there (``field_missing``)."""
+    return "field_value" if key in line else "field_missing"
+
+
+def _window(line: str, name: str, at: int) -> InputWindow | _Refusal:
+    """Read one window line (stripped, at index `at`) whose name field is
+    `name`."""
     touch = _touch(line)
+    if isinstance(touch, str):
+        return _Refusal(LINE_FORMAT, touch, at)
     uid = _UID.search(line)
+    if uid is None:
+        return _Refusal(LINE_FORMAT, _missing(line, "ownerUid="), at)
     portal = _PORTAL.search(line)
-    samsung = _samsung(line)
-    if touch is None or uid is None or samsung is None:
-        return LINE_FORMAT
+    if _samsung(line) is None:
+        return _Refusal(LINE_FORMAT, "samsung_fields", at)
     if portal is None and ("portalToDisplayId=" in line or touch[2]):
-        return LINE_FORMAT
-    region = _REGION.search(line)
-    if region is None:
-        return REGION_FORMAT
-    bounds = None
-    if not region["empty"]:
-        left, top = int(region["l"]), int(region["t"])
-        right, bottom = int(region["r"]), int(region["b"])
-        if left > right or top > bottom:
-            return REGION_FORMAT
-        bounds = (left, top, right, bottom)
+        rule = "field_value" if "portalToDisplayId=" in line else "portal_missing"
+        return _Refusal(LINE_FORMAT, rule, at)
+    bounds = _bounds(line, at)
+    if isinstance(bounds, _Refusal):
+        return bounds
     takes, modal, _ = touch
     return InputWindow(
         _title(name),
@@ -672,58 +848,121 @@ def _window(line: str, name: str) -> InputWindow | str:
     )
 
 
-def _group(lines: list[str]) -> list[tuple[str, list[str]]] | None:
-    """Each window line of a list (stripped) with the lines that follow it up
-    to the next window line; None when a line comes before the first."""
-    groups: list[tuple[str, list[str]]] = []
-    for raw in lines:
+def _bounds(line: str, at: int) -> tuple[int, int, int, int] | _Refusal | None:
+    """The touchable region of a window line (None: empty), or why it does
+    not read (`REGION_FORMAT`)."""
+    region = _REGION.search(line)
+    if region is None:
+        rule = "region_format" if "touchableRegion=" in line else "region_missing"
+        return _Refusal(REGION_FORMAT, rule, at)
+    if region["empty"]:
+        return None
+    left, top = int(region["l"]), int(region["t"])
+    right, bottom = int(region["r"]), int(region["b"])
+    if left > right or top > bottom:
+        return _Refusal(REGION_FORMAT, "region_reversed", at)
+    return left, top, right, bottom
+
+
+def _group(found: _List) -> list[_Group] | _Refusal:
+    """Each window line of a list with the lines that follow it up to the
+    next window line; ``orphan_line`` when a line comes before the first."""
+    groups: list[_Group] = []
+    for raw, at in zip(found.lines, found.at, strict=True):
         line = raw.strip()
         if _INDEX.match(line):
-            groups.append((line, []))
+            groups.append(_Group(line, at, [], []))
         elif not groups:
-            return None
+            return _Refusal(LINE_FORMAT, "orphan_line", at)
         else:
-            groups[-1][1].append(line)
+            groups[-1].rest.append(line)
+            groups[-1].rest_at.append(at)
     return groups
 
 
-def _turned(rest: list[str]) -> bool | None:
-    """Whether the lines after a window line hold a rotated transform; None
-    unless they are nothing or a ``transform`` line with its matrix rows
-    (none for ``IDENTITY``, three for any other kind)."""
+def _turned(group: _Group) -> bool | _Refusal:
+    """Whether the lines after a window line hold a rotated transform; why
+    not, unless they are nothing or a ``transform`` line with its matrix rows
+    (none for ``IDENTITY``, three for any other kind): ``unknown_line`` for
+    a line that is neither, ``transform_shape`` for matrix rows missing,
+    malformed or too many."""
+    rest, rest_at = group.rest, group.rest_at
     if not rest:
         return False
     transform = _TRANSFORM.match(rest[0])
     if transform is None:
-        return None
+        return _Refusal(LINE_FORMAT, "unknown_line", rest_at[0])
     rows = 0 if transform["kind"] == "IDENTITY" else _MATRIX_ROWS
-    if len(rest) != 1 + rows or not all(_MATRIX_ROW.match(row) for row in rest[1:]):
-        return None
+    for i in range(1, len(rest)):
+        if not _MATRIX_ROW.match(rest[i]):
+            rule = "transform_shape" if i <= rows else "unknown_line"
+            return _Refusal(LINE_FORMAT, rule, rest_at[i])
+        if i > rows:
+            return _Refusal(LINE_FORMAT, "transform_shape", rest_at[i])
+    if len(rest) != 1 + rows:
+        return _Refusal(LINE_FORMAT, "transform_shape", rest_at[0])
     return _number(transform["rot"]) != 0
 
 
+def _turns(group: _Group) -> bool:
+    """Whether a window line has a ``displayOrientation=`` other than 0
+    (`_TooLongError` for one too long to read)."""
+    try:
+        return any(_number(o) != 0 for o in _LINE_ORIENTATION.findall(group.line))
+    except _TooLongError as error:
+        raise _TooLongError(group.at) from error
+
+
 def _row(
-    line: str, index: int, found: _List, display_id: int
-) -> InputWindow | str | None:
+    group: _Group, index: int, found: _List, display_id: int
+) -> InputWindow | _Refusal | None:
     """Read the window line of row `index` of `found`; None when it is of
     another display than `display_id` (only in a list of every display)."""
+    line, at = group.line, group.at
     match = _LINE.match(line)
-    if match is None or int(match["index"]) != index:
-        return LINE_FORMAT
+    if match is None:
+        return _Refusal(LINE_FORMAT, "row_shape", at)
+    if int(match["index"]) != index:
+        return _Refusal(LINE_FORMAT, "row_number", at)
     if any(line.count(key) > 1 for key in _ONCE):
-        return LINE_FORMAT
+        return _Refusal(LINE_FORMAT, "field_twice", at)
     display = int(match["display"])
     if found.display is not None and display != found.display:
-        return LINE_FORMAT
+        return _Refusal(LINE_FORMAT, "display_mismatch", at)
     if display != display_id:
         return None
     name = match["quoted"] if match["quoted"] is not None else match["bare"]
-    return _window(line, name)
+    return _window(line, name, at)
+
+
+def _split(text: str) -> list[str]:
+    return [line.removesuffix("\r") for line in text.split("\n")]
+
+
+def _parse(lines: list[str], display_id: int) -> tuple[InputWindow, ...] | _Refusal:
+    """Read the windows of `display_id` (see `parse_input_windows`)."""
+    found = _window_list(lines, display_id)
+    if isinstance(found, _Refusal):
+        return found
+    if found.problem is not None:
+        return found.problem
+    try:
+        for other in found.others:  # read as well: a name could have made them
+            read = _read(other, display_id if other.display is None else other.display)
+            if isinstance(read, _Refusal) and read.reason in {
+                LINE_FORMAT,
+                REGION_FORMAT,
+            }:
+                return read
+        return _read(found, display_id)
+    except _TooLongError as error:
+        # Such a number could be anything, 0 or display 0 included.
+        return _Refusal(ROTATION, "number_too_long", error.line)
 
 
 def parse_input_windows(
     text: str, display_id: int = 0
-) -> tuple[InputWindow, ...] | str:
+) -> tuple[InputWindow, ...] | Unreadable:
     """Read the windows of `display_id` from the top down.
 
     Returns the windows, or the reason they are not known: `NO_LIST` (no
@@ -734,23 +973,11 @@ def parse_input_windows(
     `ROTATION` (a transform or orientation in the list, or the display's
     transform, that is not the unrotated identity; or a rotation or
     orientation too long to read in any list read, another display's
-    included). The ``Viewport`` lines are read by `display_orientation`, not
-    here.
+    included), as an `Unreadable` that also names the rule that refused. The
+    ``Viewport`` lines are read by `display_orientation`, not here.
     """
-    lines = [line.removesuffix("\r") for line in text.split("\n")]
-    found = _window_list(lines, display_id)
-    if found is None:
-        return NO_LIST
-    if found.problem is not None:
-        return found.problem
-    try:
-        for other in found.others:  # read as well: a name could have made them
-            read = _read(other, display_id if other.display is None else other.display)
-            if read in {LINE_FORMAT, REGION_FORMAT}:
-                return read
-        return _read(found, display_id)
-    except _TooLongError:
-        return ROTATION
+    read = _parse(_split(text), display_id)
+    return Unreadable(read.reason, read.rule) if isinstance(read, _Refusal) else read
 
 
 def _meta(line: str) -> str:
@@ -774,34 +1001,101 @@ def _form(line: str) -> tuple[bool, tuple[str, ...]]:
     return quoted, tuple(key for key in _FORM_FIELDS if f", {key}=" in meta)
 
 
-def _read(found: _List, display_id: int) -> tuple[InputWindow, ...] | str:
+def _whole(groups: list[_Group], found: _List) -> _Refusal | None:
+    """Why the rows of a list do not read as one list: a row of API 24 to 28
+    in a list per display, rows that differ in form, or rows that differ in
+    having transform lines (all or none)."""
+    if found.display is not None:
+        # A list per display (API 29 on) has no row of API 24 to 28 (scale=).
+        legacy = [g for g in groups if ", scale=" in _meta(g.line)]
+        if legacy:
+            return _Refusal(LINE_FORMAT, "legacy_row_in_display_list", legacy[0].at)
+    if not groups:
+        return None
+    first = groups[0]
+    form = _form(first.line)
+    for group in groups:
+        if _form(group.line) != form:
+            return _Refusal(LINE_FORMAT, "form_mismatch", group.at)
+    for group in groups:
+        if bool(group.rest) != bool(first.rest):
+            return _Refusal(LINE_FORMAT, "transform_mismatch", group.at)
+    return None
+
+
+def _read(found: _List, display_id: int) -> tuple[InputWindow, ...] | _Refusal:
     """Read the windows of `display_id` in the list `found` (see
     `parse_input_windows`)."""
-    groups = _group(found.lines)
-    if (
-        groups is None
-        # A list per display (API 29 on) has no row of API 24 to 28 (scale=).
-        or (
-            found.display is not None and any(", scale=" in _meta(g[0]) for g in groups)
-        )
-        or len({_form(line) for line, _ in groups}) > 1
-        or len({bool(rest) for _, rest in groups}) > 1  # transform lines: all or none
-    ):
-        return LINE_FORMAT
+    groups = _group(found)
+    if isinstance(groups, _Refusal):
+        return groups
+    refused = _whole(groups, found)
+    if refused is not None:
+        return refused
     windows: list[InputWindow] = []
     rotated = found.rotated
-    for index, (line, rest) in enumerate(groups):
-        turned = _turned(rest)
-        window = LINE_FORMAT if turned is None else _row(line, index, found, display_id)
-        if isinstance(window, str):
+    for index, group in enumerate(groups):
+        try:
+            turned = _turned(group)
+        except _TooLongError as error:
+            raise _TooLongError(group.rest_at[0]) from error
+        if isinstance(turned, _Refusal):
+            return turned
+        window = _row(group, index, found, display_id)
+        if isinstance(window, _Refusal):
             return window
-        if window is not None:
-            windows.append(window)
-            orientations = _LINE_ORIENTATION.findall(line)
-            rotated = rotated or turned or any(_number(o) != 0 for o in orientations)
+        if window is None:
+            continue
+        windows.append(window)
+        if rotated is not None:
+            continue
+        if turned:
+            rotated = _Refusal(ROTATION, "row_rotated", group.rest_at[0])
+        elif _turns(group):
+            rotated = _Refusal(ROTATION, "row_orientation", group.at)
     if not windows:
-        return NO_LIST
-    return ROTATION if rotated else tuple(windows)
+        return _Refusal(NO_LIST, "no_rows")
+    return rotated if rotated is not None else tuple(windows)
+
+
+def _viewport_of(line: str, display_id: int, at: int) -> int | _Refusal | None:
+    """The orientation a line (at index `at`) gives for `display_id`, None
+    when it is no Viewport line of that display, or why it cannot be read: a
+    display number too long to read (it could be this one), a line of no
+    known form, or a scaled or moved display."""
+    claim = _VIEWPORT_CLAIM.match(line)
+    try:
+        if claim is None or _number(claim["display"]) != display_id:
+            return None
+    except _TooLongError:
+        return _Refusal(ROTATION, "number_too_long", at)
+    match = _VIEWPORT.fullmatch(line)
+    if match is None:
+        return _Refusal(ROTATION, "viewport_malformed", at)
+    if match["logical"] != match["physical"]:
+        return _Refusal(ROTATION, "scaled", at)
+    return int(match["orientation"])
+
+
+def _orientation(lines: list[str], display_id: int) -> tuple[int, int] | _Refusal:
+    """The orientation of `display_id` (see `display_orientation`) with the
+    index of the first line that says it, or why it cannot be read
+    (`ROTATION`)."""
+    start = _dispatcher_start(lines)
+    if isinstance(start, _Refusal):
+        return _Refusal(ROTATION, start.rule, start.line)
+    said: dict[int, int] = {}  # orientation: the first line that said it
+    for i, line in enumerate(lines[:start]):
+        read = _viewport_of(line, display_id, i)
+        if isinstance(read, _Refusal):
+            return read
+        if read is not None:
+            said.setdefault(read, i)
+    if not said:
+        return _Refusal(ROTATION, "viewport_missing")
+    if len(said) > 1:
+        return _Refusal(ROTATION, "viewport_disagree", sorted(said.values())[1])
+    return next(iter(said.items()))
 
 
 def display_orientation(text: str, display_id: int = 0) -> int | None:
@@ -815,23 +1109,94 @@ def display_orientation(text: str, display_id: int = 0) -> int | None:
     orientation. A line whose display number is too long to read could name
     the display: None.
     """
-    lines = [line.removesuffix("\r") for line in text.split("\n")]
+    found = _orientation(_split(text), display_id)
+    return None if isinstance(found, _Refusal) else found[0]
+
+
+def _checked(lines: list[str], display_id: int) -> tuple[InputWindow, ...] | _Refusal:
+    """The windows of `display_id` when both the list and the display's
+    orientation read and the orientation is 0, else why not."""
+    read = _parse(lines, display_id)
+    if isinstance(read, _Refusal):
+        return read
+    turned = _orientation(lines, display_id)
+    if isinstance(turned, _Refusal):
+        return turned
+    orientation, line = turned
+    return _Refusal(ROTATION, "rotated", line) if orientation != 0 else read
+
+
+@dataclass(frozen=True, slots=True)
+class ListSpan:
+    """One window list of the dispatcher's part, found the way the reader
+    finds them (see `explain_input_windows`).
+
+    ``display`` is the number of its ``Display:`` section, None for the one
+    list of every display (API 24 to 28); ``head`` the index of its
+    ``Windows:`` line in the text's lines, ``lines`` the indices of its lines
+    and ``rows`` how many of them are window lines.
+    """
+
+    display: int | None
+    head: int
+    lines: tuple[int, ...]
+    rows: int
+
+
+@dataclass(frozen=True, slots=True)
+class Verdict:
+    """What reading the windows of a display concluded, as in `read_window_at`
+    before a point is looked at, with no text of the output in it.
+
+    ``reason`` is None when the list and the display's orientation read
+    (the check would go on to the point), else one of `NO_LIST`,
+    `LINE_FORMAT`, `REGION_FORMAT` and `ROTATION`; ``rule`` (one of `RULES`)
+    the check that refused; ``line`` the index, in ``text.split("\\n")``, of
+    the line it refused at, None when no one line is to blame; ``start``
+    the index of the dispatcher's header line, None when there is not
+    exactly one; ``lists`` the window lists found.
+    """
+
+    reason: str | None
+    rule: str | None
+    line: int | None
+    start: int | None
+    lists: tuple[ListSpan, ...]
+
+
+def _spans(lines: list[str], start: int) -> tuple[ListSpan, ...]:
+    """Every ``Windows`` list directly under the dispatcher's header or under
+    one of its ``Display:`` sections, in their order."""
+    found, level = _under(lines, start)
+    spans: list[ListSpan] = []
+    for i in (i for i in found if _indent(lines[i]) == level):
+        if _DISPLAY.match(lines[i].strip()):
+            section, inner = _under(lines, i)
+            heads = [(_display_of(lines[i]), h) for h in _heads(lines, section, inner)]
+        else:
+            heads = [(None, h) for h in _heads(lines, [i], level)]
+        for display, head in heads:
+            taken = _listed(lines, head).taken
+            rows = sum(1 for t in taken if _INDEX.match(lines[t].strip()))
+            spans.append(ListSpan(display, head, tuple(taken), rows))
+    return tuple(spans)
+
+
+def explain_input_windows(text: str, display_id: int = 0) -> Verdict:
+    """Tell whether the windows of `display_id` can be read from the whole
+    text of ``dumpsys input``, and if not, which rule refused and where.
+
+    It runs the same checks as `read_window_at` up to the point (the list,
+    then the display's orientation) and refuses exactly what they refuse.
+    """
+    lines = _split(text)
     start = _dispatcher_start(lines)
-    if start is None:
-        return None
-    said: set[int] = set()
-    for line in lines[:start]:
-        claim = _VIEWPORT_CLAIM.match(line)
-        try:
-            if claim is None or _number(claim["display"]) != display_id:
-                continue
-        except _TooLongError:
-            return None  # a display number too long to read could be this one
-        match = _VIEWPORT.fullmatch(line)
-        if match is None or match["logical"] != match["physical"]:
-            return None
-        said.add(int(match["orientation"]))
-    return next(iter(said)) if len(said) == 1 else None
+    first = None if isinstance(start, _Refusal) else start
+    lists = () if first is None else _spans(lines, first)
+    read = _checked(lines, display_id)
+    if isinstance(read, _Refusal):
+        return Verdict(read.reason, read.rule, read.line, first, lists)
+    return Verdict(None, None, None, first, lists)
 
 
 def window_at(
@@ -850,13 +1215,12 @@ def read_window_at(
     The reason is one of `parse_input_windows`, `ROTATION` (the display's
     orientation is not 0 or cannot be read, see `display_orientation`),
     `NO_WINDOW` (no window takes a touch there) or `PORTAL` (the window there
-    forwards the touch to another display).
+    forwards the touch to another display). The reasons of the first two are
+    an `Unreadable` that names the rule that refused (see `RULES`).
     """
-    windows = parse_input_windows(text, display_id)
-    if isinstance(windows, str):
-        return windows
-    if display_orientation(text, display_id) != 0:
-        return ROTATION
+    windows = _checked(_split(text), display_id)
+    if isinstance(windows, _Refusal):
+        return Unreadable(windows.reason, windows.rule)
     found = window_at(windows, point)
     if found is None:
         return NO_WINDOW

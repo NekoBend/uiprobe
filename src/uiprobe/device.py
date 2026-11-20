@@ -44,6 +44,7 @@ from uiprobe.model import (
 )
 from uiprobe.packageuid import PackageUid, parse_package_uid
 from uiprobe.pngfile import check_png
+from uiprobe.windowdiag import TapWindowDiagnosis, diagnose_tap_window
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
@@ -2526,7 +2527,9 @@ class Device:
         string is one of ``no_list``, ``line_format``, ``region_format``,
         ``rotation`` (the display is rotated, or its orientation cannot be
         read), ``no_window`` (no window takes a touch there) or ``portal``
-        (the window there forwards touches to another display).
+        (the window there forwards touches to another display); the first
+        four are an `Unreadable` whose ``rule`` names the check that refused
+        (see `diagnose_tap_window`).
 
         Raises:
             AdbError: The adb protocol or the command failed.
@@ -2536,6 +2539,29 @@ class Device:
             DeviceUnauthorizedError: The device has not authorized this host.
         """
         return read_window_at(self._shell("dumpsys input"), point)
+
+    def diagnose_tap_window(
+        self, *, show_flag_names: bool = False
+    ) -> TapWindowDiagnosis:
+        """Tell whether `window_at` can read this device's window list, and if
+        not which rule refused it and the shape of the lines there, with no
+        text of the device's output in the result (see `uiprobe.windowdiag`).
+
+        Reads ``dumpsys input`` once. With `show_flag_names` an unknown flag
+        name that is an upper-case word is shown.
+
+        Raises:
+            AdbError: The adb protocol or the command failed.
+            AdbServerUnavailableError: The adb server cannot be reached.
+            DeviceNotFoundError: The device is gone.
+            DeviceOfflineError: The device is offline.
+            DeviceUnauthorizedError: The device has not authorized this host.
+        """
+        if not isinstance(show_flag_names, bool):
+            msg = "show_flag_names must be a bool"
+            raise TypeError(msg)
+        text = self._shell("dumpsys input")
+        return diagnose_tap_window(text, show_flag_names=show_flag_names)
 
     def package_uid(self, package: str) -> PackageUid | None:
         """Return the app id the system gave `package` and whether the package

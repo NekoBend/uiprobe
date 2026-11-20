@@ -110,7 +110,7 @@ from uiprobe.errors import (
     UiprobeError,
 )
 from uiprobe.guards import Policy, judge
-from uiprobe.inputwindows import ROTATION
+from uiprobe.inputwindows import ROTATION, Unreadable
 from uiprobe.runlog import RunFolderError, RunWriter
 
 if TYPE_CHECKING:
@@ -564,6 +564,11 @@ class _Run:
         if app is None or unknown is not None:
             return NOT_SENT_COVER_UNKNOWN, {"unreadable": unknown or "target_uid"}
         found = self.device.window_at(point)
+        if isinstance(found, Unreadable):  # the reason, and the check that refused
+            return NOT_SENT_COVER_UNKNOWN, {
+                "unreadable": str(found),
+                "rule": found.rule,
+            }
         if isinstance(found, str):
             return NOT_SENT_COVER_UNKNOWN, {"unreadable": found}
         uid, shared = app.uid, app.shared

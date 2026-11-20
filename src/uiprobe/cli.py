@@ -59,6 +59,7 @@ from uiprobe.errors import (
     UiprobeError,
 )
 from uiprobe.guards import REASONS, Policy
+from uiprobe.inputwindows import RULES
 from uiprobe.model import MAX_CANDIDATES, _describe
 from uiprobe.pngfile import (
     PngFileError,
@@ -467,6 +468,7 @@ def _build_parser() -> _Parser:
     )
     _add_launch_parser(commands.add_parser)
     _add_crawl_parser(commands.add_parser)
+    _add_diagnose_parser(commands.add_parser)
     init = commands.add_parser(
         "init",
         allow_abbrev=False,
@@ -486,6 +488,46 @@ def _build_parser() -> _Parser:
         help=f"where to create the file (default ./{SETTINGS_FILE})",
     )
     return parser
+
+
+def _add_diagnose_parser(add_parser: Callable[..., argparse.ArgumentParser]) -> None:
+    """The diagnose command, whose one check so far is tap-window."""
+    diagnose = add_parser(
+        "diagnose",
+        allow_abbrev=False,
+        help="tell why a check cannot read a device, without its values",
+        description=(
+            "Run one of uiprobe's device checks and tell why it cannot read"
+            " the device, in a report that holds no device values, so that it"
+            " can be shared. CHECK is tap-window."
+        ),
+    )
+    checks = diagnose.add_subparsers(dest="check", required=True, metavar="CHECK")
+    tap_window = checks.add_parser(
+        "tap-window",
+        allow_abbrev=False,
+        help="why the window list of a tap cannot be read",
+        description=(
+            "Read dumpsys input once and run the crawl's tap window check on"
+            " it (without a point). Print whether the window list reads or"
+            " which rule refused it and at which line, how many window rows"
+            " each display's list has, and the shape of the lines around the"
+            " failure: field names, flag names and line kinds that uiprobe"
+            " knows, value types, lengths and counts. No text of the device's"
+            " output is printed: no serial, app or window names, coordinates,"
+            " accounts or network values. Nothing is sent to the device but"
+            " that one read."
+        ),
+    )
+    _add_common_options(tap_window, in_command=True)
+    tap_window.add_argument(
+        "--show-flag-names",
+        action="store_true",
+        help=(
+            "also print unknown flag names that are upper-case words"
+            " (A-Z, 0-9 and _, at most 48 characters)"
+        ),
+    )
 
 
 def _printable(text: str) -> str:
@@ -1493,11 +1535,18 @@ def _press_hints(result: CrawlResult) -> list[str]:
     hints: list[str] = []
     refused = dict(result.not_sent)
     if refused.get("cover_unknown"):
+        unknown = result.cover_unknown or "unknown"
+        # The reasons the window list itself gives (the keys of RULES).
+        diagnose = (
+            "; uiprobe diagnose tap-window tells which rule refused it without"
+            " printing device values"
+            if unknown in RULES
+            else ""
+        )
         hints.append(
-            "the window at a tap point could not be read on this device"
-            f" ({result.cover_unknown or 'unknown'}); --no-tap-window-check"
-            " turns the check off, but then an overlay of another app over the"
-            " point can receive a tap"
+            f"the window at a tap point could not be read on this device ({unknown})"
+            f"{diagnose}; --no-tap-window-check turns the check off, but then an"
+            " overlay of another app over the point can receive a tap"
         )
     if not result.repin:
         hints.append(
@@ -1643,6 +1692,40 @@ def _cmd_screenshot(args: argparse.Namespace) -> int:
     return 0
 
 
+def _diagnose_failure(
+    kind: tuple[str, int], *, as_json: bool, details: dict[str, object] | None = None
+) -> int:
+    """Report a failed diagnosis by its error code alone: the error's own
+    message can name the device (its serial, or text it printed)."""
+    code, _ = kind
+    message = (
+        f"the check could not run ({code}); no more is shown, as the error"
+        " can name the device"
+    )
+    return _fail(kind, message, as_json=as_json, details=details)
+
+
+def _cmd_diagnose(args: argparse.Namespace) -> int:
+    serial = _single_serial(args)
+    try:
+        device = Device(
+            serial,
+            adb_server=args.adb_server,
+            adb=args.adb,
+            start_server=args.start_server,
+        )
+        found = device.diagnose_tap_window(show_flag_names=args.show_flag_names)
+    except UiprobeError as exc:
+        return _diagnose_failure((exc.code, exc.exit_code), as_json=args.json)
+    except (TypeError, ValueError):
+        return _diagnose_failure(USAGE_ERROR, as_json=args.json)
+    except Exception as exc:  # noqa: BLE001 - its message could hold device text
+        details: dict[str, object] = {"type": type(exc).__name__}
+        return _diagnose_failure(INTERNAL_ERROR, as_json=args.json, details=details)
+    _emit(dumps(found.to_dict(), indent=2) if args.json else found.to_text())
+    return 0
+
+
 _HANDLERS: dict[str, Callable[[argparse.Namespace], int]] = {
     "devices": _cmd_devices,
     "dump": _cmd_dump,
@@ -1654,6 +1737,7 @@ _HANDLERS: dict[str, Callable[[argparse.Namespace], int]] = {
     "launch": _cmd_launch,
     "screenshot": _cmd_screenshot,
     "crawl": _cmd_crawl,
+    "diagnose": _cmd_diagnose,
     "init": _cmd_init,
 }
 

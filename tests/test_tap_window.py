@@ -135,6 +135,25 @@ def test_a_window_that_cannot_be_read_refuses_the_tap(
     assert unknown[0]["details"] == {"unreadable": problem}
 
 
+def test_the_record_names_the_rule_that_refused_the_list(
+    tmp_path: Path, device, android, clock, monkeypatch
+):
+    # A read field twice in the top row (text a window title could hold):
+    # the list is line_format, and the end line says which check refused.
+    original = android._dumpsys_input
+
+    def owner_twice() -> str:
+        return original().replace("ownerUid=", "ownerUid=1, ownerUid=", 1)
+
+    monkeypatch.setattr(android, "_dumpsys_input", owner_twice)
+    out = tmp_path / "run"
+    run(device, clock, out, limits=Limits(actions=3))
+    assert _taps(android) == []
+    refused = _covered(out)
+    assert refused
+    assert refused[0]["details"] == {"unreadable": "line_format", "rule": "field_twice"}
+
+
 def test_an_app_uid_that_cannot_be_read_refuses_every_tap(
     tmp_path: Path, device, android, clock, monkeypatch
 ):
@@ -234,9 +253,12 @@ def test_a_system_uid_window_of_a_longer_package_name_is_not_the_app(
     assert refused[0]["details"] == {"window": title, "owner_uid": 1000}
 
 
-@pytest.mark.parametrize("orientation", [1, 3, None])
+@pytest.mark.parametrize(
+    ("orientation", "rule"),
+    [(1, "rotated"), (3, "rotated"), (None, "viewport_missing")],
+)
 def test_a_rotated_or_unknown_display_refuses_every_tap(
-    tmp_path: Path, device, android, clock, orientation
+    tmp_path: Path, device, android, clock, orientation, rule
 ):
     android.orientation = orientation
     out = tmp_path / "run"
@@ -245,7 +267,8 @@ def test_a_rotated_or_unknown_display_refuses_every_tap(
     refused = _covered(out)
     assert refused
     assert {r["reason"] for r in refused} == {"cover_unknown"}
-    assert refused[0]["details"] == {"unreadable": "rotation"}
+    # The record names the rule that refused next to the reason.
+    assert refused[0]["details"] == {"unreadable": "rotation", "rule": rule}
 
 
 # Python's default limit of digits `int` converts (`_digit_limit` sets it):
@@ -370,7 +393,10 @@ def test_a_number_too_long_to_read_in_the_window_list_refuses_every_tap(
     refused = _covered(out)
     assert refused
     assert {r["reason"] for r in refused} == {"cover_unknown"}
-    assert refused[0]["details"] == {"unreadable": "rotation"}
+    assert refused[0]["details"] == {
+        "unreadable": "rotation",
+        "rule": "number_too_long",
+    }
 
 
 @pytest.mark.usefixtures("_digit_limit")
