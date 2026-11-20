@@ -270,6 +270,12 @@ class FakeAndroid:
     extra_dumpsys: dict[str, str]
     # A uid per package; packages not listed get one from their name.
     uids: dict[str, int]
+    # The shared user (``android:sharedUserId``) per package, for the
+    # ``sharedUser=`` line of ``dumpsys package``; packages not listed have none.
+    shared_users: dict[str, str]
+    # The display's orientation in ``dumpsys input`` (0 to 3); None: the input
+    # reader prints no Viewport line for display 0.
+    orientation: int | None = 0
     # What ``cat /proc/sys/kernel/random/boot_id`` prints; None: the file
     # cannot be read (the identity command then prints an empty line).
     boot_id: str | None = "3ea6a12b-8379-445f-852a-73a2c4c3ff17"
@@ -527,7 +533,12 @@ class FakeAndroid:
         self._keyboard_hidden = False
         # Lines appended to a dumpsys service's output ("window", "activity
         # activities", "input_method"), to imitate text an app prints.
-        self.extra_dumpsys, self.overlays, self.uids = {}, [], {}
+        self.extra_dumpsys, self.overlays, self.uids, self.shared_users = (
+            {},
+            [],
+            {},
+            {},
+        )
         # Replaces the text of ``dumpsys window displays`` when not None.
         self.displays_output: str | None = None
         self._drop_after: set[int] = set()
@@ -997,9 +1008,49 @@ class FakeAndroid:
             return self._dumpsys_input_method()
         if words == ["input"]:
             return self._dumpsys_input()
-        name = words[1] if len(words) == 2 else ""
-        uid = self.uid_of(name)
-        return f"Packages:\n  Package [{name}] ({_hex(name)}):\n    userId={uid}\n"
+        return self._dumpsys_package(words[1] if len(words) == 2 else "")
+
+    def _dumpsys_package(self, name: str) -> str:
+        """``dumpsys package <name>`` as the emulators print it, in short.
+
+        The stanza of a package whose name begins with `name` comes first, and
+        a ``Shared users:`` section repeats the uid after the stanzas (as on
+        the emulators); neither must be read as the package's. API 24 and 33
+        print ``userId=``; ``appId=`` was seen on API 34, 35 and 36 emulators,
+        so the fake prints it from API 34 on.
+        """
+        key = "appId" if self.api >= 34 else "userId"
+        other = name + "x"
+        lines = [
+            "Permissions:",
+            "  Permission [android.permission.EXAMPLE] (1a2b3c):",
+            "    uid=1000 gids=[] type=0 prot=signature",
+            "Packages:",
+            f"  Package [{other}] ({_hex(other)}):",
+            f"    {key}={self.uid_of(other)}",
+            f"    pkg=Package{{{_hex(other)} {other}}}",
+            f"  Package [{name}] ({_hex(name)}):",
+            f"    {key}={self.uid_of(name)}",
+        ]
+        shared = self.shared_users.get(name)
+        if shared is not None:
+            lines.append(
+                f"    sharedUser=SharedUserSetting{{{_hex(shared)}"
+                f" {shared}/{self.uid_of(name)}}}"
+            )
+        lines += [
+            f"    pkg=Package{{{_hex(name)} {name}}}",
+            "    User 0: ceDataInode=1 installed=true hidden=false",
+            "      gids=[3003]",
+        ]
+        if shared is not None:
+            lines += [
+                "",
+                "Shared users:",
+                f"  SharedUser [{shared}] ({_hex(shared)}):",
+                f"    {key}={self.uid_of(name)}",
+            ]
+        return "\n".join(lines) + "\n" + self.extra_dumpsys.get("package", "")
 
     def uid_of(self, package: str) -> int:
         """The uid the fake system gave `package` (stable, apps from 10000)."""
@@ -1030,7 +1081,12 @@ class FakeAndroid:
                 " dispatchingTimeout=5000ms"
             )
         if self.api >= 31:
-            flags = "SPLIT_TOUCH" if touchable else "NOT_FOCUSABLE | NOT_TOUCHABLE"
+            # NOT_TOUCH_MODAL: a touch outside the region is not this window's.
+            flags = (
+                "NOT_TOUCH_MODAL | SPLIT_TOUCH"
+                if touchable
+                else "NOT_FOCUSABLE | NOT_TOUCHABLE"
+            )
             return (
                 f"    {index}: name='{hash_} {title}', id={index + 50},"
                 " displayId=0, portalToDisplayId=-1, paused=false, focusable=true,"
@@ -1073,18 +1129,45 @@ class FakeAndroid:
             ("ImageWallpaper", None, self.uid_of("com.android.systemui"), False)
         )
         indent = "    " if self.api >= 33 else "  "
-        lines = ["Input Dispatcher State:", "  DispatchEnabled: true"]
+        lines = ["INPUT MANAGER (dumpsys input)", "Input Reader State:"]
+        if self.orientation is not None:
+            lines.append(self._viewport(self.orientation))
+        lines += ["Input Dispatcher State:", "  DispatchEnabled: true"]
         if self.api >= 33:
-            lines.append("  Display: 0")
+            lines += [
+                "  Display: 0",
+                "    logicalSize={}x{}".format(*self.display),
+                "        transform (ROT_0) (IDENTITY)",
+            ]
         lines.append(f"{indent}Windows:")
         for index, (title, region, uid, touchable) in enumerate(rows):
             lines.append(
                 self._input_line(index, title, region, uid, touchable=touchable)
             )
-            if self.api >= 33:
+            if self.api >= 31:
                 lines.append("      transform (ROT_0) (IDENTITY)")
         lines.append("  Connections:")
         return "\n".join(lines) + "\n" + self.extra_dumpsys.get("input", "")
+
+    def _viewport(self, orientation: int) -> str:
+        """The input reader's Viewport line of display 0 (API 24 and API 36
+        forms as seen on emulators; API 26 to 32 were not checked)."""
+        width, height = self.display
+        if orientation % 2:
+            width, height = height, width
+        frame = f"[0, 0, {width}, {height}]"
+        if self.api >= 29:
+            return (
+                "      Viewport INTERNAL: displayId=0, uniqueId=local:0, port=0,"
+                f" orientation={orientation}, logicalFrame={frame},"
+                f" physicalFrame={frame}, deviceSize=[{width}, {height}],"
+                " isActive=[1]"
+            )
+        return (
+            f"      Viewport: displayId=0, orientation={orientation},"
+            f" logicalFrame={frame}, physicalFrame={frame},"
+            f" deviceSize=[{width}, {height}]"
+        )
 
     def _dumpsys_input_method(self) -> str:
         shown = _bool(self.keyboard_visible)

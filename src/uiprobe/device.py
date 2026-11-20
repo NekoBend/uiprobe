@@ -34,7 +34,7 @@ from uiprobe.errors import (
     ScreenshotFailedError,
     UiprobeError,
 )
-from uiprobe.inputwindows import NO_WINDOW, InputWindow, parse_input_windows, window_at
+from uiprobe.inputwindows import InputWindow, read_window_at
 from uiprobe.model import (
     Bounds,
     Element,
@@ -42,6 +42,7 @@ from uiprobe.model import (
     parse_uiautomator_dump,
     shorten_activity,
 )
+from uiprobe.packageuid import PackageUid, parse_package_uid
 from uiprobe.pngfile import check_png
 
 if TYPE_CHECKING:
@@ -72,8 +73,6 @@ IDENTITY_COMMAND: Final = (
     "getprop ro.kernel.qemu; getprop ro.serialno; getprop ro.build.fingerprint;"
     ' echo "$(cat /proc/sys/kernel/random/boot_id 2>/dev/null)"'
 )
-# The first ``userId=`` line of ``dumpsys package <name>``: the app's uid.
-_USER_ID = re.compile(r"^\s*userId=(\d+)\b", re.MULTILINE)
 _BOOT_ID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\Z")
 # A pinned transport that the adb server renumbered: how long to wait for the
 # device to come back, how often to look, and how many times one Device may
@@ -2497,8 +2496,10 @@ class Device:
 
         Reads ``dumpsys input`` once and takes the topmost window of display
         0 that takes touches at `point` (see `uiprobe.inputwindows`). The
-        string is one of ``no_list``, ``line_format``, ``region_format`` or
-        ``no_window`` (no window takes a touch there).
+        string is one of ``no_list``, ``line_format``, ``region_format``,
+        ``rotation`` (the display is rotated, or its orientation cannot be
+        read), ``no_window`` (no window takes a touch there) or ``portal``
+        (the window there forwards touches to another display).
 
         Raises:
             AdbError: The adb protocol or the command failed.
@@ -2507,17 +2508,17 @@ class Device:
             DeviceOfflineError: The device is offline.
             DeviceUnauthorizedError: The device has not authorized this host.
         """
-        windows = parse_input_windows(self._shell("dumpsys input"))
-        if isinstance(windows, str):
-            return windows
-        found = window_at(windows, point)
-        return NO_WINDOW if found is None else found
+        return read_window_at(self._shell("dumpsys input"), point)
 
-    def package_uid(self, package: str) -> int | None:
-        """Return the uid the system gave `package`, None when not readable.
+    def package_uid(self, package: str) -> PackageUid | None:
+        """Return the app id the system gave `package` and whether the package
+        shares it, None when not readable.
 
-        Reads ``userId=`` from ``dumpsys package <package>``; a package that
-        is not installed gives None. The uid can change when the app is
+        Reads ``userId=`` or ``appId=`` and ``sharedUser=`` from the
+        package's own stanza of ``dumpsys package <package>`` (see
+        `uiprobe.packageuid`); a package that is not installed, or whose
+        stanzas disagree, gives None. The app id is the uid of the package's
+        windows for Android user 0 only. It can change when the app is
         installed again.
 
         Raises:
@@ -2532,8 +2533,8 @@ class Device:
         if isinstance(package, str):
             package = str.__str__(package)
         check_package(package)
-        found = _USER_ID.search(self._shell(quote_args("dumpsys", "package", package)))
-        return None if found is None else int(found[1])
+        text = self._shell(quote_args("dumpsys", "package", package))
+        return parse_package_uid(text, package)
 
     def keyboard_shown(self) -> bool | None:
         """Return whether the soft keyboard is shown, or None when unknown.

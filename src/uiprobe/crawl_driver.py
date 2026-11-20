@@ -119,6 +119,7 @@ if TYPE_CHECKING:
     from uiprobe.crawl import Action, SkippedElement
     from uiprobe.device import Device, FocusedWindow
     from uiprobe.model import Element, Screen
+    from uiprobe.packageuid import PackageUid
 
 __all__ = ["INTERRUPTED", "STOP_ERROR", "CrawlResult", "crawl"]
 
@@ -209,7 +210,7 @@ NOT_SENT_COVERED: Final = "covered_by_other"
 NOT_SENT_COVER_UNKNOWN: Final = "cover_unknown"
 _COVER_REASONS: Final = frozenset({NOT_SENT_COVERED, NOT_SENT_COVER_UNKNOWN})
 # Android gives installed apps uids from 10000 on; below are system uids that
-# several packages share.
+# several packages share (and system windows have).
 _FIRST_APP_UID: Final = 10000
 # What `_Run.relaunch` returns when it force-stopped the app and then did not
 # start it because the device had to be proven again (not an end-line reason).
@@ -241,7 +242,7 @@ class _Run:
         policy: Policy,
         *,
         emulator: bool,
-        app_uid: int | None = None,
+        app_uid: PackageUid | None = None,
         screenshots: bool,
         settle: float,
         deadline: float,
@@ -499,19 +500,24 @@ class _Run:
         """Why a tap at `point` must not go out, from the window there, or
         None when the window that takes it belongs to the app.
 
-        The window's owner uid must be the app's. An app that runs with a
-        uid below 10000 (a system uid such as Settings' 1000, which other
-        windows share) must also have its package in the window's name.
+        The window's owner uid must be the app's app id exactly, so only
+        Android user 0 passes (another user's uid is user * 100000 + app id).
+        When the app shares its uid with other packages (``sharedUser``) or
+        has a uid below 10000 (a system uid such as Settings' 1000, which
+        system windows have), the window's title must also name the app: be
+        the package or begin with the package and ``/`` (as an activity's
+        window does); a window of the app with another title is refused.
         """
         if self.app_uid is None:
             return NOT_SENT_COVER_UNKNOWN, {"unreadable": "target_uid"}
         found = self.device.window_at(point)
         if isinstance(found, str):
             return NOT_SENT_COVER_UNKNOWN, {"unreadable": found}
-        ours = found.owner_uid == self.app_uid and (
-            self.app_uid >= _FIRST_APP_UID or self.package in found.title
+        uid, shared = self.app_uid.uid, self.app_uid.shared
+        named = found.title == self.package or found.title.startswith(
+            self.package + "/"
         )
-        if ours:
+        if found.owner_uid == uid and (named or (not shared and uid >= _FIRST_APP_UID)):
             return None
         return NOT_SENT_COVERED, {"window": found.title, "owner_uid": found.owner_uid}
 
@@ -1081,8 +1087,9 @@ def _crawl_on(
     """`crawl` after its arguments were checked: pin, check, run."""
     device.pin_transport()
     _check_device(device, allow_real_device=allow_real_device)
-    # The app's uid, which a tap's window must have (Policy.check_tap_window);
-    # None when it cannot be read: then every tap is refused (cover_unknown).
+    # The app's uid, which a tap's window must have (Policy.check_tap_window),
+    # and whether other packages share it; None when it cannot be read: then
+    # every tap is refused (cover_unknown) before any window is read.
     app_uid = device.package_uid(package) if policy.check_tap_window else None
     started_at = clock()
     _check_clock("clock()", started_at)

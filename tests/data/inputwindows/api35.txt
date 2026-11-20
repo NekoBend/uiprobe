@@ -1,0 +1,27 @@
+      Viewport INTERNAL: displayId=0, uniqueId=local:4619827259835644672, port=0, orientation=0, logicalFrame=[0, 0, 320, 640], physicalFrame=[0, 0, 320, 640], deviceSize=[320, 640], isActive=[1]
+        Viewport INTERNAL: displayId=0, uniqueId=local:4619827259835644672, port=0, orientation=0, logicalFrame=[0, 0, 320, 640], physicalFrame=[0, 0, 320, 640], deviceSize=[320, 640], isActive=[1]
+Input Dispatcher State:
+  Display: 0
+    Windows:
+      0: name=stylus-handwriting-event-receiver-0, id=86, displayId=0, inputConfig=NOT_FOCUSABLE | NOT_TOUCHABLE | TRUSTED_OVERLAY | SPY | INTERCEPTS_STYLUS, alpha=1, frame=[0,0][0,0], globalScale=1, applicationInfo.name=stylus-handwriting-event-receiver-0, applicationInfo.token=<null>, touchableRegion=[-3199,-6399][3200,6400], ownerPid=560, ownerUid=1000, dispatchingTimeout=5000ms, token=0x763c08b49ed0, touchOcclusionMode=BLOCK_UNTRUSTED
+    transform (ROT_0) (IDENTITY)
+      1: name=[Gesture Monitor] swipe-up, id=75, displayId=0, inputConfig=NOT_FOCUSABLE | TRUSTED_OVERLAY | SPY, alpha=1, frame=[0,0][0,0], globalScale=1, applicationInfo.name=[Gesture Monitor] swipe-up, applicationInfo.token=<null>, touchableRegion=[-3199,-6399][3200,6400], ownerPid=1155, ownerUid=10179, dispatchingTimeout=5000ms, token=0x763c08b74f90, touchOcclusionMode=BLOCK_UNTRUSTED
+    transform (ROT_0) (IDENTITY)
+      2: name=95a11fa Taskbar, id=97, displayId=0, inputConfig=NOT_VISIBLE | NOT_FOCUSABLE | TRUSTED_OVERLAY | WATCH_OUTSIDE_TOUCH | SLIPPERY, alpha=0, frame=[0,616][320,640], globalScale=1, applicationInfo.name=, applicationInfo.token=<null>, touchableRegion=<empty>, ownerPid=1155, ownerUid=10179, dispatchingTimeout=5000ms, token=0x763c08b66e90, touchOcclusionMode=BLOCK_UNTRUSTED
+    transform (ROT_0) (TRANSLATE)
+        1.0000  0.0000  -0.0000
+        0.0000  1.0000  -616.0000
+        0.0000  0.0000  1.0000
+      3: name=66391f2 StatusBar, id=90, displayId=0, inputConfig=NOT_VISIBLE | NOT_FOCUSABLE | TRUSTED_OVERLAY, alpha=0, frame=[0,0][320,24], globalScale=1, applicationInfo.name=, applicationInfo.token=<null>, touchableRegion=[0,0][320,24], ownerPid=905, ownerUid=10181, dispatchingTimeout=5000ms, token=0x763c08b6e890, touchOcclusionMode=BLOCK_UNTRUSTED
+    transform (ROT_0) (IDENTITY)
+      4: name=e9b0043 com.google.android.apps.nexuslauncher/com.google.android.apps.nexuslauncher.NexusLauncherActivity, id=98, displayId=0, inputConfig=DUPLICATE_TOUCH_TO_WALLPAPER, alpha=1, frame=[0,0][320,640], globalScale=1, applicationInfo.name=ActivityRecord{dfeaabe u0 com.google.android.apps.nexuslauncher/.NexusLauncherActivity t7}, applicationInfo.token=0x763b78aae890, touchableRegion=[0,0][320,640], ownerPid=1155, ownerUid=10179, dispatchingTimeout=5000ms, token=0x763c08b46710, touchOcclusionMode=BLOCK_UNTRUSTED
+    transform (ROT_0) (IDENTITY)
+      5: name=ffb6d79 ActivityRecordInputSink com.google.android.apps.nexuslauncher/.NexusLauncherActivity, id=103, displayId=0, inputConfig=NO_INPUT_CHANNEL | NOT_FOCUSABLE, alpha=1, frame=[0,0][0,0], globalScale=0, applicationInfo.name=, applicationInfo.token=<null>, touchableRegion=[-3199,-6399][3200,6400], ownerPid=560, ownerUid=1000, dispatchingTimeout=0ms, token=0x0, touchOcclusionMode=BLOCK_UNTRUSTED
+    transform (ROT_0) (IDENTITY)
+      6: name=[Gesture Monitor] minus-one, id=112, displayId=0, inputConfig=NOT_FOCUSABLE | TRUSTED_OVERLAY | SPY, alpha=1, frame=[0,0][0,0], globalScale=1, applicationInfo.name=[Gesture Monitor] minus-one, applicationInfo.token=<null>, touchableRegion=[0,0][320,640], ownerPid=1155, ownerUid=10179, dispatchingTimeout=5000ms, token=0x763c08b2b910, touchOcclusionMode=BLOCK_UNTRUSTED
+    transform (ROT_0) (IDENTITY)
+      7: name=f8d6b6 com.android.systemui.wallpapers.ImageWallpaper, id=64, displayId=0, inputConfig=NOT_FOCUSABLE | NOT_TOUCHABLE | PREVENT_SPLITTING | IS_WALLPAPER, alpha=1, frame=[-15,-31][-15,-31], globalScale=1, applicationInfo.name=, applicationInfo.token=<null>, touchableRegion=<empty>, ownerPid=905, ownerUid=10181, dispatchingTimeout=5000ms, token=0x763c08b5f350, touchOcclusionMode=BLOCK_UNTRUSTED
+    transform (ROT_0) (SCALE TRANSLATE)
+        1.4552  -0.0000  23.2828
+        -0.0000  1.4545  46.5455
+        0.0000  0.0000  1.0000

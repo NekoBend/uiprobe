@@ -1,0 +1,23 @@
+      Viewport INTERNAL: displayId=0, uniqueId=local:4619827259835644672, port=0, orientation=0, logicalFrame=[0, 0, 320, 640], physicalFrame=[0, 0, 320, 640], deviceSize=[320, 640], isActive=[1]
+Input Dispatcher State:
+    Windows:
+      0: name='[Gesture Monitor] swipe-up', id=72, displayId=0, inputConfig=NOT_FOCUSABLE | TRUSTED_OVERLAY | SPY, alpha=1.00, frame=[0,0][0,0], globalScale=1.000000, applicationInfo.name=[Gesture Monitor] swipe-up, applicationInfo.token=<null>, touchableRegion=[-3199,-6399][3200,6400], ownerPid=1019, ownerUid=10153, dispatchingTimeout=5000ms, hasToken=true, touchOcclusionMode=BLOCK_UNTRUSTED
+        transform (ROT_0) (IDENTITY)
+      1: name='bfd95f5 StatusBar', id=76, displayId=0, inputConfig=NOT_FOCUSABLE | TRUSTED_OVERLAY, alpha=1.00, frame=[0,0][320,24], globalScale=1.000000, applicationInfo.name=, applicationInfo.token=<null>, touchableRegion=[0,0][320,24], ownerPid=758, ownerUid=10157, dispatchingTimeout=5000ms, hasToken=true, touchOcclusionMode=BLOCK_UNTRUSTED
+        transform (ROT_0) (IDENTITY)
+      2: name='d861837 com.google.android.apps.nexuslauncher/com.google.android.apps.nexuslauncher.NexusLauncherActivity', id=99, displayId=0, inputConfig=NOT_VISIBLE | NOT_FOCUSABLE | NOT_TOUCHABLE | WATCH_OUTSIDE_TOUCH, alpha=0.00, frame=[0,0][320,640], globalScale=1.000000, applicationInfo.name=ActivityRecord{ce6044e u0 com.google.android.apps.nexuslauncher/.NexusLauncherActivity} t8}, applicationInfo.token=0x7dc8a64b84d0, touchableRegion=[0,0][320,640], ownerPid=1673, ownerUid=10119, dispatchingTimeout=5000ms, hasToken=true, touchOcclusionMode=BLOCK_UNTRUSTED
+        transform (ROT_0) (IDENTITY)
+      3: name='1465d93 com.google.android.apps.nexuslauncher/com.google.android.apps.nexuslauncher.NexusLauncherActivity', id=91, displayId=0, inputConfig=DUPLICATE_TOUCH_TO_WALLPAPER, alpha=1.00, frame=[0,0][320,640], globalScale=1.000000, applicationInfo.name=ActivityRecord{ce6044e u0 com.google.android.apps.nexuslauncher/.NexusLauncherActivity} t8}, applicationInfo.token=0x7dc8a64b84d0, touchableRegion=[0,0][320,640], ownerPid=1019, ownerUid=10153, dispatchingTimeout=5000ms, hasToken=true, touchOcclusionMode=BLOCK_UNTRUSTED
+        transform (ROT_0) (IDENTITY)
+      4: name='5ad4f13 ActivityRecordInputSink com.google.android.apps.nexuslauncher/.NexusLauncherActivity', id=95, displayId=0, inputConfig=NO_INPUT_CHANNEL | NOT_FOCUSABLE, alpha=1.00, frame=[0,0][0,0], globalScale=0.000000, applicationInfo.name=, applicationInfo.token=<null>, touchableRegion=[-3199,-6399][3200,6400], ownerPid=489, ownerUid=1000, dispatchingTimeout=0ms, hasToken=false, touchOcclusionMode=BLOCK_UNTRUSTED
+        transform (ROT_0) (IDENTITY)
+      5: name='Wallpaper BBQ wrapper#75', id=75, displayId=0, inputConfig=NO_INPUT_CHANNEL, alpha=1.00, frame=[-15,-31][618,672], globalScale=1.000000, applicationInfo.name=, applicationInfo.token=<null>, touchableRegion=<empty>, ownerPid=758, ownerUid=10157, dispatchingTimeout=5000ms, hasToken=false, touchOcclusionMode=BLOCK_UNTRUSTED
+        transform (ROT_0) (SCALE TRANSLATE)
+            1.4552  -0.0000  23.2828
+            -0.0000  1.4545  46.5455
+            0.0000  0.0000  1.0000
+      6: name='ae6b3ed com.android.systemui.wallpapers.ImageWallpaper', id=74, displayId=0, inputConfig=NOT_FOCUSABLE | NOT_TOUCHABLE | PREVENT_SPLITTING | IS_WALLPAPER, alpha=1.00, frame=[-15,-31][-15,-31], globalScale=1.000000, applicationInfo.name=, applicationInfo.token=<null>, touchableRegion=<empty>, ownerPid=758, ownerUid=10157, dispatchingTimeout=5000ms, hasToken=true, touchOcclusionMode=BLOCK_UNTRUSTED
+        transform (ROT_0) (SCALE TRANSLATE)
+            1.4552  -0.0000  23.2828
+            -0.0000  1.4545  46.5455
+            0.0000  0.0000  1.0000

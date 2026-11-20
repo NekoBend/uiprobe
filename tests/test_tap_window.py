@@ -9,9 +9,11 @@ import pytest
 
 from tests.fake_device import FakeAndroid
 from tests.test_crawl_driver import SCREENS, SERIAL, SHOP, TRANSPORT, Clock, lines, run
+from tests.test_repin import Waits, listing, renumber
 from uiprobe.crawl import Limits
 from uiprobe.device import Device
 from uiprobe.guards import Policy
+from uiprobe.packageuid import PackageUid
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -57,7 +59,7 @@ def test_window_at_reads_each_form(device, android):
     found = device.window_at((10, 400))
     assert not isinstance(found, str)
     assert found.owner_uid == android.uid_of("com.example.launcher")
-    assert device.package_uid(SHOP) == android.uid_of(SHOP)
+    assert device.package_uid(SHOP) == PackageUid(android.uid_of(SHOP), shared=False)
 
 
 def test_an_overlay_over_the_tap_point_refuses_the_tap(
@@ -165,3 +167,110 @@ def test_an_app_with_a_system_uid_taps_its_own_window(
     out = tmp_path / "run"
     run(device, clock, out, limits=Limits(actions=3))
     assert BROWSE in _taps(android)
+
+
+def test_package_uid_reads_the_package_stanza(device, android):
+    # The fake prints another package's stanza first and, for a shared uid, a
+    # "Shared users:" section after; userId= below API 34, appId= from it.
+    android.uids[SHOP] = 1000
+    android.uids[SHOP + "x"] = 10123
+    android.shared_users[SHOP] = "android.uid.system"
+    assert device.package_uid(SHOP) == PackageUid(1000, shared=True)
+    android.shared_users.clear()
+    android.uids[SHOP] = 10500
+    assert device.package_uid(SHOP) == PackageUid(10500, shared=False)
+
+
+def _covered(out: Path) -> list[dict[str, object]]:
+    return [r for r in lines(out / "transitions.jsonl") if r.get("not_sent")]
+
+
+def test_a_package_sharing_an_app_uid_is_not_the_app(
+    tmp_path: Path, device, android, clock
+):
+    # Two packages share the ordinary uid 10500 (android:sharedUserId); a
+    # window of the other one over the point has the app's uid but does not
+    # name the app.
+    helper = "com.example.shophelper"
+    for package in (SHOP, helper):
+        android.uids[package] = 10500
+        android.shared_users[package] = "com.example.shared"
+    android.overlays.append(("HelperBubble", helper, (0, 180, 320, 260)))
+    out = tmp_path / "run"
+    run(device, clock, out, limits=Limits(actions=4))
+    assert BROWSE not in _taps(android)
+    refused = _covered(out)
+    assert refused[0]["reason"] == "covered_by_other"
+    assert refused[0]["details"] == {"window": "HelperBubble", "owner_uid": 10500}
+
+
+def test_an_app_sharing_its_uid_taps_its_own_window(
+    tmp_path: Path, device, android, clock
+):
+    android.uids[SHOP] = 10500
+    android.shared_users[SHOP] = "com.example.shared"
+    out = tmp_path / "run"
+    run(device, clock, out, limits=Limits(actions=3))
+    assert BROWSE in _taps(android)  # its window's title is SHOP/...
+
+
+def test_a_system_uid_window_of_a_longer_package_name_is_not_the_app(
+    tmp_path: Path, device, android, clock
+):
+    # Both run as uid 1000; the other package's name begins with the app's.
+    longer = SHOP + "x"
+    for package in (SHOP, longer):
+        android.uids[package] = 1000
+        android.shared_users[package] = "android.uid.system"
+    title = f"{longer}/{longer}.Bubble"
+    android.overlays.append((title, longer, (0, 180, 320, 260)))
+    out = tmp_path / "run"
+    run(device, clock, out, limits=Limits(actions=4))
+    assert BROWSE not in _taps(android)
+    refused = _covered(out)
+    assert refused[0]["details"] == {"window": title, "owner_uid": 1000}
+
+
+@pytest.mark.parametrize("orientation", [1, 3, None])
+def test_a_rotated_or_unknown_display_refuses_every_tap(
+    tmp_path: Path, device, android, clock, orientation
+):
+    android.orientation = orientation
+    out = tmp_path / "run"
+    run(device, clock, out, limits=Limits(actions=3))
+    assert _taps(android) == []
+    refused = _covered(out)
+    assert refused
+    assert {r["reason"] for r in refused} == {"cover_unknown"}
+    assert refused[0]["details"] == {"unreadable": "rotation"}
+
+
+def test_a_device_away_during_the_window_read_is_device_reconnected(
+    tmp_path: Path, device, android, clock, fake_adb, monkeypatch
+):
+    # The device drops out while the gate reads the window at the point and
+    # comes back on its number, proven the same; the window read then shows
+    # another app's window there. The pin moved during the gate, so the tap
+    # is refused as device_reconnected, without the cover's details, and is
+    # not sent.
+    original = device.window_at
+    first: list[tuple[int, int]] = []
+
+    def away_once(point: tuple[int, int]) -> object:
+        if not first:
+            first.append(point)
+            x, y = point
+            android.overlays.append(("ChatHead", OVERLAY, (x - 1, y - 1, x + 1, y + 1)))
+            Waits(device, [renumber(fake_adb, TRANSPORT)])
+            listing(fake_adb, (TRANSPORT, "offline"))
+        return original(point)
+
+    monkeypatch.setattr(device, "window_at", away_once)
+    out = tmp_path / "run"
+    run(device, clock, out, limits=Limits(actions=4))
+    assert device.reconnects == 1
+    assert first
+    assert first[0] not in _taps(android)
+    refused = _covered(out)
+    assert refused[0]["reason"] == "device_reconnected"
+    assert "details" not in refused[0]
