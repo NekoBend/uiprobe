@@ -18,6 +18,7 @@ from tests.test_crawl_driver import (
     lines,
     run,
 )
+from uiprobe import crawl_driver
 from uiprobe.crawl import Limits
 from uiprobe.device import (
     IDENTITY_COMMAND,
@@ -722,7 +723,8 @@ def test_a_back_chosen_before_the_device_was_away_is_not_sent(
 ):
     # On the detail screen the engine chooses a navigation BACK; the device
     # drops out once, during that BACK's gate (its keyboard read), and comes
-    # back on its number. 1a: the BACK is not sent and the run ends.
+    # back on its number. The BACK is not sent: the engine takes it back and,
+    # on a fresh read, chooses it again, and then it is sent.
     device = pinned(fake_adb)
     original = device.keyboard_shown
     reads = {"detail": 0}
@@ -738,12 +740,13 @@ def test_a_back_chosen_before_the_device_was_away_is_not_sent(
     monkeypatch.setattr(device, "keyboard_shown", away_once)
     out = tmp_path / "run"
     result = run(device, clock, out)
-    assert result.stop_reason == "not_sent"
+    assert result.stop_reason == "exhausted"  # the crawl went on to its end
     assert device.reconnects == 1  # the wait happened
     records = lines(out / "transitions.jsonl")
     refused = [r for r in records if r.get("not_sent")]
     assert [r["reason"] for r in refused] == ["device_reconnected"]
-    assert all(i.screen != "detail" for i in android.inputs if i.kind == "key")
+    keys = [i for i in android.inputs if i.kind == "key"]
+    assert any(i.screen == "detail" for i in keys)  # the BACK, sent after proof
 
 
 # --- a failed request, the watch, the server, the first pin ---
@@ -1045,14 +1048,16 @@ def test_a_tap_that_meets_a_renumbered_pin_is_not_sent_and_the_crawl_goes_on(
     monkeypatch.setattr(device, "tap", renumber_then_tap)
     out = tmp_path / "run"
     result = run(device, clock, out, limits=Limits(actions=6))
-    # 1a: the refused tap's element is released, so the crawl may run out of
-    # elements sooner; it does not end with an error
-    assert result.stop_reason in {"max_actions", "exhausted"}
+    assert result.stop_reason == "max_actions"
     assert device.repins == ((TRANSPORT, TRANSPORT + 1),)
     records = lines(out / "transitions.jsonl")
     assert [r["reason"] for r in records if r.get("not_sent")] == ["device_reconnected"]
+    refused = next(r for r in records if "action" in r and r["action"]["kind"] == "tap")
     taps = [i for i in android.inputs if i.kind == "tap"]
-    assert taps  # later taps went out, on the proven new number
+    # the same element was tapped after the proof: the engine took it back
+    assert taps[0].point == tuple(refused["action"]["point"])
+    skipped = lines(out / "skipped.jsonl") if (out / "skipped.jsonl").exists() else []
+    assert not [r for r in skipped if "tap_not_sent" in r["reasons"]]
 
 
 def test_a_back_that_meets_a_renumbered_pin_is_not_sent(
@@ -1071,8 +1076,9 @@ def test_a_back_that_meets_a_renumbered_pin_is_not_sent(
     monkeypatch.setattr(device, "key", renumber_then_key)
     out = tmp_path / "run"
     result = run(device, clock, out)
-    assert result.stop_reason == "not_sent"  # 1a: a refused BACK ends the run
-    assert [i for i in android.inputs if i.kind == "key"] == []
+    assert result.stop_reason == "exhausted"  # taken back, chosen again, sent
+    assert [i for i in android.inputs if i.kind == "key"]
+    assert device.repins == ((TRANSPORT, TRANSPORT + 1),)
     records = lines(out / "transitions.jsonl")
     assert [r["reason"] for r in records if r.get("not_sent")] == ["device_reconnected"]
 
@@ -1174,3 +1180,115 @@ def test_a_stop_that_waits_after_force_stop_records_the_half_relaunch(
     assert [r["reason"] for r in records if r.get("not_sent")] == ["start_not_sent"]
     summary = (out / "summary.txt").read_text(encoding="utf-8")
     assert "force-stopped but not started again (time_limit)" in summary
+
+
+def test_a_relaunch_refused_before_its_force_stop_is_taken_back(
+    tmp_path: Path, fake_adb, android, clock, monkeypatch
+):
+    device = pinned(fake_adb)
+    _covered_after_launch(monkeypatch, device, android)
+    original = device.stop_app
+    moved: list[bool] = []
+
+    def renumber_then_stop(package: str) -> None:
+        if not moved:
+            moved.append(True)
+            listing(fake_adb, (TRANSPORT + 1, "device"))
+        original(package)
+
+    monkeypatch.setattr(device, "stop_app", renumber_then_stop)
+    out = tmp_path / "run"
+    result = run(device, clock, out)
+    assert result.stop_reason == "relaunch_limit"  # the run went on to its end
+    records = lines(out / "transitions.jsonl")
+    assert [r["reason"] for r in records if r.get("not_sent")] == ["device_reconnected"]
+    assert android.stopped == [SHOP, SHOP, SHOP]  # three relaunches all sent
+
+
+def test_withdraws_end_with_the_reconnect_limit(
+    tmp_path: Path, fake_adb, android, clock, monkeypatch
+):
+    # The device is away once during every gate (never during an
+    # observation): every action is taken back and chosen again, and the
+    # crawl still ends at the Device's wait limit, with no input sent.
+    device = pinned(fake_adb)
+    Waits(device, [])
+    in_gate = [False]
+    original_gate = crawl_driver._Run.gate
+
+    def gate(self: crawl_driver._Run, action: object, observation: object) -> object:
+        in_gate[0] = True
+        try:
+            return original_gate(self, action, observation)  # ty: ignore[invalid-argument-type]
+        finally:
+            in_gate[0] = False
+
+    original = device.keyboard_shown
+
+    def away_in_the_gate() -> object:
+        if in_gate[0]:
+            listing(fake_adb, (TRANSPORT, "offline"))
+            Waits(device, [renumber(fake_adb, TRANSPORT)])
+        return original()
+
+    monkeypatch.setattr(crawl_driver._Run, "gate", gate)
+    monkeypatch.setattr(device, "keyboard_shown", away_in_the_gate)
+    out = tmp_path / "run"
+    with pytest.raises(DeviceNotFoundError, match="away more than"):
+        run(device, clock, out)
+    assert android.inputs == []
+    records = lines(out / "transitions.jsonl")
+    refused = [r for r in records if r.get("reason") == "device_reconnected"]
+    assert len(refused) == MAX_RECONNECTS  # one taken-back attempt per wait
+
+
+def test_after_a_withdrawal_the_engine_and_the_run_folder_keep_their_landing(
+    tmp_path: Path, fake_adb, android, clock, monkeypatch
+):
+    # A tap from the start screen lands on browse; the next action is taken
+    # back because the device was away in its gate, and meanwhile the detail
+    # screen came up. The run folder keeps the landing it saw (browse); the
+    # engine counts the screen of the fresh read (detail).
+    engines: list[crawl_driver.CrawlEngine] = []
+
+    class Kept(crawl_driver.CrawlEngine):
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            super().__init__(*args, **kwargs)  # ty: ignore[invalid-argument-type]
+            engines.append(self)
+
+    monkeypatch.setattr(crawl_driver, "CrawlEngine", Kept)
+    device = pinned(fake_adb)
+    in_gate = [False]
+    original_gate = crawl_driver._Run.gate
+
+    def gate(self: crawl_driver._Run, action: object, observation: object) -> object:
+        in_gate[0] = True
+        try:
+            return original_gate(self, action, observation)  # ty: ignore[invalid-argument-type]
+        finally:
+            in_gate[0] = False
+
+    original = device.keyboard_shown
+    done: list[bool] = []
+
+    def away_once_on_browse() -> object:
+        if in_gate[0] and not done and android.screen.name == "browse":
+            done.append(True)
+            listing(fake_adb, (TRANSPORT, "offline"))
+            Waits(device, [renumber(fake_adb, TRANSPORT)])
+            android.show("detail")
+        return original()
+
+    monkeypatch.setattr(crawl_driver._Run, "gate", gate)
+    monkeypatch.setattr(device, "keyboard_shown", away_once_on_browse)
+    out = tmp_path / "run"
+    run(device, clock, out, limits=Limits(actions=4))
+    assert done
+    records = lines(out / "transitions.jsonl")
+    first_tap = next(
+        r["action_id"] for r in records if r.get("action", {}).get("kind") == "tap"
+    )
+    end = next(r for r in records if "action" not in r and r["action_id"] == first_tap)
+    browse = end["to_screen_id"]
+    engine_tap = next(t for t in engines[0].records.transitions if t.kind == "tap")
+    assert engine_tap.to_screen_id != browse  # the engine took the fresh read

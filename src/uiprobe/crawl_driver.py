@@ -48,10 +48,12 @@ foreground and focused window (and for BACK keyboard) as the observation they
 were chosen on, and for a BACK chosen on a screen of the app also a focused
 window owned by the app (a BACK goes to the focused window). The table of
 checks per action is in docs/python.md. After the decision nothing else runs
-before the input. A refused tap's fresh observation goes to `CrawlEngine.next`,
-which releases the unreported tap; a refused BACK or relaunch ends the run with
-``not_sent``, because the engine already counted it. Every observation checks
-the pin too.
+before the input. An action refused as ``device_reconnected`` (by the gate,
+or because the device had to be proven again right before the input) is taken
+back with `CrawlEngine.withdraw` and decided again on a fresh read. Otherwise a
+refused tap's fresh observation goes to `CrawlEngine.next`, which releases the
+unreported tap, and a refused BACK or relaunch ends the run with ``not_sent``,
+because the engine already counted it. Every observation checks the pin too.
 
 How a run ends. The engine's stop reason, ``not_sent``, ``interrupted`` (the ``stop``
 callable returned True between two actions, or Ctrl+C arrived while it
@@ -262,6 +264,7 @@ class _Run:
         # A refused tap and the screen it was chosen on, until the engine
         # releases it (see `run`).
         self.held: tuple[Tap, Screen | None] | None = None
+        self.withdrawn = False  # the last action was taken back by the engine
         # Device.pin_epoch when the current observation began its reads, and
         # after the gate's own pin check: an input goes out only when nothing
         # happened to the pin since the observation it was chosen on.
@@ -314,6 +317,36 @@ class _Run:
                 continue
             observation = self.observe()
 
+    def send_input(self, action: Action, action_id: int) -> bool:
+        """Send a tap, BACK or the first launch; False when nothing was sent
+        because the device has to be proven again first (the action is
+        closed as the gate would have closed it, and taken back unless it is
+        the first launch)."""
+        try:
+            if isinstance(action, Tap):
+                self.device.tap(action.point)
+            elif isinstance(action, Back):
+                self.device.key("back")
+            else:
+                self.launch()
+        except DeviceNotFoundError as error:
+            if error.details.get("reason") != PIN_NOT_PROVEN:
+                raise
+            self._open = None
+            self.writer.write_transition_end(action_id, not_sent=NOT_SENT_RECONNECTED)
+            if not isinstance(action, Launch):
+                self.withdraw(action)
+            return False
+        return True
+
+    def withdraw(self, action: Action) -> None:
+        """Have the engine take back `action`, which was not sent."""
+        self.engine.withdraw(action)
+        self.withdrawn = True
+        # Skip rows written for the undone call stay written; the writer
+        # drops repeats when the engine reports them again.
+        self._skips_written = min(self._skips_written, len(self.engine.records.skipped))
+
     def ending(self, action: Action, refused: str | None) -> str | None:
         """The stop reason when the run ends after `action`, or None to go on.
 
@@ -324,6 +357,10 @@ class _Run:
         counted it, so rather than go on from a wrong count the run ends
         (alpha: the safe side).
         """
+        if self.withdrawn:
+            # Taken back by the engine: the crawl goes on from a fresh read.
+            self.withdrawn = False
+            return INTERRUPTED if self._stop_seen else None
         if refused == _HALF_RELAUNCH:
             return STOP_NOT_SENT  # the summary already says what happened
         if refused in (NOT_SENT_STOPPED, NOT_SENT_TIME_LIMIT, NOT_SENT_START):
@@ -375,6 +412,12 @@ class _Run:
         self.unsent = None
         if reason is not None:
             self.writer.write_transition_end(action_id, not_sent=reason)
+            if reason == NOT_SENT_RECONNECTED and not isinstance(action, Launch):
+                # Nothing was sent and nothing about the screen is known: the
+                # engine takes the action back and decides again on a fresh
+                # read.
+                self.withdraw(action)
+                return reason, None
             if seen is not None and isinstance(action, Tap):
                 return reason, self.refused_tap(action, screen, seen)
             return reason, None
@@ -383,23 +426,8 @@ class _Run:
         self._open = action_id
         self.sent_epoch = self.device.pin_epoch
         if isinstance(action, Relaunch):
-            return self.relaunch(action_id), None
-        try:
-            if isinstance(action, Tap):
-                self.device.tap(action.point)
-            elif isinstance(action, Back):
-                self.device.key("back")
-            else:
-                self.launch()
-        except DeviceNotFoundError as error:
-            if error.details.get("reason") != PIN_NOT_PROVEN:
-                raise
-            # Nothing was sent: the device has to be proven again first. The
-            # action is closed as the gate would have closed it.
-            self._open = None
-            self.writer.write_transition_end(action_id, not_sent=NOT_SENT_RECONNECTED)
-            if isinstance(action, Tap):
-                self.held = (action, screen)
+            return self.relaunch(action_id, action), None
+        if not self.send_input(action, action_id):
             return NOT_SENT_RECONNECTED, None
         if isinstance(action, Tap):
             self.engine.tap_sent(action)
@@ -598,7 +626,7 @@ class _Run:
             seen = error.details.get("foreground")
             self.notes.append(f"{self.package} was not in front after launch ({seen})")
 
-    def relaunch(self, action_id: int) -> str | None:
+    def relaunch(self, action_id: int, action: Relaunch) -> str | None:
         """Force-stop the app, then, unless told to stop meanwhile, start it.
 
         The two commands are sent one after the other, and `stop` and the time
@@ -614,6 +642,7 @@ class _Run:
                 raise
             self._open = None  # nothing was sent
             self.writer.write_transition_end(action_id, not_sent=NOT_SENT_RECONNECTED)
+            self.withdraw(action)
             return NOT_SENT_RECONNECTED
         try:
             # stop() may read the device, so it is inside the handler too.
