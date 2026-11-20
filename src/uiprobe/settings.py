@@ -6,8 +6,9 @@ file format, the generator (`render_default_settings`,
 `write_default_settings`) and a strict reader (`load_settings`). ``uiprobe crawl``
 (the preview) reads the file for its no-press defaults, through
 `policy_from_settings`, and ``uiprobe key`` reads the keys it refuses. The crawl
-limits are not used yet, and ``press = true`` only makes ``crawl`` refuse to run
-unless ``--dry-run`` is given.
+limits are not used to press (``crawl --press`` takes its own small limits),
+and ``press = true`` only makes ``crawl`` refuse to run unless ``--press`` or
+``--dry-run`` is given.
 
 What the file holds: the deny words, the confirm words, the phrases that mark a
 screen as irreversible, the rules (unlabeled,
@@ -342,8 +343,8 @@ def render_default_settings() -> str:
         "",
         f"format_version = {FORMAT_VERSION}",
         f"defaults_version = {DEFAULTS_VERSION}",
-        "# Press elements for real. Not available yet: with true, crawl refuses to",
-        "# run unless --dry-run is given.",
+        "# Not used to press: crawl presses only with --press. With true, crawl",
+        "# refuses to run unless --press or --dry-run is given.",
         "press = false",
         "",
         "[deny]",

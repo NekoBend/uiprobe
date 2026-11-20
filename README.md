@@ -8,11 +8,11 @@ uiprobe saves the screen structure of an Android app and sends taps, swipes and 
 
 uiprobe is alpha software: the command line, the JSON formats and the Python API may change in any later version. This is a development snapshot, version 0.1.0a1.dev0; no alpha is tagged yet.
 
-Eleven commands exist: `devices`, `dump`, `screenshot`, `find`, `tap`, `swipe`, `key`, `type`, `launch`, `crawl` and `init`. Of `crawl` only the preview exists: it shows what a crawl would press on the screen showing now and presses nothing, and it is what `crawl` does by default. The pressing crawl is planned, not implemented, and a run that asks for pressing (`--press` or `press = true` in the settings file) is refused. Other ways of operating the app are planned. The guards have been checked only on Android emulators; real devices and other Android versions may behave differently.
+Eleven commands exist: `devices`, `dump`, `screenshot`, `find`, `tap`, `swipe`, `key`, `type`, `launch`, `crawl` and `init`. By default `crawl` previews: it shows what a crawl would press on the screen showing now and presses nothing. `crawl --press --out DIR` crawls for real: it presses on an emulator only (unless `--allow-real-device`), stops after 30 sent actions or 5 minutes and taps at most 3 screens deep on one path unless told otherwise, and records every step in a new folder. Other ways of operating the app are planned. The guards have been checked only on Android emulators; real devices and other Android versions may behave differently.
 
 ## Safety
 
-- `tap`, `swipe` and `key` send real input to whatever screen is showing, in any app, and press what you name, even a button called "Delete" or "Buy". `type` sends text to whatever field has focus. Only the crawl preview (what `crawl` does by default) uses deny words, and it presses nothing.
+- `tap`, `swipe` and `key` send real input to whatever screen is showing, in any app, and press what you name, even a button called "Delete" or "Buy". `type` sends text to whatever field has focus. Only `crawl` uses deny words: the preview (the default) presses nothing, and `crawl --press` presses what the rules allow.
 - Use an emulator, or a test device with test accounts. Do not run uiprobe on a phone that holds your own accounts, payment methods or messages.
 - uiprobe uses the device given with `-s`, else the one named in `ANDROID_SERIAL`, else the only ready device. Run `uiprobe devices` first.
 - Deny words see only the text, description, hint and resource id that uiautomator reports. An icon-only button without them (a trash can, a send arrow) has no words to match.
@@ -79,7 +79,7 @@ Add `--json` to get JSON instead of text (`uiprobe dump --json`), or `--brief` f
 | `key` | Presses one key. | [Pressing keys](docs/commands.md#pressing-keys) |
 | `type` | Types ASCII text into the focused field. | [Typing text](docs/commands.md#typing-text) |
 | `launch` | Starts an app and waits until it is in front. | [Launching an app](docs/commands.md#launching-an-app) |
-| `crawl` | Previews what a crawl would press, using the settings file; pressing is not available yet. | [Previewing a crawl](docs/crawl.md) |
+| `crawl` | Previews what a crawl would press, using the settings file; with `--press`, crawls for real into a run folder. | [Crawling an app](docs/crawl.md) |
 | `init` | Creates the settings file `uiprobe.toml`; no device needed. | [Settings file](docs/settings.md) |
 
 Options and environment variables: [Options](docs/commands.md#options), [Environment variables](docs/commands.md#environment-variables). JSON shapes and exit codes: [docs/output.md](docs/output.md).
@@ -105,7 +105,7 @@ uiprobe connects only to the adb server, which is on `127.0.0.1:5037` unless you
 ## Documentation
 
 - [docs/commands.md](docs/commands.md): every command, the options and the environment variables.
-- [docs/crawl.md](docs/crawl.md): previewing a crawl, with the reasons, deny words and limits.
+- [docs/crawl.md](docs/crawl.md): previewing a crawl and the pressing crawl (`--press`), with the reasons, deny words and limits.
 - [docs/settings.md](docs/settings.md): the settings file `uiprobe.toml` and `uiprobe init`; `crawl` and `key` read it.
 - [docs/safety.md](docs/safety.md): detailed safety notes.
 - [docs/output.md](docs/output.md): JSON formats and exit codes.
