@@ -25,7 +25,10 @@ is copied from the rotated emulators; changed lines are changed in place.
 
 from __future__ import annotations
 
+import re
+import sys
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
 
@@ -43,7 +46,12 @@ from uiprobe.inputwindows import (
     window_at,
 )
 
+if TYPE_CHECKING:
+    from collections.abc import Iterator
+
 DATA = Path(__file__).parent / "data" / "inputwindows"
+# A window line of the list (its row number and a colon).
+_INDEX_LINE = re.compile(r"^ +[0-9]+: name=")
 
 
 def _capture(name: str) -> str:
@@ -466,6 +474,189 @@ def test_a_rotated_transform_in_the_list_is_rotation():
         API32, "bab5115 StatusBar", "displayOrientation=0", "displayOrientation=1"
     )
     assert parse_input_windows(orientation) == ROTATION
+
+
+# Python's default limit of digits `int` converts (`_digit_limit` sets it):
+# one more digit raises ValueError, which the parser turns into a refusal.
+LIMIT = 4300
+OVERLONG = ["1" * (LIMIT + 1), "0" * (LIMIT + 1)]
+LONGEST_ZERO = "0" * LIMIT  # still converts: read as 0, as before
+
+
+@pytest.fixture
+def _digit_limit() -> Iterator[None]:
+    """Use Python's default int-to-str digit limit, whatever the host set."""
+    before = sys.get_int_max_str_digits()
+    sys.set_int_max_str_digits(LIMIT)
+    try:
+        yield
+    finally:
+        sys.set_int_max_str_digits(before)
+
+
+def _row_rotation(text: str, row: str, rotation: str) -> str:
+    """`text` with the transform line right below the row holding `row`
+    saying ``ROT_<rotation>`` instead of ``ROT_0``."""
+    line = _line(text, row)
+    after = line + "\n      transform (ROT_0) (IDENTITY)"
+    assert text.count(after) == 1
+    return text.replace(after, f"{line}\n      transform (ROT_{rotation}) (IDENTITY)")
+
+
+STYLUS = "0: name=stylus-handwriting-event-receiver-0"
+
+
+@pytest.mark.usefixtures("_digit_limit")
+@pytest.mark.parametrize("digits", OVERLONG)
+def test_a_row_rotation_too_long_to_read_is_rotation(digits):
+    text = _row_rotation(API36, STYLUS, digits)
+    assert parse_input_windows(text) == ROTATION
+    assert read_window_at(text, (160, 320)) == ROTATION
+
+
+@pytest.mark.usefixtures("_digit_limit")
+def test_a_row_rotation_of_the_longest_convertible_zero_is_read_as_before():
+    text = _row_rotation(API36, STYLUS, LONGEST_ZERO)
+    assert parse_input_windows(text) == parse_input_windows(API36)
+    assert read_window_at(text, (160, 320)) == read_window_at(API36, (160, 320))
+
+
+def _viewport_display(text: str, digits: str) -> str:
+    """`text` with its first Viewport line of display 0 naming display
+    `digits` (the second one still says display 0, orientation 0)."""
+    marker = "Viewport INTERNAL: displayId=0,"
+    assert text.count(marker) == 2
+    return text.replace(marker, f"Viewport INTERNAL: displayId={digits},", 1)
+
+
+@pytest.mark.usefixtures("_digit_limit")
+@pytest.mark.parametrize("digits", OVERLONG)
+def test_a_viewport_display_number_too_long_to_read_is_rotation(digits):
+    # The line could be of display 0 too.
+    text = _viewport_display(API36, digits)
+    assert parse_input_windows(text) == parse_input_windows(API36)  # list fine
+    assert display_orientation(text) is None
+    assert read_window_at(text, (160, 320)) == ROTATION
+
+
+@pytest.mark.usefixtures("_digit_limit")
+def test_a_viewport_display_number_of_the_longest_convertible_length_is_read():
+    # As before: display 0 written with 4300 digits is a line of display 0
+    # of no known form (displayId= has at most 10 digits there); display 1
+    # written so is another display's line, not read.
+    assert display_orientation(_viewport_display(API36, LONGEST_ZERO)) is None
+    text = _viewport_display(API36, "0" * (LIMIT - 1) + "1")
+    assert display_orientation(text) == 0
+    assert read_window_at(text, (160, 320)) == read_window_at(API36, (160, 320))
+
+
+def _orientation(digits: str) -> str:
+    return _edit(
+        API32,
+        "2c0698f ScreenDecorOverlayBottom",
+        "displayOrientation=0",
+        f"displayOrientation={digits}",
+    )
+
+
+@pytest.mark.usefixtures("_digit_limit")
+@pytest.mark.parametrize("digits", OVERLONG)
+def test_a_display_orientation_too_long_to_read_is_rotation(digits):
+    text = _orientation(digits)
+    assert parse_input_windows(text) == ROTATION
+    assert read_window_at(text, (160, 320)) == ROTATION
+
+
+@pytest.mark.usefixtures("_digit_limit")
+def test_a_display_orientation_of_the_longest_convertible_zero_is_read_as_before():
+    text = _orientation(LONGEST_ZERO)
+    assert parse_input_windows(text) == parse_input_windows(API32)
+    assert read_window_at(text, (160, 320)) == read_window_at(API32, (160, 320))
+
+
+def _with_display1(rotation: str = "0", field: str = "") -> str:
+    """API 36 with the list of display 1 (`DISPLAY1`) above display 0's, its
+    row's transform saying ``ROT_<rotation>`` and `field` added to its row."""
+    block = DISPLAY1.replace(
+        "      transform (ROT_0) (IDENTITY)\n",
+        f"      transform (ROT_{rotation}) (IDENTITY)\n",
+    ).replace(", ownerUid=10999", f"{field}, ownerUid=10999")
+    return API36.replace("  Display: 0\n", block + "  Display: 0\n")
+
+
+@pytest.mark.usefixtures("_digit_limit")
+@pytest.mark.parametrize(
+    ("rotation", "field"),
+    [("0" * (LIMIT + 1), ""), ("0", f", displayOrientation={'0' * (LIMIT + 1)}")],
+    ids=["row_rotation", "display_orientation"],
+)
+def test_a_number_too_long_to_read_in_another_displays_list_is_rotation(
+    rotation, field
+):
+    text = _with_display1(rotation, field)
+    assert parse_input_windows(text) == ROTATION
+    assert read_window_at(text, (160, 320)) == ROTATION
+
+
+@pytest.mark.usefixtures("_digit_limit")
+@pytest.mark.parametrize(
+    ("rotation", "field"),
+    [("1", ""), ("0", ", displayOrientation=1"), (LONGEST_ZERO, "")],
+    ids=["row_rotation_1", "display_orientation_1", "longest_zero"],
+)
+def test_a_readable_rotation_in_another_displays_list_leaves_display_0_as_before(
+    rotation, field
+):
+    # The other display's own rotation does not matter for display 0.
+    text = _with_display1(rotation, field)
+    assert parse_input_windows(text) == parse_input_windows(_with_display1())
+    assert parse_input_windows(text) == parse_input_windows(API36)
+    assert read_window_at(text, (160, 320)) == read_window_at(API36, (160, 320))
+
+
+def _combined(rotation: str) -> str:
+    """API 24 (one list of every display) with a transform line below every
+    row and its StatusBar row on display 1, whose transform says
+    ``ROT_<rotation>``."""
+    rows = [line for line in API24.split("\n") if _INDEX_LINE.match(line)]
+    text = API24
+    for row in rows:
+        text = text.replace(row + "\n", row + "\n      transform (ROT_0) (IDENTITY)\n")
+    text = _edit(text, "u0 StatusBar}", "displayId=0", "displayId=1")
+    return _row_rotation(text, "u0 StatusBar}", rotation)
+
+
+@pytest.mark.usefixtures("_digit_limit")
+def test_a_rotation_too_long_to_read_on_a_skipped_row_is_rotation():
+    # A list of every display: the row of display 1 is skipped, but its
+    # transform was read first.
+    base = parse_input_windows(_combined("0"))
+    assert isinstance(base, tuple)
+    assert "StatusBar" not in [w.title for w in base]
+    assert parse_input_windows(_combined("1")) == base  # as before: skipped
+    assert parse_input_windows(_combined(LONGEST_ZERO)) == base
+    text = _combined("0" * (LIMIT + 1))
+    assert parse_input_windows(text) == ROTATION
+    assert read_window_at(text, (160, 320)) == ROTATION
+
+
+@pytest.mark.usefixtures("_digit_limit")
+def test_an_orientation_too_long_to_read_on_a_skipped_row_is_not_read():
+    # A list of every display: the orientation of display 1's row is not
+    # read for display 0 (as before, when int() never saw it), unlike its
+    # transform line, so display 0's window is found as without it.
+    base = _combined("0")
+    text = _edit(
+        base,
+        "u0 StatusBar}",
+        ", ownerUid=",
+        f", displayOrientation={'0' * (LIMIT + 1)}, ownerUid=",
+    )
+    assert text != base
+    found = read_window_at(text, (160, 320))
+    assert isinstance(found, InputWindow)
+    assert found.title == SETTINGS
+    assert found == read_window_at(base, (160, 320))
 
 
 def test_without_a_viewport_line_every_form_is_rotation():
