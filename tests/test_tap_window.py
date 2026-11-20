@@ -403,3 +403,27 @@ def test_a_focused_window_owned_by_another_uid_refuses(
     assert _taps(android) == []
     assert _covered(out)[0]["details"] == {"unreadable": "target_uid"}
     assert not [c for _, _, c in fake_adb.commands if c == "dumpsys input"]
+
+
+def test_an_apostrophe_in_the_app_window_name_still_names_the_app(
+    tmp_path: Path, device, android, clock
+):
+    # A system-uid app's own window over the point, titled with an apostrophe
+    # (quoted on API 24 and 31, bare on 36): its package prefix is read.
+    android.uids[SHOP] = 1000
+    android.shared_users[SHOP] = "android.uid.system"
+    android.overlays.append((f"{SHOP}/Today's Orders", SHOP, (0, 180, 320, 260)))
+    out = tmp_path / "run"
+    run(device, clock, out, limits=Limits(actions=3))
+    assert BROWSE in _taps(android)
+    assert not _covered(out)
+
+
+def test_braces_in_the_focused_title_do_not_stop_the_tap(
+    tmp_path: Path, device, android, clock
+):
+    android.focus_window = ("Order {7}", SHOP)
+    out = tmp_path / "run"
+    run(device, clock, out, limits=Limits(actions=3))
+    assert BROWSE in _taps(android)
+    assert not _covered(out)
