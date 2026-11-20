@@ -1896,3 +1896,127 @@ def test_a_relaunch_decided_on_the_apps_screen_has_no_off_target(
     driver.send(Relaunch(), observation)
     assert "off_target" not in _start_lines(tmp_path)[-1]
     assert android.stopped == [SHOP]
+
+
+def test_a_tap_whose_reads_end_past_the_limit_is_not_sent(
+    tmp_path: Path, device, android, clock, monkeypatch
+):
+    # Each dump takes 19 s on this device: the gate's own dump before a tap
+    # crosses the 1-minute limit, so the tap must not go out.
+    original = Device.dump
+
+    def slow_dump(self: Device, **kwargs: object) -> object:
+        clock.now += 19.0
+        return original(self, **kwargs)  # ty: ignore[invalid-argument-type]
+
+    monkeypatch.setattr(Device, "dump", slow_dump)
+    out = tmp_path / "run"
+    started = clock.now
+    result = run(device, clock, out, limits=Limits(minutes=1))
+    assert result.stop_reason == "max_duration"
+    taps = [i for i in android.inputs if i.kind == "tap"]
+    sent_at = [
+        r for r in lines(out / "transitions.jsonl") if r.get("reason") == "time_limit"
+    ]
+    assert sent_at, "the late tap is closed as not sent"
+    assert clock.now - started >= 60
+    # Every tap that went out was decided and checked within the limit.
+    assert len(taps) <= 2
+    assert dict(result.not_sent).get("time_limit") == 1
+
+
+def _monkeys(fake_adb: FakeAdbServer) -> list[str]:
+    return [r for r in fake_adb.requests if r.startswith("shell:") and "monkey" in r]
+
+
+def test_a_launch_whose_pin_check_ends_past_the_limit_is_not_sent(
+    tmp_path: Path, device, android, clock, monkeypatch, fake_adb
+):
+    assert android.serial == SERIAL
+    original = Device.check_pin
+    checks = [0]
+
+    def slow_check(self: Device, **kwargs: object) -> None:
+        original(self, **kwargs)  # ty: ignore[invalid-argument-type]
+        checks[0] += 1
+        if checks[0] == 1:
+            clock.now += 61.0  # the first launch's pin check crosses the limit
+
+    monkeypatch.setattr(Device, "check_pin", slow_check)
+    out = tmp_path / "run"
+    result = run(device, clock, out, limits=Limits(minutes=1))
+    assert result.stop_reason == "max_duration"
+    assert _monkeys(fake_adb) == []
+    assert dict(result.not_sent) == {"time_limit": 1}
+
+
+def test_a_restart_whose_pin_check_ends_past_the_limit_is_only_half_sent(
+    tmp_path: Path, device, android, clock, monkeypatch, fake_adb
+):
+    original_tap = device.tap
+
+    def tap_then_cover(point: tuple[int, int]) -> tuple[int, int]:
+        result = original_tap(point)
+        if not android.stopped and android.screen.name == "browse":
+            for name in ("ext1", "ext2", "ext3"):
+                android.show(name)
+        return result
+
+    original_check = Device.check_pin
+
+    def slow_after_stop(self: Device, **kwargs: object) -> None:
+        original_check(self, **kwargs)  # ty: ignore[invalid-argument-type]
+        if android.stopped:
+            clock.now += 3600.0  # the restart's pin check crosses the limit
+
+    monkeypatch.setattr(device, "tap", tap_then_cover)
+    monkeypatch.setattr(Device, "check_pin", slow_after_stop)
+    out = tmp_path / "run"
+    result = run(device, clock, out)
+    assert android.stopped == [SHOP]
+    assert len(_monkeys(fake_adb)) == 1  # the first launch only
+    assert result.stop_reason == "max_duration"
+    ends = [r for r in lines(out / "transitions.jsonl") if r.get("not_sent")]
+    assert ends[-1]["reason"] == "start_not_sent"
+
+
+@pytest.mark.usefixtures("android")
+def test_nothing_is_hashed_between_the_last_clock_read_and_a_tap(
+    tmp_path: Path, device, clock, monkeypatch
+):
+    # The screen id walks the whole screen; it must be computed before the
+    # gate's last look at the clock, never between that look and the tap.
+    from uiprobe import model
+
+    events: list[str] = []
+    original_id = model.Screen.screen_id
+    original_tap = Device.tap
+
+    def recording_id(self: model.Screen) -> str:
+        events.append("hash")
+        return original_id.fget(self)
+
+    def recording_clock() -> float:
+        events.append("clock")
+        return clock.now
+
+    def recording_tap(self: Device, *args: object, **kwargs: object) -> object:
+        last_clock = max(i for i, e in enumerate(events) if e == "clock")
+        assert "hash" not in events[last_clock:], events[last_clock:]
+        events.append("tap")
+        return original_tap(self, *args, **kwargs)  # ty: ignore[invalid-argument-type]
+
+    monkeypatch.setattr(model.Screen, "screen_id", property(recording_id))
+    monkeypatch.setattr(Device, "tap", recording_tap)
+    out = tmp_path / "run"
+    crawl(
+        device,
+        SHOP,
+        out,
+        policy=Policy(),
+        limits=Limits(actions=4),
+        settle=1.0,
+        clock=recording_clock,
+        sleep=clock.sleep,
+    )
+    assert "tap" in events
