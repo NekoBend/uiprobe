@@ -694,8 +694,10 @@ def test_the_time_limit_inside_the_wait_after_force_stop_is_recorded(
     dropped: list[bool] = []
     original_stop = device.stop_app
 
-    def stop_then_drop(package: str, _send_by: float | None = None) -> None:
-        original_stop(package, _send_by=_send_by)
+    def stop_then_drop(
+        package: str, _send_by: float | None = None, _epoch: int | None = None
+    ) -> None:
+        original_stop(package, _send_by=_send_by, _epoch=_epoch)
         listing(fake_adb)
         dropped.append(True)
 
@@ -728,8 +730,10 @@ def test_a_device_proven_again_after_force_stop_gets_no_start(
     _covered_after_launch(monkeypatch, device, android)
     original_stop = device.stop_app
 
-    def stop_then_renumber(package: str, _send_by: float | None = None) -> None:
-        original_stop(package, _send_by=_send_by)
+    def stop_then_renumber(
+        package: str, _send_by: float | None = None, _epoch: int | None = None
+    ) -> None:
+        original_stop(package, _send_by=_send_by, _epoch=_epoch)
         listing(fake_adb, (TRANSPORT + 1, "device"))
 
     monkeypatch.setattr(device, "stop_app", stop_then_renumber)
@@ -1167,12 +1171,12 @@ def test_a_tap_that_meets_a_renumbered_pin_is_not_sent_and_the_crawl_goes_on(
     moved: list[bool] = []
 
     def renumber_then_tap(
-        point: tuple[int, int], _send_by: float | None = None
+        point: tuple[int, int], _send_by: float | None = None, _epoch: int | None = None
     ) -> tuple[int, int]:
         if not moved:
             moved.append(True)
             listing(fake_adb, (TRANSPORT + 1, "device"))  # after the gate
-        return original(point, _send_by=_send_by)
+        return original(point, _send_by=_send_by, _epoch=_epoch)
 
     monkeypatch.setattr(device, "tap", renumber_then_tap)
     out = tmp_path / "run"
@@ -1250,8 +1254,8 @@ def test_a_restart_launch_on_a_stale_pin_says_it_force_stopped(
     device = pinned(fake_adb)
     original = device._force_stop
 
-    def stop_then_renumber(package: str) -> None:
-        original(package)
+    def stop_then_renumber(package: str, dispatch: object = None) -> None:
+        original(package, dispatch)  # ty: ignore[invalid-argument-type]
         listing(fake_adb, (TRANSPORT + 1, "device"))
 
     monkeypatch.setattr(device, "_force_stop", stop_then_renumber)
@@ -1287,8 +1291,10 @@ def test_a_stop_that_waits_after_force_stop_records_the_half_relaunch(
     dropped: list[bool] = []
     original_stop = device.stop_app
 
-    def stop_then_drop(package: str, _send_by: float | None = None) -> None:
-        original_stop(package, _send_by=_send_by)
+    def stop_then_drop(
+        package: str, _send_by: float | None = None, _epoch: int | None = None
+    ) -> None:
+        original_stop(package, _send_by=_send_by, _epoch=_epoch)
         listing(fake_adb)
         dropped.append(True)
 
@@ -1319,11 +1325,13 @@ def test_a_relaunch_refused_before_its_force_stop_is_taken_back(
     original = device.stop_app
     moved: list[bool] = []
 
-    def renumber_then_stop(package: str, _send_by: float | None = None) -> None:
+    def renumber_then_stop(
+        package: str, _send_by: float | None = None, _epoch: int | None = None
+    ) -> None:
         if not moved:
             moved.append(True)
             listing(fake_adb, (TRANSPORT + 1, "device"))
-        original(package, _send_by=_send_by)
+        original(package, _send_by=_send_by, _epoch=_epoch)
 
     monkeypatch.setattr(device, "stop_app", renumber_then_stop)
     out = tmp_path / "run"

@@ -47,7 +47,7 @@ from uiprobe.pngfile import check_png
 from uiprobe.windowdiag import TapWindowDiagnosis, diagnose_tap_window
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Generator, Mapping, Sequence
+    from collections.abc import Callable, Mapping, Sequence
 
 __all__ = [
     "DEVICE_WIDE_KEYS",
@@ -108,6 +108,29 @@ def _monotonic() -> float:
     reads, so no code of the caller runs between that check and the send.
     """
     return time.monotonic()
+
+
+class _Dispatch(NamedTuple):
+    """What the crawl hands one call that changes the device: the value of
+    `_monotonic` by which its requests must go out, and the `pin_epoch` it
+    approved (None: none given)."""
+
+    send_by: float | None
+    epoch: int | None
+
+
+def _dispatch(send_by: object, epoch: object) -> _Dispatch | None:
+    """Check the private `_send_by` and `_epoch` arguments; they must be a
+    built-in float and int (the crawl's own values), or None."""
+    if send_by is None and epoch is None:
+        return None
+    if send_by is not None and type(send_by) is not float:
+        msg = f"_send_by must be a float, not {type(send_by).__name__}"
+        raise TypeError(msg)
+    if epoch is not None and type(epoch) is not int:
+        msg = f"_epoch must be an int, not {type(epoch).__name__}"
+        raise TypeError(msg)
+    return _Dispatch(send_by, epoch)
 
 
 # Android gives each user this many uids: uid = user * 100000 + app id.
@@ -1542,11 +1565,6 @@ class Device:
         self._pinned_identity: DeviceIdentity | None = None
         self._repins: list[tuple[int, int]] = []
         self._pin_watch: Callable[[], bool] | None = None
-        # Set only while one call that changes the device runs: the value of
-        # `_monotonic` by which its requests must go out (None: no limit).
-        self._send_by: float | None = None
-        # The transport an unpinned `launch` was bound to for its whole run.
-        self._bound: int | None = None
         self._repinning = False  # inside a re-pin: no second one
         self._reconnects = 0  # times the device had to be proven again
         # Moves on every event that makes earlier reads doubtful: a failed
@@ -1585,8 +1603,7 @@ class Device:
             # from the watch, say): nothing goes out, and the proof fails.
             raise self._fail(self._changed("was asked for during a proof"))
         if self._transport_id is None:
-            # Unpinned: only a running launch binds its requests to one transport.
-            return {} if self._bound is None else {"transport_id": self._bound}
+            return {}
         succeeded = False
         try:
             self._check_listed(strict=strict)
@@ -1605,6 +1622,7 @@ class Device:
         *,
         strict: bool,
         changing: bool = False,
+        dispatch: _Dispatch | None = None,
     ) -> T:
         """Send one request with the pin; note a lost transport at once.
 
@@ -1624,7 +1642,7 @@ class Device:
         there, never a caller's.
         """
         pin = self._pin(strict=strict)  # moves the epoch itself on a failure
-        guard = self._dispatch_guard(self._epoch) if changing else None
+        guard = self._dispatch_guard(self._epoch, dispatch) if changing else None
         succeeded = False
         try:
             result = send(pin) if guard is None else send(pin, guard)
@@ -1638,9 +1656,17 @@ class Device:
                 self._epoch += 1  # any way out but success, whatever the error
         return result
 
-    def _dispatch_guard(self, epoch: int) -> Callable[[], None]:
-        """The last check of a request that changes the device (see `_call`)."""
-        send_by = self._send_by
+    def _dispatch_guard(
+        self, epoch: int, dispatch: _Dispatch | None
+    ) -> Callable[[], None]:
+        """The last check of a request that changes the device (see `_call`).
+
+        The epoch compared is the one the caller approved (`dispatch`), else
+        the one when the request began.
+        """
+        send_by = None if dispatch is None else dispatch.send_by
+        if dispatch is not None and dispatch.epoch is not None:
+            epoch = dispatch.epoch
 
         def guard() -> None:
             if self._epoch != epoch:
@@ -1660,23 +1686,6 @@ class Device:
                 raise DeviceNotFoundError(msg, details=details)
 
         return guard
-
-    @contextlib.contextmanager
-    def _sending_by(self, send_by: float | None) -> Generator[None]:
-        """Hold the requests of one call to `send_by` (a `_monotonic` value)."""
-        if send_by is not None and (
-            isinstance(send_by, bool) or not isinstance(send_by, int | float)
-        ):
-            msg = f"_send_by must be a number, not {type(send_by).__name__}"
-            raise TypeError(msg)
-        before, self._send_by = (
-            self._send_by,
-            (None if send_by is None else float(send_by)),
-        )
-        try:
-            yield
-        finally:
-            self._send_by = before
 
     def _check_listed(self, *, strict: bool = False) -> None:
         """Hold every request to one rule; raise when it does not hold.
@@ -2079,7 +2088,12 @@ class Device:
         return self._shell_text(command)
 
     def _shell_text(
-        self, command: str, *, timeout: float | None = None, strict: bool = False
+        self,
+        command: str,
+        *,
+        timeout: float | None = None,
+        strict: bool = False,
+        dispatch: _Dispatch | None = None,
     ) -> str:
         changing = command.startswith(_CHANGING_COMMANDS)
         strict = strict or changing
@@ -2093,6 +2107,7 @@ class Device:
             ),
             strict=strict,
             changing=changing,
+            dispatch=dispatch,
         )
         return raw.decode("utf-8", errors="replace")
 
@@ -2103,6 +2118,7 @@ class Device:
         long: bool = False,
         press_ms: int = DEFAULT_PRESS_MS,
         _send_by: float | None = None,
+        _epoch: int | None = None,
     ) -> tuple[int, int]:
         """Press one point of the screen showing now; return the point pressed.
 
@@ -2170,46 +2186,45 @@ class Device:
 
         The first two are raised before anything is sent to the adb server.
 
-        `_send_by` is for uiprobe's crawl, not part of the API: a value of
-        uiprobe's own clock by which the request must go out, checked on the
-        selected connection right before it is written (``send_stopped``).
+        `_send_by` and `_epoch` are for uiprobe's crawl, not part of the API:
+        a value of uiprobe's own clock by which the request must go out, and
+        the `pin_epoch` the crawl approved, both checked on the selected
+        connection right before the request is written (``send_stopped``,
+        ``pin_not_proven``).
         """
-        with self._sending_by(_send_by):
-            if not isinstance(long, bool):
-                msg = f"long must be a bool, not {type(long).__name__}"
-                raise TypeError(msg)
-            hold = _check_press_ms(press_ms)
-            if long and hold != DEFAULT_PRESS_MS:
+        dispatch = _dispatch(_send_by, _epoch)
+        if not isinstance(long, bool):
+            msg = f"long must be a bool, not {type(long).__name__}"
+            raise TypeError(msg)
+        hold = _check_press_ms(press_ms)
+        if long and hold != DEFAULT_PRESS_MS:
+            msg = "press_ms cannot be combined with long=True (a long press is 800 ms)"
+            raise ValueError(msg)
+        if isinstance(target, Element):
+            latest = self._latest_screen
+            if latest is None or not any(e is target for e in latest.elements):
                 msg = (
-                    "press_ms cannot be combined with long=True"
-                    " (a long press is 800 ms)"
+                    "this element is not from the latest dump of this device; "
+                    "dump again and use an element of that screen, or pass "
+                    "screen.tap_point(element) as a point"
                 )
                 raise ValueError(msg)
-            if isinstance(target, Element):
-                latest = self._latest_screen
-                if latest is None or not any(e is target for e in latest.elements):
-                    msg = (
-                        "this element is not from the latest dump of this device; "
-                        "dump again and use an element of that screen, or pass "
-                        "screen.tap_point(element) as a point"
-                    )
-                    raise ValueError(msg)
-                x, y = _press_point(latest.tap_point(target))
-            else:
-                x, y = _press_point(target)
-            point = (x, y)
-            if long or hold > 0:
-                words = ("input", "swipe", str(x), str(y), str(x), str(y))
-                words = (*words, str(LONG_PRESS_MS if long else hold))
-            else:
-                words = ("input", "tap", str(x), str(y))
-            output = self._shell_text(quote_args(*words) + _EXIT_SUFFIX)
-            failure = _input_failure(
-                "long_tap" if long else "tap", {"point": list(point)}, output
-            )
-            if failure is not None:
-                raise self._doubt(failure)
-            return point
+            x, y = _press_point(latest.tap_point(target))
+        else:
+            x, y = _press_point(target)
+        point = (x, y)
+        if long or hold > 0:
+            words = ("input", "swipe", str(x), str(y), str(x), str(y))
+            words = (*words, str(LONG_PRESS_MS if long else hold))
+        else:
+            words = ("input", "tap", str(x), str(y))
+        output = self._shell_text(quote_args(*words) + _EXIT_SUFFIX, dispatch=dispatch)
+        failure = _input_failure(
+            "long_tap" if long else "tap", {"point": list(point)}, output
+        )
+        if failure is not None:
+            raise self._doubt(failure)
+        return point
 
     def swipe(
         self,
@@ -2386,6 +2401,7 @@ class Device:
         *,
         refused: RefusedKeys | None = None,
         _send_by: float | None = None,
+        _epoch: int | None = None,
     ) -> str:
         """Press one key; return the key code name that was sent.
 
@@ -2431,23 +2447,25 @@ class Device:
 
         The first two are raised before anything is sent to the adb server.
 
-        `_send_by` is for uiprobe's crawl, not part of the API: a value of
-        uiprobe's own clock by which the request must go out, checked on the
-        selected connection right before it is written (``send_stopped``).
+        `_send_by` and `_epoch` are for uiprobe's crawl, not part of the API:
+        a value of uiprobe's own clock by which the request must go out, and
+        the `pin_epoch` the crawl approved, both checked on the selected
+        connection right before the request is written (``send_stopped``,
+        ``pin_not_proven``).
         """
-        with self._sending_by(_send_by):
-            if refused is not None and not isinstance(refused, RefusedKeys):
-                kind = type(refused).__name__
-                msg = f"refused must be a RefusedKeys or None, not {kind}"
-                raise TypeError(msg)
-            code = _key_code(name, refused)
-            output = self._shell_text(
-                quote_args("input", "keyevent", code) + _EXIT_SUFFIX
-            )
-            failure = _input_failure("key", {"key": code}, output)
-            if failure is not None:
-                raise self._doubt(failure)
-            return code
+        dispatch = _dispatch(_send_by, _epoch)
+        if refused is not None and not isinstance(refused, RefusedKeys):
+            kind = type(refused).__name__
+            msg = f"refused must be a RefusedKeys or None, not {kind}"
+            raise TypeError(msg)
+        code = _key_code(name, refused)
+        output = self._shell_text(
+            quote_args("input", "keyevent", code) + _EXIT_SUFFIX, dispatch=dispatch
+        )
+        failure = _input_failure("key", {"key": code}, output)
+        if failure is not None:
+            raise self._doubt(failure)
+        return code
 
     def type_text(self, text: str) -> None:
         """Type `text` into the field that has focus, as printable ASCII.
@@ -2529,6 +2547,7 @@ class Device:
         timeout: float = DEFAULT_LAUNCH_TIMEOUT,
         activity: str | None = None,
         _send_by: float | None = None,
+        _epoch: int | None = None,
         _stop: Callable[[], bool] | None = None,
     ) -> None:
         """Start the app `package` and wait until it is in front.
@@ -2580,21 +2599,21 @@ class Device:
         between the caller's last check and the start (the crawl reads it once
         per run). A str subclass is used as a plain str with the same text.
 
-        On a device that is not pinned (as ``uiprobe launch`` uses), the whole
-        launch is bound to the transport the adb server lists for the device
-        when it begins: the launcher read, the stop, the start and the
-        foreground reads all go to that transport, so when it is gone (the
-        device was renumbered or replaced) nothing more is sent and the launch
-        ends with `DeviceNotFoundError` (``device_changed``). A pinned device
-        keeps its pin's rule. A server that lists no transport id binds
-        nothing.
+        On a device that is not pinned (as ``uiprobe launch`` uses), each
+        request selects the device by its serial. Accepted limit: when the
+        device behind the serial is replaced between the launcher read and
+        the start, the start uses the component read just before (it fails,
+        or opens that component of the same package on the new device). A
+        pinned device keeps its pin's rule.
 
-        `_send_by` and `_stop` are for uiprobe's crawl, not part of the API:
-        `_send_by` is a value of uiprobe's own clock by which the stop and the
-        start must go out (checked on the selected connection right before
-        each is written; ``send_stopped``); `_stop` is asked after a start
-        that reported success and before each foreground read, and when it
-        returns True the launch returns at once without reading more.
+        `_send_by`, `_epoch` and `_stop` are for uiprobe's crawl, not part of
+        the API: `_send_by` is a value of uiprobe's own clock by which the
+        stop and the start must go out, and `_epoch` the `pin_epoch` the
+        crawl approved (both checked on the selected connection right before
+        each request is written; ``send_stopped``, ``pin_not_proven``);
+        `_stop` is asked after a start that reported success and before each
+        foreground read, which also stop once `_send_by` has passed; then the
+        launch returns at once without reading more.
 
         Raises:
             TypeError: `package` or `activity` is not a str, `restart` is not
@@ -2632,10 +2651,8 @@ class Device:
                 started.
             AdbError: The adb protocol or the command failed.
             AdbServerUnavailableError: The adb server cannot be reached.
-            DeviceNotFoundError: The device is gone, has to be proven again
-                (``pin_not_proven``, nothing sent), or (unpinned) no longer
-                listed on the transport the launch began on
-                (``device_changed``, nothing more sent).
+            DeviceNotFoundError: The device is gone, or has to be proven
+                again (``pin_not_proven``, nothing sent).
             DeviceOfflineError: The device is offline.
             DeviceUnauthorizedError: The device has not authorized this host.
         """
@@ -2651,8 +2668,10 @@ class Device:
         if _stop is not None and not callable(_stop):
             msg = "_stop must be callable or None"
             raise TypeError(msg)
-        with self._sending_by(_send_by), self._bound_launch():
-            self._launch(package, activity, limit, restart=restart, stop=_stop)
+        dispatch = _dispatch(_send_by, _epoch)
+        self._launch(
+            package, activity, limit, restart=restart, stop=_stop, dispatch=dispatch
+        )
 
     def _launch(
         self,
@@ -2662,6 +2681,7 @@ class Device:
         *,
         restart: bool,
         stop: Callable[[], bool] | None,
+        dispatch: _Dispatch | None,
     ) -> None:
         """`launch` after its arguments were checked."""
         if activity is None:
@@ -2677,13 +2697,16 @@ class Device:
                 details = {"serial": self.serial, "reason": PIN_NOT_PROVEN}
                 raise DeviceNotFoundError(msg, details=details)
         if restart:
-            self._force_stop(package)
-        self._start(package, activity, limit, force_stopped=restart)
+            self._force_stop(package, dispatch)
+        self._start(package, activity, limit, force_stopped=restart, dispatch=dispatch)
         details: dict[str, object] = {"package": package}
         deadline = self._clock() + limit
+        send_by = None if dispatch is None else dispatch.send_by
         while True:
             if stop is not None and stop():
                 return  # the caller (the crawl) asked to stop: no more reads
+            if send_by is not None and _monotonic() >= send_by:
+                return  # the crawl's time is up: no more reads
             seen = self.foreground()
             if seen == package:
                 return
@@ -2697,45 +2720,6 @@ class Device:
         last = "unknown" if shown is None else shown
         msg = f"{package} was not in front after {limit:g} seconds (foreground: {last})"
         raise LaunchFailedError(msg, details=details)
-
-    @contextlib.contextmanager
-    def _bound_launch(self) -> Generator[None]:
-        """Bind an unpinned launch to the transport the device is on now.
-
-        The adb server's list is read once; when it shows exactly one ready
-        entry of this serial with a transport id, every request of the launch
-        (the launcher read, the stop, the start and the foreground reads)
-        goes to that transport (``host:transport-id:N``). When that transport
-        is gone, the request fails at the adb server, so nothing reaches
-        another device or a renumbered one, and the launch ends with
-        `DeviceNotFoundError` (``device_changed``). A pinned device keeps its
-        own rule; without a transport id in the list, nothing is bound.
-        """
-        if self._transport_id is not None or self._bound is not None:
-            yield
-            return
-        ready = [
-            d
-            for d in self._client.devices()
-            if d.serial == self.serial and d.state == READY_STATE
-        ]
-        if len(ready) != 1 or ready[0].transport_id is None:
-            yield
-            return
-        self._bound = ready[0].transport_id
-        try:
-            yield
-        except DeviceNotFoundError as error:
-            if "reason" in error.details:
-                raise
-            msg = (
-                f"the transport {self._bound} that {self.serial} was on when the"
-                " launch began is gone; nothing more was sent"
-            )
-            details = {"serial": self.serial, "reason": "device_changed"}
-            raise DeviceNotFoundError(msg, details=details) from None
-        finally:
-            self._bound = None
 
     def launcher_activity(self, package: str) -> str:
         """Return the launcher activity of `package` as ``PACKAGE/CLASS``.
@@ -2799,7 +2783,13 @@ class Device:
         raise LaunchFailedError(msg, details=details)
 
     def _start(
-        self, package: str, activity: str, limit: float, *, force_stopped: bool
+        self,
+        package: str,
+        activity: str,
+        limit: float,
+        *,
+        force_stopped: bool,
+        dispatch: _Dispatch | None = None,
     ) -> None:
         """Send ``am start -W`` of `activity` once and require it to succeed."""
         command = (
@@ -2819,7 +2809,7 @@ class Device:
         wait = max(limit, START_MIN_WAIT)
         details: dict[str, object] = {"package": package}
         try:
-            output = self._shell_text(command, timeout=wait)
+            output = self._shell_text(command, timeout=wait, dispatch=dispatch)
         except DeviceNotFoundError as error:
             if not force_stopped or error.details.get("reason") != PIN_NOT_PROVEN:
                 raise
@@ -2856,7 +2846,13 @@ class Device:
             raise LaunchFailedError(msg, details=details)
         raise self._doubt(LaunchFailedError(msg, details=details))
 
-    def stop_app(self, package: str, *, _send_by: float | None = None) -> None:
+    def stop_app(
+        self,
+        package: str,
+        *,
+        _send_by: float | None = None,
+        _epoch: int | None = None,
+    ) -> None:
         """Send ``am force-stop PACKAGE`` once and require it to report success.
 
         It is the first half of ``launch(package, restart=True)``, for a caller
@@ -2870,17 +2866,21 @@ class Device:
                 other output (``details["reason"]`` is ``stop_failed``).
             AdbError: The adb protocol or the command failed.
 
-        `_send_by` is for uiprobe's crawl, not part of the API: a value of
-        uiprobe's own clock by which the request must go out, checked on the
-        selected connection right before it is written (``send_stopped``).
+        `_send_by` and `_epoch` are for uiprobe's crawl, not part of the API:
+        a value of uiprobe's own clock by which the request must go out, and
+        the `pin_epoch` the crawl approved, both checked on the selected
+        connection right before the request is written (``send_stopped``,
+        ``pin_not_proven``).
         """
-        with self._sending_by(_send_by):
-            if isinstance(package, str):
-                package = str.__str__(package)
-            self._force_stop(check_package(package))
+        dispatch = _dispatch(_send_by, _epoch)
+        if isinstance(package, str):
+            package = str.__str__(package)
+        self._force_stop(check_package(package), dispatch)
 
-    def _force_stop(self, package: str) -> None:
-        stop = self._shell(quote_args("am", "force-stop", package) + _EXIT_SUFFIX)
+    def _force_stop(self, package: str, dispatch: _Dispatch | None = None) -> None:
+        stop = self._shell_text(
+            quote_args("am", "force-stop", package) + _EXIT_SUFFIX, dispatch=dispatch
+        )
         failure = _input_failure("force-stop", {}, stop)
         if failure is None:
             return

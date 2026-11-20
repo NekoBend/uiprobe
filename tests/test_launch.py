@@ -22,7 +22,7 @@ from tests.fake_device import El, FakeAndroid, Screen
 from uiprobe import cli
 from uiprobe import device as device_module
 from uiprobe.device import Device
-from uiprobe.errors import AdbError, DeviceNotFoundError, LaunchFailedError
+from uiprobe.errors import AdbError, LaunchFailedError
 
 SERIAL = "emulator-5554"
 SHOP = "com.example.shop"
@@ -1444,79 +1444,27 @@ def test_cli_launch_restart_with_an_unreadable_launcher_sends_no_stop(
     assert android.stopped == []
 
 
-# --- an unpinned launch stays on one transport ---
-
-
-def selected_after(fake_adb: FakeAdbServer, selector: str) -> list[str]:
-    """The services asked for right after `selector`."""
-    requests = fake_adb.requests
-    return [
-        requests[i + 1]
-        for i, request in enumerate(requests[:-1])
-        if request == selector
-    ]
+# --- an unpinned launch selects the device by its serial ---
 
 
 @pytest.mark.usefixtures("clock")
-def test_an_unpinned_launch_sends_every_request_on_the_first_transport(fake_adb):
+def test_an_unpinned_launch_selects_the_device_by_serial_for_every_request(
+    fake_adb,
+):
+    # As on main: each request goes to host:transport:SERIAL, also when the
+    # server lists a transport id (no binding to a transport number).
     FakeAndroid(fake_adb, SERIAL, SCREENS, start="launcher", transport_id=7)
     device = Device(adb_server=fake_adb.address)
     assert device.transport_id is None  # not pinned
     device.launch(SHOP, restart=True)
-    services = selected_after(fake_adb, "host:transport-id:7")
-    assert f"shell:{RESOLVE}" in services
-    assert f"shell:{STOP}" in services
-    assert f"shell:{START}" in services
-    assert not [r for r in fake_adb.requests if r == f"host:transport:{SERIAL}"]
-
-
-@pytest.mark.usefixtures("clock")
-def test_a_launch_whose_transport_changes_after_the_read_sends_nothing_more(
-    fake_adb, monkeypatch
-):
-    # Transport 7 is replaced by 8 under the same serial right after the
-    # launcher read; 8's app has another launcher and also declares .Main.
-    screens = (
-        *SCREENS,
-        Screen("new", f"{SHOP}/.NewLauncher", (El((0, 0, 9, 9)),)),
-    )
-    android = FakeAndroid(fake_adb, SERIAL, screens, start="launcher", transport_id=7)
-    device = Device(adb_server=fake_adb.address)
-    original = device._launcher_activity
-
-    def read_then_replace(package: str, **kwargs: bool) -> str:
-        component = original(package, **kwargs)
-        fake_adb.devices[:] = [{"serial": SERIAL, "state": "device", "transport_id": 8}]
-        return component
-
-    monkeypatch.setattr(device, "_launcher_activity", read_then_replace)
-    with pytest.raises(DeviceNotFoundError) as info:
-        device.launch(SHOP, restart=True)
-    assert info.value.details == {"serial": SERIAL, "reason": "device_changed"}
-    assert selected_after(fake_adb, "host:transport-id:8") == []
-    assert not [c for _, _, c in fake_adb.commands if c.startswith("am ")]
-    assert android.stopped == []
-
-
-def test_cli_launch_restart_on_a_replaced_transport_sends_no_stop_or_start(
-    capsys, fake_adb, monkeypatch, clock
-):
-    android = FakeAndroid(fake_adb, SERIAL, SCREENS, start="launcher", transport_id=7)
-    assert clock.now == 1000.0
-    original = Device._launcher_activity
-
-    def read_then_replace(self: Device, package: str, **kwargs: bool) -> str:
-        component = original(self, package, **kwargs)
-        fake_adb.devices[:] = [{"serial": SERIAL, "state": "device", "transport_id": 8}]
-        return component
-
-    monkeypatch.setattr(Device, "_launcher_activity", read_then_replace)
-    code, out, _ = invoke(capsys, fake_adb, "launch", SHOP, "--restart", "--json")
-    assert code != 0
-    assert json.loads(out)["error"]["details"]["reason"] == "device_changed"
-    assert selected_after(fake_adb, "host:transport-id:8") == []
-    assert android.stopped == []
-    assert not [c for _, _, c in fake_adb.commands if c.startswith("am ")]
+    requests = fake_adb.requests
+    selectors = [
+        requests[i - 1]
+        for i, r in enumerate(requests)
+        if r in (f"shell:{RESOLVE}", f"shell:{STOP}", f"shell:{START}")
+    ]
+    assert selectors == [f"host:transport:{SERIAL}"] * 3
+    assert not [r for r in requests if r.startswith("host:transport-id:")]
 
 
 @pytest.mark.usefixtures("android")

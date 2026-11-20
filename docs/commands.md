@@ -302,7 +302,7 @@ The start counts as successful only when all of this holds (empty lines are igno
 
 Then uiprobe reads the foreground app (as `Device.foreground` does) about every 0.5 seconds, at least once, until it equals `PACKAGE`; `--timeout SECONDS` (a plain decimal number from 0 to 600 of at most 32 characters, default 10) limits the wait. The timeout is the latest time a read may start, not a limit on the whole wait: a read that started in time still counts, so the wait can run past the timeout by the time of that read, and by how late a pause ends when the system wakes it late. This check is made even when `am start` reported success.
 
-The whole launch stays on the transport the adb server lists for the device when it begins: the launcher read, the stop, the start and the reads of the app in front all go to that transport. If the device is renumbered or replaced meanwhile, nothing more is sent and the command fails (`device_not_found`, `details.reason` `device_changed`).
+Each request selects the device by its serial, as for every other command. Accepted limit: if the device behind the serial is replaced between the launcher read and the start, the start uses the component read just before; it fails, or opens that component of the same package on the new device.
 
 `launch` starts the app on whatever device is selected and does not check what was in front before. It exits with 15 (`launch_failed`) when it cannot be sure the app is in front; `details.reason` says why:
 
