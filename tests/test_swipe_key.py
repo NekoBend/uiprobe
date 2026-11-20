@@ -235,9 +235,9 @@ def test_swipe_read_timeout_follows_the_duration(
     seen: list[tuple[str, float | None]] = []
     original = AdbClient.shell
 
-    def spy(self, serial, command, *, timeout=None):
+    def spy(self, serial, command, *, timeout=None, **kwargs):
         seen.append((command, timeout))
-        return original(self, serial, command, timeout=timeout)
+        return original(self, serial, command, timeout=timeout, **kwargs)
 
     monkeypatch.setattr(AdbClient, "shell", spy)
     device.swipe((1, 2), (3, 4), duration_ms=duration)
@@ -250,9 +250,9 @@ def test_key_uses_the_client_timeout(device, monkeypatch):
     seen: list[float | None] = []
     original = AdbClient.shell
 
-    def spy(self, serial, command, *, timeout=None):
+    def spy(self, serial, command, *, timeout=None, **kwargs):
         seen.append(timeout)
-        return original(self, serial, command, timeout=timeout)
+        return original(self, serial, command, timeout=timeout, **kwargs)
 
     monkeypatch.setattr(AdbClient, "shell", spy)
     device.key("back")

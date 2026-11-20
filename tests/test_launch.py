@@ -22,7 +22,7 @@ from tests.fake_device import El, FakeAndroid, Screen
 from uiprobe import cli
 from uiprobe import device as device_module
 from uiprobe.device import Device
-from uiprobe.errors import AdbError, LaunchFailedError
+from uiprobe.errors import AdbError, DeviceNotFoundError, LaunchFailedError
 
 SERIAL = "emulator-5554"
 SHOP = "com.example.shop"
@@ -230,6 +230,7 @@ def test_a_given_activity_is_started_without_a_read(device, android, fake_adb):
         (f"{SHOP}/." + "a" * 255, ValueError),
         (f"{SHOP}/.Main/x", ValueError),
         (SHOP, ValueError),
+        ("android/com.android.internal.app.ResolverActivity", ValueError),
     ],
 )
 def test_a_given_activity_is_checked_before_any_request(
@@ -535,6 +536,14 @@ def test_the_reported_activity_may_have_another_class(device, android, activity)
             "other_activity",
             "Activity: com.example.shopx/.Main",
         ),
+        # the system's chooser (owner "android", no dot)
+        (
+            OK_36.replace(
+                "{activity}", "android/com.android.internal.app.ResolverActivity"
+            ),
+            "other_activity",
+            "Activity: android/com.android.internal.app.ResolverActivity",
+        ),
         # not a component of any package
         (
             OK_36.replace("{activity}", "shop/.Main"),
@@ -752,12 +761,15 @@ def test_the_captured_warnings_are_accepted(device, android, warning):
 @pytest.mark.parametrize(
     ("state", "ok"),
     [
+        # only the captured values
         ("COLD", True),
         ("WARM", True),
-        ("HOT", True),
         ("UNKNOWN (0)", True),
-        ("UNKNOWN (-1)", True),
-        ("UNKNOWN", True),
+        ("HOT", False),
+        ("FAILED", False),
+        ("UNKNOWN (-1)", False),
+        ("UNKNOWN (1)", False),
+        ("UNKNOWN", False),
         ("cold", False),
         ("COLD extra", False),
         ("UNKNOWN (x)", False),
@@ -1430,3 +1442,97 @@ def test_cli_launch_restart_with_an_unreadable_launcher_sends_no_stop(
     }
     assert sent(fake_adb) == [RESOLVE]
     assert android.stopped == []
+
+
+# --- an unpinned launch stays on one transport ---
+
+
+def selected_after(fake_adb: FakeAdbServer, selector: str) -> list[str]:
+    """The services asked for right after `selector`."""
+    requests = fake_adb.requests
+    return [
+        requests[i + 1]
+        for i, request in enumerate(requests[:-1])
+        if request == selector
+    ]
+
+
+@pytest.mark.usefixtures("clock")
+def test_an_unpinned_launch_sends_every_request_on_the_first_transport(fake_adb):
+    FakeAndroid(fake_adb, SERIAL, SCREENS, start="launcher", transport_id=7)
+    device = Device(adb_server=fake_adb.address)
+    assert device.transport_id is None  # not pinned
+    device.launch(SHOP, restart=True)
+    services = selected_after(fake_adb, "host:transport-id:7")
+    assert f"shell:{RESOLVE}" in services
+    assert f"shell:{STOP}" in services
+    assert f"shell:{START}" in services
+    assert not [r for r in fake_adb.requests if r == f"host:transport:{SERIAL}"]
+
+
+@pytest.mark.usefixtures("clock")
+def test_a_launch_whose_transport_changes_after_the_read_sends_nothing_more(
+    fake_adb, monkeypatch
+):
+    # Transport 7 is replaced by 8 under the same serial right after the
+    # launcher read; 8's app has another launcher and also declares .Main.
+    screens = (
+        *SCREENS,
+        Screen("new", f"{SHOP}/.NewLauncher", (El((0, 0, 9, 9)),)),
+    )
+    android = FakeAndroid(fake_adb, SERIAL, screens, start="launcher", transport_id=7)
+    device = Device(adb_server=fake_adb.address)
+    original = device._launcher_activity
+
+    def read_then_replace(package: str, **kwargs: bool) -> str:
+        component = original(package, **kwargs)
+        fake_adb.devices[:] = [{"serial": SERIAL, "state": "device", "transport_id": 8}]
+        return component
+
+    monkeypatch.setattr(device, "_launcher_activity", read_then_replace)
+    with pytest.raises(DeviceNotFoundError) as info:
+        device.launch(SHOP, restart=True)
+    assert info.value.details == {"serial": SERIAL, "reason": "device_changed"}
+    assert selected_after(fake_adb, "host:transport-id:8") == []
+    assert not [c for _, _, c in fake_adb.commands if c.startswith("am ")]
+    assert android.stopped == []
+
+
+def test_cli_launch_restart_on_a_replaced_transport_sends_no_stop_or_start(
+    capsys, fake_adb, monkeypatch, clock
+):
+    android = FakeAndroid(fake_adb, SERIAL, SCREENS, start="launcher", transport_id=7)
+    assert clock.now == 1000.0
+    original = Device._launcher_activity
+
+    def read_then_replace(self: Device, package: str, **kwargs: bool) -> str:
+        component = original(self, package, **kwargs)
+        fake_adb.devices[:] = [{"serial": SERIAL, "state": "device", "transport_id": 8}]
+        return component
+
+    monkeypatch.setattr(Device, "_launcher_activity", read_then_replace)
+    code, out, _ = invoke(capsys, fake_adb, "launch", SHOP, "--restart", "--json")
+    assert code != 0
+    assert json.loads(out)["error"]["details"]["reason"] == "device_changed"
+    assert selected_after(fake_adb, "host:transport-id:8") == []
+    assert android.stopped == []
+    assert not [c for _, _, c in fake_adb.commands if c.startswith("am ")]
+
+
+@pytest.mark.usefixtures("android")
+def test_launch_asks_the_stop_hook_before_each_foreground_read(device, fake_adb):
+    asked: list[int] = []
+
+    def stop() -> bool:
+        asked.append(len(fake_adb.commands))
+        return True
+
+    device.launch(SHOP, _stop=stop)
+    assert len(asked) == 1
+    # Nothing was read after the start: the hook ended the launch first.
+    assert fake_adb.commands[-1][2] == START
+
+
+def test_there_is_no_public_send_check():
+    assert not hasattr(Device, "set_send_check")
+    assert not hasattr(Device, "send_check")

@@ -40,8 +40,13 @@ The loop (the protocol of the `CrawlEngine` docstring)::
 The gate (`_Run.gate`) is the one place every action passes right before it is
 sent. In order: `stop` and the time limit; the pin (`Device.check_pin`: the
 same transport, serial and identity with its boot id, a renumbered transport
-followed only as `Device.can_repin` allows, else an error); then fresh reads,
-for a tap the dump first. It refuses, with a ``not_sent`` end line and nothing
+followed only as `Device.can_repin` allows, else an error); `stop` again;
+then fresh reads, for a tap the dump first; last the comparison of the pin.
+No code of the caller runs after the reads: `stop`, `clock`, `sleep` and the
+run folder writes all come before them or after the input. The time limit is
+turned into a value of uiprobe's own clock (`_Run.note_time`) and checked by
+the device, with the pin, on the request's own connection right before it is
+written. It refuses, with a ``not_sent`` end line and nothing
 sent, when anything it needs cannot be read or has changed: for a tap the
 engine's `CrawlEngine.recheck` on the fresh dump, a keyboard known to be hidden
 and a focused window owned by the app; for BACK and relaunch the same
@@ -101,7 +106,7 @@ from uiprobe.crawl import (
     _Prints,
 )
 from uiprobe.crawl_preview import check_package
-from uiprobe.device import PIN_NOT_PROVEN, PIN_WAIT_STOPPED, SEND_STOPPED
+from uiprobe.device import PIN_NOT_PROVEN, PIN_WAIT_STOPPED, SEND_STOPPED, _monotonic
 from uiprobe.errors import (
     DeviceNotFoundError,
     DumpError,
@@ -239,6 +244,11 @@ MAX_DURATION: Final = "max_duration"  # the engine's reason for the time limit
 PAUSE_STEP: Final = 0.1
 
 
+class _StopSeen(Exception):  # noqa: N818 - a signal inside the driver, not an error
+    """`stop` returned True after the pin check of an observation, before the
+    screen was read: the run ends with ``interrupted`` without reading it."""
+
+
 @dataclass(frozen=True, slots=True)
 class _Seen:
     """What the device showed: the observation plus the focused window."""
@@ -309,6 +319,9 @@ class _Run:
         self.epoch_seen = device.pin_epoch
         self.gate_epoch = device.pin_epoch
         self.sent_epoch = device.pin_epoch  # when the last action was sent
+        # The time limit as a value of uiprobe's own clock (`note_time`), by
+        # which the next input, stop or start must go out.
+        self.send_by: float | None = None
         self.repins_before = len(device.repins)  # moves made before this run
         # Why a wait for the device was stopped (a not_sent reason), once known.
         self.wait_stop: str | None = None
@@ -318,6 +331,13 @@ class _Run:
 
     def run(self) -> str:
         """Run until a stop reason is known; return it."""
+        try:
+            return self.run_loop()
+        except _StopSeen:
+            return INTERRUPTED
+
+    def run_loop(self) -> str:
+        """`run`, which a stop seen inside an observation ends."""
         reason = self.first_launch()
         if reason is not None:
             return reason
@@ -374,14 +394,15 @@ class _Run:
         ``device_reconnected``: the device has to be proven again first (the
         action is closed as the gate would have closed it, and taken back
         unless it is the first launch). ``time_limit``: the time limit had
-        passed when the request was about to go out (`Device.set_send_check`);
+        passed when the request was about to go out (checked by the device
+        with uiprobe's own clock, see `note_time`);
         the action is closed as not sent and the run ends.
         """
         try:
             if isinstance(action, Tap):
-                self.device.tap(action.point)
+                self.device.tap(action.point, _send_by=self.send_by)
             elif isinstance(action, Back):
-                self.device.key("back")
+                self.device.key("back", _send_by=self.send_by)
             else:
                 self.launch()
         except DeviceNotFoundError as error:
@@ -486,10 +507,11 @@ class _Run:
                 self.wait_stop = NOT_SENT_TIME_LIMIT
         return self.wait_stop is not None
 
-    def send_check(self) -> str | None:
-        """The time limit, asked by the device right before a request that
-        changes it goes out (after the transport was chosen)."""
-        return NOT_SENT_TIME_LIMIT if self.clock() >= self.deadline else None
+    def note_time(self, now: float) -> None:
+        """Turn the time limit into a value of uiprobe's own clock, from the
+        caller's clock read `now` (before the last reads): the device checks
+        it right before the request goes out, with no caller code."""
+        self.send_by = _monotonic() + (self.deadline - now)
 
     def stopped(self) -> bool:
         """Whether `stop` asked to end; once it did, the answer stays True."""
@@ -520,8 +542,8 @@ class _Run:
         self.unsent = None
         if seen is not None and reason != NOT_SENT_RECONNECTED:
             # A read the pin check kept: it names the last screen and app
-            # (the id was computed in the gate, before its last look at the
-            # clock, so no work of this size runs after the last check).
+            # (the id was computed in the gate, before its last comparison,
+            # so no work of this size runs between it and the input).
             if self.gate_screen_id is not None:
                 self.last_screen_id = self.gate_screen_id
             self.last_foreground = seen.observation.foreground
@@ -716,6 +738,7 @@ class _Run:
         decision nothing else runs before the input is sent.
         """
         now = self.clock()  # the one time taken, before any read
+        self.note_time(now)
         reason = self.halt(now)
         if reason is not None:
             return reason, None
@@ -801,23 +824,21 @@ class _Run:
         # here), then nothing but one integer comparison follows.
         why = next((reason for failed, reason in checks if bool(failed)), None)
         self.gate_screen_id = None if screen is None else screen.screen_id
-        # The time again, after the reads (they can take long) and before the
-        # last comparison, so that the clock, which may be the caller's code,
-        # runs before it and nothing runs after it: past the limit, nothing is
-        # sent.
-        late = self.clock() >= self.deadline
+        # No caller code after the reads: the time limit is checked by the
+        # device with its own clock right before the input goes out
+        # (`note_time`), and the pin last, here and there.
         if self.device.pin_epoch != self.epoch_seen:
             return NOT_SENT_RECONNECTED, seen
-        if late:
-            return NOT_SENT_TIME_LIMIT, None
         return why, seen
 
     def launch_gate(self) -> str | None:
-        """The end of the first launch's gate, after the pin check: the time
-        again (the check's reads can take long), then the last comparison."""
+        """The end of the first launch's gate, after the pin check: `stop` and
+        the time again (the check can take long), then the last comparison."""
         epoch = self.device.pin_epoch
         stopped = self.stopped()  # asked again after the pin check
-        late = self.clock() >= self.deadline
+        now = self.clock()
+        late = now >= self.deadline
+        self.note_time(now)
         if self.device.pin_epoch != epoch:
             return NOT_SENT_RECONNECTED
         if stopped:
@@ -863,7 +884,12 @@ class _Run:
         raised and ends the run.
         """
         try:
-            self.device.launch(self.package, activity=self.launcher)
+            self.device.launch(
+                self.package,
+                activity=self.launcher,
+                _send_by=self.send_by,
+                _stop=self.stopped,
+            )
         except LaunchFailedError as error:
             reason = error.details.get("reason")
             if reason == "other_activity":
@@ -913,7 +939,7 @@ class _Run:
     def relaunch_stop(self, action_id: int, action: Relaunch) -> str | None:
         """Send the force-stop of a relaunch; why it was not sent, or None."""
         try:
-            self.device.stop_app(self.package)
+            self.device.stop_app(self.package, _send_by=self.send_by)
         except DeviceNotFoundError as error:
             reason = error.details.get("reason")
             if reason == SEND_STOPPED:
@@ -942,8 +968,11 @@ class _Run:
                 self.device.check_pin(emulator=self.emulator)
                 if self.stopped():
                     reason = NOT_SENT_STOPPED
-                elif self.clock() >= self.deadline:
-                    reason = NOT_SENT_TIME_LIMIT
+                else:
+                    now = self.clock()
+                    self.note_time(now)
+                    if now >= self.deadline:
+                        reason = NOT_SENT_TIME_LIMIT
         except DeviceNotFoundError as error:
             if error.details.get("reason") != PIN_WAIT_STOPPED:
                 raise
@@ -990,6 +1019,10 @@ class _Run:
         """
         while True:
             self.device.check_pin(emulator=self.emulator)
+            # Asked again after the pin check (which can wait for the device)
+            # and before the dump and the other reads.
+            if self.stopped():
+                raise _StopSeen
             self.epoch_seen = self.device.pin_epoch
             screen = self.dump()
             foreground = self.device.foreground()
@@ -1282,9 +1315,7 @@ def crawl(
     # called while the device is being proven); the caller's own watch is put
     # back at the end.
     caller_watch = device.pin_watch
-    caller_check = device.send_check
     device.set_pin_watch(None)
-    device.set_send_check(None)
     repins_before = len(device.repins)
     try:
         return _crawl_on(
@@ -1303,7 +1334,6 @@ def crawl(
         )
     finally:
         device.set_pin_watch(caller_watch)
-        device.set_send_check(caller_check)
 
 
 def _crawl_on(
@@ -1366,9 +1396,6 @@ def _crawl_on(
         run.repins_before = repins_before  # moves made before this call
         # Asked only while the device waits for a renumbered transport.
         device.set_pin_watch(run.waiting_stopped)
-        # Asked right before each input, start or stop goes out, after the
-        # transport was chosen: past the time limit nothing more is sent.
-        device.set_send_check(run.send_check)
         return _drive(run, writer)
     finally:
         with contextlib.suppress(RunFolderError):

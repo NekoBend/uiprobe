@@ -47,7 +47,7 @@ from uiprobe.pngfile import check_png
 from uiprobe.windowdiag import TapWindowDiagnosis, diagnose_tap_window
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping, Sequence
+    from collections.abc import Callable, Generator, Mapping, Sequence
 
 __all__ = [
     "DEVICE_WIDE_KEYS",
@@ -95,9 +95,19 @@ PIN_WAIT_STOPPED: Final = "pin_wait_stopped"
 # because the device has to be proven again first (the pin itself is kept).
 PIN_NOT_PROVEN: Final = "pin_not_proven"
 # details["reason"] when a request that changes the device was not sent
-# because the check set with `Device.set_send_check` said so (asked after the
-# transport was chosen, right before the request); details["why"] is its word.
+# because the time it had to go out by had passed: checked with uiprobe's own
+# clock on the selected connection, right before the request is written (the
+# crawl's time limit); details["why"] is ``time_limit``.
 SEND_STOPPED: Final = "send_stopped"
+
+
+def _monotonic() -> float:
+    """uiprobe's own clock for the last check before a request goes out.
+
+    The crawl turns its time limit into a value of this clock before its last
+    reads, so no code of the caller runs between that check and the send.
+    """
+    return time.monotonic()
 
 
 # Android gives each user this many uids: uid = user * 100000 + app id.
@@ -173,12 +183,14 @@ _START_WARNINGS: Final = frozenset(
         "Warning: Activity not started, its current task has been brought to the front",
     }
 )
-# Captured: COLD, WARM, UNKNOWN (0) (API 36); ThisTime only on API 24.
+# LaunchState only as captured (API 36): COLD, WARM, UNKNOWN (0); another
+# value is unknown output until it is seen. ThisTime only on API 24.
 _START_INFO = re.compile(
-    r"(LaunchState): [A-Z]{1,16}(?: \(-?[0-9]{1,10}\))?"
+    r"(LaunchState): (?:COLD|WARM|UNKNOWN \(0\))"
     r"|(ThisTime|TotalTime|WaitTime): -?[0-9]{1,10}"
 )
 _START_OK: Final = "Status: ok"
+SYSTEM_PACKAGE: Final = "android"
 _START_DONE: Final = "Complete"
 _START_ACTIVITY: Final = "Activity:"
 # C0 and C1 control characters; a line keeps none after its CR LF end is cut.
@@ -992,11 +1004,14 @@ def _start_report_failure(
     if component != named and _is_component(component, package):
         return None
     owner = component.partition("/")[0]
+    # The system owner ``android`` (its chooser,
+    # android/com.android.internal.app.ResolverActivity) has no dot, unlike an
+    # app's package; it is accepted here, for the activity reported only.
     if (
         component != named
         and owner != package
         and len(owner) <= MAX_PACKAGE_LENGTH
-        and PACKAGE_PATTERN.fullmatch(owner)
+        and (owner == SYSTEM_PACKAGE or PACKAGE_PATTERN.fullmatch(owner))
         and _is_component(component, owner)
     ):
         return _StartFailure(
@@ -1527,7 +1542,11 @@ class Device:
         self._pinned_identity: DeviceIdentity | None = None
         self._repins: list[tuple[int, int]] = []
         self._pin_watch: Callable[[], bool] | None = None
-        self._send_check: Callable[[], str | None] | None = None
+        # Set only while one call that changes the device runs: the value of
+        # `_monotonic` by which its requests must go out (None: no limit).
+        self._send_by: float | None = None
+        # The transport an unpinned `launch` was bound to for its whole run.
+        self._bound: int | None = None
         self._repinning = False  # inside a re-pin: no second one
         self._reconnects = 0  # times the device had to be proven again
         # Moves on every event that makes earlier reads doubtful: a failed
@@ -1566,7 +1585,8 @@ class Device:
             # from the watch, say): nothing goes out, and the proof fails.
             raise self._fail(self._changed("was asked for during a proof"))
         if self._transport_id is None:
-            return {}
+            # Unpinned: only a running launch binds its requests to one transport.
+            return {} if self._bound is None else {"transport_id": self._bound}
         succeeded = False
         try:
             self._check_listed(strict=strict)
@@ -1581,7 +1601,7 @@ class Device:
 
     def _call[T](
         self,
-        send: Callable[[dict[str, int]], T],
+        send: Callable[..., T],
         *,
         strict: bool,
         changing: bool = False,
@@ -1597,20 +1617,17 @@ class Device:
         the next input is refused.
 
         A request that `changing` marks (an input, a start or stop of an app)
-        asks the send check (`set_send_check`) after the pin check, right
-        before it goes out.
+        is checked once more on its own connection, after the transport was
+        selected and right before the request is written: nothing happened to
+        the pin since this method began (`pin_epoch`), and uiprobe's own clock
+        has not reached the time it had to go out by. Only uiprobe's code runs
+        there, never a caller's.
         """
         pin = self._pin(strict=strict)  # moves the epoch itself on a failure
-        if changing and self._send_check is not None:
-            why = self._send_check()
-            if why is not None:
-                word = str.__str__(why) if isinstance(why, str) else "stopped"
-                msg = f"nothing was sent to {self.serial}: {_escaped(word, 40)}"
-                details = {"serial": self.serial, "reason": SEND_STOPPED, "why": word}
-                raise DeviceNotFoundError(msg, details=details)
+        guard = self._dispatch_guard(self._epoch) if changing else None
         succeeded = False
         try:
-            result = send(pin)
+            result = send(pin) if guard is None else send(pin, guard)
             succeeded = True
         except BaseException as error:
             if pin:
@@ -1620,6 +1637,46 @@ class Device:
             if pin and not succeeded:
                 self._epoch += 1  # any way out but success, whatever the error
         return result
+
+    def _dispatch_guard(self, epoch: int) -> Callable[[], None]:
+        """The last check of a request that changes the device (see `_call`)."""
+        send_by = self._send_by
+
+        def guard() -> None:
+            if self._epoch != epoch:
+                msg = (
+                    f"{self.serial} has to be proven again before an input"
+                    f" (transport {self._transport_id}); nothing was sent"
+                )
+                details = {"serial": self.serial, "reason": PIN_NOT_PROVEN}
+                raise DeviceNotFoundError(msg, details=details)
+            if send_by is not None and _monotonic() >= send_by:
+                msg = f"nothing was sent to {self.serial}: the time limit had passed"
+                details = {
+                    "serial": self.serial,
+                    "reason": SEND_STOPPED,
+                    "why": "time_limit",
+                }
+                raise DeviceNotFoundError(msg, details=details)
+
+        return guard
+
+    @contextlib.contextmanager
+    def _sending_by(self, send_by: float | None) -> Generator[None]:
+        """Hold the requests of one call to `send_by` (a `_monotonic` value)."""
+        if send_by is not None and (
+            isinstance(send_by, bool) or not isinstance(send_by, int | float)
+        ):
+            msg = f"_send_by must be a number, not {type(send_by).__name__}"
+            raise TypeError(msg)
+        before, self._send_by = (
+            self._send_by,
+            (None if send_by is None else float(send_by)),
+        )
+        try:
+            yield
+        finally:
+            self._send_by = before
 
     def _check_listed(self, *, strict: bool = False) -> None:
         """Hold every request to one rule; raise when it does not hold.
@@ -2001,27 +2058,6 @@ class Device:
         """The watch set with `set_pin_watch`, or None."""
         return self._pin_watch
 
-    @property
-    def send_check(self) -> Callable[[], str | None] | None:
-        """The check set with `set_send_check`, or None."""
-        return self._send_check
-
-    def set_send_check(self, check: Callable[[], str | None] | None) -> None:
-        """Ask `check` right before each request that changes the device.
-
-        It is called after the transport was chosen (the adb server's list
-        read and the pin checked), right before the request goes out, for an
-        input and for a start or stop of an app, never for a read. When it
-        returns a str, nothing is sent and the request raises
-        `DeviceNotFoundError` whose ``details["reason"]`` is ``send_stopped``
-        and ``details["why"]`` that str; the pin stays as it was. The crawl
-        uses it for its time limit. None removes it.
-        """
-        if check is not None and not callable(check):
-            msg = "check must be callable or None"
-            raise TypeError(msg)
-        self._send_check = check
-
     def set_pin_watch(self, watch: Callable[[], bool] | None) -> None:
         """Ask `watch` while waiting for a renumbered transport.
 
@@ -2048,8 +2084,12 @@ class Device:
         changing = command.startswith(_CHANGING_COMMANDS)
         strict = strict or changing
         raw = self._call(
-            lambda pin: self._client.shell(
-                self.serial, command, timeout=timeout, **pin
+            lambda pin, guard=None: (
+                self._client.shell(self.serial, command, timeout=timeout, **pin)
+                if guard is None
+                else self._client.shell(
+                    self.serial, command, timeout=timeout, _before_send=guard, **pin
+                )
             ),
             strict=strict,
             changing=changing,
@@ -2062,6 +2102,7 @@ class Device:
         *,
         long: bool = False,
         press_ms: int = DEFAULT_PRESS_MS,
+        _send_by: float | None = None,
     ) -> tuple[int, int]:
         """Press one point of the screen showing now; return the point pressed.
 
@@ -2128,39 +2169,47 @@ class Device:
             DeviceUnauthorizedError: The device has not authorized this host.
 
         The first two are raised before anything is sent to the adb server.
+
+        `_send_by` is for uiprobe's crawl, not part of the API: a value of
+        uiprobe's own clock by which the request must go out, checked on the
+        selected connection right before it is written (``send_stopped``).
         """
-        if not isinstance(long, bool):
-            msg = f"long must be a bool, not {type(long).__name__}"
-            raise TypeError(msg)
-        hold = _check_press_ms(press_ms)
-        if long and hold != DEFAULT_PRESS_MS:
-            msg = "press_ms cannot be combined with long=True (a long press is 800 ms)"
-            raise ValueError(msg)
-        if isinstance(target, Element):
-            latest = self._latest_screen
-            if latest is None or not any(e is target for e in latest.elements):
+        with self._sending_by(_send_by):
+            if not isinstance(long, bool):
+                msg = f"long must be a bool, not {type(long).__name__}"
+                raise TypeError(msg)
+            hold = _check_press_ms(press_ms)
+            if long and hold != DEFAULT_PRESS_MS:
                 msg = (
-                    "this element is not from the latest dump of this device; "
-                    "dump again and use an element of that screen, or pass "
-                    "screen.tap_point(element) as a point"
+                    "press_ms cannot be combined with long=True"
+                    " (a long press is 800 ms)"
                 )
                 raise ValueError(msg)
-            x, y = _press_point(latest.tap_point(target))
-        else:
-            x, y = _press_point(target)
-        point = (x, y)
-        if long or hold > 0:
-            words = ("input", "swipe", str(x), str(y), str(x), str(y))
-            words = (*words, str(LONG_PRESS_MS if long else hold))
-        else:
-            words = ("input", "tap", str(x), str(y))
-        output = self._shell_text(quote_args(*words) + _EXIT_SUFFIX)
-        failure = _input_failure(
-            "long_tap" if long else "tap", {"point": list(point)}, output
-        )
-        if failure is not None:
-            raise self._doubt(failure)
-        return point
+            if isinstance(target, Element):
+                latest = self._latest_screen
+                if latest is None or not any(e is target for e in latest.elements):
+                    msg = (
+                        "this element is not from the latest dump of this device; "
+                        "dump again and use an element of that screen, or pass "
+                        "screen.tap_point(element) as a point"
+                    )
+                    raise ValueError(msg)
+                x, y = _press_point(latest.tap_point(target))
+            else:
+                x, y = _press_point(target)
+            point = (x, y)
+            if long or hold > 0:
+                words = ("input", "swipe", str(x), str(y), str(x), str(y))
+                words = (*words, str(LONG_PRESS_MS if long else hold))
+            else:
+                words = ("input", "tap", str(x), str(y))
+            output = self._shell_text(quote_args(*words) + _EXIT_SUFFIX)
+            failure = _input_failure(
+                "long_tap" if long else "tap", {"point": list(point)}, output
+            )
+            if failure is not None:
+                raise self._doubt(failure)
+            return point
 
     def swipe(
         self,
@@ -2331,7 +2380,13 @@ class Device:
         start, end = _scroll_points(direction, Bounds(0, 0, size[0], size[1]), size)
         return self.swipe(start, end, duration_ms=duration_ms)
 
-    def key(self, name: str, *, refused: RefusedKeys | None = None) -> str:
+    def key(
+        self,
+        name: str,
+        *,
+        refused: RefusedKeys | None = None,
+        _send_by: float | None = None,
+    ) -> str:
         """Press one key; return the key code name that was sent.
 
         `name` is an alias from `KEY_ALIASES` (``back``, ``home``, ...;
@@ -2375,16 +2430,24 @@ class Device:
             DeviceUnauthorizedError: The device has not authorized this host.
 
         The first two are raised before anything is sent to the adb server.
+
+        `_send_by` is for uiprobe's crawl, not part of the API: a value of
+        uiprobe's own clock by which the request must go out, checked on the
+        selected connection right before it is written (``send_stopped``).
         """
-        if refused is not None and not isinstance(refused, RefusedKeys):
-            msg = f"refused must be a RefusedKeys or None, not {type(refused).__name__}"
-            raise TypeError(msg)
-        code = _key_code(name, refused)
-        output = self._shell_text(quote_args("input", "keyevent", code) + _EXIT_SUFFIX)
-        failure = _input_failure("key", {"key": code}, output)
-        if failure is not None:
-            raise self._doubt(failure)
-        return code
+        with self._sending_by(_send_by):
+            if refused is not None and not isinstance(refused, RefusedKeys):
+                kind = type(refused).__name__
+                msg = f"refused must be a RefusedKeys or None, not {kind}"
+                raise TypeError(msg)
+            code = _key_code(name, refused)
+            output = self._shell_text(
+                quote_args("input", "keyevent", code) + _EXIT_SUFFIX
+            )
+            failure = _input_failure("key", {"key": code}, output)
+            if failure is not None:
+                raise self._doubt(failure)
+            return code
 
     def type_text(self, text: str) -> None:
         """Type `text` into the field that has focus, as printable ASCII.
@@ -2465,6 +2528,8 @@ class Device:
         restart: bool = False,
         timeout: float = DEFAULT_LAUNCH_TIMEOUT,
         activity: str | None = None,
+        _send_by: float | None = None,
+        _stop: Callable[[], bool] | None = None,
     ) -> None:
         """Start the app `package` and wait until it is in front.
 
@@ -2515,6 +2580,22 @@ class Device:
         between the caller's last check and the start (the crawl reads it once
         per run). A str subclass is used as a plain str with the same text.
 
+        On a device that is not pinned (as ``uiprobe launch`` uses), the whole
+        launch is bound to the transport the adb server lists for the device
+        when it begins: the launcher read, the stop, the start and the
+        foreground reads all go to that transport, so when it is gone (the
+        device was renumbered or replaced) nothing more is sent and the launch
+        ends with `DeviceNotFoundError` (``device_changed``). A pinned device
+        keeps its pin's rule. A server that lists no transport id binds
+        nothing.
+
+        `_send_by` and `_stop` are for uiprobe's crawl, not part of the API:
+        `_send_by` is a value of uiprobe's own clock by which the stop and the
+        start must go out (checked on the selected connection right before
+        each is written; ``send_stopped``); `_stop` is asked after a start
+        that reported success and before each foreground read, and when it
+        returns True the launch returns at once without reading more.
+
         Raises:
             TypeError: `package` or `activity` is not a str, `restart` is not
                 a bool, or `timeout` is not a number (a bool is not).
@@ -2534,10 +2615,11 @@ class Device:
                 ``start_failed`` (``am start`` printed a line starting with
                 ``Error``, or ended with an exit status other than 0, then in
                 ``exit_status``), ``other_activity`` (a reply that is a
-                success in every other way named an activity of another app,
-                which is then in front; ``activity`` is that component,
-                escaped), ``unexpected_output`` (``am start`` did not report
-                the success described above), these three with ``output``, the
+                success in every other way named an activity of another app
+                or of the system (``android``, its chooser), which is then in
+                front; ``activity`` is that component, escaped),
+                ``unexpected_output`` (``am start`` did not report the success
+                described above), these three with ``output``, the
                 line at fault or else the first line that is not blank, cut to
                 200 characters and escaped, ``start_timeout`` (the reply of
                 ``am start -W`` did not come: it was silent for ``timeout``
@@ -2551,8 +2633,9 @@ class Device:
             AdbError: The adb protocol or the command failed.
             AdbServerUnavailableError: The adb server cannot be reached.
             DeviceNotFoundError: The device is gone, has to be proven again
-                (``pin_not_proven``, nothing sent), or the send check said
-                not to send (``send_stopped``, see `set_send_check`).
+                (``pin_not_proven``, nothing sent), or (unpinned) no longer
+                listed on the transport the launch began on
+                (``device_changed``, nothing more sent).
             DeviceOfflineError: The device is offline.
             DeviceUnauthorizedError: The device has not authorized this host.
         """
@@ -2565,7 +2648,23 @@ class Device:
         limit = _check_launch_timeout(timeout)
         if activity is not None:
             activity = _check_activity(activity, package)
-        else:
+        if _stop is not None and not callable(_stop):
+            msg = "_stop must be callable or None"
+            raise TypeError(msg)
+        with self._sending_by(_send_by), self._bound_launch():
+            self._launch(package, activity, limit, restart=restart, stop=_stop)
+
+    def _launch(
+        self,
+        package: str,
+        activity: str | None,
+        limit: float,
+        *,
+        restart: bool,
+        stop: Callable[[], bool] | None,
+    ) -> None:
+        """`launch` after its arguments were checked."""
+        if activity is None:
             # The read goes out only to a device proven now, as a start would,
             # and nothing follows it when anything happened to the pin.
             epoch = self._epoch
@@ -2583,6 +2682,8 @@ class Device:
         details: dict[str, object] = {"package": package}
         deadline = self._clock() + limit
         while True:
+            if stop is not None and stop():
+                return  # the caller (the crawl) asked to stop: no more reads
             seen = self.foreground()
             if seen == package:
                 return
@@ -2596,6 +2697,45 @@ class Device:
         last = "unknown" if shown is None else shown
         msg = f"{package} was not in front after {limit:g} seconds (foreground: {last})"
         raise LaunchFailedError(msg, details=details)
+
+    @contextlib.contextmanager
+    def _bound_launch(self) -> Generator[None]:
+        """Bind an unpinned launch to the transport the device is on now.
+
+        The adb server's list is read once; when it shows exactly one ready
+        entry of this serial with a transport id, every request of the launch
+        (the launcher read, the stop, the start and the foreground reads)
+        goes to that transport (``host:transport-id:N``). When that transport
+        is gone, the request fails at the adb server, so nothing reaches
+        another device or a renumbered one, and the launch ends with
+        `DeviceNotFoundError` (``device_changed``). A pinned device keeps its
+        own rule; without a transport id in the list, nothing is bound.
+        """
+        if self._transport_id is not None or self._bound is not None:
+            yield
+            return
+        ready = [
+            d
+            for d in self._client.devices()
+            if d.serial == self.serial and d.state == READY_STATE
+        ]
+        if len(ready) != 1 or ready[0].transport_id is None:
+            yield
+            return
+        self._bound = ready[0].transport_id
+        try:
+            yield
+        except DeviceNotFoundError as error:
+            if "reason" in error.details:
+                raise
+            msg = (
+                f"the transport {self._bound} that {self.serial} was on when the"
+                " launch began is gone; nothing more was sent"
+            )
+            details = {"serial": self.serial, "reason": "device_changed"}
+            raise DeviceNotFoundError(msg, details=details) from None
+        finally:
+            self._bound = None
 
     def launcher_activity(self, package: str) -> str:
         """Return the launcher activity of `package` as ``PACKAGE/CLASS``.
@@ -2716,7 +2856,7 @@ class Device:
             raise LaunchFailedError(msg, details=details)
         raise self._doubt(LaunchFailedError(msg, details=details))
 
-    def stop_app(self, package: str) -> None:
+    def stop_app(self, package: str, *, _send_by: float | None = None) -> None:
         """Send ``am force-stop PACKAGE`` once and require it to report success.
 
         It is the first half of ``launch(package, restart=True)``, for a caller
@@ -2729,10 +2869,15 @@ class Device:
             LaunchFailedError: The stop did not report exit status 0 with no
                 other output (``details["reason"]`` is ``stop_failed``).
             AdbError: The adb protocol or the command failed.
+
+        `_send_by` is for uiprobe's crawl, not part of the API: a value of
+        uiprobe's own clock by which the request must go out, checked on the
+        selected connection right before it is written (``send_stopped``).
         """
-        if isinstance(package, str):
-            package = str.__str__(package)
-        self._force_stop(check_package(package))
+        with self._sending_by(_send_by):
+            if isinstance(package, str):
+                package = str.__str__(package)
+            self._force_stop(check_package(package))
 
     def _force_stop(self, package: str) -> None:
         stop = self._shell(quote_args("am", "force-stop", package) + _EXIT_SUFFIX)

@@ -176,8 +176,8 @@ class LaunchFailedError(UiprobeError):
     ``start_failed`` (``am start`` printed a line starting with ``Error`` or
     ended with an exit status other than 0, then in ``details["exit_status"]``),
     ``other_activity`` (``am start`` reported a success that named an
-    activity of another app, which is then in front; ``details["activity"]``
-    is that component, escaped),
+    activity of another app or of the system owner ``android``, which is then
+    in front; ``details["activity"]`` is that component, escaped),
     ``unexpected_output`` (``am start`` did not report ``Status: ok`` and one
     activity of the package in the known shape); for these three,
     ``details["output"]`` is the line at fault, or the first line that is not

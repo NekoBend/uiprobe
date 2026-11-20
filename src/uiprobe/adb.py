@@ -31,7 +31,7 @@ from uiprobe.errors import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Callable, Mapping
 
 __all__ = [
     "DEFAULT_SERVER",
@@ -642,6 +642,7 @@ class AdbClient:
         *,
         timeout: float | None = None,
         transport_id: int | None = None,
+        _before_send: Callable[[], None] | None = None,
     ) -> bytes:
         """Run `command` on the device with the ``shell:`` service.
 
@@ -650,9 +651,14 @@ class AdbClient:
         `transport_id`, when given, selects the device by that transport
         (``host:transport-id:N``) instead of by `serial`, so the request goes
         to that very connection or fails; `serial` then only names it in
-        errors.
+        errors. `_before_send` is uiprobe's own check (not for callers): it is
+        called on the connection after the transport was selected, right
+        before the service request is written, and stops the request by
+        raising.
         """
-        return self._device_service(serial, f"shell:{command}", timeout, transport_id)
+        return self._device_service(
+            serial, f"shell:{command}", timeout, transport_id, _before_send
+        )
 
     def exec_out(
         self,
@@ -681,6 +687,7 @@ class AdbClient:
         service: str,
         read_timeout: float | None,
         transport_id: int | None = None,
+        before_send: Callable[[], None] | None = None,
     ) -> bytes:
         if transport_id is None:
             selector = f"host:transport:{serial}"
@@ -693,6 +700,8 @@ class AdbClient:
             message = _send_request(sock, selector)
             if message is not None:
                 raise _transport_error(serial, message)
+            if before_send is not None:
+                before_send()  # the last check, on the selected connection
             message = _send_request(sock, service)
             if message is not None:
                 raise _fail(service, message)

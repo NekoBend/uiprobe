@@ -13,6 +13,7 @@ import re
 import time
 from dataclasses import dataclass, replace
 from pathlib import Path
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, cast
 
 import pytest
@@ -28,7 +29,9 @@ from tests.fake_device import (
     assert_no_text_input,
     assert_only_back_keys,
 )
+from uiprobe import adb as adb_module
 from uiprobe import crawl_driver, runlog
+from uiprobe import device as device_module
 from uiprobe.crawl import (
     TAP_NOT_SENT,
     Back,
@@ -423,8 +426,10 @@ def test_a_relaunch_restarts_the_app(tmp_path, device, android, monkeypatch, clo
 
     original = device.tap
 
-    def tap_then_cover(point: tuple[int, int]) -> tuple[int, int]:
-        result = original(point)
+    def tap_then_cover(
+        point: tuple[int, int], _send_by: float | None = None
+    ) -> tuple[int, int]:
+        result = original(point, _send_by=_send_by)
         if not android.stopped and android.screen.name == "browse":
             for name in ("ext1", "ext2", "ext3"):
                 android.show(name)
@@ -624,8 +629,10 @@ def test_the_crawl_reads_the_launcher_once_and_starts_it_with_am_start(
 ):
     original = device.tap
 
-    def tap_then_cover(point: tuple[int, int]) -> tuple[int, int]:
-        result = original(point)
+    def tap_then_cover(
+        point: tuple[int, int], _send_by: float | None = None
+    ) -> tuple[int, int]:
+        result = original(point, _send_by=_send_by)
         if not android.stopped and android.screen.name == "browse":
             for name in ("ext1", "ext2", "ext3"):
                 android.show(name)
@@ -673,13 +680,25 @@ def test_an_unreadable_launcher_ends_the_crawl_before_the_run_folder(
     assert not any(c.startswith(("am ", "input ")) for c in commands(fake_adb))
 
 
+def share_clock(monkeypatch, clock) -> None:
+    """Make uiprobe's own clock (the one the device checks right before a
+    request goes out) the test's clock, so that a test can move both."""
+    monkeypatch.setattr(
+        device_module,
+        "time",
+        SimpleNamespace(monotonic=clock.monotonic, sleep=clock.sleep),
+    )
+
+
 def cover_after_browse(monkeypatch, device, android) -> None:
     """Bring screens of another app over the app after the tap on Browse,
     so that the engine relaunches."""
     original = device.tap
 
-    def tap_then_cover(point: tuple[int, int]) -> tuple[int, int]:
-        result = original(point)
+    def tap_then_cover(
+        point: tuple[int, int], _send_by: float | None = None
+    ) -> tuple[int, int]:
+        result = original(point, _send_by=_send_by)
         if not android.stopped and android.screen.name == "browse":
             for name in ("ext1", "ext2", "ext3"):
                 android.show(name)
@@ -850,6 +869,28 @@ def test_a_relaunch_that_names_another_apps_activity_ends_with_relaunch_limit(
     assert not [r for r in records if r.get("failed")]
 
 
+RESOLVER_REPLY = (
+    b"Starting: Intent { act=android.intent.action.MAIN"
+    b" cat=[android.intent.category.LAUNCHER] cmp=com.example.shop/.Main }\n"
+    b"Status: ok\nLaunchState: COLD\n"
+    b"Activity: android/com.android.internal.app.ResolverActivity\n"
+    b"TotalTime: 5\nWaitTime: 6\nComplete\nuiprobe-exit:0\n"
+)
+
+
+def test_a_start_handed_to_the_system_chooser_does_not_end_the_crawl(
+    tmp_path, device, android, clock
+):
+    # Synthetic: the start reports Android's own chooser (owner "android").
+    android.override(re.compile(r"^am start"), RESOLVER_REPLY)
+    out = tmp_path / "run"
+    result = run(device, clock, out)
+    assert result.stop_reason in STOP_REASONS
+    summary = (out / "summary.txt").read_text(encoding="utf-8")
+    assert f"{SHOP} was not in front after launch (android)" in summary
+    assert not [r for r in lines(out / "transitions.jsonl") if r.get("failed")]
+
+
 # --- stop and the time limit right before a request ---
 
 
@@ -909,29 +950,52 @@ def test_a_stop_asked_during_the_gate_pin_check_sends_no_tap(
     assert (records[-1]["not_sent"], records[-1]["reason"]) == (True, "stopped")
 
 
-@pytest.mark.usefixtures("android")
 def test_a_stop_asked_while_the_app_starts_reads_nothing_more(
-    tmp_path, device, monkeypatch, clock, fake_adb
+    tmp_path, device, android, clock, fake_adb
 ):
     asked: list[bool] = []
-    original = device.launch
 
-    def launch_then_stop(package: str, **kwargs: object) -> None:
-        original(package, **kwargs)
-        asked.append(True)
+    def start_then_stop(command: str):
+        reply = android._shell(command)
+        asked.append(True)  # stop() turns True while the start runs
+        return reply
 
-    monkeypatch.setattr(device, "launch", launch_then_stop)
+    android.override(re.compile(r"^am start"), start_then_stop)
     out = tmp_path / "run"
     result = run(device, clock, out, stop=lambda: bool(asked))
     assert result.stop_reason == "interrupted"
+    # The launch asks stop before its foreground read: nothing is read after
+    # the start, no foreground, no dump.
+    assert device_requests_after(fake_adb, start_requests(fake_adb)[0]) == []
+
+
+@pytest.mark.usefixtures("android")
+def test_a_stop_asked_during_the_observation_pin_check_reads_no_screen(
+    tmp_path, device, monkeypatch, clock, fake_adb
+):
+    asked: list[bool] = []
+    original = Device.check_pin
+
+    def check_then_stop(self: Device, **kwargs: object) -> None:
+        original(self, **kwargs)  # ty: ignore[invalid-argument-type]
+        if start_requests(fake_adb):  # the observation after the launch
+            asked.append(True)
+
+    monkeypatch.setattr(Device, "check_pin", check_then_stop)
+    out = tmp_path / "run"
+    result = run(device, clock, out, stop=lambda: bool(asked))
+    assert asked
+    assert result.stop_reason == "interrupted"
     after = device_requests_after(fake_adb, start_requests(fake_adb)[0])
-    # The launch's own wait for the app in front reads; no dump follows.
+    # The launch's own foreground read came before the observation; the
+    # observation's dump never went out.
     assert not [r for r in after if "uiautomator" in r or r.startswith("exec:")]
 
 
 def test_a_start_is_not_sent_once_the_time_limit_passed_during_the_listing(
     tmp_path, device, android, monkeypatch, clock, fake_adb
 ):
+    share_clock(monkeypatch, clock)
     original = Device._check_listed
     crossed: list[bool] = []
 
@@ -952,9 +1016,44 @@ def test_a_start_is_not_sent_once_the_time_limit_passed_during_the_listing(
     assert (records[-1]["not_sent"], records[-1]["reason"]) == (True, "time_limit")
 
 
+@pytest.mark.usefixtures("android")
+def test_a_start_is_not_sent_once_the_time_limit_passed_selecting_the_transport(
+    tmp_path, device, monkeypatch, clock, fake_adb
+):
+    # The adb server took long to acknowledge host:transport-id:N for the
+    # start; the check on that connection, right before the service request,
+    # holds it back.
+    share_clock(monkeypatch, clock)
+    original_listed = Device._check_listed
+    original_send = adb_module._send_request
+    armed: list[bool] = []
+
+    def listed(self: Device, *, strict: bool = False) -> None:
+        original_listed(self, strict=strict)
+        if strict:
+            armed.append(True)
+
+    def send_request(sock, request: str):
+        message = original_send(sock, request)
+        if armed and request.startswith("host:transport-id:"):
+            armed.clear()
+            clock.now += 3600.0  # the acknowledgement came late
+        return message
+
+    monkeypatch.setattr(Device, "_check_listed", listed)
+    monkeypatch.setattr(adb_module, "_send_request", send_request)
+    out = tmp_path / "run"
+    result = run(device, clock, out)
+    assert result.stop_reason == "max_duration"
+    assert start_requests(fake_adb) == []
+    records = lines(out / "transitions.jsonl")
+    assert (records[-1]["not_sent"], records[-1]["reason"]) == (True, "time_limit")
+
+
 def test_a_relaunch_start_is_not_sent_once_the_time_limit_passed(
     tmp_path, device, android, monkeypatch, clock, fake_adb
 ):
+    share_clock(monkeypatch, clock)
     cover_after_browse(monkeypatch, device, android)
     original = Device._check_listed
 
@@ -1729,8 +1828,8 @@ def _interrupting_put(_handle, _data):
 def _after_first_tap(monkeypatch, device, then):
     original = device.tap
 
-    def tap(point):
-        result = original(point)
+    def tap(point, _send_by=None):
+        result = original(point, _send_by=_send_by)
         then()
         return result
 
@@ -1833,8 +1932,10 @@ def test_a_stop_between_force_stop_and_start_sends_no_start(
 ):
     original = device.tap
 
-    def tap_then_cover(point: tuple[int, int]) -> tuple[int, int]:
-        result = original(point)
+    def tap_then_cover(
+        point: tuple[int, int], _send_by: float | None = None
+    ) -> tuple[int, int]:
+        result = original(point, _send_by=_send_by)
         if not android.stopped and android.screen.name == "browse":
             for name in ("ext1", "ext2", "ext3"):
                 android.show(name)
@@ -1844,8 +1945,8 @@ def test_a_stop_between_force_stop_and_start_sends_no_start(
     stopping = []
     stop_app = device.stop_app
 
-    def stop_then_ask(package: str) -> None:
-        stop_app(package)
+    def stop_then_ask(package: str, _send_by: float | None = None) -> None:
+        stop_app(package, _send_by=_send_by)
         stopping.append(True)
 
     monkeypatch.setattr(device, "stop_app", stop_then_ask)
@@ -1989,8 +2090,10 @@ def test_a_changed_identity_after_the_force_stop_sends_no_start(
 ):
     original = device.tap
 
-    def tap_then_cover(point: tuple[int, int]) -> tuple[int, int]:
-        result = original(point)
+    def tap_then_cover(
+        point: tuple[int, int], _send_by: float | None = None
+    ) -> tuple[int, int]:
+        result = original(point, _send_by=_send_by)
         if not android.stopped and android.screen.name == "browse":
             for name in ("ext1", "ext2", "ext3"):
                 android.show(name)
@@ -1999,8 +2102,8 @@ def test_a_changed_identity_after_the_force_stop_sends_no_start(
     monkeypatch.setattr(device, "tap", tap_then_cover)
     stop_app = device.stop_app
 
-    def stop_then_swap(package: str) -> None:
-        stop_app(package)
+    def stop_then_swap(package: str, _send_by: float | None = None) -> None:
+        stop_app(package, _send_by=_send_by)
         android.props["ro.build.fingerprint"] = "other/build:36/X/9:user/k"
 
     monkeypatch.setattr(device, "stop_app", stop_then_swap)
@@ -2139,8 +2242,10 @@ def test_a_back_that_leaves_the_app_is_followed_by_a_relaunch(
     # leaves the app for the launcher. By default the launcher gets nothing.
     original_tap = device.tap
 
-    def tap_then_replace(point: tuple[int, int]) -> tuple[int, int]:
-        result = original_tap(point)
+    def tap_then_replace(
+        point: tuple[int, int], _send_by: float | None = None
+    ) -> tuple[int, int]:
+        result = original_tap(point, _send_by=_send_by)
         if android.screen.name == "browse":
             android.stack[:] = ["home", "browse"]
         return result
@@ -2268,7 +2373,9 @@ def test_a_tap_whose_reads_end_past_the_limit_is_not_sent(
     tmp_path: Path, device, android, clock, monkeypatch
 ):
     # Each dump takes 19 s on this device: the gate's own dump before a tap
-    # crosses the 1-minute limit, so the tap must not go out.
+    # crosses the 1-minute limit, so the tap must not go out (the device
+    # checks the time with uiprobe's own clock right before it would send).
+    share_clock(monkeypatch, clock)
     original = Device.dump
 
     def slow_dump(self: Device, **kwargs: object) -> object:
@@ -2321,8 +2428,10 @@ def test_a_restart_whose_pin_check_ends_past_the_limit_is_only_half_sent(
 ):
     original_tap = device.tap
 
-    def tap_then_cover(point: tuple[int, int]) -> tuple[int, int]:
-        result = original_tap(point)
+    def tap_then_cover(
+        point: tuple[int, int], _send_by: float | None = None
+    ) -> tuple[int, int]:
+        result = original_tap(point, _send_by=_send_by)
         if not android.stopped and android.screen.name == "browse":
             for name in ("ext1", "ext2", "ext3"):
                 android.show(name)
@@ -2347,33 +2456,35 @@ def test_a_restart_whose_pin_check_ends_past_the_limit_is_only_half_sent(
 
 
 @pytest.mark.usefixtures("android")
-def test_nothing_is_hashed_between_the_last_clock_read_and_a_tap(
+def test_nothing_is_hashed_between_the_last_time_check_and_a_tap(
     tmp_path: Path, device, clock, monkeypatch
 ):
     # The screen id walks the whole screen; it must be computed before the
-    # gate's last look at the clock, never between that look and the tap.
+    # last look at the time, which is the device's own, on the tap's
+    # connection right before the request is written.
     from uiprobe import model
 
     events: list[str] = []
     original_id = model.Screen.screen_id
-    original_tap = Device.tap
+    original_check = device_module._monotonic
+    original_send = adb_module._send_request
 
     def recording_id(self: model.Screen) -> str:
         events.append("hash")
         return original_id.fget(self)
 
-    def recording_clock() -> float:
-        events.append("clock")
-        return clock.now
+    def recording_check() -> float:
+        events.append("check")
+        return original_check()
 
-    def recording_tap(self: Device, *args: object, **kwargs: object) -> object:
-        last_clock = max(i for i, e in enumerate(events) if e == "clock")
-        assert "hash" not in events[last_clock:], events[last_clock:]
-        events.append("tap")
-        return original_tap(self, *args, **kwargs)  # ty: ignore[invalid-argument-type]
+    def recording_send(sock, request: str):
+        if request.startswith("shell:input swipe"):
+            events.append("tap")
+        return original_send(sock, request)
 
     monkeypatch.setattr(model.Screen, "screen_id", property(recording_id))
-    monkeypatch.setattr(Device, "tap", recording_tap)
+    monkeypatch.setattr(device_module, "_monotonic", recording_check)
+    monkeypatch.setattr(adb_module, "_send_request", recording_send)
     out = tmp_path / "run"
     crawl(
         device,
@@ -2382,10 +2493,13 @@ def test_nothing_is_hashed_between_the_last_clock_read_and_a_tap(
         policy=Policy(),
         limits=Limits(actions=4),
         settle=1.0,
-        clock=recording_clock,
+        clock=clock.monotonic,
         sleep=clock.sleep,
     )
-    assert "tap" in events
+    taps = [i for i, e in enumerate(events) if e == "tap"]
+    assert taps
+    for index in taps:
+        assert events[index - 1] == "check"  # the time, then at once the tap
 
 
 # --- skip details: the matched word in skipped.jsonl ---
