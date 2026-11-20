@@ -3783,7 +3783,100 @@ def test_a_real_boundary_between_fragments_keeps_the_exception(parts) -> None:
     assert reasons(run(_fragment_row(parts), policy=policy), "e2") == ()
 
 
-def test_latin_fragments_are_still_read_as_separate_words() -> None:
-    # In a script written with spaces, two texts are two words.
-    found = run_x(_fragment_row(("Turn on", "automatically")))
-    assert reasons(found, "e2") == ()
+@pytest.mark.parametrize(
+    ("parts", "exception", "word"),
+    [
+        (("recorder", "s"), "recorder", "order"),
+        (("recorder", "\u0332"), "recorder", "order"),
+        (
+            ("\u524a\u9664\u6e08\u307f2", "3"),
+            "\u524a\u9664\u6e08\u307f2",
+            "\u524a\u9664",
+        ),
+        (
+            ("\u524a\u9664\u6e08\u307f", "\u200b", "\u306b\u3059\u308b"),
+            "\u524a\u9664\u6e08\u307f",
+            "\u524a\u9664",
+        ),
+        (("Turn on", "automatically"), "automatically", "call"),
+    ],
+)
+def test_touching_fragments_are_one_word_in_every_script(
+    parts, exception, word
+) -> None:
+    # The space between two texts is uiprobe's: where letters, digits or
+    # marks touch on both sides it is no word boundary, so the exception does
+    # not stand alone and the hit counts, as in the single label.
+    policy = Policy(deny_exceptions=(exception,))
+    detail = deny_of(run(_fragment_row(parts), policy=policy), "e2")
+    assert detail is not None
+    assert (detail.word, detail.field) == (word, "joined")
+    single = run([el("e2", text="".join(parts))], policy=policy)
+    assert reasons(single, "e2") == ("deny_word",)
+
+
+@pytest.mark.parametrize(
+    "parts",
+    [
+        ("Network preferences", WIFI_SUMMARY),
+        ("recorder", " s"),
+        ("recorder", "!"),
+        ("Voice", " recorder"),
+    ],
+)
+def test_real_separators_between_fragments_keep_the_exception(parts) -> None:
+    policy = Policy(deny_exceptions=("recorder", "automatically"))
+    assert reasons(run(_fragment_row(parts), policy=policy), "e2") == ()
+
+
+@pytest.mark.parametrize("outer_clickable", [True, False])
+def test_an_outer_clickable_cannot_hide_an_inner_buttons_refusal(
+    outer_clickable,
+) -> None:
+    # The inner button reads 削除済みにする (refused); the outer container
+    # also holds 方法, so its joined text is the longer exception
+    # 削除済みにする方法. The inner button stays refused either way, and so
+    # does the clickable container that holds it.
+    words = (
+        "\u524a\u9664\u6e08\u307f",
+        "\u524a\u9664\u6e08\u307f\u306b\u3059\u308b\u65b9\u6cd5",
+    )
+    policy = Policy(deny_exceptions=words)
+    flags = CLICK if outer_clickable else ()
+    elements = [
+        el(
+            "e2",
+            cls="android.widget.LinearLayout",
+            bounds=(0, 100, 320, 300),
+            flags=flags,
+        ),
+        el(
+            "e3",
+            parent="e2",
+            cls="android.widget.LinearLayout",
+            bounds=(0, 100, 320, 200),
+        ),
+        el("e4", parent="e3", text=words[0], flags=(), bounds=(10, 110, 100, 130)),
+        el(
+            "e5",
+            parent="e3",
+            text="\u306b\u3059\u308b",
+            flags=(),
+            bounds=(100, 110, 200, 130),
+        ),
+        el(
+            "e6", parent="e2", text="\u65b9\u6cd5", flags=(), bounds=(10, 220, 100, 240)
+        ),
+    ]
+    found = run(elements, policy=policy)
+    inner = deny_of(found, "e3")
+    assert inner is not None
+    assert (inner.word, inner.field, inner.element_id) == (
+        "\u524a\u9664",
+        "joined",
+        "e3",
+    )
+    if outer_clickable:
+        outer = deny_of(found, "e2")
+        assert outer is not None
+        assert (outer.field, outer.element_id) == ("joined", "e3")

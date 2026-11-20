@@ -42,9 +42,13 @@ it is a whole word also with the invisible characters around it removed
 (``x`` + U+200B + U+0332 + ``recorder`` is one word) and in the original text
 before NFKC (U+013F + ``recorder`` is one word; NFKC would split it). In a
 joined text, the space put between two parts is no word boundary where the
-parts touch in a script written without spaces (`_tight_join`): an exception
-word must stand alone in that reading too, so 削除済み + にする is refused
-like 削除済みにする.
+visible characters on both sides of it are letters, digits or combining marks,
+in any script (`_tight_join`): an exception word must stand alone in that
+reading too, so ``recorder`` + ``s``, 削除済み + にする and ``Turn on`` +
+``automatically`` (with ``automatically`` listed) are refused like the single
+labels. So an exception word excuses a hit only as one whole word within the
+text of one element, or in a joined text where the boundaries around it are
+real separators (a space, punctuation or the end of the text).
 When the trace is not certain (NFKC of the characters one by one differs from
 NFKC of the field, or a traced form differs from the real one), every
 occurrence counts. Resource ids, the irreversibility phrases and the
@@ -206,12 +210,13 @@ ancestors and the clickable hit targets. Three strings are matched, each
 joined by one space in document order: the texts and content_descs together,
 the texts alone and the content_descs alone, so a description between two
 parts of ``Log`` + ``out`` does not hide ``log out``. The detail has field
-``joined`` and names the subtree root. A deny word in the joined text of a
-subtree is also in that of every clickable ancestor, so only the highest
-clickable element above each element is matched. This still holds with
-exception words: a word run never crosses the space between two parts, so an
-exception run in the joined text of an ancestor is one in every subtree that
-holds it.
+``joined`` and names the subtree root. Without exception words, a deny word in
+the joined text of a subtree is also in that of every clickable ancestor, so
+only the highest clickable element above each element is matched. With
+exception words that does not hold (a longer exception word can form in the
+ancestor's joined text), so the joined text of every clickable element in the
+highest clickable subtree is matched too, and a hit in any of them refuses
+(`_Judge.joined_root`).
 
 For ``confirm_button`` the whole screen counts: the deny words are matched in
 each field alone, then in the joined texts, the joined content_descs and the
@@ -223,7 +228,9 @@ Cost: the work grows linearly with the number of elements. One pass over the
 tree finds, for every element, the first deny hit in its own fields and in its
 subtree; hit targets come from a grid over the display; both are cached per
 element and per press point. The joined text is matched once per highest
-clickable root, so nested clickables do not make it quadratic. The one
+clickable root, so nested clickables do not make it quadratic; with exception
+words it is matched once per clickable element, which grows with the nesting
+depth of clickables. The one
 exception is the confirm-label search (_find_label), which can be quadratic in
 the nesting depth of clickable chains (deeper than real layouts).
 
@@ -695,53 +702,36 @@ def _forms(value: str) -> tuple[str, ...]:
     return tuple(dict.fromkeys(_form_triple(value)))
 
 
-# Scripts other than Japanese (whose letters `_is_japanese_letter` knows) that
-# are written without spaces between words: Thai, Lao, Myanmar and Khmer.
-_UNSPACED_RANGES: Final[tuple[tuple[int, int], ...]] = (
-    (0x0E00, 0x0E7F),
-    (0x0E80, 0x0EFF),
-    (0x1000, 0x109F),
-    (0x1780, 0x17FF),
-)
-
-
-def _is_unspaced_letter(char: str) -> bool:
-    """True for a letter or mark of a script written without spaces (Japanese
-    and Chinese kana and ideographs, Thai, Lao, Myanmar, Khmer)."""
-    if _is_japanese_letter(char):
-        return True
-    if unicodedata.category(char)[0] not in "LM":
-        return False
-    code = ord(char)
-    return any(low <= code <= high for low, high in _UNSPACED_RANGES)
+def _is_word_char(char: str) -> bool:
+    """True for a letter, a digit or a combining mark."""
+    return char.isalnum() or unicodedata.category(char)[0] == "M"
 
 
 def _tight_join(parts: Iterable[str]) -> str:
-    """Join the parts with one space, except with none where the last visible
-    character of one part and the first of the next are both letters, digits
-    or marks and one of them belongs to a script written without spaces
-    (``削除済み`` + ``にする`` reads ``削除済みにする``). Invisible characters
-    are kept where they are.
+    """Join the parts as the joined text does, but without the space where
+    the parts may continue one word.
+
+    The space between two parts is uiprobe's, not the app's. Where the last
+    visible character before it and the first visible character after it
+    are both letters, digits or combining marks, in any script, the parts
+    are joined directly (``recorder`` + ``s`` reads ``recorders``,
+    ``削除済み`` + ``にする`` reads ``削除済みにする``). A part with no visible
+    character is joined directly and does not count as either side, so
+    ``削除済み`` + U+200B + ``にする`` reads as one word too. Invisible
+    characters stay where they are; spaces and punctuation inside a part
+    stay real separators.
     """
     out: list[str] = []
-    previous = ""
+    last = ""
     for part in parts:
-        if out:
-            out.append("" if _touching(previous, part) else " ")
+        first = next((c for c in part if not _is_invisible(c)), "")
+        if out and first and not (_is_word_char(last) and _is_word_char(first)):
+            out.append(" ")
         out.append(part)
-        previous = part
+        tail = next((c for c in reversed(part) if not _is_invisible(c)), "")
+        if tail:
+            last = tail
     return "".join(out)
-
-
-def _touching(previous: str, following: str) -> bool:
-    """Whether two joined parts read as one word without the joining space."""
-    last = next((c for c in reversed(previous) if not _is_invisible(c)), "")
-    first = next((c for c in following if not _is_invisible(c)), "")
-    if not last or not first:
-        return False
-    if not all(c.isalnum() or unicodedata.category(c)[0] == "M" for c in (last, first)):
-        return False
-    return _is_unspaced_letter(last) or _is_unspaced_letter(first)
 
 
 def _is_japanese_letter(char: str) -> bool:
@@ -1854,6 +1844,9 @@ class _Judge:
         self._irreversible: Detail | Literal[False] | None = False
         self._summarize()
         self._joined_hit: dict[int, str | None] = {}
+        # Per clickable root: the first clickable element below it whose own
+        # joined text holds a deny word (only used with exception words).
+        self._joined_below: dict[int, int] = {}
         self._labels: dict[int, str] = {}
         self._contrib: dict[int, _Agg] = {}
         self._everywhere: _Agg | None = None
@@ -1941,9 +1934,10 @@ class _Judge:
                 self.above_deny[i] = self.above_deny[up]
                 if self.clickable[up]:
                     self.above_deny[i] = min(self.above_deny[i], self.sub_deny[up])
-        # The highest clickable element at or above each element. A deny word
-        # in the joined text of a clickable subtree is also in the joined text
-        # of every clickable ancestor, so only this one is ever matched.
+        # The highest clickable element at or above each element. Without
+        # exception words, a deny word in the joined text of a clickable
+        # subtree is also in the joined text of every clickable ancestor, so
+        # only this one is matched (see `joined_root` for exception words).
         self.top = [-1] * count
         for i in self.tree.pre:
             up = parent[i]
@@ -2079,8 +2073,8 @@ class _Judge:
             if not matcher.excuses:
                 word = matcher.match_text(spaced)
             else:
-                # The space between two parts is uiprobe's, not the app's: in a
-                # script written without spaces it is no word boundary, so an
+                # The space between two parts is uiprobe's, not the app's: where
+                # letters touch on both sides it is no word boundary, so an
                 # exception word must stand alone without it too.
                 tight = _tight_join(joined)
                 values = (spaced,) if tight == spaced else (spaced, tight)
@@ -2100,13 +2094,33 @@ class _Judge:
 
     def joined_root(self, i: int) -> int:
         """Return the clickable root whose joined subtree text holds a deny
-        word and whose subtree holds the element (the highest clickable element
-        at or above it), or ``_NONE``.
+        word and whose subtree holds the element, or ``_NONE``.
+
+        The scope is the subtree of the highest clickable element at or above
+        it. Without exception words its joined text is enough: a deny word in
+        the joined text of a subtree is also in that of every clickable
+        ancestor. With exception words that does not hold (a longer exception
+        word can form in the ancestor's text), so the joined text of every
+        clickable element in that subtree is matched as well, the root first,
+        then in document order; the first one with a hit is returned.
         """
         root = self.top[i]
-        if root != -1 and self.joined_hit(root) is not None:
+        if root == -1:
+            return _NONE
+        if self.joined_hit(root) is not None:
             return root
-        return _NONE
+        if not self.matcher.excuses:
+            return _NONE
+        if root not in self._joined_below:
+            self._joined_below[root] = next(
+                (
+                    j
+                    for j in self.tree.subtree(root)[1:]
+                    if self.clickable[j] and self.joined_hit(j) is not None
+                ),
+                _NONE,
+            )
+        return self._joined_below[root]
 
     # -- confirm labels ------------------------------------------------------------
 
