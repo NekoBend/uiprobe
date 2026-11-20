@@ -292,13 +292,100 @@ Monkey must print the line `Events injected: 1` exactly once and no other `Event
 
 With `--json` the result is a `uiprobe.action/1` object (see [Output formats](output.md)); `restart` is always written.
 
+## Diagnosing the tap window check
+
+`uiprobe diagnose tap-window` tells why the crawl's tap window check (see [Crawling from Python](python.md#crawling-from-python-alpha)) cannot read a device, in a report you can share: by default it holds no text or number of the device's output at all, only what uiprobe's reader concluded and lengths. Use it when `uiprobe crawl --press` refuses taps with `cover_unknown` and the run folder's end line has `details.rule`: a rule identifies a refusal of the window list reader. Each end line has its own `details`; the crawl's note at the end of the run looks at the run's first `cover_unknown` only, and suggests this command when that one has a rule. In a run folder written by this version, a `cover_unknown` without `details.rule` was not made by the reader (older versions record no rule at all, so there it says nothing): either an earlier check of the gate refused (such as `rotation` from the gate's own dump, or `target_uid`), or the list read and the point check refused later (`no_window`, `portal`); this command can then rightly say `readable`.
+
+```console
+$ uiprobe -s SERIAL diagnose tap-window
+uiprobe diagnose tap-window: this output contains no device serial, app or window names, coordinates, accounts or network values; it read: dumpsys input
+result: not readable: line_format, rule unknown_flag at line 26 of the dispatcher part
+the display's list: its Display section, 3 windows read, the check refused here
+lines (number, kind, length):
+  24 window_row 351
+  25 transform 34
+> 26 window_row 357
+  27 other 35
+  28 other 33
+```
+
+On a list the check reads, the result line says `result: readable`, and no lines are shown.
+
+It sends exactly one command to the device, `dumpsys input` (besides the adb server's device listing that every command uses to choose the device), and runs the same checks on it as the crawl does right before a tap, up to the point: the window list of display 0, then the display's orientation in the `Viewport` lines. It presses nothing. The report has:
+
+- `result`: `readable`, or the reason the crawl would record (`no_list`, `line_format`, `region_format` or `rotation`), the rule that refused (see the table below) and the line it refused at, counted from 1 in its part: in the `dispatcher` part the line `Input Dispatcher State:` is line 1; in the `input_reader` part (the `Viewport` lines above it) the first line of the output is line 1; when there is not exactly one `Input Dispatcher State:` line, or the line comes after the dispatcher's part (the first line not more indented than its header ends it), the part is `output`, the whole output from its first line. Some rules have no one line to blame; then no line is named.
+- `the display's list`: the window list the reader took as display 0's, if any: whether it is a `Display:` section or the one list of every display (API 24 to 28), whether the reader got to it (it reads other displays' lists first and stops at the first refusal; a list it started to read counts as reached, also when it refused at its first line), how many window lines it read into a window there, and whether the check refused in it. Other displays' lists are not described: a window name that holds line breaks could have made them.
+- `lines`: the failing line (marked `>`) and up to two lines before and after it in the same part; when no one line is to blame, the reader's own headings instead (its header and the headings of the display's list), at most 40. Each line is shown as its number, kind and length. Counts and lengths stop at 9999 when the report is printed: past that the text shows `9999+` and JSON shows 9999 (the Python object keeps the exact numbers).
+
+A line's kind is what the reader made of it, with its own anchored patterns, where it reads: `heading` (its header, and the display's `Display:`, `Windows:`, `logicalSize=` and the line its list ended at), `window_row` (a window line it read into a window, or the window line a rule about window lines refused at), `transform` and `matrix_row` (the lines after a window line it read, and the display's transform line), `viewport` (a `Viewport` line of display 0 it read for the orientation), `blank`, and `other` for every other line, whatever it holds.
+
+So the default report is built only from a closed vocabulary: uiprobe's own fixed words (the notice, labels, reasons, rule names, part names, line kinds) and numbers uiprobe counted (line numbers, lengths, windows read). No field name, value, flag, row or display number, orientation, sign or other character of the device's output is in it; a test walks the text, the JSON and the Python object of every rule case, capture, hostile input and reviewer's input, and of mutated outputs, and finds nothing else. The counts, the kinds and which lines are shown are what the reader read, so they can differ between outputs the reader judges the same (a window name that holds line breaks can add a line the reader reads, or change a count); they say something about the device, as the lengths do (how long a window title's line is).
+
+With `--show-device-text` the report also has, for each shown line, its indent and tokens, every list the reader found (with its place among the lists), and the rows' forms (whether names are quoted, which fields follow them). Those come from the device: field names and values (as types such as `<num>` or as words such as `true`), known flag names, unknown flag names that are upper-case words (as `<unknown_flag:NAME>`), row numbers, a `Viewport` line's orientation. Window names and app text can appear in them, with or without line breaks, and can hold a serial or personal data. In this mode the first line of the report (and `notice` in JSON) says so; read the report before you paste it anywhere. With it the failing line of the example reads:
+
+```text
+> 26 window_row 6 357: row:<num:1> name=<text:15> id=<num> displayId=<num> inputConfig=NOT_FOCUSABLE|TRUSTED_OVERLAY|SLIPPERY|<unknown_flag:SEM_FOO> alpha=<num> frame=<rect> globalScale=<num> applicationInfo.name=<blank> applicationInfo.token=<text:6> touchableRegion=<text:7> ownerPid=<num> ownerUid=<num> dispatchingTimeout=<ms> token=<hex> touchOcclusionMode=<word:15>
+```
+
+The rules, under the reason the crawl records with them (`details.rule` next to `details.unreadable` in the run folder, see [The run folder](run-folder.md#json-formats)):
+
+| Reason | Rule | The check refused because |
+| --- | --- | --- |
+| `no_list` | `no_dispatcher` | No `Input Dispatcher State:` line. |
+| `no_list` | `dispatcher_twice` | More than one `Input Dispatcher State:` line (the second is named). |
+| `no_list` | `no_list` | Neither a `Windows:` list nor `Display:` sections under the header, or the display's section has no `Windows` line. |
+| `no_list` | `lists_twice` | More than one `Windows` line where only one may be (the second is named). |
+| `no_list` | `list_heading` | The `Windows` line says more than `Windows:`. |
+| `no_list` | `list_and_sections` | Both a list directly under the header and `Display:` sections. |
+| `no_list` | `display_twice` | Two `Display:` sections of the same number (`Display: 00` and `Display: 0`). |
+| `no_list` | `display_missing` | No `Display:` section of display 0. |
+| `no_list` | `no_rows` | The list has no window row of display 0. |
+| `line_format` | `list_end` | A list does not end at a line it is known to end at (`MonitoringChannels:`, `Connections:`, `Global monitors ... display N:`, `mMaximumObscuringOpacityForTouch: ...`, `Display: N`); the line it ended at is named. |
+| `line_format` | `stray_owner` | A line outside every list holds `ownerUid=`. |
+| `line_format` | `orphan_line` | A line in the list comes before its first window row. |
+| `line_format` | `legacy_row_in_display_list` | A list per display holds a row of API 24 to 28 (`scale=`). |
+| `line_format` | `form_mismatch` | A row differs from the list's first row in form: a quoted or bare name, or which known fields it prints. |
+| `line_format` | `transform_mismatch` | Some rows are followed by transform lines and others are not (when the lines after a row are not a transform line with its rows, `unknown_line` or `transform_shape` names them instead). |
+| `line_format` | `unknown_line` | A line after a window row that is neither a transform line nor one of its matrix rows. |
+| `line_format` | `transform_shape` | A transform line with matrix rows missing, malformed or too many (none for `IDENTITY`, three otherwise). |
+| `line_format` | `row_shape` | A window line whose start is of no known form (`N: name=..., [id=N, ]displayId=N`). |
+| `line_format` | `row_number` | A row number that is not the next one (rows run 0, 1, 2, ...). |
+| `line_format` | `field_twice` | A field that is read appears twice in one line (`ownerUid=`, `touchableRegion=`, `inputConfig=`, `flags=`, `visible=`, `displayId=`, `portalToDisplayId=`, `samsungFlags=`, `pTouchableRegion=`, `1HXY=`). |
+| `line_format` | `display_mismatch` | A row's `displayId=` differs from its `Display:` section. |
+| `line_format` | `field_value` | A field that is read is named but its value does not read: a value of another form (`visible=yes`), or more text after it before the next `, key=` field. |
+| `line_format` | `field_missing` | A field that is read is not there: `ownerUid=`, or both `inputConfig=` and `visible=`, or `flags=` beside `visible=`. |
+| `line_format` | `unknown_flag` | A flag name in `inputConfig=` or `flags=` that uiprobe does not know. |
+| `line_format` | `mixed_flags` | `inputConfig=` together with `visible=` or `flags=`. |
+| `line_format` | `hex_form` | A `flags=0x...` row that is neither wholly of API 24 to 28 (`scale=`) nor of API 29 and 30 (`globalScale=`, `windowScale=` and `portalToDisplayId=`). |
+| `line_format` | `portal_missing` | A row of a form that prints `portalToDisplayId=` (API 29 to 32) without it. |
+| `line_format` | `samsung_fields` | A row names `samsungFlags=`, `pTouchableRegion=` or `1HXY=` (the Samsung form, API 36), but the fields after the name do not hold all three at their places with a value the phone printed. |
+| `region_format` | `region_missing` | A row without `touchableRegion=`. |
+| `region_format` | `region_format` | A touchable region that is not one rectangle or `<empty>`. |
+| `region_format` | `region_reversed` | A touchable region whose right is left of its left, or bottom above its top. |
+| `rotation` | `display_transform_missing` | The display's section prints `logicalSize=` without a display transform line, or the list has `inputConfig` rows and the section lacks either. |
+| `rotation` | `display_transform` | The display's section has more than one transform line, or one that is not `transform (ROT_0) (IDENTITY)`. |
+| `rotation` | `row_rotated` | A transform line of a row of display 0 rotates (not `ROT_0`). |
+| `rotation` | `row_orientation` | A row of display 0 prints `displayOrientation=` other than 0. |
+| `rotation` | `viewport_malformed` | A `Viewport` line of display 0 of no known form. |
+| `rotation` | `scaled` | A `Viewport` line of display 0 whose logical frame differs from its physical frame. |
+| `rotation` | `viewport_missing` | No `Viewport` line of display 0 above the dispatcher. |
+| `rotation` | `viewport_disagree` | The `Viewport` lines of display 0 say different orientations (the first that differs is named). |
+| `rotation` | `rotated` | The display is rotated (orientation 1 to 3). |
+| `rotation` | `number_too_long` | A rotation, orientation or `Viewport` display number the reader reads has more digits than Python converts (4300 by default); with leading zeros it could still be 0, or display 0. |
+
+A rule refuses only what the crawl's check refuses: running the diagnosis changes nothing in how the crawl reads the list.
+
+Device options go after `tap-window` (`uiprobe diagnose tap-window -s SERIAL --json`) or before `diagnose`. When the arguments of `diagnose tap-window` cannot be read (an option in the wrong place, an unknown option such as `--ser SERIAL` before `diagnose`, an extra word, a malformed serial or server address), the usage error (exit 2) shows none of them, only the valid form: `uiprobe [-s SERIAL] diagnose tap-window [-s SERIAL] [--adb PATH] [--adb-server tcp:HOST:PORT] [--no-start-server] [--json] [--show-device-text]` (this holds for any command line whose words include `diagnose`, unless another command is the one run, as in `uiprobe -s diagnose tap ...`, where `diagnose` is the serial and `tap` reports its own errors; a serial given twice gets `--serial may be given only once`, which names neither). A serial that is well formed but matches no device is not a usage error but a device-selection error (`device_not_found`, exit 4), reported by its code alone like the other errors below. With `--json` the report is a `uiprobe.diagnose_tap_window/1` object (see [Output formats](output.md)). An error (no adb server, no such device, a failed read) is reported by its error code and exit code alone, with a fixed message: the error's own message is not printed, because it can name the device. The exit code is 0 whenever the report was printed, readable or not.
+
+From Python, `Device.diagnose_tap_window(show_device_text=False)` returns the report (`to_text()`, `to_dict()`), and `uiprobe.windowdiag.diagnose_tap_window(text)` makes it from a saved `dumpsys input`.
+
 ## Creating the settings file
 
 `uiprobe init [PATH]` creates the settings file `uiprobe.toml` (at `./uiprobe.toml` unless you give a path) and prints its path. It needs no device and no adb server, and it never overwrites a file. Details are in [Settings file](settings.md).
 
 ## Options
 
-These options work before or after the command, except for `init`, which accepts only `--json` from this table (see [Settings file](settings.md)).
+These options work before or after the command, except for `init`, which accepts only `--json` from this table (see [Settings file](settings.md)), and `diagnose`, which takes them after its check (`uiprobe diagnose tap-window --json`) or before `diagnose`.
 
 | Option | Meaning |
 | --- | --- |

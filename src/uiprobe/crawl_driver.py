@@ -110,7 +110,7 @@ from uiprobe.errors import (
     UiprobeError,
 )
 from uiprobe.guards import Policy, judge
-from uiprobe.inputwindows import ROTATION
+from uiprobe.inputwindows import ROTATION, Unreadable
 from uiprobe.runlog import RunFolderError, RunWriter
 
 if TYPE_CHECKING:
@@ -139,7 +139,9 @@ class CrawlResult:
     ``not_sent`` counts the actions closed as not sent, by reason; ``repins``
     the moves of the pinned transport in this run and ``repin`` whether moves
     were allowed (the boot id could be read); ``cover_unknown`` what the
-    first ``cover_unknown`` refusal could not read; ``last_screen_id`` the
+    first ``cover_unknown`` refusal could not read and ``cover_rule`` the
+    rule of the window list reader that made it (None when the reader did
+    not refuse it, see `uiprobe.inputwindows.RULES`); ``last_screen_id`` the
     last screen that was read and ``last_foreground`` the app in front at the
     last read (None when unknown).
     """
@@ -154,6 +156,7 @@ class CrawlResult:
     cover_unknown: str | None = None
     last_screen_id: str | None = None
     last_foreground: str | None = None
+    cover_rule: str | None = None
 
 
 def _check_flag(name: str, value: object) -> None:
@@ -273,6 +276,7 @@ class _Run:
         self.gate_details: dict[str, str | int] | None = None  # why, for cover
         self.not_sent: dict[str, int] = {}  # not_sent end lines by reason
         self.cover_unknown: str | None = None  # what the first cover_unknown missed
+        self.cover_rule: str | None = None  # and the reader's rule, when it had one
         self.last_screen_id: str | None = None  # the last screen read
         self.last_foreground: str | None = None  # the app in front at the last read
         self.gate_screen_id: str | None = None  # the id of the gate's own dump
@@ -380,6 +384,8 @@ class _Run:
         self.not_sent[reason] = self.not_sent.get(reason, 0) + 1
         if reason == NOT_SENT_COVER_UNKNOWN and details and self.cover_unknown is None:
             self.cover_unknown = str(details.get("unreadable", ""))
+            rule = details.get("rule")
+            self.cover_rule = None if rule is None else str(rule)
 
     def withdraw(self, action: Action) -> None:
         """Have the engine take back `action`, which was not sent."""
@@ -564,6 +570,11 @@ class _Run:
         if app is None or unknown is not None:
             return NOT_SENT_COVER_UNKNOWN, {"unreadable": unknown or "target_uid"}
         found = self.device.window_at(point)
+        if isinstance(found, Unreadable):  # the reason, and the check that refused
+            return NOT_SENT_COVER_UNKNOWN, {
+                "unreadable": str(found),
+                "rule": found.rule,
+            }
         if isinstance(found, str):
             return NOT_SENT_COVER_UNKNOWN, {"unreadable": found}
         uid, shared = app.uid, app.shared
@@ -1329,6 +1340,7 @@ def _result(run: _Run, writer: RunWriter, reason: str) -> CrawlResult:
         repins=len(run.device.repins) - run.repins_before,
         repin=run.device.can_repin,
         cover_unknown=run.cover_unknown,
+        cover_rule=run.cover_rule,
         last_screen_id=run.last_screen_id,
         last_foreground=run.last_foreground,
     )

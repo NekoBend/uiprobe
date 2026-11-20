@@ -135,6 +135,78 @@ def test_a_window_that_cannot_be_read_refuses_the_tap(
     assert unknown[0]["details"] == {"unreadable": problem}
 
 
+def test_the_record_names_the_rule_that_refused_the_list(
+    tmp_path: Path, device, android, clock, monkeypatch
+):
+    # A read field twice in the top row (text a window title could hold):
+    # the list is line_format, and the end line says which check refused.
+    original = android._dumpsys_input
+
+    def owner_twice() -> str:
+        return original().replace("ownerUid=", "ownerUid=1, ownerUid=", 1)
+
+    monkeypatch.setattr(android, "_dumpsys_input", owner_twice)
+    out = tmp_path / "run"
+    result = run(device, clock, out, limits=Limits(actions=3))
+    assert _taps(android) == []
+    refused = _covered(out)
+    assert refused
+    assert refused[0]["details"] == {"unreadable": "line_format", "rule": "field_twice"}
+    assert (result.cover_unknown, result.cover_rule) == ("line_format", "field_twice")
+
+
+def test_an_unknown_line_after_a_row_is_recorded_as_such(
+    tmp_path: Path, device, android, clock, monkeypatch
+):
+    # A line after the top row that is no transform line: on every form the
+    # record names that line's rule, not transform_mismatch (API 24 rows have
+    # no transform lines, so the rows differ in having lines after them).
+    original = android._dumpsys_input
+
+    def note_after_top_row() -> str:
+        lines = original().split("\n")
+        top = next(i for i, line in enumerate(lines) if line.strip().startswith("0: "))
+        lines.insert(top + 1, " " * 8 + "vendor note")
+        return "\n".join(lines)
+
+    monkeypatch.setattr(android, "_dumpsys_input", note_after_top_row)
+    out = tmp_path / "run"
+    run(device, clock, out, limits=Limits(actions=3))
+    refused = _covered(out)
+    assert refused
+    assert refused[0]["details"] == {
+        "unreadable": "line_format",
+        "rule": "unknown_line",
+    }
+
+
+@pytest.mark.usefixtures("_digit_limit")
+def test_a_huge_rotation_after_a_row_is_refused_not_raised(
+    tmp_path: Path, device, android, clock, monkeypatch
+):
+    # A transform line with a rotation of thousands of digits after the top
+    # row: the gate records a refusal (API 24 rows have no transform lines,
+    # so the rows differ; on the other forms the extra line is unknown).
+    original = android._dumpsys_input
+    huge = " " * 8 + "transform (ROT_" + "1" * 4301 + ") (IDENTITY)"
+
+    def huge_rotation() -> str:
+        lines = original().split("\n")
+        top = next(i for i, line in enumerate(lines) if line.strip().startswith("0: "))
+        lines.insert(top + 1, huge)
+        return "\n".join(lines)
+
+    monkeypatch.setattr(android, "_dumpsys_input", huge_rotation)
+    out = tmp_path / "run"
+    run(device, clock, out, limits=Limits(actions=3))
+    refused = _covered(out)
+    assert refused
+    assert refused[0]["details"] in (
+        {"unreadable": "line_format", "rule": "transform_mismatch"},
+        {"unreadable": "line_format", "rule": "unknown_line"},
+    )
+
+
 def test_an_app_uid_that_cannot_be_read_refuses_every_tap(
     tmp_path: Path, device, android, clock, monkeypatch
 ):
@@ -234,9 +306,12 @@ def test_a_system_uid_window_of_a_longer_package_name_is_not_the_app(
     assert refused[0]["details"] == {"window": title, "owner_uid": 1000}
 
 
-@pytest.mark.parametrize("orientation", [1, 3, None])
+@pytest.mark.parametrize(
+    ("orientation", "rule"),
+    [(1, "rotated"), (3, "rotated"), (None, "viewport_missing")],
+)
 def test_a_rotated_or_unknown_display_refuses_every_tap(
-    tmp_path: Path, device, android, clock, orientation
+    tmp_path: Path, device, android, clock, orientation, rule
 ):
     android.orientation = orientation
     out = tmp_path / "run"
@@ -245,7 +320,8 @@ def test_a_rotated_or_unknown_display_refuses_every_tap(
     refused = _covered(out)
     assert refused
     assert {r["reason"] for r in refused} == {"cover_unknown"}
-    assert refused[0]["details"] == {"unreadable": "rotation"}
+    # The record names the rule that refused next to the reason.
+    assert refused[0]["details"] == {"unreadable": "rotation", "rule": rule}
 
 
 # Python's default limit of digits `int` converts (`_digit_limit` sets it):
@@ -370,7 +446,10 @@ def test_a_number_too_long_to_read_in_the_window_list_refuses_every_tap(
     refused = _covered(out)
     assert refused
     assert {r["reason"] for r in refused} == {"cover_unknown"}
-    assert refused[0]["details"] == {"unreadable": "rotation"}
+    assert refused[0]["details"] == {
+        "unreadable": "rotation",
+        "rule": "number_too_long",
+    }
 
 
 @pytest.mark.usefixtures("_digit_limit")
@@ -531,13 +610,15 @@ def test_a_rotated_dump_refuses_the_tap_even_with_viewport_0(
     # hierarchy is turned once: the tap is refused before the window read.
     android.dump_rotation = 1
     out = tmp_path / "run"
-    run(device, clock, out, limits=Limits(actions=3))
+    result = run(device, clock, out, limits=Limits(actions=3))
     assert _taps(android) == []
     refused = _covered(out)
     assert refused
     assert {r["reason"] for r in refused} == {"cover_unknown"}
     assert refused[0]["details"] == {"unreadable": "rotation"}
     assert not [c for _, _, c in fake_adb.commands if c == "dumpsys input"]
+    # The window list was not read, so there is no reader rule to diagnose.
+    assert (result.cover_unknown, result.cover_rule) == ("rotation", None)
 
 
 def test_a_focused_window_whose_owner_uid_is_of_another_user_refuses(
