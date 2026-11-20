@@ -42,6 +42,7 @@ from __future__ import annotations
 import contextlib
 import os
 import re
+from collections.abc import Mapping
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import IO, TYPE_CHECKING, Any, Final
@@ -53,7 +54,7 @@ from uiprobe.model import Element, Screen, _name, _quote
 from uiprobe.pngfile import check_new_path, depends_on_a_drive_folder
 
 if TYPE_CHECKING:
-    from collections.abc import Generator, Iterable, Mapping, Sequence
+    from collections.abc import Generator, Iterable, Sequence
 
 __all__ = [
     "RUN_SCHEMA",
@@ -189,6 +190,41 @@ def _check_texts(name: str, values: object) -> list[str]:
         msg = f"{name} must be a list of str, not {type(values).__name__}"
         raise TypeError(msg)
     return [_check_text(f"an item of {name}", item) for item in values]  # ty: ignore[not-iterable]
+
+
+_SKIP_DETAIL_KEYS: Final = ("reason", "word", "field", "element_id", "note")
+
+
+def _check_skip_details(details: object) -> list[dict[str, str]]:
+    """Check the details of a skip line; return them as plain dicts.
+
+    Each item is a mapping with a ``reason`` and, optionally, ``word``,
+    ``field``, ``element_id`` and ``note``; every value is a str that can be
+    written as UTF-8. The keys are written in that order.
+    """
+    if isinstance(details, str | Mapping) or not hasattr(details, "__iter__"):
+        msg = f"details must be a list of mappings, not {type(details).__name__}"
+        raise TypeError(msg)
+    checked: list[dict[str, str]] = []
+    for item in details:  # ty: ignore[not-iterable]
+        if not isinstance(item, Mapping):
+            msg = f"an item of details must be a mapping, not {type(item).__name__}"
+            raise TypeError(msg)
+        unknown = [key for key in item if key not in _SKIP_DETAIL_KEYS]
+        if unknown or "reason" not in item:
+            msg = (
+                "an item of details needs a reason and may hold only"
+                f" {', '.join(_SKIP_DETAIL_KEYS)}"
+            )
+            raise ValueError(msg)
+        checked.append(
+            {
+                key: _check_text(f"details {key}", item[key])
+                for key in _SKIP_DETAIL_KEYS
+                if key in item
+            }
+        )
+    return checked
 
 
 def _element_dict(element: Element | Mapping[str, object] | None) -> dict[str, object]:
@@ -617,28 +653,38 @@ class RunWriter:
         fingerprint: str,
         reasons: Sequence[str],
         element: Element | Mapping[str, object],
+        details: Sequence[Mapping[str, str]] = (),
     ) -> bool:
         """Write one element that was not pressed, once per screen, fingerprint
-        and reasons. Return False, writing nothing, for a repeat."""
+        and reasons. Return False, writing nothing, for a repeat.
+
+        `details`, when not empty, is written as ``details``: a list of
+        objects with ``reason`` and, when given, ``word``, ``field``,
+        ``element_id`` and ``note`` (all strings; the form of
+        `uiprobe.guards.Detail.to_dict`). A repeat keeps the first line's
+        details.
+        """
         checked = _check_screen_id(screen_id)
         _check_text("fingerprint", fingerprint)
         listed = tuple(_check_texts("reasons", reasons))
+        explained = _check_skip_details(details)
         key = (checked, fingerprint, listed)
         with self.critical():
             self._check_usable()
             if key in self._skipped:
                 return False
             body = _element_dict(element)
-            line = _json_text(
-                {
-                    "schema": SKIP_SCHEMA,
-                    "recorded_at": _stamp(_now()),
-                    "screen_id": checked,
-                    "fingerprint": fingerprint,
-                    "reasons": list(listed),
-                    "element": body,
-                }
-            )
+            record: dict[str, object] = {
+                "schema": SKIP_SCHEMA,
+                "recorded_at": _stamp(_now()),
+                "screen_id": checked,
+                "fingerprint": fingerprint,
+                "reasons": list(listed),
+            }
+            if explained:
+                record["details"] = explained
+            record["element"] = body
+            line = _json_text(record)
             # Reading the element may have called back into this writer, which
             # may since have failed or been closed.
             self._check_usable()

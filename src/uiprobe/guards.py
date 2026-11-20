@@ -1441,6 +1441,20 @@ class Detail:
     field: str = ""
     element_id: str = ""
 
+    def to_dict(self) -> dict[str, str]:
+        """Return the JSON form: ``reason``, then ``word``, ``field``,
+        ``element_id`` and ``note`` when set (the form of ``crawl --json`` and
+        of ``skipped.jsonl``)."""
+        optional = {
+            "word": self.word,
+            "field": self.field,
+            "element_id": self.element_id,
+            "note": self.note,
+        }
+        entry: dict[str, str] = {"reason": self.reason}
+        entry.update({key: value for key, value in optional.items() if value})
+        return entry
+
 
 @dataclass(frozen=True)
 class Decision:

@@ -222,6 +222,9 @@ NOT_SENT_RECONNECTED: Final = "device_reconnected"
 NOT_SENT_COVERED: Final = "covered_by_other"
 NOT_SENT_COVER_UNKNOWN: Final = "cover_unknown"
 _COVER_REASONS: Final = frozenset({NOT_SENT_COVERED, NOT_SENT_COVER_UNKNOWN})
+# The reasons whose details name the matched word or phrase, the field and the
+# element; a skip line carries their details (the form of `crawl --json`).
+_WORD_REASONS: Final = frozenset({"deny_word", "irreversible_screen", "confirm_button"})
 # Android gives installed apps uids from 10000 on; below are system uids that
 # several packages share (and system windows have).
 _FIRST_APP_UID: Final = 10000
@@ -961,7 +964,10 @@ class _Run:
             body = _skipped_element(
                 item, screens, found, package=self.package, policy=self.policy, tap=tap
             )
-            self.writer.write_skip(item.screen_id, item.fingerprint, item.reasons, body)
+            details = [d.to_dict() for d in item.details if d.reason in _WORD_REASONS]
+            self.writer.write_skip(
+                item.screen_id, item.fingerprint, item.reasons, body, details
+            )
 
 
 def _kind(action: Action) -> str:
