@@ -3313,14 +3313,13 @@ def test_a_second_occurrence_outside_the_exception_counts() -> None:
 
 
 def test_a_hit_that_only_overlaps_an_exception_counts() -> None:
-    # "ders" starts inside "Border" and ends in "sale" (spaces removed).
-    assert word_matches("Border sale", "ders", exceptions=("border",))
-    assert not word_matches("Border", "rde", exceptions=("border",))
-    policy = Policy(deny_words=("ders",), deny_exceptions=("border",))
-    assert reasons(run([el("e2", text="Border sale")], policy=policy), "e2") == (
-        "deny_word",
-    )
-    assert reasons(run([el("e2", text="Border")], policy=policy), "e2") == ()
+    # "lines" starts inside "Borderline" and ends in "sale" (spaces removed).
+    assert word_matches("Borderline sale", "lines", exceptions=("borderline",))
+    assert not word_matches("Borderline", "rdel", exceptions=("borderline",))
+    policy = Policy(deny_words=("lines",), deny_exceptions=("borderline",))
+    found = run([el("e2", text="Borderline sale")], policy=policy)
+    assert reasons(found, "e2") == ("deny_word",)
+    assert reasons(run([el("e2", text="Borderline")], policy=policy), "e2") == ()
 
 
 @pytest.mark.parametrize(
@@ -3447,11 +3446,35 @@ def test_a_resource_id_does_not_use_the_exceptions() -> None:
     )
 
 
-def test_the_screen_wide_deny_for_confirm_buttons_uses_the_exceptions() -> None:
+def test_the_screen_wide_deny_for_confirm_buttons_has_no_exceptions() -> None:
+    # The prompt is not clickable and not a dialog: only the screen-wide deny
+    # word refuses the confirm button, and exceptions do not apply there.
+    prompt = el(
+        "e3",
+        text="Debit $50 automatically?",
+        cls="android.widget.TextView",
+        flags=(),
+        bounds=(50, 300, 250, 350),
+    )
+    found = run([el("e2", text="Continue"), prompt])
+    assert reasons(found, "e2") == ("confirm_button",)
+    detail = next(d for d in decision(found, "e2").details)
+    assert (detail.word, detail.field, detail.element_id) == ("call", "text", "e3")
     summary = el("e3", text=WIFI_SUMMARY, flags=(), bounds=(50, 300, 250, 350))
-    assert reasons(run([el("e2", text="OK"), summary]), "e2") == ()
-    other = el("e3", text="Automatically pay", flags=(), bounds=(50, 300, 250, 350))
-    assert "confirm_button" in reasons(run([el("e2", text="OK"), other]), "e2")
+    assert reasons(run([el("e2", text="OK"), summary]), "e2") == ("confirm_button",)
+
+
+def test_the_screen_wide_joined_text_has_no_exceptions() -> None:
+    # "Automatic" + "ally" holds "call" only once the texts are joined.
+    parts = [
+        el("e3", text="Automatic", flags=(), bounds=(50, 300, 150, 350)),
+        el("e4", text="ally", flags=(), bounds=(150, 300, 250, 350)),
+    ]
+    policy = Policy(deny_exceptions=("automatically",))
+    found = run([el("e2", text="OK"), *parts], policy=policy)
+    assert reasons(found, "e2") == ("confirm_button",)
+    detail = decision(found, "e2").details[0]
+    assert (detail.word, detail.field) == ("call", "joined")
 
 
 def test_irreversibility_phrases_do_not_use_the_exceptions() -> None:
@@ -3474,9 +3497,13 @@ def test_without_exceptions_the_old_substring_rule_applies() -> None:
     ["auto matically", "auto-matically", "border!", "-", "bor\u200bder", " border"],
 )
 def test_an_exception_must_be_one_word(word) -> None:
-    with pytest.raises(ValueError, match=r"one word of letters and digits|empty"):
+    with pytest.raises(
+        ValueError, match=r"one word of letters and digits|empty|invisible"
+    ):
         Policy(deny_exceptions=(word,))
-    with pytest.raises(ValueError, match=r"one word of letters and digits|empty"):
+    with pytest.raises(
+        ValueError, match=r"one word of letters and digits|empty|invisible"
+    ):
         word_matches("x", "x", exceptions=(word,))
 
 
@@ -3514,8 +3541,152 @@ def test_tracing_that_is_not_certain_counts_the_hit() -> None:
     # Removing the zero-width space lets NFKC compose e + U+0301 differently
     # from the character-by-character trace, so the hit counts.
     label = "Automatically e\u200b\u0301"
-    assert guards._Excuser(frozenset({"automatically"})).counts(label, ("call",))
+    excuser = guards._Excuser(frozenset({"automatically"}))
+    assert excuser.counts(label, ("call",), builtin=True)
     # The same text without the trap is excused.
-    assert not guards._Excuser(frozenset({"automatically"})).counts(
-        "Automatically e", ("call",)
+    assert not excuser.counts("Automatically e", ("call",), builtin=True)
+
+
+# -- which words the exceptions weaken ------------------------------------------------
+
+
+def test_the_builtin_exception_keys_are_the_exception_keys() -> None:
+    keys = {guards._exception_key(word) for word in DEFAULT_DENY_EXCEPTIONS}
+    assert keys == guards._BUILTIN_EXCEPTION_KEYS
+
+
+def test_builtin_exceptions_do_not_weaken_a_word_the_user_added() -> None:
+    assert word_matches("Automatically", "matic", exceptions=DEFAULT_DENY_EXCEPTIONS)
+    assert word_matches("Recorder", "rde", exceptions=DEFAULT_DENY_EXCEPTIONS)
+    policy = Policy().with_deny_words(["matic"])
+    detail = deny_of(run([el("e2", text="Automatically")], policy=policy), "e2")
+    assert detail is not None
+    assert detail.word == "matic"
+    plain = Policy(deny_words=("matic",))
+    assert reasons(run([el("e2", text="Automatically")], policy=plain), "e2") == (
+        "deny_word",
     )
+
+
+def test_a_word_equal_to_a_builtin_word_is_builtin() -> None:
+    # After normalize, "CALL" is the built-in "call", so the exception applies.
+    assert not word_matches("Automatically", "CALL", exceptions=("automatically",))
+    policy = Policy(deny_words=("CALL",))
+    assert reasons(run([el("e2", text="Automatically")], policy=policy), "e2") == ()
+    # A different spelling with other forms is not the built-in word.
+    assert word_matches("Automatically", "c-all", exceptions=("automatically",))
+
+
+def test_a_user_exception_applies_to_every_word() -> None:
+    # "dramatic" is not a built-in exception: it excuses a user word ...
+    assert not word_matches("Dramatic", "matic", exceptions=("dramatic",))
+    # ... and a built-in word ("post" inside "Postal").
+    assert not word_matches("Postal", "post", exceptions=("postal",))
+    policy = Policy(deny_exceptions=(*DEFAULT_DENY_EXCEPTIONS, "postal", "dramatic"))
+    policy = policy.with_deny_words(["matic"])
+    for label in ("Postal", "Dramatic", "Border"):
+        assert reasons(run([el("e2", text=label)], policy=policy), "e2") == (), label
+    # The built-in "automatically" still does not excuse the user word.
+    assert reasons(run([el("e2", text="Automatically")], policy=policy), "e2") == (
+        "deny_word",
+    )
+
+
+@pytest.mark.parametrize(
+    ("label", "word"),
+    [
+        ("Charger", "charge"),
+        ("Fully charged", "charge"),
+        ("Stop updates", "top up"),
+        ("Renewal", "renew"),
+    ],
+)
+def test_the_redial_and_payment_words_over_block_as_documented(label, word) -> None:
+    detail = deny_of(run([el("e2", text=label)]), "e2")
+    assert detail is not None
+    assert detail.word == word
+
+
+def test_charging_does_not_hold_charge() -> None:
+    assert reasons(run([el("e2", text="Charging")]), "e2") == ()
+
+
+# -- review fixes: user words, invisible characters, public checks, cost -----------
+
+
+def test_an_added_word_inside_a_builtin_exception_is_not_weakened() -> None:
+    policy = Policy().with_deny_words(["record"])
+    found = run([el("e2", text="Start microphone recorder")], policy=policy)
+    detail = deny_of(found, "e2")
+    assert detail is not None
+    assert detail.word == "record"
+    only = Policy(deny_words=("record",))
+    assert reasons(run([el("e2", text="Recorder")], policy=only), "e2") == (
+        "deny_word",
+    )
+
+
+@pytest.mark.parametrize(
+    "word",
+    ["Pay\ufe0f", "pay\u200b", "\u00adborder", "bor\u034fder", "border\U000e0100"],
+)
+def test_an_exception_with_an_invisible_character_is_refused(word) -> None:
+    with pytest.raises(ValueError, match="invisible character"):
+        Policy(deny_exceptions=(word,))
+    with pytest.raises(ValueError, match="invisible character"):
+        word_matches("x", "y", exceptions=(word,))
+
+
+@pytest.mark.parametrize(
+    "label",
+    [
+        "Disconnect recorder\u200bs",
+        "Disconnect s\u200brecorder",
+        "recorder\u200b\u200bs",
+        "recorder\u200b\u0332",
+        "Automatically\u2060ish",
+    ],
+)
+def test_an_invisible_character_next_to_the_exception_cannot_hide_a_longer_word(
+    label,
+) -> None:
+    assert reasons(run([el("e2", text=label)]), "e2") == ("deny_word",)
+
+
+@pytest.mark.parametrize(
+    "label", ["recorder\u200b", "\u200brecorder", "recorder\u200b s"]
+)
+def test_an_invisible_character_before_a_boundary_keeps_the_exception(label) -> None:
+    assert reasons(run([el("e2", text=label)]), "e2") == ()
+
+
+def test_the_public_helpers_refuse_an_exception_equal_to_the_word() -> None:
+    with pytest.raises(ValueError, match="equals the deny word"):
+        word_matches("Pay", "pay", exceptions=("PAY",))
+    with pytest.raises(ValueError, match="equals the deny word"):
+        deny_word_in(el("e2", text="Pay"), ("pay",), exceptions=("PAY",))
+    with pytest.raises(ValueError, match="equals the deny word"):
+        deny_word_in(
+            el("e2", text="x"), iter(["auto-matically"]), exceptions=("automatically",)
+        )
+    with pytest.raises(TypeError, match="collection of words"):
+        deny_word_in(el("e2", text="x"), ("pay",), exceptions="border")
+
+
+def _joined_match_seconds(count: int) -> float:
+    value = " ".join(["Border"] * count)
+    best = float("inf")
+    for _ in range(3):
+        matcher = guards._Matcher(("order",), ("border",))
+        start = time.perf_counter()
+        assert matcher.match_text(value) is None
+        best = min(best, time.perf_counter() - start)
+    return best
+
+
+def test_many_exception_words_in_one_text_cost_linear_time() -> None:
+    # Every hit lies inside its own run; a scan of all runs per hit would make
+    # eight times the text take about sixty-four times as long.
+    small = _joined_match_seconds(500)
+    large = _joined_match_seconds(4000)
+    assert large < 16 * small + 0.02, (small, large)

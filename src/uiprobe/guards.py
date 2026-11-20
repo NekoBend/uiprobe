@@ -42,6 +42,16 @@ before. An exception word must be one word run and must not equal a deny word
 (any of its forms); `Policy.with_deny_words` drops an exception equal to an
 added word.
 
+Which words an exception weakens: a built-in exception word (equal to one of
+`DEFAULT_DENY_EXCEPTIONS`) excuses only hits of a built-in deny word, one equal
+to an item of `DEFAULT_DENY_WORDS` after `normalize`; a deny word added by the
+caller (``--deny``, a settings file's own words, `Policy.with_deny_words`) is
+not weakened by it, so ``matic`` still matches ``Automatically``. Any other
+exception word (one a user wrote) excuses hits of every deny word, built-in or
+added. Both are decided by equality, not by where a word came from: a
+settings file lists the built-in words and exceptions itself, and an added
+word equal to a built-in one is that built-in word.
+
 The default deny words come from four lists: the base list (purchases,
 payments, sending, deleting, signing out, calling and redialling, charging,
 topping up, renewing and similar), a list of further
@@ -195,7 +205,9 @@ holds it.
 
 For ``confirm_button`` the whole screen counts: the deny words are matched in
 each field alone, then in the joined texts, the joined content_descs and the
-joined text and content_desc sequence of all elements in document order.
+joined text and content_desc sequence of all elements in document order. The
+exception words are not used there, so a deny word inside an exception word
+anywhere on the screen still refuses a confirm button.
 
 Cost: the work grows linearly with the number of elements. One pass over the
 tree finds, for every element, the first deny hit in its own fields and in its
@@ -229,9 +241,17 @@ Known limits:
 * Substring matching over-blocks: ``Postures`` contains ``post`` and
   ``Recorders`` contains ``order`` (the exception words are whole words
   only).
+* The words for redialling and payments added with the exception words
+  (``redial``, ``charge``, ``top up``, ``renew``) over-block as substrings:
+  ``charge`` matches ``Charger``, ``Fully charged`` and ``Battery charge``
+  (not ``Charging``); ``top up`` matches ``Stop updates`` and ``Desktop
+  updates``; ``renew`` matches ``Renewal``. They are there so that
+  ``Redial automatically``, ``Charge automatically`` and similar labels stay
+  refused.
 * Exception words let through a label that names an action without a deny
-  word of its own: ``Dial automatically`` is pressable, because ``dial`` is
-  not a deny word (``redial`` is).
+  word of its own: ``Dial automatically``, ``Answer automatically`` and
+  ``Forward automatically`` are pressable, because ``dial``, ``answer`` and
+  ``forward`` are not deny words.
 * The nine words for disabling, force-stopping and signing in (``disable``,
   ``force stop``, ``sign in``, ``log in``, ``login``, 無効, 強制停止, ログイン,
   サインイン)
@@ -712,17 +732,26 @@ def word_matches(value: str, word: str, *, exceptions: Iterable[str] = ()) -> bo
     the rule of the text, content description and hint fields and of the
     joined texts; a resource id is matched without exceptions.
 
+    A built-in exception word (equal to one of `DEFAULT_DENY_EXCEPTIONS`)
+    applies only when `word` is a built-in deny word (equal to one of
+    `DEFAULT_DENY_WORDS` after `normalize`); any other exception word applies
+    to every deny word. So ``matic`` matches ``Automatically`` even with the
+    default exceptions.
+
     Raises:
         TypeError: `exceptions` is one string, not a collection of words.
-        ValueError: The word is empty after normalization, or an exception
-            word is not one word of letters and digits.
+        ValueError: The word is empty after normalization, an exception word
+            is not one word of letters and digits (or holds an invisible
+            character), or an exception word equals `word` (see `Policy`).
     """
     _check_word(word)
+    exceptions = tuple(_check_collection(exceptions))
     excuser = _Excuser(_exception_keys(exceptions))
+    _check_no_conflict(exceptions, (word,))
     word_forms = _forms(word)
     if not _forms_match(word_forms, _forms(value)):
         return False
-    return excuser.counts(value, word_forms)
+    return excuser.counts(value, word_forms, builtin=_is_builtin_word(word))
 
 
 def _forms_match(word_forms: tuple[str, ...], field_forms: tuple[str, ...]) -> bool:
@@ -757,16 +786,41 @@ def _word_runs(text: str) -> list[tuple[int, int]]:
     return runs
 
 
+def _hidden_neighbour(text: str, start: int, end: int) -> bool:
+    """True when invisible characters next to the run hide a longer word.
+
+    Deny matching removes invisible characters, so ``recorder`` + U+200B +
+    ``s`` reads as ``recorders``: the run ``recorder`` must not count as the
+    whole word. Looks past invisible characters on both sides for a letter,
+    digit or combining mark that would join the run once they are gone.
+    """
+    before = start - 1
+    while before >= 0 and _is_invisible(text[before]):
+        before -= 1
+    if before < start - 1 and before >= 0 and _in_word(text[before], inside=True):
+        return True
+    after = end
+    while after < len(text) and _is_invisible(text[after]):
+        after += 1
+    return after > end and after < len(text) and _in_word(text[after], inside=True)
+
+
 def _exception_key(word: str) -> str:
     """Return the form a word run is compared with: NFKC, then case-folded.
 
     Raises:
-        ValueError: The word is empty after normalization, or is not one word
-            of letters and digits (a space, a separator, punctuation or an
-            invisible character in it would keep it from ever being equal to
-            a word of a text).
+        ValueError: The word is empty after normalization, holds an invisible
+            character (a default-ignorable one such as U+200B or the
+            variation selector U+FE0F, or a format or control character:
+            deny matching removes them, so the exception could equal a deny
+            word in disguise), or is not one word of letters and digits (a
+            space, a separator or punctuation in it would keep it from ever
+            being equal to a word of a text).
     """
     _check_word(word)
+    if any(_is_invisible(char) for char in word):
+        msg = f"exception word holds an invisible character: {word!r}"
+        raise ValueError(msg)
     folded = unicodedata.normalize("NFKC", word)
     if _word_runs(folded) != [(0, len(folded))]:
         msg = f"exception word must be one word of letters and digits: {word!r}"
@@ -774,11 +828,51 @@ def _exception_key(word: str) -> str:
     return folded.casefold()
 
 
-def _exception_keys(exceptions: Iterable[str]) -> frozenset[str]:
+def _is_builtin_word(word: str) -> bool:
+    """True for a deny word equal to a built-in one after `normalize`.
+
+    Only such a word is weakened by the built-in exception words.
+    """
+    return normalize(word) in _BUILTIN_WORD_KEYS
+
+
+def _check_collection(exceptions: Iterable[str]) -> Iterable[str]:
     if isinstance(exceptions, str):
         msg = "exception words must be a collection of words, not one string"
         raise TypeError(msg)
-    return frozenset(_exception_key(word) for word in exceptions)
+    return exceptions
+
+
+def _exception_keys(exceptions: Iterable[str]) -> frozenset[str]:
+    return frozenset(_exception_key(word) for word in _check_collection(exceptions))
+
+
+def _check_no_conflict(exceptions: Iterable[str], deny_words: Iterable[str]) -> None:
+    """Raise when an exception word equals a deny word (see `Policy`).
+
+    Raises:
+        ValueError: An exception word equals a deny word (any of its forms).
+    """
+    deny_forms = _deny_forms(deny_words)
+    for exception in exceptions:
+        word = _exception_conflict(exception, deny_forms)
+        if word is not None:
+            msg = (
+                f"exception word {exception!r} equals the deny word {word!r};"
+                " an exception cannot excuse its own deny word"
+            )
+            raise ValueError(msg)
+
+
+# What makes a deny word built-in (`_is_builtin_word`) and an exception word
+# built-in (its key is one of these): built-in exceptions excuse only hits of
+# built-in deny words.
+_BUILTIN_WORD_KEYS: Final = frozenset(normalize(word) for word in DEFAULT_DENY_WORDS)
+# The same as `_exception_key` of each word (a test checks it); that function
+# needs helpers defined further down.
+_BUILTIN_EXCEPTION_KEYS: Final = frozenset(
+    unicodedata.normalize("NFKC", word).casefold() for word in DEFAULT_DENY_EXCEPTIONS
+)
 
 
 def _deny_forms(words: Iterable[str]) -> dict[str, str]:
@@ -855,8 +949,34 @@ def _traced_forms(text: str) -> list[tuple[str, list[int]]] | None:
     return traced
 
 
-# The traced forms of a field (`_traced_forms`) and its exception runs.
-_Traced = tuple[list[tuple[str, list[int]]], list[tuple[int, int]]]
+def _hit_outside(
+    form: str, sources: list[int], word_form: str, runs: list[tuple[int, int]]
+) -> bool:
+    """True when an occurrence of `word_form` in `form` is outside every run.
+
+    `runs` are disjoint and in text order, and the sources of later
+    occurrences do not start earlier (the traced forms keep text order), so
+    one index moves forward through the runs: the work is linear in the
+    number of occurrences plus runs. An occurrence that starts before the
+    current run counts, which can only block more.
+    """
+    index = 0
+    start = form.find(word_form)
+    while start != -1:
+        span = sources[start : start + len(word_form)]
+        low, high = min(span), max(span)
+        while index < len(runs) and runs[index][1] <= low:
+            index += 1
+        if index == len(runs) or not runs[index][0] <= low or high >= runs[index][1]:
+            return True
+        start = form.find(word_form, start + 1)
+    return False
+
+
+# The traced forms of a field (`_traced_forms`) and its exception runs, each
+# as ``(start, end, builtin)``: builtin is True when the run equals a built-in
+# exception word.
+_Traced = tuple[list[tuple[str, list[int]]], list[tuple[int, int, bool]]]
 
 
 class _Excuser:
@@ -872,7 +992,10 @@ class _Excuser:
     all of them lie inside one such run. Every hit is checked on its own, so
     one hit outside every exception run counts. When tracing is not certain
     (NFKC of the characters one by one differs from NFKC of the whole field,
-    or a traced form differs from the real one), every hit counts.
+    or a traced form differs from the real one), every hit counts. A run that
+    equals a built-in exception word (`DEFAULT_DENY_EXCEPTIONS`) excuses only
+    hits of a built-in deny word; a run equal to any other exception word
+    excuses hits of every deny word.
     """
 
     def __init__(self, keys: frozenset[str]) -> None:
@@ -882,26 +1005,24 @@ class _Excuser:
         # every deny word that hits it.
         self._last: tuple[str, _Traced | None] | None = None
 
-    def counts(self, value: str, word_forms: tuple[str, ...]) -> bool:
+    def counts(self, value: str, word_forms: tuple[str, ...], *, builtin: bool) -> bool:
         """Return True when a hit of the word forms in `value` is not excused.
 
-        The caller has already found at least one hit.
+        `builtin` tells whether the deny word is a built-in one
+        (`_is_builtin_word`); otherwise the built-in exception words do not
+        excuse it. The caller has already found at least one hit.
         """
         traced = self._trace(value)
         if traced is None:
             return True
-        forms, runs = traced
+        forms, tagged = traced
+        runs = [(first, end) for first, end, own in tagged if builtin or not own]
+        if not runs:
+            return True
         for form, sources in forms:
             for word_form in word_forms:
-                if not word_form:
-                    continue
-                start = form.find(word_form)
-                while start != -1:
-                    span = sources[start : start + len(word_form)]
-                    low, high = min(span), max(span)
-                    if not any(first <= low and high < end for first, end in runs):
-                        return True
-                    start = form.find(word_form, start + 1)
+                if word_form and _hit_outside(form, sources, word_form, runs):
+                    return True
         return False
 
     def _trace(self, value: str) -> _Traced | None:
@@ -932,9 +1053,11 @@ class _Excuser:
         if text != unicodedata.normalize("NFKC", value):
             return None
         runs = [
-            (start, end)
+            (start, end, text[start:end].casefold() in _BUILTIN_EXCEPTION_KEYS)
             for start, end in _word_runs(text)
-            if text[start:end].casefold() in self.keys and all(unchanged[start:end])
+            if text[start:end].casefold() in self.keys
+            and all(unchanged[start:end])
+            and not _hidden_neighbour(text, start, end)
         ]
         if not runs:
             return None
@@ -963,7 +1086,9 @@ class _Matcher:
     """Deny words with their forms computed once, and the exception words."""
 
     def __init__(self, words: Iterable[str], exceptions: Iterable[str] = ()) -> None:
-        self._words = tuple((word, _forms(word)) for word in words)
+        self._words = tuple(
+            (word, _forms(word), _is_builtin_word(word)) for word in words
+        )
         self._excuser = _Excuser(_exception_keys(exceptions))
         self._cache: dict[str, str | None] = {}
         self._plain_cache: dict[str, str | None] = {}
@@ -984,7 +1109,8 @@ class _Matcher:
         """Return the first deny word found in one string, or None.
 
         With `excuse` (the default), a word whose every hit lies inside an
-        exception word of the string does not count (`_Excuser`).
+        exception word of the string that applies to it does not count
+        (`_Excuser`).
         """
         excuse = excuse and bool(self._excuser.keys)
         cache = self._cache if excuse else self._plain_cache
@@ -994,9 +1120,12 @@ class _Matcher:
         found = next(
             (
                 w
-                for w, word_forms in self._words
+                for w, word_forms, builtin in self._words
                 if _forms_match(word_forms, field_forms)
-                and (not excuse or self._excuser.counts(value, word_forms))
+                and (
+                    not excuse
+                    or self._excuser.counts(value, word_forms, builtin=builtin)
+                )
             ),
             None,
         )
@@ -1043,9 +1172,14 @@ def deny_word_in(
 
     Raises:
         TypeError: `exceptions` is one string, not a collection of words.
-        ValueError: An exception word is not one word of letters and digits.
+        ValueError: An exception word is not one word of letters and digits
+            (or holds an invisible character), or equals a deny word.
     """
-    return _Matcher(words, exceptions).match(element)
+    words = tuple(words)
+    exceptions = tuple(_check_collection(exceptions))
+    matcher = _Matcher(words, exceptions)
+    _check_no_conflict(exceptions, words)
+    return matcher.match(element)
 
 
 # -- policy ----------------------------------------------------------------------
@@ -1115,7 +1249,10 @@ class Policy:
     ``deny_exceptions`` (default `DEFAULT_DENY_EXCEPTIONS`) are the exception
     words: a deny-word hit in a text, content description or hint (or in a
     joined text) that lies completely inside a whole word equal to one of
-    them does not count (see `word_matches`). ``()`` turns this off. An
+    them does not count (see `word_matches`). A built-in exception word
+    (equal to one of `DEFAULT_DENY_EXCEPTIONS`) excuses only a built-in deny
+    word (equal to one of `DEFAULT_DENY_WORDS` after `normalize`); any other
+    exception word excuses every deny word. ``()`` turns this off. An
     exception word must not equal a deny word (any of its forms).
 
     ``back_on_other_screens`` (default False) is read by the pressing crawl
@@ -1180,15 +1317,7 @@ class Policy:
         for word in (*self.deny_words, *self.confirm_words, *self.irreversible_phrases):
             _check_word(word)
         _exception_keys(self.deny_exceptions)
-        deny_forms = _deny_forms(self.deny_words)
-        for exception in self.deny_exceptions:
-            word = _exception_conflict(exception, deny_forms)
-            if word is not None:
-                msg = (
-                    f"exception word {exception!r} equals the deny word {word!r};"
-                    " an exception cannot excuse its own deny word"
-                )
-                raise ValueError(msg)
+        _check_no_conflict(self.deny_exceptions, self.deny_words)
         if self.edges is not None and (
             len(self.edges) != _EDGE_SIDES
             or any(type(size) is not int or size < 0 for size in self.edges)
@@ -1788,10 +1917,18 @@ class _Judge:
         none matches, the texts, the content_descs and the text and
         content_desc sequence of the whole screen in document order, each
         joined by one space, are matched (field ``joined``, no element).
+        The exception words are not used here: a deny word anywhere on the
+        screen counts, even inside an exception word.
         """
         if self._screen_hit is False:
             self._screen_hit = None
-            for i, hit in enumerate(self.own_hit):
+            plain = self._plain_matcher()
+            hits = (
+                self.own_hit
+                if plain is self.matcher
+                else [plain.match(e) for e in self.elements]
+            )
+            for i, hit in enumerate(hits):
                 if hit:
                     self._screen_hit = Detail(
                         "confirm_button",
@@ -1801,14 +1938,26 @@ class _Judge:
                     )
                     break
             else:
-                word = self._joined_word([self.elements[i] for i in self.tree.pre])
+                word = self._joined_word(
+                    [self.elements[i] for i in self.tree.pre], plain
+                )
                 if word is not None:
                     self._screen_hit = Detail(
                         "confirm_button", word=word, field="joined"
                     )
         return self._screen_hit
 
-    def _joined_word(self, elements: Iterable[Element]) -> str | None:
+    def _plain_matcher(self) -> _Matcher:
+        """Return the deny words without exceptions (the matcher itself when
+        the policy has no exception words).
+        """
+        if not self.policy.deny_exceptions:
+            return self.matcher
+        return _Matcher(self.policy.deny_words)
+
+    def _joined_word(
+        self, elements: Iterable[Element], matcher: _Matcher | None = None
+    ) -> str | None:
         """Return the deny word found in the joined text of the elements.
 
         Three strings are matched, each joined by one space: the text and
@@ -1826,7 +1975,7 @@ class _Judge:
                 parts.append(element.content_desc)
                 descs.append(element.content_desc)
         for joined in (parts, texts, descs):
-            word = self.matcher.match_text(" ".join(joined))
+            word = (matcher or self.matcher).match_text(" ".join(joined))
             if word is not None:
                 return word
         return None
@@ -2272,7 +2421,7 @@ def judge(
       those of any descendant, or the joined descendant texts or
       content_descs) and a deny word is found anywhere on the screen, alone in
       a field or in the joined texts, content_descs or text and content_desc
-      sequence of the whole screen.
+      sequence of the whole screen (without the exception words).
     * ``dialog_confirm_button``: a confirm word is the label (same sources) and
       the screen is
       a dialog (its first top-level element is smaller than the display; the first

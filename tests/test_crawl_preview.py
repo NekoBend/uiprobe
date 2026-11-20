@@ -1196,3 +1196,12 @@ def test_deny_blocks_a_word_that_is_also_an_exception(fake_adb, capsys):
     # The exception equal to the added word is dropped, so the first default
     # word found ("call") refuses it again, as it did before exceptions.
     assert entry["details"][0]["word"] == "call"
+
+
+def test_deny_is_not_weakened_by_the_builtin_exceptions(fake_adb, capsys):
+    FakeAndroid(fake_adb, SERIAL, (AUTO,), start="auto")
+    payload = crawl_json(capsys, fake_adb, "--deny", "matic")
+    entry = skipped_by_text(payload)["Automatically"]
+    assert entry["reasons"] == ["deny_word"]
+    assert entry["details"][0]["word"] == "matic"
+    assert [e["text"] for e in payload["press"]] == ["Voice Recorder"]

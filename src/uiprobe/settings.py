@@ -34,8 +34,11 @@ table counts as empty, so all of its defaults apply, and a missing rule takes
 its default. Version 2 added the ``[irreversible]`` table, the rule
 ``refuse_irreversible_screens`` and four deny words. Version 3 added the
 ``[deny] except`` list (exception words, see `uiprobe.guards.word_matches`)
-with all of its words, and four deny words (``redial``, ``charge``, ``top up``,
-``renew``). ``[deny] remove`` takes words out of both ``words`` and ``except``.
+with all of its words, and four deny words (``redial``, ``charge``, ``top
+up``, ``renew``). ``[deny] remove`` takes words out of both ``words`` and
+``except``. The built-in exception words excuse only built-in deny words
+(equal to a default after normalization); any other exception word, written
+in ``except``, excuses every deny word.
 
 An exception word must be one word of letters and digits. One that equals a
 deny word in use (any form of it, see `uiprobe.guards._forms`) would excuse that
@@ -387,7 +390,9 @@ def render_default_settings() -> str:
         "# A deny word found inside one of these words does not count where the",
         '# word stands whole in a text ("call" in "Automatically"). Any other word',
         '# that holds a deny word is still refused. "remove" also takes words out',
-        "# of this list.",
+        "# of this list. The words uiprobe lists here excuse only uiprobe's own",
+        "# deny words, not the ones you add; a word you add here excuses every",
+        "# deny word.",
         *_toml_list("except", _current(_DENY_EXCEPTIONS)),
         "remove = []",
         "",

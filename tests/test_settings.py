@@ -2218,3 +2218,14 @@ def test_an_added_deny_word_keeps_blocking_over_an_exception(tmp_path):
     assert guards.word_matches(
         "Automatically", "automatically", exceptions=policy.deny_exceptions
     )
+
+
+@pytest.mark.parametrize("word", ["Pay\ufe0f", "border\u200b"])
+def test_an_exception_with_an_invisible_character_is_refused_in_the_file(
+    tmp_path, word
+):
+    text = render_default_settings()
+    start = text.index("except = [")
+    end = text.index("]", start) + 1
+    path = write(tmp_path, text[:start] + f'except = ["{word}"]' + text[end:])
+    refused(path, "[deny] except", "invisible character")

@@ -1330,3 +1330,54 @@ def test_exceptions_come_from_the_file(tmp_path) -> None:
     item = el("e2", text="Border", bounds=(50, 100, 250, 150))
     assert reasons(run([item]), "e2") == ()
     assert reasons(run([item], policy=policy), "e2") == ("deny_word",)
+
+
+DRAMA_SCREEN = Screen(
+    "drama",
+    f"{SHOP}/.Drama",
+    (
+        El((40, 100, 280, 150), text="Automatically", go="drama"),
+        El((40, 160, 280, 210), text="Dramatic", go="drama"),
+        El((40, 220, 280, 270), text="Postal", go="drama"),
+    ),
+)
+
+
+def test_a_word_added_in_the_file_is_not_weakened(capsys, fake_adb, folder) -> None:
+    write(folder, edited('    "call",\n', '    "call",\n    "matic",\n'))
+    FakeAndroid(fake_adb, SERIAL, (DRAMA_SCREEN,), start="drama")
+    payload = crawl_json(capsys, fake_adb)
+    assert skipped(payload) == {
+        "Automatically": ["deny_word"],
+        "Dramatic": ["deny_word"],
+        "Postal": ["deny_word"],
+    }
+
+
+def test_a_user_exception_in_the_file_applies_to_every_word(
+    capsys, fake_adb, folder
+) -> None:
+    text = edited('    "designing",\n', '    "designing",\n    "dramatic",\n')
+    text = text.replace('    "designing",\n', '    "designing",\n    "postal",\n', 1)
+    write(folder, text)
+    FakeAndroid(fake_adb, SERIAL, (DRAMA_SCREEN,), start="drama")
+    payload = crawl_json(capsys, fake_adb, "--deny", "matic")
+    # "dramatic" (user) excuses the --deny word, "postal" (user) the built-in
+    # "post"; the built-in "automatically" does not excuse "matic".
+    assert pressed(payload) == ["Dramatic", "Postal"]
+    assert skipped(payload) == {"Automatically": ["deny_word"]}
+
+
+def test_an_older_file_with_its_own_word_is_not_weakened(tmp_path) -> None:
+    # A version 2 file whose only deny word is "record": the inherited
+    # exception "recorder" excuses built-in words only.
+    text = _v2_text()
+    start = text.index("words = [")
+    end = text.index("]", start) + 1
+    text = text[:start] + 'words = ["record"]' + text[end:]
+    policy = policy_from_settings(loaded(tmp_path, text))
+    assert "recorder" in policy.deny_exceptions
+    item = el("e2", text="Start microphone recorder", bounds=(50, 100, 250, 150))
+    found = run([item], policy=policy)
+    assert reasons(found, "e2") == ("deny_word",)
+    assert found.decisions[0].details[0].word == "record"
