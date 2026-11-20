@@ -1,0 +1,16 @@
+# Real output of Settings started again while it was running in front, on an API 36 emulator (Android 16, AVD "settings36").
+# Source: the emulator capture of 2026-11-21 (amstart out.txt, block
+# "######## settings36", section "== am start running"), taken over adb with
+# "adb -s emulator-5554 shell '<command>' | tr -d '\r'" (so no CR).
+# Command: am start -W -a android.intent.action.MAIN -c android.intent.category.LAUNCHER -n com.android.settings/.Settings; echo uiprobe-exit:$?
+# The body below this header is verbatim; nothing was replaced (an
+# emulator has no device-identifying values in this output).
+Starting: Intent { act=android.intent.action.MAIN cat=[android.intent.category.LAUNCHER] cmp=com.android.settings/.Settings }
+Warning: Activity not started, intent has been delivered to currently running top-most instance.
+Status: ok
+LaunchState: UNKNOWN (0)
+Activity: com.android.settings/.homepage.SettingsHomepageActivity
+TotalTime: 0
+WaitTime: 130
+Complete
+uiprobe-exit:0

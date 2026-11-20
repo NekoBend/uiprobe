@@ -1,0 +1,7 @@
+# Real output of a package that is not installed, on a Samsung phone (Android 16, API 36, One UI).
+# Source: device capture samsung-api36-1121/resolve-activity-no-such-package.txt of 2026-11-21, taken
+# with adb on the host; its lines end in CR LF, kept as captured.
+# Command: cmd package resolve-activity --brief -c android.intent.category.LAUNCHER <a package that is not installed>
+# Checked for device-identifying values (serial, account, IMEI, build,
+# address): none found, so the body below this header is verbatim.
+No activity found

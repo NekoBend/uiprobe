@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import re
 import time
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, cast
@@ -60,6 +61,7 @@ TRANSPORT = 7
 SHOP = "com.example.shop"
 OTHER = "com.example.other"
 BUTTON = "android.widget.Button"
+LAUNCHER = "android.intent.category.LAUNCHER"
 STOP_REASONS = {
     "exhausted",
     "max_actions",
@@ -439,6 +441,8 @@ def test_a_relaunch_restarts_the_app(tmp_path, device, android, monkeypatch, clo
     assert "relaunch" in kinds
     # A relaunch is a force-stop, then a plain launch, sent one after the other.
     assert all(kwargs.get("restart", False) is False for _, kwargs in launches)
+    # Every launch starts the launcher activity read once before the run.
+    assert all(kwargs.get("activity") == f"{SHOP}/.Main" for _, kwargs in launches)
     assert len(launches) == 1 + kinds.count("relaunch")
     assert android.stopped == [SHOP] * kinds.count("relaunch")
     for name in (out / "screens").iterdir():
@@ -610,6 +614,84 @@ def test_max_actions_stops_the_crawl(tmp_path, device, clock):
     result = run(device, clock, tmp_path / "run", limits=Limits(actions=4))
     assert result.stop_reason == "max_actions"
     assert result.actions == 4
+
+
+# --- how the app is started ---
+
+
+def test_the_crawl_reads_the_launcher_once_and_starts_it_with_am_start(
+    tmp_path, device, android, monkeypatch, clock, fake_adb
+):
+    original = device.tap
+
+    def tap_then_cover(point: tuple[int, int]) -> tuple[int, int]:
+        result = original(point)
+        if not android.stopped and android.screen.name == "browse":
+            for name in ("ext1", "ext2", "ext3"):
+                android.show(name)
+        return result
+
+    monkeypatch.setattr(device, "tap", tap_then_cover)
+    run(device, clock, tmp_path / "run")
+    sent = commands(fake_adb)
+    resolve = f"cmd package resolve-activity --brief -c {LAUNCHER} {SHOP}"
+    start = (
+        f"am start -W -a android.intent.action.MAIN -c {LAUNCHER} -n {SHOP}/.Main;"
+        " echo uiprobe-exit:$?"
+    )
+    stop = f"am force-stop {SHOP}; echo uiprobe-exit:$?"
+    changing = [c for c in sent if c.startswith(("am ", "monkey", "cmd "))]
+    assert changing.count(resolve) == 1
+    assert changing[0] == resolve  # before the first launch
+    assert changing[1] == start
+    assert stop in changing  # there was a relaunch
+    assert set(changing[1:]) == {start, stop}
+    # A relaunch: the force-stop, then the start with no read of the
+    # launcher in between.
+    for index, command in enumerate(changing):
+        if command == stop:
+            assert changing[index + 1] == start
+    assert not any("monkey" in c for c in sent)
+
+
+def test_an_unreadable_launcher_ends_the_crawl_before_the_run_folder(
+    tmp_path, device, android, clock, fake_adb
+):
+    android.override(re.compile(r"^cmd package"), b"No activity found\n")
+    out = tmp_path / "run"
+    with pytest.raises(LaunchFailedError) as info:
+        run(device, clock, out)
+    assert info.value.details == {
+        "package": SHOP,
+        "reason": "launcher_unreadable",
+        "output": "No activity found",
+    }
+    assert not out.exists()
+    assert not any(c.startswith(("am ", "input ")) for c in commands(fake_adb))
+
+
+@pytest.mark.usefixtures("android")
+def test_a_start_that_does_not_finish_in_time_does_not_end_the_crawl(
+    tmp_path, device, monkeypatch, clock
+):
+    original = device.launch
+    calls: list[int] = []
+
+    def slow_first(package: str, **kwargs: object) -> None:
+        calls.append(1)
+        original(package, **kwargs)
+        if len(calls) == 1:
+            raise LaunchFailedError(
+                "silent",
+                details={"package": SHOP, "reason": "start_timeout", "timeout": 10.0},
+            )
+
+    monkeypatch.setattr(device, "launch", slow_first)
+    out = tmp_path / "run"
+    result = run(device, clock, out)
+    assert result.stop_reason in STOP_REASONS
+    summary = (out / "summary.txt").read_text(encoding="utf-8")
+    assert f"{SHOP} did not finish starting in 10.0 seconds" in summary
 
 
 # --- a launch that leaves another app in front ---
@@ -1039,6 +1121,7 @@ def _gate_run(
         engine,
         policy,
         emulator=True,
+        launcher=f"{SHOP}/.Main",
         app_uid=device.package_uid(SHOP),
         screenshots=False,
         settle=0.0,
@@ -1154,6 +1237,7 @@ def test_the_gate_holds_back_the_launch_too(
         engine,
         Policy(),
         emulator=True,
+        launcher=f"{SHOP}/.Main",
         app_uid=device.package_uid(SHOP),
         screenshots=False,
         settle=0.0,
@@ -1926,8 +2010,8 @@ def test_a_tap_whose_reads_end_past_the_limit_is_not_sent(
     assert dict(result.not_sent).get("time_limit") == 1
 
 
-def _monkeys(fake_adb: FakeAdbServer) -> list[str]:
-    return [r for r in fake_adb.requests if r.startswith("shell:") and "monkey" in r]
+def _starts(fake_adb: FakeAdbServer) -> list[str]:
+    return [r for r in fake_adb.requests if r.startswith("shell:am start ")]
 
 
 def test_a_launch_whose_pin_check_ends_past_the_limit_is_not_sent(
@@ -1947,7 +2031,7 @@ def test_a_launch_whose_pin_check_ends_past_the_limit_is_not_sent(
     out = tmp_path / "run"
     result = run(device, clock, out, limits=Limits(minutes=1))
     assert result.stop_reason == "max_duration"
-    assert _monkeys(fake_adb) == []
+    assert _starts(fake_adb) == []
     assert dict(result.not_sent) == {"time_limit": 1}
 
 
@@ -1975,7 +2059,7 @@ def test_a_restart_whose_pin_check_ends_past_the_limit_is_only_half_sent(
     out = tmp_path / "run"
     result = run(device, clock, out)
     assert android.stopped == [SHOP]
-    assert len(_monkeys(fake_adb)) == 1  # the first launch only
+    assert len(_starts(fake_adb)) == 1  # the first launch only
     assert result.stop_reason == "max_duration"
     ends = [r for r in lines(out / "transitions.jsonl") if r.get("not_sent")]
     assert ends[-1]["reason"] == "start_not_sent"

@@ -32,6 +32,14 @@ if TYPE_CHECKING:
 SERIAL = "emulator-5554"
 SHOP = "com.example.shop"
 TRICKY = 'Tom & <Jerry> "x"\nnext'
+RESOLVE = f"cmd package resolve-activity --brief -c {LAUNCHER_CATEGORY} "
+START = f"am start -W -a android.intent.action.MAIN -c {LAUNCHER_CATEGORY} -n "
+
+
+def am_start(component: str) -> str:
+    """The start uiprobe sends for `component`, in the marker form."""
+    return f"{START}{component}; echo uiprobe-exit:$?"
+
 
 SCREENS = (
     Screen("launcher", "com.example.launcher/.Home", (El((0, 0, 320, 640)),)),
@@ -193,17 +201,18 @@ def test_keyboard_shows_hides_on_back_and_is_in_dumpsys_input_method(device, and
 
 
 @device_options(extra_packages=["com.unknown"])
-def test_relaunch_by_monkey_and_am_start(device, android):
+def test_relaunch_by_resolve_activity_and_am_start(device, android):
     android.show("launcher")
-    assert "Events injected" in device._shell(
-        f"monkey -p {SHOP} -c android.intent.category.LAUNCHER 1"
-    )
+    component = device._shell(RESOLVE + SHOP).splitlines()[-1]
+    assert component == f"{SHOP}/.Main"
+    out = device._shell(am_start(component))
+    assert "Status: ok" in out
+    assert out.endswith("uiprobe-exit:0\n")
     assert android.stack == ["main"]  # the task came back to the front
-    android.show("launcher")
-    device._shell(f"am start -n {SHOP}/.Main")
-    assert android.screen.package == SHOP
-    assert "No activities found" in device._shell("monkey -p com.unknown 1")
-    assert "does not exist" in device._shell("am start -n com.unknown/.Main")
+    assert device._shell(RESOLVE + "com.unknown") == "No activity found\n"
+    out = device._shell(am_start("com.unknown/.Main"))
+    assert "does not exist" in out
+    assert out.endswith("uiprobe-exit:1\n")
     assert android.screen.package == SHOP
 
 
@@ -403,10 +412,10 @@ VALID = (
     "input swipe 20 120 20 120 800",
     "input keyevent KEYCODE_BACK",
     "input keyevent 4",
-    f"monkey -p {SHOP} 1",
-    f"monkey -p {SHOP} -c android.intent.category.LAUNCHER 1",
-    f"am start -n {SHOP}/.Main",
-    f"am start -n {SHOP}/{SHOP}.Main",
+    RESOLVE + SHOP,
+    am_start(f"{SHOP}/.Main"),
+    am_start(f"{SHOP}/{SHOP}.Main"),
+    f"am force-stop {SHOP}; echo uiprobe-exit:$?",
     "screencap -p",
 )
 INJECTIONS = (
@@ -444,19 +453,25 @@ def test_strict_mode_rejects_chains_and_quoting_in_every_command_family(
 @pytest.mark.parametrize(
     "command",
     [
-        f"am start -n {SHOP}/.Main;reboot",
-        f"am start -n {SHOP}/.Main&&reboot",
-        f"am start -n {SHOP}/.Main|reboot",
-        f"am start -n {SHOP}/.Main$(reboot)",
-        f"am start -n {SHOP}/.Main`reboot`",
-        f"am start -n {SHOP}/.Main$Inner",
-        f"am start -n {SHOP}/",
-        f"am start -n {SHOP}/..Main",
-        f"am start -n {SHOP}/.Main..X",
-        "am start -n shop/.Main",
-        f"monkey -p {SHOP};reboot 1",
-        f"monkey -p {SHOP} -c a;b 1",
-        "monkey -p com.a.b  1",
+        am_start(f"{SHOP}/.Main;reboot"),
+        am_start(f"{SHOP}/.Main&&reboot"),
+        am_start(f"{SHOP}/.Main|reboot"),
+        am_start(f"{SHOP}/.Main$(reboot)"),
+        am_start(f"{SHOP}/.Main`reboot`"),
+        am_start(f"{SHOP}/.Main$Inner"),
+        am_start(f"{SHOP}/"),
+        am_start(f"{SHOP}/..Main"),
+        am_start(f"{SHOP}/.Main..X"),
+        am_start("shop/.Main"),
+        RESOLVE + f"{SHOP};reboot",
+        RESOLVE + f" {SHOP}",
+        f"cmd package resolve-activity -c {LAUNCHER_CATEGORY} {SHOP}",
+        f"cmd package resolve-activity --brief {SHOP}",
+        START + f"{SHOP}/.Main",  # without the exit marker
+        f"am start -n {SHOP}/.Main",  # the plain form is not sent
+        f"am start -W -n {SHOP}/.Main; echo uiprobe-exit:$?",
+        f"monkey -p {SHOP} -c {LAUNCHER_CATEGORY} 1",  # monkey is never admitted
+        f"monkey -p {SHOP} 1",
         "input tap 1 2;reboot",
         "input tap \u0661 2",
         "input swipe 1 2 1 3 800",
@@ -478,15 +493,16 @@ def test_strict_mode_rejects_malformed_and_chained_commands(android, command):
 @pytest.mark.parametrize(
     "command",
     [
-        "monkey -p com.attacker.app 1",
-        "monkey -p com.attacker.app -c com.attacker.Category 1",
-        f"monkey -p {SHOP} -c com.attacker.Category 1",
-        f"monkey -p {SHOP} -c android.intent.category.LAUNCHER.x 1",
-        f"monkey -p {SHOP}x 1",
-        "am start -n com.attacker.app/.Main",
-        f"am start -n {SHOP}/.Undeclared",
-        f"am start -n {SHOP}/{SHOP}.Undeclared",
-        f"am start -n {SHOP}x/.Main",
+        RESOLVE + "com.attacker.app",
+        RESOLVE + f"{SHOP}x",
+        f"cmd package resolve-activity --brief -c com.attacker.Category {SHOP}",
+        am_start(f"{SHOP}/.Main").replace(LAUNCHER_CATEGORY, "com.attacker.Category"),
+        am_start(f"{SHOP}/.Main").replace(LAUNCHER_CATEGORY, LAUNCHER_CATEGORY + ".x"),
+        am_start(f"{SHOP}/.Main").replace("action.MAIN", "action.VIEW"),
+        am_start("com.attacker.app/.Main"),
+        am_start(f"{SHOP}/.Undeclared"),
+        am_start(f"{SHOP}/{SHOP}.Undeclared"),
+        am_start(f"{SHOP}x/.Main"),
     ],
 )
 def test_strict_mode_refuses_undeclared_packages_components_and_categories(
@@ -497,11 +513,13 @@ def test_strict_mode_refuses_undeclared_packages_components_and_categories(
 
 def test_extra_packages_admit_only_the_missing_package_launches(android):
     extra = "com.example.missing"
-    assert allowed(android, f"monkey -p {extra} 1", extra)
-    assert allowed(android, f"am start -n {extra}/.Main", extra)
-    assert not allowed(android, f"monkey -p {extra} 1")
-    assert not allowed(android, "monkey -p com.attacker.app 1", extra)
-    assert not allowed(android, f"monkey -p {extra} -c com.attacker.Category 1", extra)
+    assert allowed(android, RESOLVE + extra, extra)
+    assert allowed(android, am_start(f"{extra}/.Main"), extra)
+    assert not allowed(android, RESOLVE + extra)
+    assert not allowed(android, am_start(f"{extra}/.Main"))
+    assert not allowed(android, RESOLVE + "com.attacker.app", extra)
+    other = am_start(f"{extra}/.Main").replace(LAUNCHER_CATEGORY, "com.attacker.C")
+    assert not allowed(android, other, extra)
 
 
 def test_allowed_refuses_a_declared_package_as_extra(android):
@@ -524,8 +542,8 @@ def test_a_configured_missing_package_gets_the_real_failure_output(fake_adb, and
     extra = "com.example.missing"
     phone = Device(adb_server=fake_adb.address)
     before = list(android.stack)
-    assert "No activities found" in phone._shell(f"monkey -p {extra} 1")
-    assert "does not exist" in phone._shell(f"am start -n {extra}/.Main")
+    assert phone._shell(RESOLVE + extra) == "No activity found\n"
+    assert "does not exist" in phone._shell(am_start(f"{extra}/.Main"))
     assert android.stack == before
     assert fake_adb.unexpected == []
 
@@ -536,9 +554,9 @@ def test_strict_mode_refuses_an_unknown_package_and_category_end_to_end(
     phone = Device(adb_server=fake_adb.address)
     android.show("launcher")
     for command in (
-        "monkey -p com.attacker.app 1",
-        f"monkey -p {SHOP} -c com.attacker.Category 1",
-        "am start -n com.attacker.app/.Main",
+        RESOLVE + "com.attacker.app",
+        am_start(f"{SHOP}/.Main").replace(LAUNCHER_CATEGORY, "com.attacker.Category"),
+        am_start("com.attacker.app/.Main"),
     ):
         with pytest.raises(AdbError):
             phone._shell(command)
@@ -548,13 +566,17 @@ def test_strict_mode_refuses_an_unknown_package_and_category_end_to_end(
 
 
 @LAX
-def test_monkey_honours_the_category(device, android):
+def test_resolve_and_start_honour_the_category(device, android):
     android.show("launcher")
-    out = device._shell(f"monkey -p {SHOP} -c com.attacker.Category 1")
-    assert "No activities found" in out
+    out = device._shell(
+        f"cmd package resolve-activity --brief -c com.attacker.Category {SHOP}"
+    )
+    assert out == "No activity found\n"
+    command = am_start(f"{SHOP}/.Main")
+    other = command.replace(LAUNCHER_CATEGORY, "com.attacker.C")
+    assert device._shell(other) == "uiprobe-exit:1\n"
     assert android.stack[-1] == "launcher"
-    out = device._shell(f"monkey -p {SHOP} -c {LAUNCHER_CATEGORY} 1")
-    assert "Events injected: 1" in out
+    assert "Status: ok" in device._shell(command)
     assert android.screen.package == SHOP
 
 
@@ -562,9 +584,9 @@ def test_strict_mode_serves_no_chain_end_to_end(fake_adb, android):
     phone = Device(adb_server=fake_adb.address)
     android.show("launcher")
     for command in (
-        f"am start -n {SHOP}/.Main;reboot",
-        f"am start -n {SHOP}/.Main\nreboot",
-        f"monkey -p {SHOP} 1 && reboot",
+        am_start(f"{SHOP}/.Main;reboot"),
+        am_start(f"{SHOP}/.Main\nreboot"),
+        RESOLVE + f"{SHOP} && reboot",
     ):
         with pytest.raises(AdbError):
             phone._shell(command)
@@ -577,11 +599,11 @@ def test_strict_mode_serves_no_chain_end_to_end(fake_adb, android):
 def test_explicit_launch_starts_the_named_component_of_an_app_that_is_not_running(
     device, android
 ):
-    device._shell(f"am start -n {SHOP}/.Menu")
+    device._shell(am_start(f"{SHOP}/.Menu"))
     assert android.stack == ["launcher", "menu"]
     # The full class name names the same activity as the short one.
     android.stack[:] = ["launcher"]
-    device._shell(f"am start -n {SHOP}/{SHOP}.Main")
+    device._shell(am_start(f"{SHOP}/{SHOP}.Main"))
     assert android.stack == ["launcher", "main"]
 
 
@@ -594,7 +616,7 @@ def test_explicit_launch_of_a_running_app_brings_its_top_screen_forward(
     device._shell("input tap 20 20")
     android.show("launcher")
     assert android.stack == ["main", "settings", "editing", "launcher"]
-    device._shell(f"am start -n {SHOP}/.Main")
+    device._shell(am_start(f"{SHOP}/.Main"))
     assert android.stack == ["main", "settings", "editing"]
 
 
@@ -602,7 +624,7 @@ def test_explicit_launch_of_a_running_app_brings_its_top_screen_forward(
 def test_explicit_launch_of_an_unknown_activity_fails_even_for_a_running_app(
     device, android
 ):
-    out = device._shell(f"am start -n {SHOP}/.Missing")
+    out = device._shell(am_start(f"{SHOP}/.Missing"))
     assert "does not exist" in out
     assert android.stack == ["main"]
 
@@ -611,14 +633,14 @@ def test_explicit_launch_of_an_unknown_activity_fails_even_for_a_running_app(
 def test_launch_of_a_missing_activity_fails_and_changes_nothing(device, android):
     android.show("launcher")
     before = list(android.stack)
-    out = device._shell(f"am start -n {SHOP}/.Missing")
+    out = device._shell(am_start(f"{SHOP}/.Missing"))
     assert f"Error: Activity class {{{SHOP}/{SHOP}.Missing}} does not exist." in out
     assert "Error type 3" in out
     assert android.stack == before
-    out = device._shell(f"am start -n {SHOP}/other.pkg.Main")
+    out = device._shell(am_start(f"{SHOP}/other.pkg.Main"))
     assert "does not exist" in out
     assert android.stack == before
-    out = device._shell("am start -n com.example.launcher/.Menu")  # wrong app
+    out = device._shell(am_start("com.example.launcher/.Menu"))  # wrong app
     assert "does not exist" in out
     assert android.stack == before
 
@@ -688,7 +710,7 @@ def test_a_malformed_declared_component_fails_at_setup(fake_adb, component):
 def test_short_and_full_class_spellings_are_declarable(fake_adb, component):
     phone = FakeAndroid(fake_adb, SERIAL, (Screen("main", component),), start="main")
     assert phone.screen.name == "main"
-    assert any(p.search(f"am start -n {component}") for p in phone.allowed()["shell"])
+    assert any(p.search(am_start(f"{component}")) for p in phone.allowed()["shell"])
 
 
 def test_screens_are_read_only(fake_adb):
@@ -874,13 +896,13 @@ def test_two_devices_each_get_their_own_allowlist(fake_adb):
     assert client.shell(SERIAL, "wm size")
     assert client.shell("emulator-5556", "wm size")
     assert (one.serial, two.serial) == (SERIAL, "emulator-5556")
-    assert client.shell(SERIAL, f"am start -n {SHOP}/.Settings") is not None
+    assert client.shell(SERIAL, am_start(f"{SHOP}/.Settings")) is not None
     assert not fake_adb.unexpected
     with pytest.raises(AdbError):
         client.shell(
-            "emulator-5556", f"am start -n {SHOP}/.Settings"
+            "emulator-5556", am_start(f"{SHOP}/.Settings")
         )  # not declared there
-    assert fake_adb.unexpected == [f"shell:am start -n {SHOP}/.Settings"]
+    assert fake_adb.unexpected == ["shell:" + am_start(f"{SHOP}/.Settings")]
     fake_adb.unexpected.clear()
 
 
@@ -906,27 +928,70 @@ def test_a_lax_device_created_first_stays_served(fake_adb):
     assert fake_adb.unexpected == []
 
 
-def test_monkey_output_starts_with_the_preamble_monkey_prints(device):
-    out = device._shell(f"monkey -p {SHOP} -c {LAUNCHER_CATEGORY} 1")
-    lines = out.splitlines()
-    assert lines[:5] == [
-        "  bash arg: -p",
-        f"  bash arg: {SHOP}",
-        "  bash arg: -c",
-        f"  bash arg: {LAUNCHER_CATEGORY}",
-        "  bash arg: 1",
+def test_resolve_activity_prints_the_captured_shape(device):
+    assert device._shell(RESOLVE + SHOP) == (
+        "priority=0 preferredOrder=0 match=0x108000 specificIndex=-1 isDefault=true\n"
+        f"{SHOP}/.Main\n"
+    )
+
+
+STARTING = (
+    "Starting: Intent { act=android.intent.action.MAIN"
+    f" cat=[{LAUNCHER_CATEGORY}] cmp={SHOP}/.Main }}"
+)
+
+
+@pytest.mark.parametrize(
+    ("api", "cold", "running"),
+    [
+        (
+            36,
+            ["Status: ok", "LaunchState: COLD", f"Activity: {SHOP}/.Main"],
+            [
+                "Warning: Activity not started, intent has been delivered to"
+                " currently running top-most instance.",
+                "Status: ok",
+                "LaunchState: UNKNOWN (0)",
+                f"Activity: {SHOP}/.Main",
+            ],
+        ),
+        (
+            24,
+            ["Status: ok", f"Activity: {SHOP}/.Main", "ThisTime: 0"],
+            [
+                "Warning: Activity not started, its current task has been brought"
+                " to the front",
+                "Status: ok",
+                f"Activity: {SHOP}/.Main",
+                "ThisTime: 0",
+            ],
+        ),
+    ],
+)
+def test_am_start_prints_the_captured_shapes(fake_adb, api, cold, running):
+    FakeAndroid(fake_adb, SERIAL, SCREENS, start="launcher", api=api)
+    device = Device(adb_server=fake_adb.address)
+    # The full class name is echoed in the short form.
+    lines = device._shell(am_start(f"{SHOP}/{SHOP}.Main")).splitlines()
+    assert lines[0] == STARTING
+    assert lines[1 : 1 + len(cold)] == cold
+    assert lines[-2:] == ["Complete", "uiprobe-exit:0"]
+    lines = device._shell(am_start(f"{SHOP}/.Main")).splitlines()
+    assert lines[0] == STARTING
+    assert lines[1 : 1 + len(running)] == running
+    assert lines[-1] == "uiprobe-exit:0"
+
+
+@pytest.mark.parametrize(("api", "status"), [(36, 1), (24, 0)])
+def test_am_start_of_an_unknown_class_prints_the_captured_error(fake_adb, api, status):
+    FakeAndroid(fake_adb, SERIAL, SCREENS, start="main", api=api, strict=False)
+    device = Device(adb_server=fake_adb.address)
+    lines = device._shell(am_start(f"{SHOP}/.Nope")).splitlines()
+    assert lines[1:] == [
+        "Error type 3",
+        f"Error: Activity class {{{SHOP}/{SHOP}.Nope}} does not exist.",
+        f"uiprobe-exit:{status}",
     ]
-    assert lines[5] == f"args: [-p, {SHOP}, -c, {LAUNCHER_CATEGORY}, 1]"
-    assert lines[6] == ' arg: "-p"'
-    assert lines[10] == ' arg: "1"'
-    assert lines[11:13] == [f'data="{SHOP}"', f'data="{LAUNCHER_CATEGORY}"']
-    assert lines[13] == "Events injected: 1"
-    assert lines[0] != "Events injected: 1"
-
-
-def test_am_start_echoes_the_short_component(device):
-    out = device._shell(f"am start -n {SHOP}/{SHOP}.Main")
-    assert out == f"Starting: Intent {{ cmp={SHOP}/.Main }}\n"
 
 
 # --- screen validation ---
@@ -986,11 +1051,11 @@ def test_a_single_segment_system_package_can_be_declared(fake_adb):
     )
     phone = FakeAndroid(fake_adb, SERIAL, screens, start="main")
     client = Device(adb_server=fake_adb.address)
-    assert f"cmp={RESOLVER}" in client._shell(f"am start -n {RESOLVER}")
+    assert f"cmp={RESOLVER}" in client._shell(am_start(f"{RESOLVER}"))
     assert phone.screen.name == "chooser"
     assert client.dump().package == "android"
     assert RESOLVER in phone._dumpsys_window()
-    assert "Events injected" in client._shell("monkey -p android 1")
+    assert client._shell(RESOLVE + "android").endswith(f"\n{RESOLVER}\n")
 
 
 def test_a_nested_class_with_a_dollar_stays_refused(fake_adb):

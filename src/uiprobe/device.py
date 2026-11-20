@@ -136,8 +136,41 @@ class DeviceIdentity(NamedTuple):
 DEFAULT_LAUNCH_TIMEOUT: Final = 10.0
 LAUNCH_POLL_INTERVAL: Final = 0.5
 MAX_LAUNCH_TIMEOUT: Final = 600.0
-_EVENTS_INJECTED = re.compile(r"Events injected: ([0-9]+)")
-_NO_ACTIVITIES: Final = "** No activities found"
+# An app is started with ``am start -W`` of its launcher activity, read first
+# with ``cmd package resolve-activity --brief``. ``monkey -p PACKAGE -c
+# android.intent.category.LAUNCHER 1`` is not used: it switched the system
+# setting accelerometer_rotation (auto-rotate) from 0 to 1 on a Samsung API 36
+# phone and on API 24 and 36 emulators, while ``am start -W`` left it as it was.
+LAUNCHER_CATEGORY: Final = "android.intent.category.LAUNCHER"
+MAIN_ACTION: Final = "android.intent.action.MAIN"
+# The lines ``resolve-activity --brief`` prints before the component (captured
+# on API 24 and 36 emulators and a Samsung API 36 phone:
+# ``priority=0 preferredOrder=0 match=0x108000 specificIndex=-1 isDefault=true``).
+_RESOLVE_INFO = re.compile(
+    r"priority=-?[0-9]{1,10} preferredOrder=-?[0-9]{1,10}"
+    r" match=0x[0-9a-f]{1,8} specificIndex=-?[0-9]{1,10} isDefault=(?:true|false)"
+)
+# The class part of a component: dot-separated names of ASCII letters, digits,
+# ``_`` and ``$``, optionally starting with ``.`` (short for the package).
+_CLASS_NAME = re.compile(r"\.?[A-Za-z0-9_$]+(?:\.[A-Za-z0-9_$]+)*")
+_MAX_CLASS_NAME: Final = 255
+# Lines ``am start -W`` prints that say nothing about success and are allowed
+# (captured: ``Warning:`` when the app was running, ``LaunchState:`` on API 36,
+# ``ThisTime:`` on API 24).
+_START_INFO: Final = (
+    "Starting: ",
+    "Warning: ",
+    "LaunchState: ",
+    "ThisTime: ",
+    "TotalTime: ",
+    "WaitTime: ",
+)
+_START_OK: Final = "Status: ok"
+_START_DONE: Final = "Complete"
+_START_ACTIVITY: Final = "Activity:"
+# The silence ``am start -W`` may keep while it waits is the launch timeout,
+# but at least this long (a read timeout of 0 would not wait at all).
+START_MIN_WAIT: Final = 1.0
 _FOREGROUND_LIMIT: Final = 1000
 DUMP_DIRECTORY: Final = "/data/local/tmp"
 DUMP_MESSAGE_LIMIT: Final = 500
@@ -786,6 +819,126 @@ def _check_launch_timeout(timeout: object) -> float:
 def _escaped(text: str, limit: int = 200) -> str:
     """Return `text` cut to `limit` characters and escaped to printable ASCII."""
     return ascii(text[:limit])[1:-1]
+
+
+def _is_component(text: str, package: str) -> bool:
+    """Whether `text` is ``PACKAGE/CLASS`` with exactly `package` before the
+    slash and a class name of the accepted shape and length after it."""
+    owner, slash, name = text.partition("/")
+    return (
+        slash == "/"
+        and owner == package
+        and len(name) <= _MAX_CLASS_NAME
+        and _CLASS_NAME.fullmatch(name) is not None
+    )
+
+
+def _launcher_component(output: str, package: str) -> str | None:
+    """Read the component from ``cmd package resolve-activity --brief`` output.
+
+    Accepted: zero or more lines of the `_RESOLVE_INFO` form, then exactly one
+    last line ``PACKAGE/CLASS`` of `package` (empty lines and one CR at each
+    line end are ignored). Anything else, ``No activity found`` included, is
+    None.
+    """
+    lines = [line for line in _lines(output) if line]
+    if not lines:
+        return None
+    *info, last = lines
+    if not all(_RESOLVE_INFO.fullmatch(line) for line in info):
+        return None
+    return last if _is_component(last, package) else None
+
+
+def _check_activity(activity: object, package: str) -> str:
+    """Return `activity` as a plain str when it is a component of `package`.
+
+    Raises:
+        TypeError: `activity` is not a str.
+        ValueError: It is not ``PACKAGE/CLASS`` of `package`.
+    """
+    if not isinstance(activity, str):
+        msg = f"activity must be a str, not {type(activity).__name__}"
+        raise TypeError(msg)
+    activity = str.__str__(activity)  # a plain str, whatever the subclass
+    if not _is_component(activity, package):
+        msg = (
+            f"activity must be {package}/CLASS (CLASS made of letters, digits,"
+            f" _ and $ joined by dots), not '{_escaped(activity)}'"
+        )
+        raise ValueError(msg)
+    return activity
+
+
+class _StartFailure(NamedTuple):
+    """Why ``am start -W`` output is not a success.
+
+    ``line`` is the line to show (None: the first line that is not blank) and
+    ``exit_status`` the status when it was known and not 0.
+    """
+
+    reason: str
+    problem: str
+    line: str | None = None
+    exit_status: int | None = None
+
+
+def _start_failure(output: str, package: str) -> _StartFailure | None:
+    """Judge ``am start -W ...; echo uiprobe-exit:$?`` output; None is success.
+
+    Success: no line starts with ``Error``, the marker line is last with exit
+    status 0, the line ``Status: ok`` is there exactly once, exactly one line
+    starts with ``Activity:`` and it is ``Activity: PACKAGE/CLASS`` of
+    `package` (any class: a launcher activity may hand over to another one),
+    and every other line is ``Complete`` or starts with one of `_START_INFO`.
+    Empty lines and one CR at each line end are ignored. API 24 prints its
+    ``Error`` lines with exit status 0, so the status alone proves nothing.
+    """
+    lines = [line for line in _lines(output) if line]
+    marker = lines[-1] if lines and lines[-1].startswith(EXIT_MARKER) else None
+    others = lines[:-1] if marker is not None else lines
+    value = None if marker is None else marker[len(EXIT_MARKER) :]
+    status = int(value) if value is not None and _EXIT_VALUE.fullmatch(value) else None
+    failed = None if status in (None, 0) else status
+    errors = [line for line in others if line.startswith("Error")]
+    # API 24 and 36 print ``Error type 3`` and then the line that says why.
+    error = next((line for line in errors if line.startswith("Error:")), None)
+    error = error or next(iter(errors), None)
+    if error is not None:
+        return _StartFailure("start_failed", "reported an error", error, failed)
+    if failed is not None:
+        return _StartFailure(
+            "start_failed", f"ended with exit status {failed}", None, failed
+        )
+    if status is None:
+        return _StartFailure("unexpected_output", "reported no exit status")
+    return _start_report_failure(others, package)
+
+
+def _start_report_failure(lines: list[str], package: str) -> _StartFailure | None:
+    """Judge the lines of a start that reported exit status 0 and no error."""
+    unknown = next(
+        (
+            line
+            for line in lines
+            if line not in (_START_OK, _START_DONE)
+            and not line.startswith((*_START_INFO, _START_ACTIVITY))
+        ),
+        None,
+    )
+    if unknown is not None:
+        return _StartFailure("unexpected_output", "printed an unknown line", unknown)
+    if lines.count(_START_OK) != 1:
+        return _StartFailure("unexpected_output", f"did not print '{_START_OK}' once")
+    activities = [line for line in lines if line.startswith(_START_ACTIVITY)]
+    if len(activities) != 1:
+        return _StartFailure("unexpected_output", "did not name one started activity")
+    named = activities[0].removeprefix(_START_ACTIVITY + " ")
+    if named == activities[0] or not _is_component(named, package):
+        return _StartFailure(
+            "unexpected_output", f"named no activity of {package}", activities[0]
+        )
+    return None
 
 
 def _shown_foreground(name: str) -> str:
@@ -2204,18 +2357,32 @@ class Device:
         *,
         restart: bool = False,
         timeout: float = DEFAULT_LAUNCH_TIMEOUT,
+        activity: str | None = None,
     ) -> None:
         """Start the app `package` and wait until it is in front.
 
+        First the launcher activity is read with ``cmd package
+        resolve-activity --brief -c android.intent.category.LAUNCHER PACKAGE``
+        (see `launcher_activity`; skipped when `activity` is given). When it
+        cannot be read, nothing is sent that changes the device.
         With ``restart=True`` the command ``am force-stop PACKAGE; echo
-        uiprobe-exit:$?`` is sent first. It stops the app, so the next launch
+        uiprobe-exit:$?`` is sent next. It stops the app, so the next launch
         starts a fresh task; state the app has not saved is lost. It must
         report exit status 0 and print nothing else (empty lines are ignored),
         or nothing more is sent.
-        Then exactly ``monkey -p PACKAGE -c android.intent.category.LAUNCHER
-        1`` is sent (no other monkey option, and always a count of 1). Monkey
-        must print the line ``Events injected: 1`` exactly once. Each command
-        is sent once and never resent, not even after a connection error.
+        Then exactly ``am start -W -a android.intent.action.MAIN -c
+        android.intent.category.LAUNCHER -n PACKAGE/CLASS; echo
+        uiprobe-exit:$?`` is sent. It succeeds only when no line starts with
+        ``Error``, the exit status is 0, ``Status: ok`` is printed exactly
+        once, exactly one ``Activity:`` line names an activity of `package`
+        (its class may differ from the one started), and every other line is
+        ``Complete`` or starts with ``Starting:``, ``Warning:``,
+        ``LaunchState:``, ``ThisTime:``, ``TotalTime:`` or ``WaitTime:``. The
+        wait of ``-W`` may stay silent for `timeout` seconds (at least
+        `START_MIN_WAIT`). Each command is sent once and never resent, not
+        even after a connection error. ``monkey`` is never sent: it turned
+        auto-rotate on (on a Samsung API 36 phone and API 24 and 36
+        emulators), ``am start`` did not.
 
         Then `foreground` is read about every 0.5 seconds until it equals
         `package`. It is read at least once, and no read starts after
@@ -2224,28 +2391,40 @@ class Device:
         counts, so the wait can run past the timeout by the time of that read,
         and by how late a pause ends when the system wakes it late.
 
-        A str subclass is used as a plain str with the same text.
+        `activity` is a launcher activity read earlier with
+        `launcher_activity` for the same package, so that nothing is read
+        between the caller's last check and the start (the crawl reads it once
+        per run). A str subclass is used as a plain str with the same text.
 
         Raises:
-            TypeError: `package` is not a str, `restart` is not a bool, or
-                `timeout` is not a number (a bool is not).
+            TypeError: `package` or `activity` is not a str, `restart` is not
+                a bool, or `timeout` is not a number (a bool is not).
             ValueError: `package` does not follow the Android package rule
-                (see `uiprobe.crawl_preview.PACKAGE_PATTERN`), or `timeout` is
-                not from 0 to 600 seconds. Both are raised before the adb
-                server is contacted.
+                (see `uiprobe.crawl_preview.PACKAGE_PATTERN`), `activity` is
+                not ``PACKAGE/CLASS`` of `package`, or `timeout` is not from 0
+                to 600 seconds. All are raised before the adb server is
+                contacted.
             LaunchFailedError: ``details`` hold ``package`` and ``reason``:
+                ``launcher_unreadable`` (the launcher activity could not be
+                read; ``output`` is the first line that is not blank, stripped,
+                cut to 200 characters and escaped; nothing was sent),
                 ``stop_failed`` (``am force-stop`` did not report success;
                 ``exit_status`` when it reported a status other than 0,
                 ``output`` when it printed something else, escaped; with no
-                status and no output neither is set; monkey was not sent),
-                ``not_installed_or_no_launcher`` (monkey found no launcher
-                activity), ``unexpected_output`` (monkey did not report exactly
-                one injected event; ``output`` is its first line that is not
-                blank, stripped, cut to 200 characters and escaped) or
-                ``not_in_front`` (the app was not the foreground app in time;
-                ``foreground`` is the last package seen (escaped; past 1000
-                characters cut and ended with ``...``), or None, and ``timeout``
-                the limit). The app may still have started.
+                status and no output neither is set; the start was not sent),
+                ``start_failed`` (``am start`` printed a line starting with
+                ``Error``, or ended with an exit status other than 0, then in
+                ``exit_status``), ``unexpected_output`` (``am start`` did not
+                report the success described above), both with ``output``, the
+                line at fault or else the first line that is not blank, cut to
+                200 characters and escaped, ``start_timeout`` (``am start -W``
+                was silent longer than ``timeout`` seconds, the read timeout
+                used) or ``not_in_front`` (the app was not the foreground app in
+                time; ``foreground`` is the last package seen (escaped; past
+                1000 characters cut and ended with ``...``), or None, and
+                ``timeout`` the limit). After ``start_failed``,
+                ``unexpected_output``, ``start_timeout`` and ``not_in_front``
+                the app may still have started.
             AdbError: The adb protocol or the command failed.
             AdbServerUnavailableError: The adb server cannot be reached.
             DeviceNotFoundError: The device is gone.
@@ -2259,49 +2438,14 @@ class Device:
             msg = f"restart must be a bool, not {type(restart).__name__}"
             raise TypeError(msg)
         limit = _check_launch_timeout(timeout)
-        details: dict[str, object] = {"package": package}
+        if activity is not None:
+            activity = _check_activity(activity, package)
+        else:
+            activity = self._launcher_activity(package)
         if restart:
             self._force_stop(package)
-        try:
-            output = self._shell(
-                quote_args(
-                    "monkey",
-                    "-p",
-                    package,
-                    "-c",
-                    "android.intent.category.LAUNCHER",
-                    "1",
-                )
-            )
-        except DeviceNotFoundError as error:
-            if not restart or error.details.get("reason") != PIN_NOT_PROVEN:
-                raise
-            msg = (
-                f"{package} was force-stopped, but the start was not sent: the"
-                f" device has to be proven again"
-            )
-            details = {**error.details, "force_stopped": True}
-            raise DeviceNotFoundError(msg, details=details) from None
-        lines = [line.strip(" \t") for line in _lines(output)]
-        counts = [
-            m.group(1) for line in lines if (m := _EVENTS_INJECTED.fullmatch(line))
-        ]
-        if counts != ["1"]:
-            self._doubt(LaunchFailedError("monkey did not report one event"))
-            if any(line.startswith(_NO_ACTIVITIES) for line in lines):
-                details["reason"] = "not_installed_or_no_launcher"
-                msg = (
-                    f"{package} has no launcher activity (not installed, or it has"
-                    " none)"
-                )
-                raise LaunchFailedError(msg, details=details)
-            first = _escaped_line(output)
-            details["reason"] = "unexpected_output"
-            details["output"] = first
-            msg = (
-                f"monkey did not report one injected event; its output began '{first}'"
-            )
-            raise LaunchFailedError(msg, details=details)
+        self._start(package, activity, limit, force_stopped=restart)
+        details: dict[str, object] = {"package": package}
         deadline = self._clock() + limit
         while True:
             seen = self.foreground()
@@ -2317,6 +2461,116 @@ class Device:
         last = "unknown" if shown is None else shown
         msg = f"{package} was not in front after {limit:g} seconds (foreground: {last})"
         raise LaunchFailedError(msg, details=details)
+
+    def launcher_activity(self, package: str) -> str:
+        """Return the launcher activity of `package` as ``PACKAGE/CLASS``.
+
+        It sends ``cmd package resolve-activity --brief -c
+        android.intent.category.LAUNCHER PACKAGE`` (a read: nothing on the
+        device changes). The output must be zero or more lines like
+        ``priority=0 preferredOrder=0 match=0x108000 specificIndex=-1
+        isDefault=true`` and then exactly one last line ``PACKAGE/CLASS`` with
+        exactly `package` before the slash and a class of dot-separated parts
+        of ASCII letters, digits, ``_`` and ``$`` (it may start with ``.``; at
+        most 255 characters). Empty lines and one CR at each line end are
+        ignored. The CLASS is returned as printed, often in the short form
+        ``.Name``.
+
+        Raises:
+            TypeError, ValueError: `package` is not a valid package name
+                (before the adb server is contacted).
+            LaunchFailedError: Anything else was printed (``No activity
+                found`` for a package that is not installed or has no
+                launcher activity, another package, more lines);
+                ``details["reason"]`` is ``launcher_unreadable`` and
+                ``details["output"]`` the first line that is not blank,
+                stripped, cut to 200 characters and escaped.
+            AdbError: The adb protocol or the command failed.
+        """
+        if isinstance(package, str):
+            package = str.__str__(package)
+        return self._launcher_activity(check_package(package))
+
+    def _launcher_activity(self, package: str) -> str:
+        output = self._shell(
+            quote_args(
+                "cmd",
+                "package",
+                "resolve-activity",
+                "--brief",
+                "-c",
+                LAUNCHER_CATEGORY,
+                package,
+            )
+        )
+        component = _launcher_component(output, package)
+        if component is not None:
+            return component
+        first = _escaped_line(output)
+        details: dict[str, object] = {
+            "package": package,
+            "reason": "launcher_unreadable",
+            "output": first,
+        }
+        msg = (
+            f"the launcher activity of {package} could not be read on this device,"
+            f" so it was not started; the output began '{first}'"
+        )
+        raise LaunchFailedError(msg, details=details)
+
+    def _start(
+        self, package: str, activity: str, limit: float, *, force_stopped: bool
+    ) -> None:
+        """Send ``am start -W`` of `activity` once and require it to succeed."""
+        command = (
+            quote_args(
+                "am",
+                "start",
+                "-W",
+                "-a",
+                MAIN_ACTION,
+                "-c",
+                LAUNCHER_CATEGORY,
+                "-n",
+                activity,
+            )
+            + _EXIT_SUFFIX
+        )
+        wait = max(limit, START_MIN_WAIT)
+        details: dict[str, object] = {"package": package}
+        try:
+            output = self._shell_text(command, timeout=wait)
+        except DeviceNotFoundError as error:
+            if not force_stopped or error.details.get("reason") != PIN_NOT_PROVEN:
+                raise
+            msg = (
+                f"{package} was force-stopped, but the start was not sent: the"
+                f" device has to be proven again"
+            )
+            details = {**error.details, "force_stopped": True}
+            raise DeviceNotFoundError(msg, details=details) from None
+        except AdbError as error:
+            if (
+                error.details.get("reason") != "timeout"
+                or error.details.get("stage") != "output"
+            ):
+                raise
+            # The request failed, so the pin was already doubted.
+            details.update(reason="start_timeout", timeout=wait)
+            msg = (
+                f"am start -W of {package} did not finish: it was silent for"
+                f" {wait:g} seconds"
+            )
+            raise LaunchFailedError(msg, details=details) from None
+        failure = _start_failure(output, package)
+        if failure is None:
+            return
+        line = _escaped_line(output) if failure.line is None else _escaped(failure.line)
+        details.update(reason=failure.reason, output=line)
+        if failure.exit_status is not None:
+            details["exit_status"] = failure.exit_status
+        msg = f"am start of {package} {failure.problem}; its output: '{line}'"
+        raise self._doubt(LaunchFailedError(msg, details=details))
 
     def stop_app(self, package: str) -> None:
         """Send ``am force-stop PACKAGE`` once and require it to report success.

@@ -1,0 +1,12 @@
+# Real output of the launcher activity of Settings, on an API 24 emulator (Android 7.0, AVD "settings24").
+# Source: the emulator capture of 2026-11-21 (amstart out.txt, block
+# "######## settings24", section "== resolve-activity settings"), taken over adb with
+# "adb -s emulator-5554 shell '<command>' | tr -d '\r'" (so no CR).
+# Command: cmd package resolve-activity --brief -c android.intent.category.LAUNCHER com.android.settings; echo uiprobe-exit:$?
+# The body below this header is verbatim; nothing was replaced (an
+# emulator has no device-identifying values in this output).
+# uiprobe sends the command without '; echo uiprobe-exit:$?': tests drop
+# the last line, which only that suffix printed.
+priority=0 preferredOrder=0 match=0x108000 specificIndex=-1 isDefault=true
+com.android.settings/.Settings
+uiprobe-exit:0

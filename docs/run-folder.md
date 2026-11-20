@@ -44,7 +44,7 @@ The `screens` folder is made when the first screen file is written.
 
 ## summary.txt
 
-For each screen that was written, one heading line (package, activity and the screen id, as in the indented tree output of `uiprobe dump`) followed by one line for each clickable element that has a label (its text, or else its content description). After the counts at the top there can be `Note:` lines (quoted and escaped), which `crawl_run()` uses for an error code (`error: adb_error`), for a screen whose screenshot could not be taken and for each move of the pinned transport to a new number. Labels come from the app, so they are quoted and escaped the same way as in the indented tree output: control and bidirectional characters appear as `\uXXXX`.
+For each screen that was written, one heading line (package, activity and the screen id, as in the indented tree output of `uiprobe dump`) followed by one line for each clickable element that has a label (its text, or else its content description). After the counts at the top there can be `Note:` lines (quoted and escaped), which `crawl_run()` uses for an error code (`error: adb_error`), for a screen whose screenshot could not be taken, for a launch after which the app was not in front or whose `am start -W` did not finish in time (`... did not finish starting in 10.0 seconds`), and for each move of the pinned transport to a new number. Labels come from the app, so they are quoted and escaped the same way as in the indented tree output: control and bidirectional characters appear as `\uXXXX`.
 
 ## Interrupts
 

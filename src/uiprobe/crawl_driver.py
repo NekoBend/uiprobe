@@ -10,9 +10,10 @@ clock or file), and the writer imports it, so the driver sits above both.
 What is sent. Only what the engine returned, and for a tap only what
 `CrawlEngine.recheck` allowed for that very `Tap` object, in the gate right
 before it is sent: the first launch, a
-relaunch (``force-stop`` then start), a tap at the point judge gave, and the
-BACK key. Text, long presses, swipes and other keys are never sent. By
-default the engine never returns BACK for a screen of another app (it
+relaunch (``force-stop`` then start; a launch is ``am start -W`` of the
+launcher activity read once before the run, never ``monkey``), a tap at the
+point judge gave, and the BACK key. Text, long presses, swipes and other keys
+are never sent. By default the engine never returns BACK for a screen of another app (it
 relaunches instead); ``Policy.back_on_other_screens`` allows it. A BACK or
 relaunch decided on such a screen names its package (and the foreground) as
 ``off_target`` in the start line. Every
@@ -258,6 +259,7 @@ class _Run:
         policy: Policy,
         *,
         emulator: bool,
+        launcher: str,
         app_uid: PackageUid | None = None,
         screenshots: bool,
         settle: float,
@@ -272,6 +274,8 @@ class _Run:
         self.engine = engine
         self.policy = policy
         self.emulator = emulator
+        # The launcher activity (PACKAGE/CLASS), read once before the run.
+        self.launcher = launcher
         self.app_uid = app_uid  # read once at the start (check_tap_window)
         self.gate_details: dict[str, str | int] | None = None  # why, for cover
         self.not_sent: dict[str, int] = {}  # not_sent end lines by reason
@@ -774,15 +778,26 @@ class _Run:
     def launch(self) -> None:
         """Start the app; an app that is not in front afterwards is not fatal.
 
-        ``not_in_front`` means monkey started something, but another package
-        (a permission dialog, a splash screen) holds the focus. The engine
-        handles an off-target screen, so the crawl observes and goes on. The
-        action stays counted as sent. Any other launch failure is raised.
+        The start is ``am start -W`` of the launcher activity read once at the
+        start of the run (`launcher`), so nothing is read between the gate
+        and the start. ``not_in_front`` means the start reported success, but
+        another package (a permission dialog, a splash screen) holds the
+        focus; ``start_timeout`` means ``am start -W`` did not finish in time.
+        The engine handles an off-target screen, so the crawl observes and
+        goes on. The action stays counted as sent. Any other launch failure is
+        raised.
         """
         try:
-            self.device.launch(self.package)
+            self.device.launch(self.package, activity=self.launcher)
         except LaunchFailedError as error:
-            if error.details.get("reason") != "not_in_front":
+            reason = error.details.get("reason")
+            if reason == "start_timeout":
+                seconds = error.details.get("timeout")
+                self.notes.append(
+                    f"{self.package} did not finish starting in {seconds} seconds"
+                )
+                return
+            if reason != "not_in_front":
                 raise
             seen = error.details.get("foreground")
             self.notes.append(f"{self.package} was not in front after launch ({seen})")
@@ -1076,9 +1091,14 @@ def crawl(
     ``policy.back_on_other_screens`` is True. It is alpha;
     ``uiprobe crawl --press`` runs it from the command line.
 
-    The order is: check the arguments, check the device, make the run folder,
-    run. Nothing is written and no input is sent before the first two have
-    passed (the device check itself reads one property). Unless
+    The order is: check the arguments, check the device, read the app's
+    launcher activity, make the run folder, run. Nothing is written and no
+    input is sent before the first three have passed (the device check itself
+    reads one property). The launcher activity is read once with ``cmd package
+    resolve-activity`` (`Device.launcher_activity`) and every launch and
+    relaunch starts it with ``am start -W`` (`Device.launch`); when it cannot
+    be read, `LaunchFailedError` (``launcher_unreadable``) is raised and
+    nothing is written. Unless
     `allow_real_device` is True, the device must answer that it is an
     emulator; an answer that cannot be read counts as a real device.
 
@@ -1120,6 +1140,10 @@ def crawl(
             be read) and `allow_real_device` is False. Nothing was written.
         AdbError: The adb server reported no transport id for the device, so
             it cannot be pinned. Nothing was written.
+        LaunchFailedError: The app's launcher activity cannot be read
+            (``launcher_unreadable``); nothing was written or sent. Raised
+            later as well when a launch fails other than by not coming to
+            the front (or not finishing) in time.
         RunFolderError: `out` exists, its parent is missing, or a file cannot
             be written.
         UiprobeError: A device or adb error that prevents going on.
@@ -1213,6 +1237,10 @@ def _crawl_on(
     # and whether other packages share it; None when it cannot be read: then
     # every tap is refused (cover_unknown) before any window is read.
     app_uid = device.package_uid(package) if policy.check_tap_window else None
+    # Read once, before the run folder: an app whose launcher activity cannot
+    # be read is not crawled, and no launch or relaunch reads it again, so
+    # nothing but the start follows the last pin comparison.
+    launcher = device.launcher_activity(package)
     started_at = clock()
     _check_clock("clock()", started_at)
     engine = CrawlEngine(package, policy, limits, started_at=started_at)
@@ -1235,6 +1263,7 @@ def _crawl_on(
             engine,
             policy,
             emulator=not allow_real_device,
+            launcher=launcher,
             app_uid=app_uid,
             screenshots=screenshots,
             settle=settle,

@@ -269,7 +269,8 @@ def test_a_boot_id_that_can_no_longer_be_read_is_a_change(fake_adb, android):
         (lambda d: d.key("back"), "input"),
         (lambda d: d.tap((10, 10)), "input"),
         (lambda d: d.stop_app(SHOP), "am"),
-        (lambda d: d.launch(SHOP), "monkey"),
+        # the launcher activity given: no read comes before the start
+        (lambda d: d.launch(SHOP, activity=f"{SHOP}/.Main"), "am start"),
     ],
 )
 def test_an_input_never_follows_a_renumbered_transport(
@@ -684,7 +685,7 @@ def test_the_time_limit_inside_the_wait_after_force_stop_is_recorded(
     result = run(device, LateClock(), out)
     assert result.stop_reason == "max_duration"
     assert android.stopped == [SHOP]
-    starts = [c for _, _, c in fake_adb.commands if c.startswith("monkey")]
+    starts = [c for _, _, c in fake_adb.commands if c.startswith("am start")]
     assert len(starts) == 1  # the first launch only
     records = lines(out / "transitions.jsonl")
     assert [r["reason"] for r in records if r.get("not_sent")] == ["start_not_sent"]
@@ -710,7 +711,7 @@ def test_a_device_proven_again_after_force_stop_gets_no_start(
     result = run(device, clock, out)
     assert result.stop_reason == "not_sent"
     assert device.repins == ((TRANSPORT, TRANSPORT + 1),)
-    starts = [c for _, _, c in fake_adb.commands if c.startswith("monkey")]
+    starts = [c for _, _, c in fake_adb.commands if c.startswith("am start")]
     assert len(starts) == 1
     records = lines(out / "transitions.jsonl")
     assert [r["reason"] for r in records if r.get("not_sent")] == ["start_not_sent"]
@@ -1231,7 +1232,7 @@ def test_a_restart_launch_on_a_stale_pin_says_it_force_stopped(
     assert caught.value.details["reason"] == PIN_NOT_PROVEN
     assert caught.value.details["force_stopped"] is True
     assert android.stopped == [SHOP]
-    assert not [c for _, _, c in fake_adb.commands if c.startswith("monkey")]
+    assert not [c for _, _, c in fake_adb.commands if c.startswith("am start")]
 
 
 @pytest.mark.usefixtures("android")
