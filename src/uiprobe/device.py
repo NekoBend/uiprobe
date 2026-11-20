@@ -672,21 +672,33 @@ _TYPING_STOPPED_BECAUSE: Final = (
 )
 
 
-def _typing_stopped(kind: type[UiprobeError], piece: int, pieces: int) -> UiprobeError:
+def _typing_stopped(
+    kind: type[UiprobeError], piece: int, pieces: int, *, unsent: bool = False
+) -> UiprobeError:
     """A new error of class `kind` for typing that stopped at `piece` (1-based).
 
     It holds only numbers and fixed words, never the text or anything the
-    device or adb answered.
+    device or adb answered. `unsent` says the piece was refused before it was
+    sent, because the pinned device has to be proven again
+    (``details["reason"]`` is then ``pin_not_proven``).
     """
-    reason = next(
-        (words for cls, words in _TYPING_STOPPED_BECAUSE if issubclass(kind, cls)),
-        "the adb request failed",
+    reason = (
+        "the device has to be proven again"
+        if unsent
+        else next(
+            (words for cls, words in _TYPING_STOPPED_BECAUSE if issubclass(kind, cls)),
+            "the adb request failed",
+        )
     )
     done = piece - 1
+    fate = (
+        f"piece {piece} was not sent"
+        if unsent
+        else f"piece {piece} may have been typed in part or in full"
+    )
     msg = (
         f"typing stopped at piece {piece} of {pieces} ({reason}); {done} earlier"
-        f" piece{' was' if done == 1 else 's were'} reported typed, and piece"
-        f" {piece} may have been typed in part or in full"
+        f" piece{' was' if done == 1 else 's were'} reported typed, and {fate}"
     )
     details: dict[str, object] = {
         "command": "type",
@@ -695,6 +707,8 @@ def _typing_stopped(kind: type[UiprobeError], piece: int, pieces: int) -> Uiprob
         "pieces": pieces,
         "pieces_done": done,
     }
+    if unsent:
+        details["reason"] = PIN_NOT_PROVEN
     return kind(msg, details=details)
 
 
@@ -1385,6 +1399,11 @@ class Device:
         if strict:
             if not provable:
                 raise self._fail(self._changed())
+            if self._reconnects >= MAX_RECONNECTS:
+                # No proof is left to try: nothing will make this pin usable.
+                raise self._fail(
+                    self._changed(f"was away more than {MAX_RECONNECTS} times")
+                )
             # Nothing is sent and the pin stays: the next read proves the
             # device again (the caller decides on that fresh read).
             msg = (
@@ -2148,13 +2167,15 @@ class Device:
         """
         command = f"input text {_single_quoted(piece)}{_EXIT_SUFFIX}"
         kind: type[UiprobeError] | None = None
+        unsent = False
         output = ""
         try:
             output = self._shell_text(command)
         except UiprobeError as exc:
             kind = type(exc)
+            unsent = exc.details.get("reason") == PIN_NOT_PROVEN
         if kind is not None:
-            return _typing_stopped(kind, number, pieces)
+            return _typing_stopped(kind, number, pieces, unsent=unsent)
         return _piece_failure(output, number, pieces)
 
     def launch(
@@ -2221,11 +2242,26 @@ class Device:
         details: dict[str, object] = {"package": package}
         if restart:
             self._force_stop(package)
-        output = self._shell(
-            quote_args(
-                "monkey", "-p", package, "-c", "android.intent.category.LAUNCHER", "1"
+        try:
+            output = self._shell(
+                quote_args(
+                    "monkey",
+                    "-p",
+                    package,
+                    "-c",
+                    "android.intent.category.LAUNCHER",
+                    "1",
+                )
             )
-        )
+        except DeviceNotFoundError as error:
+            if not restart or error.details.get("reason") != PIN_NOT_PROVEN:
+                raise
+            msg = (
+                f"{package} was force-stopped, but the start was not sent: the"
+                f" device has to be proven again"
+            )
+            details = {**error.details, "force_stopped": True}
+            raise DeviceNotFoundError(msg, details=details) from None
         lines = [line.strip(" \t") for line in _lines(output)]
         counts = [
             m.group(1) for line in lines if (m := _EVENTS_INJECTED.fullmatch(line))

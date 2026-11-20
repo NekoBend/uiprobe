@@ -1094,3 +1094,83 @@ def test_a_stop_that_reads_the_device_does_not_break_a_wait(
     assert result.stop_reason == "max_actions"
     assert device.repins == ((TRANSPORT, TRANSPORT + 1),)
     assert device._broken is None
+
+
+@pytest.mark.usefixtures("android")
+def test_typing_on_a_stale_pin_says_the_piece_was_not_sent(fake_adb, android):
+    device = pinned(fake_adb)
+    listing(fake_adb, (TRANSPORT + 1, "device"))
+    with pytest.raises(DeviceNotFoundError) as caught:
+        device.type_text("abc")
+    assert caught.value.details["reason"] == PIN_NOT_PROVEN
+    assert caught.value.details["pieces_done"] == 0
+    assert "piece 1 was not sent" in str(caught.value)
+    assert "abc" not in str(caught.value)
+    assert android.inputs == []
+
+
+def test_a_restart_launch_on_a_stale_pin_says_it_force_stopped(
+    fake_adb, android, monkeypatch
+):
+    device = pinned(fake_adb)
+    original = device._force_stop
+
+    def stop_then_renumber(package: str) -> None:
+        original(package)
+        listing(fake_adb, (TRANSPORT + 1, "device"))
+
+    monkeypatch.setattr(device, "_force_stop", stop_then_renumber)
+    with pytest.raises(DeviceNotFoundError) as caught:
+        device.launch(SHOP, restart=True)
+    assert caught.value.details["reason"] == PIN_NOT_PROVEN
+    assert caught.value.details["force_stopped"] is True
+    assert android.stopped == [SHOP]
+    assert not [c for _, _, c in fake_adb.commands if c.startswith("monkey")]
+
+
+@pytest.mark.usefixtures("android")
+def test_an_input_after_the_last_reconnect_fails_the_pin(fake_adb):
+    device = pinned(fake_adb)
+    for _ in range(MAX_RECONNECTS):
+        Waits(device, [renumber(fake_adb, TRANSPORT)])
+        listing(fake_adb, (TRANSPORT, "offline"))
+        device.foreground()
+    listing(fake_adb, (TRANSPORT, "offline"))
+    with pytest.raises(DeviceNotFoundError) as caught:
+        device.key("back")
+    assert caught.value.details["reason"] == "device_changed"
+    assert device._broken is not None
+
+
+def test_a_stop_that_waits_after_force_stop_records_the_half_relaunch(
+    tmp_path: Path, fake_adb, android, monkeypatch
+):
+    # After the force-stop the device drops out; halt() calls stop(), which
+    # reads the device and so waits for it, and the time limit ends the wait.
+    device = pinned(fake_adb)
+    _covered_after_launch(monkeypatch, device, android)
+    dropped: list[bool] = []
+    original_stop = device.stop_app
+
+    def stop_then_drop(package: str) -> None:
+        original_stop(package)
+        listing(fake_adb)
+        dropped.append(True)
+
+    class LateClock(Clock):
+        def monotonic(self) -> float:
+            if dropped and device._repinning:
+                return self.now + 3600
+            return self.now
+
+    def stop() -> bool:
+        return bool(dropped) and device.foreground() is None
+
+    monkeypatch.setattr(device, "stop_app", stop_then_drop)
+    out = tmp_path / "run"
+    result = run(device, LateClock(), out, stop=stop)
+    assert result.stop_reason == "max_duration"
+    records = lines(out / "transitions.jsonl")
+    assert [r["reason"] for r in records if r.get("not_sent")] == ["start_not_sent"]
+    summary = (out / "summary.txt").read_text(encoding="utf-8")
+    assert "force-stopped but not started again (time_limit)" in summary

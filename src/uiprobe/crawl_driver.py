@@ -615,34 +615,35 @@ class _Run:
             self._open = None  # nothing was sent
             self.writer.write_transition_end(action_id, not_sent=NOT_SENT_RECONNECTED)
             return NOT_SENT_RECONNECTED
-        reason = self.halt()
-        if reason is None:
-            # The device behind the pin is checked again before the start.
-            try:
+        try:
+            # stop() may read the device, so it is inside the handler too.
+            reason = self.halt()
+            if reason is None:
+                # The device behind the pin is checked again before the start.
                 self.device.check_pin(emulator=self.emulator)
-            except DeviceNotFoundError as error:
-                if error.details.get("reason") != PIN_WAIT_STOPPED:
-                    raise
-                # stop() or the time limit ended a wait for the device: the
-                # start was not sent, which the record says before the run
-                # ends.
-                self._open = None
-                why = self.wait_stop or NOT_SENT_STOPPED
-                self.writer.write_transition_end(action_id, not_sent=NOT_SENT_START)
-                self.notes.append(
-                    f"{self.package} was force-stopped but not started again ({why})"
-                )
+        except DeviceNotFoundError as error:
+            if error.details.get("reason") != PIN_WAIT_STOPPED:
                 raise
-            if self.device.pin_epoch != self.sent_epoch:
-                # The device had to be proven again after the force-stop: the
-                # start is not sent on the earlier decision.
-                self._open = None
-                self.writer.write_transition_end(action_id, not_sent=NOT_SENT_START)
-                self.notes.append(
-                    f"{self.package} was force-stopped but not started again"
-                    f" ({NOT_SENT_RECONNECTED})"
-                )
-                return _HALF_RELAUNCH
+            # The time limit (or a stop seen before) ended a wait for the
+            # device: the start was not sent, which the record says before
+            # the run ends.
+            self._open = None
+            why = self.wait_stop or NOT_SENT_STOPPED
+            self.writer.write_transition_end(action_id, not_sent=NOT_SENT_START)
+            self.notes.append(
+                f"{self.package} was force-stopped but not started again ({why})"
+            )
+            raise
+        if reason is None and self.device.pin_epoch != self.sent_epoch:
+            # The device had to be proven again after the force-stop: the
+            # start is not sent on the earlier decision.
+            self._open = None
+            self.writer.write_transition_end(action_id, not_sent=NOT_SENT_START)
+            self.notes.append(
+                f"{self.package} was force-stopped but not started again"
+                f" ({NOT_SENT_RECONNECTED})"
+            )
+            return _HALF_RELAUNCH
         if reason is not None:
             self._open = None
             self.writer.write_transition_end(action_id, not_sent=NOT_SENT_START)
