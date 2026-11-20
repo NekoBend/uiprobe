@@ -3726,3 +3726,64 @@ def test_an_exception_with_the_same_combining_mark_matches() -> None:
     assert not word_matches("r\u0308ecorder", "order", exceptions=("r\u0308ecorder",))
     assert word_matches("r\u0308ecorder", "order", exceptions=("recorder",))
     assert word_matches("r\u0308ecorder", "order", exceptions=("r\u0301ecorder",))
+
+
+# -- joined fragments of a script written without spaces -----------------------------
+
+
+def _fragment_row(parts):
+    row = el(
+        "e2", text="", cls="android.widget.LinearLayout", bounds=(0, 100, 320, 200)
+    )
+    children = [
+        el(
+            f"e{3 + index}",
+            parent="e2",
+            text=part,
+            cls="android.widget.TextView",
+            flags=(),
+            bounds=(10 + index * 100, 110, 100 + index * 100, 140),
+        )
+        for index, part in enumerate(parts)
+    ]
+    return [row, *children]
+
+
+@pytest.mark.parametrize(
+    "parts",
+    [
+        ("\u524a\u9664\u6e08\u307f", "\u306b\u3059\u308b"),
+        ("\u524a\u9664\u6e08\u307f\u200b", "\u306b\u3059\u308b"),
+        ("\u524a\u9664\u6e08\u307f", "\u200b\u306b\u3059\u308b"),
+        ("\u524a\u9664\u6e08\u307f", "abc"),
+    ],
+)
+def test_touching_fragments_of_an_unspaced_script_are_one_word(parts) -> None:
+    # 削除済み + にする reads 削除済みにする: the space the joined text puts
+    # between the two texts is no word boundary, so 削除 counts.
+    policy = Policy(deny_exceptions=("\u524a\u9664\u6e08\u307f",))
+    found = run(_fragment_row(parts), policy=policy)
+    detail = deny_of(found, "e2")
+    assert detail is not None
+    assert (detail.word, detail.field) == ("\u524a\u9664", "joined")
+    single = run([el("e2", text="".join(parts))], policy=policy)
+    assert reasons(single, "e2") == ("deny_word",)
+
+
+@pytest.mark.parametrize(
+    "parts",
+    [
+        ("\u524a\u9664\u6e08\u307f",),
+        ("\u524a\u9664\u6e08\u307f", "\u3001\u4eca\u65e5"),
+        ("\u524a\u9664\u6e08\u307f ", "\u306b\u3059\u308b"),
+    ],
+)
+def test_a_real_boundary_between_fragments_keeps_the_exception(parts) -> None:
+    policy = Policy(deny_exceptions=("\u524a\u9664\u6e08\u307f",))
+    assert reasons(run(_fragment_row(parts), policy=policy), "e2") == ()
+
+
+def test_latin_fragments_are_still_read_as_separate_words() -> None:
+    # In a script written with spaces, two texts are two words.
+    found = run_x(_fragment_row(("Turn on", "automatically")))
+    assert reasons(found, "e2") == ()

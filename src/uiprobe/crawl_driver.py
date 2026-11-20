@@ -109,7 +109,7 @@ from uiprobe.errors import (
     ScreenshotFailedError,
     UiprobeError,
 )
-from uiprobe.guards import Policy, judge
+from uiprobe.guards import _WORD_REASONS, Policy, judge
 from uiprobe.inputwindows import ROTATION
 from uiprobe.runlog import RunFolderError, RunWriter
 
@@ -222,9 +222,6 @@ NOT_SENT_RECONNECTED: Final = "device_reconnected"
 NOT_SENT_COVERED: Final = "covered_by_other"
 NOT_SENT_COVER_UNKNOWN: Final = "cover_unknown"
 _COVER_REASONS: Final = frozenset({NOT_SENT_COVERED, NOT_SENT_COVER_UNKNOWN})
-# The reasons whose details name the matched word or phrase, the field and the
-# element; a skip line carries their details (the form of `crawl --json`).
-_WORD_REASONS: Final = frozenset({"deny_word", "irreversible_screen", "confirm_button"})
 # Android gives installed apps uids from 10000 on; below are system uids that
 # several packages share (and system windows have).
 _FIRST_APP_UID: Final = 10000

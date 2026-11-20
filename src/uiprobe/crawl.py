@@ -263,11 +263,12 @@ import hashlib
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Final
 
-from uiprobe.guards import MAX_ELEMENTS, judge
+# Detail at runtime too, so that typing.get_type_hints(SkippedElement) works.
+from uiprobe.guards import _WORD_REASONS, MAX_ELEMENTS, Detail, judge
 from uiprobe.model import Screen
 
 if TYPE_CHECKING:
-    from uiprobe.guards import Detail, Policy
+    from uiprobe.guards import Policy
     from uiprobe.model import Element
 
 __all__ = [
@@ -521,9 +522,11 @@ class SkippedElement:
     ``changed_before_press``, ``label_changes`` or ``tap_not_sent``). A screen
     judge does not judge (``screen_too_large``) has one row for the whole
     screen, with the screen id as its fingerprint. ``details`` are the
-    `Detail` objects of judge's decision (empty for the engine's own
-    reasons), from the first element seen with this fingerprint and these
-    reasons."""
+    `Detail` objects of judge's decision for ``deny_word``,
+    ``irreversible_screen`` and ``confirm_button`` (the matched word or
+    phrase), from the first element seen with this fingerprint and these
+    reasons; empty for every other reason, so such a record equals the one
+    built from the first three fields alone."""
 
     screen_id: str
     fingerprint: str
@@ -1312,7 +1315,7 @@ class CrawlEngine:
                     sid,
                     prints.of(decision.element),
                     tuple(decision.reasons),
-                    decision.details,
+                    tuple(d for d in decision.details if d.reason in _WORD_REASONS),
                 )
         refused_out = (
             self._refused >= MAX_REFUSALS

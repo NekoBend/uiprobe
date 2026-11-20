@@ -2052,3 +2052,22 @@ def test_bad_skip_details_write_nothing(tmp_path, details):
     with pytest.raises((TypeError, ValueError)):
         writer.write_skip(ID_A, "fp1", ["deny_word"], {}, details)
     assert names(tmp_path / "run") == ["run-start.json"]
+
+
+@pytest.mark.parametrize(
+    ("reasons", "detail"),
+    [
+        # The detail's reason is not one of the line's reasons.
+        (["deny_word"], {"reason": "confirm_button", "word": "pay"}),
+        # Not a word reason, even when the line has it.
+        (["number_only"], {"reason": "number_only", "word": "42"}),
+        (["toggle", "deny_word"], {"reason": "toggle", "element_id": "e4"}),
+    ],
+)
+def test_a_skip_detail_must_belong_to_a_word_reason_of_the_line(
+    tmp_path, reasons, detail
+):
+    writer = make(tmp_path)
+    with pytest.raises(ValueError, match="one of the line's reasons"):
+        writer.write_skip(ID_A, "fp1", reasons, {}, [detail])
+    assert names(tmp_path / "run") == ["run-start.json"]

@@ -50,6 +50,7 @@ from typing import IO, TYPE_CHECKING, Any, Final
 from uiprobe._json import dumps
 from uiprobe.crawl import Limits
 from uiprobe.errors import UiprobeError
+from uiprobe.guards import _WORD_REASONS
 from uiprobe.model import Element, Screen, _name, _quote
 from uiprobe.pngfile import check_new_path, depends_on_a_drive_folder
 
@@ -195,12 +196,16 @@ def _check_texts(name: str, values: object) -> list[str]:
 _SKIP_DETAIL_KEYS: Final = ("reason", "word", "field", "element_id", "note")
 
 
-def _check_skip_details(details: object) -> list[dict[str, str]]:
+def _check_skip_details(
+    details: object, reasons: tuple[str, ...]
+) -> list[dict[str, str]]:
     """Check the details of a skip line; return them as plain dicts.
 
     Each item is a mapping with a ``reason`` and, optionally, ``word``,
     ``field``, ``element_id`` and ``note``; every value is a str that can be
-    written as UTF-8. The keys are written in that order.
+    written as UTF-8. The keys are written in that order. The reason must be
+    one of the line's `reasons` and one of ``deny_word``,
+    ``irreversible_screen`` and ``confirm_button``.
     """
     if isinstance(details, str | Mapping) or not hasattr(details, "__iter__"):
         msg = f"details must be a list of mappings, not {type(details).__name__}"
@@ -217,13 +222,18 @@ def _check_skip_details(details: object) -> list[dict[str, str]]:
                 f" {', '.join(_SKIP_DETAIL_KEYS)}"
             )
             raise ValueError(msg)
-        checked.append(
-            {
-                key: _check_text(f"details {key}", item[key])
-                for key in _SKIP_DETAIL_KEYS
-                if key in item
-            }
-        )
+        entry = {
+            key: _check_text(f"details {key}", item[key])
+            for key in _SKIP_DETAIL_KEYS
+            if key in item
+        }
+        if entry["reason"] not in _WORD_REASONS or entry["reason"] not in reasons:
+            msg = (
+                "the reason of a detail must be one of the line's reasons and one"
+                " of deny_word, irreversible_screen and confirm_button"
+            )
+            raise ValueError(msg)
+        checked.append(entry)
     return checked
 
 
@@ -667,7 +677,7 @@ class RunWriter:
         checked = _check_screen_id(screen_id)
         _check_text("fingerprint", fingerprint)
         listed = tuple(_check_texts("reasons", reasons))
-        explained = _check_skip_details(details)
+        explained = _check_skip_details(details, listed)
         key = (checked, fingerprint, listed)
         with self.critical():
             self._check_usable()

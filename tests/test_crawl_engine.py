@@ -3076,3 +3076,22 @@ def test_the_snapshot_holds_every_field_a_decision_can_change() -> None:
         value = getattr(state, f.name)
         if isinstance(value, list | set | dict) or type(value).__name__ == "_Pending":
             assert value is not getattr(eng, f"_{f.name}"), f.name
+
+
+def test_skip_records_keep_only_the_details_of_word_reasons() -> None:
+    import typing
+
+    eng = started()
+    screen = on_screen(["42", "Delete", "Item a"])
+    assert isinstance(eng.next(screen), Tap)
+    by_reasons = {r.reasons: r for r in eng.records.skipped}
+    number = by_reasons[("number_only",)]
+    assert number.details == ()
+    assert number == SkippedElement(
+        number.screen_id, number.fingerprint, ("number_only",)
+    )
+    deny = by_reasons[("deny_word",)]
+    assert [d.reason for d in deny.details] == ["deny_word"]
+    assert deny.details[0].word == "delete"
+    hints = typing.get_type_hints(SkippedElement)
+    assert hints["details"] == tuple[crawl.Detail, ...]

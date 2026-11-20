@@ -40,7 +40,11 @@ invisible character, a full-width or circled letter, or a combining mark the
 exception word does not have (or has differently) in it. A run counts only when
 it is a whole word also with the invisible characters around it removed
 (``x`` + U+200B + U+0332 + ``recorder`` is one word) and in the original text
-before NFKC (U+013F + ``recorder`` is one word; NFKC would split it).
+before NFKC (U+013F + ``recorder`` is one word; NFKC would split it). In a
+joined text, the space put between two parts is no word boundary where the
+parts touch in a script written without spaces (`_tight_join`): an exception
+word must stand alone in that reading too, so 削除済み + にする is refused
+like 削除済みにする.
 When the trace is not certain (NFKC of the characters one by one differs from
 NFKC of the field, or a traced form differs from the real one), every
 occurrence counts. Resource ids, the irreversibility phrases and the
@@ -335,6 +339,11 @@ Reason = Literal[
 
 # Every reason, in the fixed order a decision lists them.
 REASONS: Final[tuple[Reason, ...]] = get_args(Reason)
+# The reasons whose details name the matched deny word or phrase, the field
+# and the element (what skipped.jsonl records).
+_WORD_REASONS: Final[frozenset[str]] = frozenset(
+    {"deny_word", "irreversible_screen", "confirm_button"}
+)
 
 # The base list: purchases, payments, sending, deleting, signing out and
 # similar (Japanese, then English).
@@ -684,6 +693,55 @@ def _forms(value: str) -> tuple[str, ...]:
     # The spaced form is redundant with plain + joined (removing spaces on
     # both sides keeps a substring a substring); it is kept for clarity.
     return tuple(dict.fromkeys(_form_triple(value)))
+
+
+# Scripts other than Japanese (whose letters `_is_japanese_letter` knows) that
+# are written without spaces between words: Thai, Lao, Myanmar and Khmer.
+_UNSPACED_RANGES: Final[tuple[tuple[int, int], ...]] = (
+    (0x0E00, 0x0E7F),
+    (0x0E80, 0x0EFF),
+    (0x1000, 0x109F),
+    (0x1780, 0x17FF),
+)
+
+
+def _is_unspaced_letter(char: str) -> bool:
+    """True for a letter or mark of a script written without spaces (Japanese
+    and Chinese kana and ideographs, Thai, Lao, Myanmar, Khmer)."""
+    if _is_japanese_letter(char):
+        return True
+    if unicodedata.category(char)[0] not in "LM":
+        return False
+    code = ord(char)
+    return any(low <= code <= high for low, high in _UNSPACED_RANGES)
+
+
+def _tight_join(parts: Iterable[str]) -> str:
+    """Join the parts with one space, except with none where the last visible
+    character of one part and the first of the next are both letters, digits
+    or marks and one of them belongs to a script written without spaces
+    (``削除済み`` + ``にする`` reads ``削除済みにする``). Invisible characters
+    are kept where they are.
+    """
+    out: list[str] = []
+    previous = ""
+    for part in parts:
+        if out:
+            out.append("" if _touching(previous, part) else " ")
+        out.append(part)
+        previous = part
+    return "".join(out)
+
+
+def _touching(previous: str, following: str) -> bool:
+    """Whether two joined parts read as one word without the joining space."""
+    last = next((c for c in reversed(previous) if not _is_invisible(c)), "")
+    first = next((c for c in following if not _is_invisible(c)), "")
+    if not last or not first:
+        return False
+    if not all(c.isalnum() or unicodedata.category(c)[0] == "M" for c in (last, first)):
+        return False
+    return _is_unspaced_letter(last) or _is_unspaced_letter(first)
 
 
 def _is_japanese_letter(char: str) -> bool:
@@ -1101,9 +1159,23 @@ class _Matcher:
         self._words = tuple(
             (word, _forms(word), _is_builtin_word(word)) for word in words
         )
+        self._order: dict[str, int] = {}
+        for index, (word, _, _) in enumerate(self._words):
+            self._order.setdefault(word, index)
         self._excuser = _Excuser(_exception_keys(exceptions))
         self._cache: dict[str, str | None] = {}
         self._plain_cache: dict[str, str | None] = {}
+
+    @property
+    def excuses(self) -> bool:
+        """True when there are exception words."""
+        return bool(self._excuser.keys)
+
+    def match_texts(self, values: Iterable[str]) -> str | None:
+        """Return the first deny word (in list order) that counts in any of
+        the strings, or None."""
+        found = [word for word in map(self.match_text, values) if word is not None]
+        return min(found, key=self._order.__getitem__, default=None)
 
     def match(self, element: Element) -> tuple[str, str] | None:
         """Return ``(word, field)`` of the first match in the element.
@@ -2001,8 +2073,18 @@ class _Judge:
             if element.content_desc:
                 parts.append(element.content_desc)
                 descs.append(element.content_desc)
+        matcher = matcher or self.matcher
         for joined in (parts, texts, descs):
-            word = (matcher or self.matcher).match_text(" ".join(joined))
+            spaced = " ".join(joined)
+            if not matcher.excuses:
+                word = matcher.match_text(spaced)
+            else:
+                # The space between two parts is uiprobe's, not the app's: in a
+                # script written without spaces it is no word boundary, so an
+                # exception word must stand alone without it too.
+                tight = _tight_join(joined)
+                values = (spaced,) if tight == spaced else (spaced, tight)
+                word = matcher.match_texts(values)
             if word is not None:
                 return word
         return None
