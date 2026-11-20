@@ -44,7 +44,7 @@ from uiprobe.errors import (
     LaunchFailedError,
     NotEmulatorError,
 )
-from uiprobe.guards import Policy
+from uiprobe.guards import DEFAULT_DENY_EXCEPTIONS, Policy
 from uiprobe.runlog import RunFolderError, RunWriter
 
 if TYPE_CHECKING:
@@ -211,6 +211,7 @@ def test_a_small_app_is_crawled_end_to_end(tmp_path, device, android, clock):
     assert start["package"] == SHOP
     assert start["device"] == {"serial": SERIAL}
     assert "delete" in start["deny"]
+    assert start["deny_except"] == list(DEFAULT_DENY_EXCEPTIONS)
 
     transitions = lines(out / "transitions.jsonl")
     starts = transitions[0::2]

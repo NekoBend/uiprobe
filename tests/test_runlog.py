@@ -151,6 +151,8 @@ def test_a_missing_parent_is_not_created(tmp_path):
         {"limits": {"depth": 1}},
         {"limits": {"depth": 0, "actions": 1, "minutes": 1}},
         {"deny_words": ["a\ud800"]},
+        {"deny_exceptions": "border"},
+        {"deny_exceptions": [1]},
         {"package": "p\ud800"},
         {"started_at": datetime(2026, 1, 1)},  # noqa: DTZ001
         {"started_at": NO_OFFSET},
@@ -173,9 +175,16 @@ def test_run_start_json(tmp_path):
         "package": "com.example.app",
         "limits": {"depth": 5, "actions": 300, "minutes": 30},
         "deny": ["delete", "pay"],
+        "deny_except": [],
         "back_on_other_screens": False,
         "device": {"serial": "emulator-5554"},
     }
+
+
+def test_run_start_json_lists_the_exception_words(tmp_path):
+    make(tmp_path, deny_exceptions=("border", "automatically"))
+    data = json.loads((tmp_path / "run" / "run-start.json").read_bytes())
+    assert data["deny_except"] == ["border", "automatically"]
 
 
 def test_limits_may_be_a_plain_dict_and_the_time_defaults_to_now(tmp_path):
@@ -1082,6 +1091,7 @@ def test_keys_are_written_in_a_fixed_order(tmp_path):
         "package",
         "limits",
         "deny",
+        "deny_except",
         "back_on_other_screens",
         "device",
     ]

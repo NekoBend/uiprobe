@@ -10,7 +10,8 @@ limits are not used to press (``crawl --press`` takes its own small limits),
 and ``press = true`` only makes ``crawl`` refuse to run unless ``--press`` or
 ``--dry-run`` is given.
 
-What the file holds: the deny words, the confirm words, the phrases that mark a
+What the file holds: the deny words and their exception words, the confirm
+words, the phrases that mark a
 screen as irreversible, the rules (unlabeled,
 number-only and toggle elements, confirm buttons in dialogs, irreversible
 screens, the screen-edge
@@ -31,7 +32,17 @@ A file written at an older defaults version may leave out the tables and
 rules that a later version added (`_LATER_TABLES`, `_LATER_RULES`): a missing
 table counts as empty, so all of its defaults apply, and a missing rule takes
 its default. Version 2 added the ``[irreversible]`` table, the rule
-``refuse_irreversible_screens`` and four deny words.
+``refuse_irreversible_screens`` and four deny words. Version 3 added the
+``[deny] except`` list (exception words, see `uiprobe.guards.word_matches`)
+with all of its words, and four deny words (``redial``, ``charge``, ``top up``,
+``renew``). ``[deny] remove`` takes words out of both ``words`` and ``except``.
+
+An exception word must be one word of letters and digits. One that equals a
+deny word in use (any form of it, see `uiprobe.guards._forms`) would excuse that
+word wherever it stands alone, so listing it under ``except`` is refused with a
+message saying to remove the deny word instead. A default exception that a file
+written before version 3 receives automatically is dropped instead when it
+equals a deny word of that file, with a warning (the deny word wins).
 
 A deny word is compared with the ``remove`` list after the normalization the
 deny matching uses (`uiprobe.guards.normalize`: NFKC, case-folded, whitespace
@@ -78,11 +89,15 @@ from uiprobe.guards import (
     API36_SIDE_PX,
     API36_TOP_PX,
     CONFIRM_WORDS,
+    DEFAULT_DENY_EXCEPTIONS,
     DEFAULT_DENY_WORDS,
     IRREVERSIBLE_PHRASES,
     Policy,
     _check_word,
     _confirm_form,
+    _deny_forms,
+    _exception_conflict,
+    _exception_key,
     _phrase_key,
     normalize,
 )
@@ -107,7 +122,7 @@ __all__ = [
 
 SETTINGS_FILE: Final = "uiprobe.toml"
 FORMAT_VERSION: Final = 1
-DEFAULTS_VERSION: Final = 2
+DEFAULTS_VERSION: Final = 3
 MAX_SETTINGS_BYTES: Final = 1024 * 1024
 
 # Every default list item with the defaults version that introduced it. Each
@@ -123,13 +138,22 @@ MAX_SETTINGS_BYTES: Final = 1024 * 1024
 # or rule also goes into `_LATER_TABLES` or `_LATER_RULES` (with the value of a
 # missing rule in `_LATER_RULE_VALUES`), so that older files still load.
 # Version 2 added the start-over deny words, the [irreversible] table with all
-# of its phrases and the rule refuse_irreversible_screens.
+# of its phrases and the rule refuse_irreversible_screens. Version 3 added the
+# [deny] except list with all of its words, and the deny words for redialling
+# and for paying by charge, top-up or renewal.
 _LATER_DENY: Final[dict[str, int]] = {
     "やり直": 2,
     "元に戻": 2,
     "restart": 2,
     "undo": 2,
+    "redial": 3,
+    "charge": 3,
+    "top up": 3,
+    "renew": 3,
 }
+# The [deny] except list came with version 3, so its items start there.
+_FIRST_EXCEPT: Final = 3
+_LATER_EXCEPT: Final[dict[str, int]] = {}
 _LATER_CONFIRM: Final[dict[str, int]] = {}
 # The [irreversible] table came with version 2, so its items start there.
 _FIRST_IRREVERSIBLE: Final = 2
@@ -138,6 +162,9 @@ _LATER_KEYS: Final[dict[str, int]] = {}
 _LATER_PREFIXES: Final[dict[str, int]] = {}
 _DENY_WORDS: Final[tuple[tuple[int, str], ...]] = tuple(
     (_LATER_DENY.get(word, 1), word) for word in DEFAULT_DENY_WORDS
+)
+_DENY_EXCEPTIONS: Final[tuple[tuple[int, str], ...]] = tuple(
+    (_LATER_EXCEPT.get(word, _FIRST_EXCEPT), word) for word in DEFAULT_DENY_EXCEPTIONS
 )
 _CONFIRM_WORDS: Final[tuple[tuple[int, str], ...]] = tuple(
     (_LATER_CONFIRM.get(word, 1), word) for word in CONFIRM_WORDS
@@ -192,8 +219,11 @@ _INT_RANGES: Final[dict[str, dict[str, tuple[int, int]]]] = {
 _LATER_TABLES: Final[dict[str, int]] = {"irreversible": 2}
 _LATER_RULES: Final[dict[str, int]] = {"refuse_irreversible_screens": 2}
 _LATER_RULE_VALUES: Final[dict[str, bool]] = {"refuse_irreversible_screens": True}
+# Lists that a later defaults version added to an existing table, as
+# (table, key), with that version: a missing list reads as empty.
+_LATER_LISTS: Final[dict[tuple[str, str], int]] = {("deny", "except"): 3}
 _TABLE_KEYS: Final[dict[str, frozenset[str]]] = {
-    "deny": frozenset({"words", "remove"}),
+    "deny": frozenset({"words", "except", "remove"}),
     "confirm": frozenset({"words", "remove"}),
     "irreversible": frozenset({"phrases", "remove"}),
     "rules": frozenset(_BOOL_RULES) | frozenset(_INT_RANGES["rules"]),
@@ -232,6 +262,7 @@ class Settings:
     defaults_version: int
     press: bool
     deny_words: tuple[str, ...]
+    deny_exceptions: tuple[str, ...]
     confirm_words: tuple[str, ...]
     irreversible_phrases: tuple[str, ...]
     tap_unlabeled: bool
@@ -259,11 +290,13 @@ def policy_from_settings(
 ) -> Policy:
     """Return the `Policy` that the effective `settings` describe.
 
-    The deny and confirm words, the unlabeled, number-only, toggle and
-    dialog-confirm rules, the edge sizes and the smallest visible size come
-    from the settings. `extra_deny` adds deny words for this policy only (for
-    example ``--deny``). `tap_unlabeled` None keeps the file's value; a bool
-    replaces it (the command line passes True to force it for one run).
+    The deny words, their exception words and the confirm words, the
+    unlabeled, number-only, toggle and dialog-confirm rules, the edge sizes
+    and the smallest visible size come from the settings. `extra_deny` adds
+    deny words for this policy only (for example ``--deny``); an exception
+    word equal to one of them is dropped, so the added word blocks as given.
+    `tap_unlabeled` None keeps the file's value; a bool replaces it (the
+    command line passes True to force it for one run).
 
     ``min_visible_px`` applies to the rules of `uiprobe.guards.judge`;
     ``Screen.tap_point``, ``Screen.find`` and ``Screen.visible_bounds`` keep the fixed
@@ -276,6 +309,7 @@ def policy_from_settings(
     """
     policy = Policy(
         deny_words=settings.deny_words,
+        deny_exceptions=settings.deny_exceptions,
         confirm_words=settings.confirm_words,
         irreversible_phrases=settings.irreversible_phrases,
         skip_irreversible=settings.refuse_irreversible_screens,
@@ -350,6 +384,11 @@ def render_default_settings() -> str:
         "[deny]",
         "# Never press an element that contains one of these words.",
         *_toml_list("words", _current(_DENY_WORDS)),
+        "# A deny word found inside one of these words does not count where the",
+        '# word stands whole in a text ("call" in "Automatically"). Any other word',
+        '# that holds a deny word is still refused. "remove" also takes words out',
+        "# of this list.",
+        *_toml_list("except", _current(_DENY_EXCEPTIONS)),
         "remove = []",
         "",
         "[confirm]",
@@ -628,6 +667,17 @@ def _word_identity(word: str) -> str:
     return normalize(word)
 
 
+def _exception_identity(word: str) -> str:
+    """Check an exception word as `Policy` does; return what makes two equal.
+
+    The identity is `normalize`, as for a deny word, so that ``[deny] remove``
+    compares both lists alike; for one word it is the exception's key.
+    """
+    identity = _word_identity(word)
+    _exception_key(word)
+    return identity
+
+
 def _confirm_identity(word: str) -> str:
     """Check a confirm word; return the form the confirm matching compares."""
     _word_identity(word)
@@ -682,6 +732,44 @@ def _merge(
             items.setdefault(identity(item), item)
     gone = {identity(item) for item in removed}
     return tuple(item for key, item in items.items() if key not in gone)
+
+
+def _exceptions(
+    reader: _Reader,
+    listed: Sequence[str],
+    merged: Sequence[str],
+    deny_words: Sequence[str],
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """Return the exception words in use and the warnings about dropped ones.
+
+    An exception that equals a deny word in use is refused when the file lists
+    it under ``except``; one that only came in as a later default is dropped,
+    with a warning, so the deny word keeps blocking.
+
+    Raises:
+        SettingsError: A listed exception word equals a deny word.
+    """
+    listed_keys = {normalize(word) for word in listed}
+    deny_forms = _deny_forms(deny_words)
+    kept: list[str] = []
+    warnings: list[str] = []
+    for exception in merged:
+        word = _exception_conflict(exception, deny_forms)
+        if word is None:
+            kept.append(exception)
+        elif normalize(exception) in listed_keys:
+            raise reader.fail(
+                "[deny] except",
+                f"{_value_text(exception)} equals the deny word {_value_text(word)};"
+                " an exception cannot let its own deny word through: to let it"
+                " through, remove the deny word instead",
+            )
+        else:
+            warnings.append(
+                f"[deny] the default exception {_value_text(exception)} is not"
+                f" applied because it equals the deny word {_value_text(word)}"
+            )
+    return tuple(kept), tuple(warnings)
 
 
 # The flags of the one read-only open in `_read_bytes`. Only read-only names
@@ -808,8 +896,9 @@ def load_settings(path: str | os.PathLike[str]) -> Settings:
     ``defaults_version`` and every table and key that `render_default_settings`
     writes must be present; only the ``remove`` lists may be left out, and a
     file written at an older defaults version may leave out what a later
-    version added (`_LATER_TABLES`, `_LATER_RULES`): the missing rule takes its
-    default and the missing list its defaults. Unknown
+    version added (`_LATER_TABLES`, `_LATER_RULES`, `_LATER_LISTS`): the
+    missing rule takes its default and the missing list its defaults. A
+    listed exception word equal to a deny word in use is refused. Unknown
     tables or keys, wrong types, numbers out of range, words that deny matching
     rejects, key names that do not match ``KEYCODE_[A-Z0-9_]{1,40}`` and
     duplicate entries are refused.
@@ -852,7 +941,25 @@ def load_settings(path: str | os.PathLike[str]) -> Settings:
 
     deny = reader.table(parsed, "deny", _TABLE_KEYS["deny"])
     deny_listed = reader.strings(deny, "deny", "words", _word_identity)
+    except_listed = reader.strings(
+        deny,
+        "deny",
+        "except",
+        _exception_identity,
+        optional=defaults_version < _LATER_LISTS["deny", "except"],
+    )
     deny_removed = reader.strings(deny, "deny", "remove", _word_identity, optional=True)
+    deny_words = _merge(
+        deny_listed, deny_removed, _DENY_WORDS, defaults_version, normalize
+    )
+    deny_exceptions, except_warnings = _exceptions(
+        reader,
+        except_listed,
+        _merge(
+            except_listed, deny_removed, _DENY_EXCEPTIONS, defaults_version, normalize
+        ),
+        deny_words,
+    )
     confirm = reader.table(parsed, "confirm", _TABLE_KEYS["confirm"])
     confirm_listed = reader.strings(confirm, "confirm", "words", _confirm_identity)
     confirm_removed = reader.strings(
@@ -908,15 +1015,20 @@ def load_settings(path: str | os.PathLike[str]) -> Settings:
     prefixes = _merge(
         prefix_listed, key_removed, _REFUSE_PREFIXES, defaults_version, _key_identity
     )
-    warnings = tuple(
-        f"[keys] remove lists {key}, which is always refused; the entry has no effect"
-        for key in key_removed
-        if key in FIXED_DEVICE_KEYS
-    ) + tuple(
-        f"[keys] remove lists {key}, which a refused prefix still covers;"
-        " the entry has no effect"
-        for key in key_removed
-        if key not in FIXED_DEVICE_KEYS and key.startswith(tuple(prefixes))
+    warnings = (
+        except_warnings
+        + tuple(
+            f"[keys] remove lists {key}, which is always refused;"
+            " the entry has no effect"
+            for key in key_removed
+            if key in FIXED_DEVICE_KEYS
+        )
+        + tuple(
+            f"[keys] remove lists {key}, which a refused prefix still covers;"
+            " the entry has no effect"
+            for key in key_removed
+            if key not in FIXED_DEVICE_KEYS and key.startswith(tuple(prefixes))
+        )
     )
 
     return Settings(
@@ -924,9 +1036,8 @@ def load_settings(path: str | os.PathLike[str]) -> Settings:
         format_version=format_version,
         defaults_version=defaults_version,
         press=press,
-        deny_words=_merge(
-            deny_listed, deny_removed, _DENY_WORDS, defaults_version, normalize
-        ),
+        deny_words=deny_words,
+        deny_exceptions=deny_exceptions,
         confirm_words=_merge(
             confirm_listed,
             confirm_removed,

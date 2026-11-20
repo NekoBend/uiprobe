@@ -1207,6 +1207,7 @@ def _crawl_on(
         package=package,
         limits=limits,
         deny_words=policy.deny_words,
+        deny_exceptions=policy.deny_exceptions,
         serial=device.serial,
         back_on_other_screens=policy.back_on_other_screens,
         repin=device.can_repin,

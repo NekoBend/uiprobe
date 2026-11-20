@@ -1156,3 +1156,43 @@ def test_preview_policy_turns_the_number_only_and_toggle_rules_off(fake_adb, and
         "Page 2",
         "7",
     ]
+
+
+# --- exception words in the preview ---
+
+AUTO = Screen(
+    "auto",
+    f"{SHOP}/.Auto",
+    (
+        El((40, 100, 280, 150), text="Automatically", go="auto"),
+        El((40, 160, 280, 210), text="Automatically pay", go="auto"),
+        El((40, 220, 280, 270), text="Redial automatically", go="auto"),
+        El((40, 280, 280, 330), text="Voice Recorder", go="auto"),
+        El((40, 340, 280, 390), text="Job order", go="auto"),
+    ),
+)
+
+
+def test_the_preview_lets_an_exception_word_through(fake_adb, capsys):
+    android = FakeAndroid(fake_adb, SERIAL, (AUTO,), start="auto")
+    payload = crawl_json(capsys, fake_adb)
+    assert [e["text"] for e in payload["press"]] == ["Automatically", "Voice Recorder"]
+    skip = skipped_by_text(payload)
+    words = {text: entry["details"][0]["word"] for text, entry in skip.items()}
+    assert words == {
+        "Automatically pay": "pay",
+        "Redial automatically": "redial",
+        "Job order": "order",
+    }
+    assert_read_only(fake_adb, android)
+
+
+def test_deny_blocks_a_word_that_is_also_an_exception(fake_adb, capsys):
+    FakeAndroid(fake_adb, SERIAL, (AUTO,), start="auto")
+    payload = crawl_json(capsys, fake_adb, "--deny", "automatically")
+    assert [e["text"] for e in payload["press"]] == ["Voice Recorder"]
+    entry = skipped_by_text(payload)["Automatically"]
+    assert entry["reasons"] == ["deny_word"]
+    # The exception equal to the added word is dropped, so the first default
+    # word found ("call") refuses it again, as it did before exceptions.
+    assert entry["details"][0]["word"] == "call"

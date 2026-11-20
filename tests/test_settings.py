@@ -23,6 +23,7 @@ from uiprobe.guards import (
     API36_SIDE_PX,
     API36_TOP_PX,
     CONFIRM_WORDS,
+    DEFAULT_DENY_EXCEPTIONS,
     DEFAULT_DENY_WORDS,
     IRREVERSIBLE_PHRASES,
 )
@@ -276,7 +277,17 @@ V2_IRREVERSIBLE = (
 )
 # The file that `uiprobe init` wrote at defaults version 1 (rendered at
 # revision ff6f5f0, before version 2 existed), unchanged.
+V3_DENY = ("redial", "charge", "top up", "renew")
+V3_EXCEPT = (
+    "automatically",
+    "posture",
+    "recorder",
+    "border",
+    "descartes",
+    "designing",
+)
 V1_FILE = DATA / "settings_v1.toml"
+V2_FILE = DATA / "settings_v2.toml"
 
 
 def write(tmp_path: Path, text: str | bytes, name: str = SETTINGS_FILE) -> Path:
@@ -306,9 +317,10 @@ def test_the_defaults_round_trip(tmp_path):
     loaded = load_settings(default_file(tmp_path))
     assert loaded.source == tmp_path / SETTINGS_FILE
     assert loaded.format_version == 1
-    assert loaded.defaults_version == CURRENT == 2
+    assert loaded.defaults_version == CURRENT == 3
     assert loaded.press is False
     assert loaded.deny_words == DEFAULT_DENY_WORDS
+    assert loaded.deny_exceptions == DEFAULT_DENY_EXCEPTIONS
     assert loaded.confirm_words == CONFIRM_WORDS
     assert loaded.irreversible_phrases == IRREVERSIBLE_PHRASES
     assert loaded.refuse_irreversible_screens is True
@@ -331,7 +343,7 @@ def test_the_rendered_file_layout():
     assert text.startswith("# uiprobe settings")
     assert text.endswith("\n")
     assert "\r" not in text
-    assert "format_version = 1\ndefaults_version = 2\n" in text
+    assert "format_version = 1\ndefaults_version = 3\n" in text
     assert "press = false\n" in text
     for table in (
         "[deny]",
@@ -740,6 +752,7 @@ def test_init_refuses_a_stream_path_on_windows(tmp_path, capsys, monkeypatch):
     ("table", "snapshot"),
     [
         ("_DENY_WORDS", V1_DENY),
+        ("_DENY_EXCEPTIONS", ()),
         ("_CONFIRM_WORDS", V1_CONFIRM),
         ("_IRREVERSIBLE_PHRASES", V1_IRREVERSIBLE),
         ("_REFUSE_KEYS", V1_KEYS),
@@ -763,6 +776,7 @@ def test_the_version_1_defaults_are_pinned(table, snapshot):
     ("table", "snapshot"),
     [
         ("_DENY_WORDS", V2_DENY),
+        ("_DENY_EXCEPTIONS", ()),
         ("_CONFIRM_WORDS", ()),
         ("_IRREVERSIBLE_PHRASES", V2_IRREVERSIBLE),
         ("_REFUSE_KEYS", ()),
@@ -777,9 +791,28 @@ def test_the_version_2_defaults_are_pinned(table, snapshot):
 
 
 @pytest.mark.parametrize(
+    ("table", "snapshot"),
+    [
+        ("_DENY_WORDS", V3_DENY),
+        ("_DENY_EXCEPTIONS", V3_EXCEPT),
+        ("_CONFIRM_WORDS", ()),
+        ("_IRREVERSIBLE_PHRASES", ()),
+        ("_REFUSE_KEYS", ()),
+        ("_REFUSE_PREFIXES", ()),
+    ],
+)
+def test_the_version_3_defaults_are_pinned(table, snapshot):
+    version_3 = tuple(
+        item for version, item in getattr(settings, table) if version == 3
+    )
+    assert version_3 == snapshot
+
+
+@pytest.mark.parametrize(
     "table",
     [
         "_DENY_WORDS",
+        "_DENY_EXCEPTIONS",
         "_CONFIRM_WORDS",
         "_IRREVERSIBLE_PHRASES",
         "_REFUSE_KEYS",
@@ -1004,8 +1037,8 @@ def test_numbers_at_the_limits_are_accepted(tmp_path, old, new):
     [
         ("format_version = 1", "format_version = 2", "format_version"),
         ("format_version = 1", "format_version = 0", "format_version"),
-        ("defaults_version = 2", "defaults_version = 0", "defaults_version"),
-        ("defaults_version = 2", "defaults_version = 3", "defaults_version"),
+        ("defaults_version = 3", "defaults_version = 0", "defaults_version"),
+        ("defaults_version = 3", "defaults_version = 4", "defaults_version"),
     ],
 )
 def test_versions_out_of_range_are_refused(tmp_path, old, new, key):
@@ -1803,7 +1836,7 @@ def _digit_limit() -> Iterator[None]:
 def _huge_cases() -> list[tuple[str, str, str]]:
     cases = [
         ("format_version = 1", f"format_version = {HUGE}", "format_version"),
-        ("defaults_version = 2", f"defaults_version = {HUGE}", "defaults_version"),
+        ("defaults_version = 3", f"defaults_version = {HUGE}", "defaults_version"),
     ]
     for old, key in [
         ("min_visible_px = 8", "min_visible_px"),
@@ -2042,3 +2075,146 @@ def test_a_phrase_of_only_separators_is_refused_in_a_version_2_file(tmp_path, in
 def test_no_two_default_phrases_match_the_same_texts():
     keys = [guards._phrase_key(phrase) for phrase in IRREVERSIBLE_PHRASES]
     assert len(set(keys)) == len(keys)
+
+
+# -- the exception words (defaults version 3) ----------------------------------------
+
+
+def v2_text() -> str:
+    text = V2_FILE.read_text(encoding="utf-8")
+    assert "defaults_version = 2\n" in text
+    assert "except" not in text
+    assert '"redial"' not in text
+    assert "[irreversible]" in text
+    return text
+
+
+def test_the_generated_file_lists_every_exception_in_the_deny_table():
+    text = render_default_settings()
+    table = text.split("[deny]")[1].split("[confirm]")[0]
+    assert (
+        table.index("words = [") < table.index("except = [") < table.index("remove = [")
+    )
+    listed = table.split("except = [")[1].split("]")[0]
+    for word in DEFAULT_DENY_EXCEPTIONS:
+        assert f'    "{word}",\n' in listed
+    assert tomllib.loads(text)["deny"]["except"] == list(DEFAULT_DENY_EXCEPTIONS)
+
+
+@pytest.mark.parametrize("version", [1, 2])
+def test_an_unchanged_older_file_gets_the_default_exceptions(tmp_path, version):
+    text = v1_text() if version == 1 else v2_text()
+    loaded = load_settings(write(tmp_path, text))
+    assert loaded.defaults_version == version
+    assert loaded.deny_exceptions == DEFAULT_DENY_EXCEPTIONS
+    assert set(loaded.deny_words) == set(DEFAULT_DENY_WORDS)
+    for word in V3_DENY:
+        assert word in loaded.deny_words
+    assert loaded.warnings == ()
+    policy = settings.policy_from_settings(loaded)
+    assert policy.deny_exceptions == DEFAULT_DENY_EXCEPTIONS
+    assert policy.deny_words == loaded.deny_words
+
+
+def test_the_version_2_file_is_what_init_wrote_at_version_2():
+    # Pinned: the text `uiprobe init` wrote at defaults version 2.
+    text = v2_text()
+    assert text.startswith("# uiprobe settings")
+    assert tomllib.loads(text)["deny"] == {
+        "words": [w for w in DEFAULT_DENY_WORDS if w not in V3_DENY],
+        "remove": [],
+    }
+
+
+@pytest.mark.parametrize("version", [1, 2])
+def test_an_older_file_can_drop_a_default_exception_with_remove(tmp_path, version):
+    text = v1_text() if version == 1 else v2_text()
+    text = text.replace("remove = []", 'remove = ["Automatically"]', 1)  # deny
+    loaded = load_settings(write(tmp_path, text))
+    assert "automatically" not in loaded.deny_exceptions
+    assert "border" in loaded.deny_exceptions
+    assert set(loaded.deny_words) == set(DEFAULT_DENY_WORDS)
+    policy = settings.policy_from_settings(loaded)
+    assert "automatically" not in policy.deny_exceptions
+    assert guards.word_matches(
+        "Automatically", "call", exceptions=policy.deny_exceptions
+    )
+
+
+def test_remove_takes_an_exception_out_of_a_current_file(tmp_path):
+    loaded = load_settings(with_remove(tmp_path, 0, '["BORDER", "posture"]'))
+    assert loaded.deny_exceptions == tuple(
+        w for w in DEFAULT_DENY_EXCEPTIONS if w not in ("border", "posture")
+    )
+    assert loaded.deny_words == DEFAULT_DENY_WORDS
+
+
+def test_an_older_file_may_add_the_except_list(tmp_path):
+    text = v2_text().replace("remove = []", 'except = ["Recall"]\nremove = []', 1)
+    loaded = load_settings(write(tmp_path, text))
+    assert loaded.deny_exceptions == ("Recall", *DEFAULT_DENY_EXCEPTIONS)
+
+
+def test_a_current_file_needs_the_except_list(tmp_path):
+    text = render_default_settings()
+    start = text.index("except = [")
+    end = text.index("]", start) + 2
+    refused(write(tmp_path, text[:start] + text[end:]), "[deny] except", "missing")
+
+
+def test_a_listed_exception_equal_to_a_deny_word_is_refused(tmp_path):
+    message = refused(
+        edited(tmp_path, '    "border",\n', '    "border",\n    "Call",\n'),
+        "[deny] except",
+        "equals the deny word 'call'",
+        "remove the deny word instead",
+    )
+    assert "'Call'" in message
+    text = v2_text().replace("remove = []", 'except = ["auto-pay"]\nremove = []', 1)
+    refused(write(tmp_path, text), "[deny] except", "one word")
+
+
+def test_a_default_exception_equal_to_a_deny_word_of_an_older_file_is_dropped(
+    tmp_path,
+):
+    text = v2_text().replace("words = [\n", 'words = [\n    "Automatically",\n', 1)
+    loaded = load_settings(write(tmp_path, text))
+    assert "Automatically" in loaded.deny_words
+    assert "automatically" not in loaded.deny_exceptions
+    assert "border" in loaded.deny_exceptions
+    assert loaded.warnings == (
+        "[deny] the default exception 'automatically' is not applied because it"
+        " equals the deny word 'Automatically'",
+    )
+    policy = settings.policy_from_settings(loaded)
+    assert guards.word_matches(
+        "Automatically", "automatically", exceptions=policy.deny_exceptions
+    )
+
+
+@pytest.mark.parametrize(
+    ("items", "needle"),
+    [
+        ('["auto matically"]', "one word of letters and digits"),
+        ('["border!"]', "one word of letters and digits"),
+        ('["  "]', "empty"),
+        ('["Border", "border"]', "duplicate entry"),
+        ('"border"', "list of strings"),
+        ("[1]", "strings"),
+    ],
+)
+def test_bad_exception_entries_are_refused(tmp_path, items, needle):
+    text = render_default_settings()
+    start = text.index("except = [")
+    end = text.index("]", start) + 1
+    path = write(tmp_path, text[:start] + f"except = {items}" + text[end:])
+    refused(path, "[deny] except", needle)
+
+
+def test_an_added_deny_word_keeps_blocking_over_an_exception(tmp_path):
+    loaded = load_settings(default_file(tmp_path))
+    policy = settings.policy_from_settings(loaded, extra_deny=["automatically"])
+    assert "automatically" not in policy.deny_exceptions
+    assert guards.word_matches(
+        "Automatically", "automatically", exceptions=policy.deny_exceptions
+    )

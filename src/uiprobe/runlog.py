@@ -367,12 +367,15 @@ class RunWriter:
         back_on_other_screens: bool = False,
         repin: bool | None = None,
         check_tap_window: bool | None = None,
+        deny_exceptions: Iterable[str] = (),
     ) -> RunWriter:
         """Make the run folder `out` and write ``run-start.json`` into it.
 
         `limits` is a `crawl.Limits` or a dict with ``depth``, ``actions``
         and ``minutes``. `deny_words` are the words in use, written in the
-        given order. `started_at` must carry a time zone (default: now).
+        given order, and `deny_exceptions` the exception words in use
+        (``Policy.deny_exceptions``), written as ``deny_except`` in the given
+        order. `started_at` must carry a time zone (default: now).
         `back_on_other_screens` is written as given (the crawl's
         ``Policy.back_on_other_screens``). `repin`, when given, is written as
         ``repin``: whether a renumbered transport may be followed in this run
@@ -417,6 +420,7 @@ class RunWriter:
             msg = "check_tap_window must be a bool or None"
             raise TypeError(msg)
         words = _check_texts("deny_words", deny_words)
+        exceptions = _check_texts("deny_exceptions", deny_exceptions)
         limit_values = _limits_dict(limits)
         when = _check_moment("started_at", _now() if started_at is None else started_at)
         folder = _new_folder(out)
@@ -426,6 +430,7 @@ class RunWriter:
             "package": package,
             "limits": limit_values,
             "deny": words,
+            "deny_except": exceptions,
             "back_on_other_screens": back_on_other_screens,
             "device": {"serial": serial},
         }

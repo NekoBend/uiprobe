@@ -18,6 +18,7 @@ from uiprobe import guards
 from uiprobe.errors import ElementNotVisibleError
 from uiprobe.guards import (
     CONFIRM_WORDS,
+    DEFAULT_DENY_EXCEPTIONS,
     DEFAULT_DENY_WORDS,
     REASONS,
     Detail,
@@ -2163,6 +2164,7 @@ BASE_DENY = [
     "sign out",
     "signout",
     *["unsubscribe", "reset", "report", "block", "call"],
+    *["redial", "charge", "top up", "renew"],
 ]
 EXTRA_DENY = [
     *[
@@ -2243,7 +2245,7 @@ EXPECTED_CONFIRM = [
 
 
 def test_default_word_lists_match_the_expected_lists() -> None:
-    assert len(BASE_DENY) == 23 + 23
+    assert len(BASE_DENY) == 23 + 23 + 4
     assert len(SETTINGS_DENY) == 9
     assert len(SHOP_DENY) == 4
     assert DEFAULT_DENY_WORDS[-13:-4] == tuple(SETTINGS_DENY)
@@ -2285,7 +2287,6 @@ def test_sign_in_and_disable_labels_are_refused(label) -> None:
 @pytest.mark.parametrize(
     ("label", "word"),
     [
-        ("Designing", "sign in"),
         ("Signing out", "sign in"),
         ("Catalog in stock", "log in"),
         ("Log info", "log in"),
@@ -2329,7 +2330,6 @@ def test_cart_and_account_buttons_are_refused_and_products_is_not() -> None:
         ("Accounting", "account"),
         ("Cartoon", "cart"),
         ("Cartridge", "cart"),
-        ("Descartes", "cart"),
         ("Music artists", "cart"),
         ("Comic art", "cart"),
         ("Electric Artwork", "cart"),
@@ -3232,4 +3232,290 @@ def test_text_output_names_the_phrase_that_refused_a_screen() -> None:
     judgement = run([el("e2", text="Cancel"), warning])
     assert _reasons_text(decision(judgement, "e2")) == (
         'irreversible_screen ("permanently" in text of e3)'
+    )
+
+
+# -- exception words ------------------------------------------------------------------
+
+WIFI_SUMMARY = "Wi\u2011Fi doesn't turn back on automatically"
+
+
+def deny_of(judgement: Judgement, ident: str) -> Detail | None:
+    found = decision(judgement, ident)
+    return next((d for d in found.details if d.reason == "deny_word"), None)
+
+
+def test_the_default_exception_words() -> None:
+    assert DEFAULT_DENY_EXCEPTIONS == (
+        "automatically",
+        "posture",
+        "recorder",
+        "border",
+        "descartes",
+        "designing",
+    )
+    assert Policy().deny_exceptions == DEFAULT_DENY_EXCEPTIONS
+    # Each one holds a deny word; otherwise it would excuse nothing.
+    for exception in DEFAULT_DENY_EXCEPTIONS:
+        assert any(word_matches(exception, w) for w in DEFAULT_DENY_WORDS)
+
+
+@pytest.mark.parametrize(
+    "label",
+    [
+        "Automatically",
+        WIFI_SUMMARY,
+        "Posture check",
+        "Recorder",
+        "Border",
+        "Descartes",
+        "Designing",
+        "AUTOMATICALLY",
+        "(automatically)",
+    ],
+)
+def test_a_deny_word_inside_an_exception_word_does_not_refuse(label) -> None:
+    assert reasons(run([el("e2", text=label)]), "e2") == ()
+    for field in ("desc", "hint"):
+        found = run([el("e2", **{field: label})])
+        assert reasons(found, "e2") == (), field
+
+
+@pytest.mark.parametrize(
+    ("label", "word"),
+    [
+        ("Automatically pay", "pay"),
+        ("Automatically send", "send"),
+        ("Delete recorder", "delete"),
+        ("Redial automatically", "redial"),
+        ("Call automatically", "call"),
+        ("Automatically call back", "call"),
+        ("Send recorder file", "send"),
+        ("Remove border", "remove"),
+        ("Renew automatically", "renew"),
+        ("Charge automatically", "charge"),
+        ("Top up automatically", "top up"),
+    ],
+)
+def test_an_action_next_to_an_exception_word_is_refused(label, word) -> None:
+    found = run([el("e2", text=label)])
+    assert reasons(found, "e2") == ("deny_word",)
+    detail = deny_of(found, "e2")
+    assert detail is not None
+    assert detail.word == word
+
+
+def test_a_second_occurrence_outside_the_exception_counts() -> None:
+    # The first "order" lies inside "Recorder", the second does not.
+    assert word_matches("Recorder order", "order", exceptions=("recorder",))
+    assert word_matches("Automatically recall", "call", exceptions=("automatically",))
+    assert reasons(run([el("e2", text="Recorder order")]), "e2") == ("deny_word",)
+
+
+def test_a_hit_that_only_overlaps_an_exception_counts() -> None:
+    # "ders" starts inside "Border" and ends in "sale" (spaces removed).
+    assert word_matches("Border sale", "ders", exceptions=("border",))
+    assert not word_matches("Border", "rde", exceptions=("border",))
+    policy = Policy(deny_words=("ders",), deny_exceptions=("border",))
+    assert reasons(run([el("e2", text="Border sale")], policy=policy), "e2") == (
+        "deny_word",
+    )
+    assert reasons(run([el("e2", text="Border")], policy=policy), "e2") == ()
+
+
+@pytest.mark.parametrize(
+    ("label", "word"),
+    [
+        ("Job order", "order"),  # spaces removed: "joborder" holds "border"
+        ("Web order", "order"),
+        ("Club order", "order"),
+        ("Guide Sign in Google", "sign in"),  # "guidesigningoogle"
+        ("Guides cart estimate", "cart"),  # "guidescartestimate"
+    ],
+)
+def test_an_exception_across_a_word_boundary_does_not_count(label, word) -> None:
+    assert word_matches(label, word, exceptions=DEFAULT_DENY_EXCEPTIONS)
+    found = run([el("e2", text=label)])
+    detail = deny_of(found, "e2")
+    assert detail is not None
+    assert detail.word == word
+
+
+@pytest.mark.parametrize(
+    "label",
+    [
+        # The zero-width space ends a word: no word equals "border".
+        "Job\u200border",
+        "Bor\u200bder",
+        # NFKC turns the circled letter into J: the word is "jborder".
+        "\u24bfborder",
+        # A combining mark belongs to the word before it, so the word is not
+        # "border" (no precomposed letter exists for these).
+        "b\u0300order",
+        "border\u0332",
+        # An inflected form is another word.
+        "Borders",
+        "Postures",
+        "Recorders",
+        # A letter that NFKC changes (full-width, circled) is not accepted in
+        # an exception word, even though the result would be equal.
+        "\uff21utomatically",
+        "\u24d0utomatically",
+        # camelCase and separators: the exception is one word, the deny word
+        # stands beside it.
+        "AutomaticallyCall",
+        "Automatically_call",
+    ],
+)
+def test_an_exception_counts_only_as_one_unchanged_whole_word(label) -> None:
+    hits = [
+        w
+        for w in DEFAULT_DENY_WORDS
+        if word_matches(label, w, exceptions=DEFAULT_DENY_EXCEPTIONS)
+    ]
+    assert hits, label
+    assert reasons(run([el("e2", text=label)]), "e2") == ("deny_word",)
+
+
+def test_a_composed_accent_is_another_letter_and_no_hit_at_all() -> None:
+    # NFKC composes r + U+0301 into U+0155, so the text holds no "order" and
+    # neither rule refuses it; the exception words play no part.
+    for label in ("borde\u0155", "border\u0301"):
+        assert not word_matches(label, "order")
+        assert reasons(run([el("e2", text=label)]), "e2") == ()
+
+
+def test_joined_children_text_uses_the_exceptions() -> None:
+    row = el(
+        "e2", text="", cls="android.widget.LinearLayout", bounds=(0, 100, 320, 200)
+    )
+    title = el(
+        "e3",
+        parent="e2",
+        text="Network preferences",
+        flags=(),
+        bounds=(10, 110, 300, 140),
+    )
+    summary = el(
+        "e4", parent="e2", text=WIFI_SUMMARY, flags=(), bounds=(10, 150, 300, 190)
+    )
+    assert reasons(run([row, title, summary]), "e2") == ()
+
+
+def test_a_word_split_over_two_children_is_not_an_exception() -> None:
+    row = el(
+        "e2", text="", cls="android.widget.LinearLayout", bounds=(0, 100, 320, 200)
+    )
+    first = el(
+        "e3", parent="e2", text="Automatic", flags=(), bounds=(10, 110, 300, 140)
+    )
+    second = el("e4", parent="e2", text="ally", flags=(), bounds=(10, 150, 300, 190))
+    found = run([row, first, second])
+    detail = deny_of(found, "e2")
+    assert detail is not None
+    assert (detail.word, detail.field, detail.element_id) == ("call", "joined", "e2")
+
+
+def test_a_hit_in_the_joined_text_outside_the_exception_counts() -> None:
+    row = el(
+        "e2", text="", cls="android.widget.LinearLayout", bounds=(0, 100, 320, 200)
+    )
+    first = el(
+        "e3", parent="e2", text="Automatically ca", flags=(), bounds=(10, 110, 300, 140)
+    )
+    second = el("e4", parent="e2", text="ll back", flags=(), bounds=(10, 150, 300, 190))
+    detail = deny_of(run([row, first, second]), "e2")
+    assert detail is not None
+    assert (detail.word, detail.field) == ("call", "joined")
+
+
+def test_a_resource_id_does_not_use_the_exceptions() -> None:
+    found = run([el("e2", text="Next", rid="com.example:id/tv_automatically")])
+    detail = deny_of(found, "e2")
+    assert detail is not None
+    assert (detail.word, detail.field) == ("call", "resource_id")
+    element = el("e2", rid="com.example:id/tv_automatically")
+    assert deny_word_in(element, ("call",), exceptions=("automatically",)) == (
+        "call",
+        "resource_id",
+    )
+    assert (
+        deny_word_in(
+            el("e2", text="Automatically"), ("call",), exceptions=("automatically",)
+        )
+        is None
+    )
+
+
+def test_the_screen_wide_deny_for_confirm_buttons_uses_the_exceptions() -> None:
+    summary = el("e3", text=WIFI_SUMMARY, flags=(), bounds=(50, 300, 250, 350))
+    assert reasons(run([el("e2", text="OK"), summary]), "e2") == ()
+    other = el("e3", text="Automatically pay", flags=(), bounds=(50, 300, 250, 350))
+    assert "confirm_button" in reasons(run([el("e2", text="OK"), other]), "e2")
+
+
+def test_irreversibility_phrases_do_not_use_the_exceptions() -> None:
+    policy = Policy(irreversible_phrases=("call",))
+    found = run([el("e2", text="Automatically")], policy=policy)
+    assert reasons(found, "e2") == ("irreversible_screen",)
+
+
+def test_without_exceptions_the_old_substring_rule_applies() -> None:
+    policy = Policy(deny_exceptions=())
+    for label in ("Automatically", "Posture", "Recorder", "Border", "Designing"):
+        assert reasons(run([el("e2", text=label)], policy=policy), "e2") == (
+            "deny_word",
+        )
+    assert word_matches("Automatically", "call")
+
+
+@pytest.mark.parametrize(
+    "word",
+    ["auto matically", "auto-matically", "border!", "-", "bor\u200bder", " border"],
+)
+def test_an_exception_must_be_one_word(word) -> None:
+    with pytest.raises(ValueError, match=r"one word of letters and digits|empty"):
+        Policy(deny_exceptions=(word,))
+    with pytest.raises(ValueError, match=r"one word of letters and digits|empty"):
+        word_matches("x", "x", exceptions=(word,))
+
+
+def test_exceptions_must_be_a_collection() -> None:
+    loose: Any = Policy
+    with pytest.raises(TypeError, match="collection of words"):
+        loose(deny_exceptions="border")
+    with pytest.raises(TypeError, match="collection of words"):
+        word_matches("Border", "order", exceptions="border")
+
+
+@pytest.mark.parametrize(
+    ("words", "exception"),
+    [
+        (("call",), "CALL"),
+        (("auto-matically",), "automatically"),  # its spaceless form
+        (("border",), "\uff42order"),  # NFKC makes it "border"
+    ],
+)
+def test_an_exception_equal_to_a_deny_word_is_refused(words, exception) -> None:
+    with pytest.raises(ValueError, match="equals the deny word"):
+        Policy(deny_words=words, deny_exceptions=(exception,))
+
+
+def test_an_added_deny_word_drops_the_equal_exception() -> None:
+    policy = Policy().with_deny_words(["Automatically"])
+    assert "automatically" not in policy.deny_exceptions
+    assert "border" in policy.deny_exceptions
+    found = run([el("e2", text="Automatically")], policy=policy)
+    assert reasons(found, "e2") == ("deny_word",)
+    assert reasons(run([el("e2", text="Border")], policy=policy), "e2") == ()
+
+
+def test_tracing_that_is_not_certain_counts_the_hit() -> None:
+    # Removing the zero-width space lets NFKC compose e + U+0301 differently
+    # from the character-by-character trace, so the hit counts.
+    label = "Automatically e\u200b\u0301"
+    assert guards._Excuser(frozenset({"automatically"})).counts(label, ("call",))
+    # The same text without the trap is excused.
+    assert not guards._Excuser(frozenset({"automatically"})).counts(
+        "Automatically e", ("call",)
     )
