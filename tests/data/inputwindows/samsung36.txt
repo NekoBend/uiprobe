@@ -1,0 +1,64 @@
+# Lines of `dumpsys input` of a Samsung phone (Android 16, API 36), copied in
+# their order with lines left out: two Viewport lines of display 0 and the
+# dispatcher's part (only its FocusedDisplayId line above the display) down to
+# the line after the window list's sections. Replaced, everything else
+# verbatim: the display's uniqueId and xDpi/yDpi values; window hashes in
+# names and the ActivityRecord hash; pids; uids other than 1000 (10001
+# system UI, 10002 launcher, 10003 wallpaper); 16-digit hex tokens (0x0
+# kept); names of vendor apps and monitors (com.example.launcher,
+# com.example.wallpaper, monitor-a, monitor-b, Wallpaper wrapper#66).
+      Viewport INTERNAL: displayId=0, uniqueId=local:1111111111111111111, port=129, orientation=0, densityDpi=480 xDpi=400.000000, yDpi=400.000000, logicalFrame=[0, 0, 1080, 2340], physicalFrame=[0, 0, 1080, 2340], deviceSize=[1080, 2340], isActive=[0]
+        Viewport INTERNAL: displayId=0, uniqueId=local:1111111111111111111, port=129, orientation=0, densityDpi=480 xDpi=400.000000, yDpi=400.000000, logicalFrame=[0, 0, 1080, 2340], physicalFrame=[0, 0, 1080, 2340], deviceSize=[1080, 2340], isActive=[1]
+Input Dispatcher State:
+  FocusedDisplayId: 0
+  Display: 0
+    logicalSize=1080x2340
+        transform (ROT_0) (IDENTITY)
+    Windows:
+      0: name=PointerEventDispatcherOverlay0, id=44, displayId=0, inputConfig=NOT_FOCUSABLE | TRUSTED_OVERLAY | SPY | DO_NOT_PILFER, samsungFlags=0x0, alpha=1, frame=[0,0][0,0], globalScale=1, applicationInfo.name=PointerEventDispatcherOverlay0, applicationInfo.token=<null>, touchableRegion=[-10800,-23400][10800,23400], pTouchableRegion=<empty>, 1HXY=[0, 0, 0], ownerPid=20001, ownerUid=1000, dispatchingTimeout=10000ms, token=0x0000000000000001, touchOcclusionMode=BLOCK_UNTRUSTED
+      transform (ROT_0) (IDENTITY)
+      1: name=[Gesture Monitor] monitor-a, id=147, displayId=0, inputConfig=NOT_FOCUSABLE | TRUSTED_OVERLAY | SPY, samsungFlags=0x0, alpha=1, frame=[0,0][0,0], globalScale=1, applicationInfo.name=[Gesture Monitor] monitor-a, applicationInfo.token=<null>, touchableRegion=[-10800,-23400][10800,23400], pTouchableRegion=<empty>, 1HXY=[0, 0, 0], ownerPid=20001, ownerUid=1000, dispatchingTimeout=10000ms, token=0x0000000000000001, touchOcclusionMode=BLOCK_UNTRUSTED
+      transform (ROT_0) (IDENTITY)
+      2: name=[Gesture Monitor] monitor-b, id=97, displayId=0, inputConfig=NOT_FOCUSABLE | TRUSTED_OVERLAY | SPY, samsungFlags=0x0, alpha=1, frame=[0,0][0,0], globalScale=1, applicationInfo.name=[Gesture Monitor] monitor-b, applicationInfo.token=<null>, touchableRegion=[-10800,-23400][10800,23400], pTouchableRegion=<empty>, 1HXY=[0, 0, 0], ownerPid=20001, ownerUid=1000, dispatchingTimeout=10000ms, token=0x0000000000000001, touchOcclusionMode=BLOCK_UNTRUSTED
+      transform (ROT_0) (IDENTITY)
+      3: name=abcdef1 NavigationBar0, id=81, displayId=0, inputConfig=NOT_FOCUSABLE | TRUSTED_OVERLAY | WATCH_OUTSIDE_TOUCH | SLIPPERY, samsungFlags=0x0, alpha=1, frame=[0,2196][1080,2340], globalScale=1, applicationInfo.name=, applicationInfo.token=<null>, touchableRegion=[0,2196][1080,2340], pTouchableRegion=<empty>, 1HXY=[0, 0, 1], ownerPid=20002, ownerUid=10001, dispatchingTimeout=10000ms, token=0x0000000000000001, touchOcclusionMode=BLOCK_UNTRUSTED
+      transform (ROT_0) (TRANSLATE)
+          1.0000  0.0000  -0.0000
+          0.0000  1.0000  -2196.0000
+          0.0000  0.0000  1.0000
+      4: name=abcdef2 com.example.launcher/com.example.launcher.EdgePanelService, id=206, displayId=0, inputConfig=NOT_FOCUSABLE | TRUSTED_OVERLAY, samsungFlags=FORCE_TRUSTED_OVERLAY, alpha=1, frame=[1000,438][1080,780], globalScale=1, applicationInfo.name=, applicationInfo.token=<null>, touchableRegion=[1033,438][1082,780], pTouchableRegion=<empty>, 1HXY=[0, 0, 1], ownerPid=20003, ownerUid=10002, dispatchingTimeout=10000ms, token=0x0000000000000001, touchOcclusionMode=BLOCK_UNTRUSTED
+      transform (ROT_0) (TRANSLATE)
+          1.0000  0.0000  -1000.0000
+          0.0000  1.0000  -438.0000
+          0.0000  0.0000  1.0000
+      5: name=abcdef3 StatusBar, id=85, displayId=0, inputConfig=NOT_FOCUSABLE | TRUSTED_OVERLAY, samsungFlags=0x0, alpha=1, frame=[0,0][1080,111], globalScale=1, applicationInfo.name=, applicationInfo.token=<null>, touchableRegion=[0,0][1080,111], pTouchableRegion=<empty>, 1HXY=[0, 0, 1], ownerPid=20002, ownerUid=10001, dispatchingTimeout=10000ms, token=0x0000000000000001, touchOcclusionMode=BLOCK_UNTRUSTED
+      transform (ROT_0) (IDENTITY)
+      6: name=abcdef4 RecentsTransitionOverlay, id=93, displayId=0, inputConfig=NO_INPUT_CHANNEL | NOT_VISIBLE | NOT_FOCUSABLE | NOT_TOUCHABLE | TRUSTED_OVERLAY, samsungFlags=0x0, alpha=1, frame=[0,0][1,1], globalScale=1, applicationInfo.name=, applicationInfo.token=<null>, touchableRegion=<empty>, pTouchableRegion=<empty>, 1HXY=[0, 0, 0], ownerPid=20003, ownerUid=10002, dispatchingTimeout=0ms, token=0x0, touchOcclusionMode=BLOCK_UNTRUSTED
+      transform (ROT_0) (IDENTITY)
+      7: name=abcdef5 ActivityRecordInputSink com.example.launcher/com.android.quickstep.RecentsActivity, id=210, displayId=0, inputConfig=NO_INPUT_CHANNEL | NOT_VISIBLE | NOT_FOCUSABLE | NOT_TOUCHABLE, samsungFlags=0x0, alpha=0.00252533, frame=[0,0][0,0], globalScale=0, applicationInfo.name=, applicationInfo.token=<null>, touchableRegion=[-10800,-23400][10800,23400], pTouchableRegion=<empty>, 1HXY=[0, 0, 0], ownerPid=20001, ownerUid=1000, dispatchingTimeout=0ms, token=0x0, touchOcclusionMode=BLOCK_UNTRUSTED
+      transform (ROT_0) (IDENTITY)
+      8: name=Dim layer#55, id=55, displayId=0, inputConfig=NO_INPUT_CHANNEL | NOT_VISIBLE, samsungFlags=0x0, alpha=1, frame=[0,0][0,0], globalScale=1, applicationInfo.name=, applicationInfo.token=<null>, touchableRegion=<empty>, pTouchableRegion=<empty>, 1HXY=[0, 0, 0], ownerPid=20002, ownerUid=10001, dispatchingTimeout=5000ms, token=0x0, touchOcclusionMode=BLOCK_UNTRUSTED
+      transform (ROT_0) (IDENTITY)
+      9: name=Dim layer#54, id=54, displayId=0, inputConfig=NO_INPUT_CHANNEL | NOT_VISIBLE, samsungFlags=0x0, alpha=1, frame=[0,0][0,0], globalScale=1, applicationInfo.name=, applicationInfo.token=<null>, touchableRegion=<empty>, pTouchableRegion=<empty>, 1HXY=[0, 0, 0], ownerPid=20002, ownerUid=10001, dispatchingTimeout=5000ms, token=0x0, touchOcclusionMode=BLOCK_UNTRUSTED
+      transform (ROT_0) (IDENTITY)
+      10: name=Split Background Layer#53, id=53, displayId=0, inputConfig=NO_INPUT_CHANNEL | NOT_VISIBLE | TRUSTED_OVERLAY, samsungFlags=0x0, alpha=1, frame=[0,0][1080,2340], globalScale=1, applicationInfo.name=, applicationInfo.token=<null>, touchableRegion=<empty>, pTouchableRegion=<empty>, 1HXY=[0, 0, 0], ownerPid=20002, ownerUid=10001, dispatchingTimeout=5000ms, token=0x0, touchOcclusionMode=BLOCK_UNTRUSTED
+      transform (ROT_0) (IDENTITY)
+      11: name=abcdef0 com.example.launcher/com.example.launcher.HomeActivity, id=217, displayId=0, inputConfig=DUPLICATE_TOUCH_TO_WALLPAPER, samsungFlags=0x0, alpha=1, frame=[0,0][1080,2340], globalScale=1, applicationInfo.name=ActivityRecord{12345678 u0 com.example.launcher/.HomeActivity t10}, applicationInfo.token=0x0000000000000001, touchableRegion=[0,0][1080,2340], pTouchableRegion=<empty>, 1HXY=[0, 0, 1], ownerPid=20003, ownerUid=10002, dispatchingTimeout=10000ms, token=0x0000000000000001, touchOcclusionMode=BLOCK_UNTRUSTED
+      transform (ROT_0) (IDENTITY)
+      12: name=abcdef6 ActivityRecordInputSink com.example.launcher/.Launcher, id=136, displayId=0, inputConfig=NO_INPUT_CHANNEL | NOT_FOCUSABLE, samsungFlags=0x0, alpha=1, frame=[0,0][0,0], globalScale=0, applicationInfo.name=, applicationInfo.token=<null>, touchableRegion=[-10800,-23400][10800,23400], pTouchableRegion=<empty>, 1HXY=[0, 0, 0], ownerPid=20001, ownerUid=1000, dispatchingTimeout=0ms, token=0x0, touchOcclusionMode=BLOCK_UNTRUSTED
+      transform (ROT_0) (IDENTITY)
+      13: name=Wallpaper wrapper#66, id=66, displayId=0, inputConfig=NO_INPUT_CHANNEL, samsungFlags=0x0, alpha=1, frame=[0,0][1080,2340], globalScale=1, applicationInfo.name=, applicationInfo.token=<null>, touchableRegion=<empty>, pTouchableRegion=<empty>, 1HXY=[0, 0, 0], ownerPid=20004, ownerUid=10003, dispatchingTimeout=5000ms, token=0x0, touchOcclusionMode=BLOCK_UNTRUSTED
+      transform (ROT_0) (IDENTITY)
+      14: name=abcdef7 com.example.wallpaper.LiveWallpaper, id=64, displayId=0, inputConfig=NOT_FOCUSABLE | IS_WALLPAPER, samsungFlags=0x8, alpha=1, frame=[0,0][0,0], globalScale=1, applicationInfo.name=, applicationInfo.token=<null>, touchableRegion=<empty>, pTouchableRegion=<empty>, 1HXY=[0, 0, 1], ownerPid=20004, ownerUid=10003, dispatchingTimeout=10000ms, token=0x0000000000000001, touchOcclusionMode=BLOCK_UNTRUSTED
+      transform (ROT_0) (IDENTITY)
+  mMaximumObscuringOpacityForTouch: 0.800000
+  DisplayTopologyGraph:
+    PrimaryDisplayId: 0
+    TopologyGraph:
+      displayId(0):AdjacentDisplays: []
+      Density: 480
+      Bounds: FloatRect(0.000000, 0.000000, 360.000000, 780.000000)
+
+
+  Focus Monitors: <none>
+  Connections:
