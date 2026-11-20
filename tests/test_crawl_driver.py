@@ -1978,3 +1978,45 @@ def test_a_restart_whose_pin_check_ends_past_the_limit_is_only_half_sent(
     assert result.stop_reason == "max_duration"
     ends = [r for r in lines(out / "transitions.jsonl") if r.get("not_sent")]
     assert ends[-1]["reason"] == "start_not_sent"
+
+
+@pytest.mark.usefixtures("android")
+def test_nothing_is_hashed_between_the_last_clock_read_and_a_tap(
+    tmp_path: Path, device, clock, monkeypatch
+):
+    # The screen id walks the whole screen; it must be computed before the
+    # gate's last look at the clock, never between that look and the tap.
+    from uiprobe import model
+
+    events: list[str] = []
+    original_id = model.Screen.screen_id
+    original_tap = Device.tap
+
+    def recording_id(self: model.Screen) -> str:
+        events.append("hash")
+        return original_id.fget(self)
+
+    def recording_clock() -> float:
+        events.append("clock")
+        return clock.now
+
+    def recording_tap(self: Device, *args: object, **kwargs: object) -> object:
+        last_clock = max(i for i, e in enumerate(events) if e == "clock")
+        assert "hash" not in events[last_clock:], events[last_clock:]
+        events.append("tap")
+        return original_tap(self, *args, **kwargs)  # ty: ignore[invalid-argument-type]
+
+    monkeypatch.setattr(model.Screen, "screen_id", property(recording_id))
+    monkeypatch.setattr(Device, "tap", recording_tap)
+    out = tmp_path / "run"
+    crawl(
+        device,
+        SHOP,
+        out,
+        policy=Policy(),
+        limits=Limits(actions=4),
+        settle=1.0,
+        clock=recording_clock,
+        sleep=clock.sleep,
+    )
+    assert "tap" in events
