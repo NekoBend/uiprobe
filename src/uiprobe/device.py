@@ -1306,6 +1306,9 @@ class Device:
         try:
             self._check_listed(strict=strict)
             succeeded = True
+        except BaseException as error:
+            self._interrupted(error)
+            raise
         finally:
             if not succeeded:
                 self._epoch += 1  # whatever stopped the check, the proof is stale
@@ -1326,6 +1329,10 @@ class Device:
         try:
             result = send(pin)
             succeeded = True
+        except BaseException as error:
+            if pin:
+                self._interrupted(error)
+            raise
         finally:
             if pin and not succeeded:
                 self._epoch += 1  # any way out but success, whatever the error
@@ -1395,6 +1402,19 @@ class Device:
             self._broken = (str(error), dict(error.details))
             self._epoch += 1
         return error
+
+    def _doubt[E: Exception](self, failure: E) -> E:
+        """Note a request that changed the device but did not report success
+        (it may have been cut off): the proof is stale. Return `failure`."""
+        if self._transport_id is not None:
+            self._epoch += 1
+        return failure
+
+    def _interrupted(self, error: BaseException) -> None:
+        """Keep the pin as failed when an interrupt (not an error) left a
+        pinned exchange: such a Device is not to be used again."""
+        if not isinstance(error, Exception) and self._transport_id is not None:
+            self._fail(self._changed("was interrupted while it was in use"))
 
     def _broken_error(self) -> DeviceNotFoundError:
         assert self._broken is not None  # noqa: S101 - only called when kept
@@ -1495,10 +1515,16 @@ class Device:
             raise self._fail(
                 self._changed(f"did not come back within {REPIN_WAIT:g} s")
             )
+        except BaseException as error:
+            code = (
+                error.code if isinstance(error, UiprobeError) else type(error).__name__
+            )
+            self._fail(self._changed(f"could not be proven again ({code})"))
+            raise
         finally:
             self._repinning = False
             if self._proven != self._epoch:
-                # Any way out but a proof (an error, an interrupt): kept.
+                # Any way out but a proof: kept.
                 self._fail(self._changed("could not be proven again"))
 
     def _candidate(self, old: int) -> int | None:
@@ -1612,12 +1638,12 @@ class Device:
         # success is kept as a failed pin (an interrupt included), so no
         # request of this Device goes out afterwards, not even by serial.
         succeeded = False
-        # From here on a server that cannot be reached is a failure, not a
-        # reason to start a new one (it would number its transports anew),
-        # and no other request goes out while the first proof runs.
-        self._client.stop_starting_server()
-        self._repinning = True
         try:
+            # From here on a server that cannot be reached is a failure, not a
+            # reason to start a new one (it would number its transports
+            # anew), and no other request goes out while the first proof runs.
+            self._client.stop_starting_server()
+            self._repinning = True
             transport, found = self._first_proof()
             self._pinned_identity = found
             self._transport_id = transport
@@ -1811,7 +1837,7 @@ class Device:
             "long_tap" if long else "tap", {"point": list(point)}, output
         )
         if failure is not None:
-            raise failure
+            raise self._doubt(failure)
         return point
 
     def swipe(
@@ -1874,7 +1900,7 @@ class Device:
         }
         failure = _input_failure("swipe", where, output)
         if failure is not None:
-            raise failure
+            raise self._doubt(failure)
         return first, last
 
     def scroll(
@@ -2035,7 +2061,7 @@ class Device:
         output = self._shell_text(quote_args("input", "keyevent", code) + _EXIT_SUFFIX)
         failure = _input_failure("key", {"key": code}, output)
         if failure is not None:
-            raise failure
+            raise self._doubt(failure)
         return code
 
     def type_text(self, text: str) -> None:
@@ -2088,7 +2114,8 @@ class Device:
         for number, piece in enumerate(pieces, start=1):
             failure = self._type_piece(piece, number, len(pieces))
             if failure is not None:
-                raise failure  # outside any handler: no chained error to read
+                # outside any handler: no chained error to read
+                raise self._doubt(failure)
 
     def _type_piece(self, piece: str, number: int, pieces: int) -> UiprobeError | None:
         """Send one piece; return the error to raise, or None when it worked.
@@ -2181,6 +2208,7 @@ class Device:
             m.group(1) for line in lines if (m := _EVENTS_INJECTED.fullmatch(line))
         ]
         if counts != ["1"]:
+            self._doubt(LaunchFailedError("monkey did not report one event"))
             if any(line.startswith(_NO_ACTIVITIES) for line in lines):
                 details["reason"] = "not_installed_or_no_launcher"
                 msg = (
@@ -2234,6 +2262,7 @@ class Device:
         failure = _input_failure("force-stop", {}, stop)
         if failure is None:
             return
+        self._doubt(failure)
         details: dict[str, object] = {"package": package, "reason": "stop_failed"}
         if "exit_status" in failure.details:
             details["exit_status"] = failure.details["exit_status"]
@@ -2376,10 +2405,21 @@ class Device:
         if self._transport_id is None or expected is None:
             msg = "the transport is not pinned"
             raise AdbError(msg, details={"serial": self.serial})
-        found = self.identity()  # its request checks the server's listing first
-        if not self._same_device(found) or (
-            emulator and (found is None or not found.emulator)
-        ):
+        # The read and the comparison are one step: any way out but a match
+        # (an interrupt while the answer is parsed, say) makes the proof stale.
+        matched = False
+        try:
+            found = self.identity()  # its request checks the listing first
+            matched = self._same_device(found) and not (
+                emulator and (found is None or not found.emulator)
+            )
+        except BaseException as error:
+            self._interrupted(error)
+            raise
+        finally:
+            if not matched:
+                self._epoch += 1
+        if not matched:
             msg = (
                 f"the device pinned as {self.serial} (transport"
                 f" {self._transport_id}) is not the one that was checked any more"

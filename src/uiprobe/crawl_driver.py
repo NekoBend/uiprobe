@@ -427,6 +427,8 @@ class _Run:
         screen is read again from scratch.
         """
         if self.device.pin_epoch != self.gate_epoch:
+            # The skip rows come from the screen the tap was chosen on.
+            self.write_skips(screen, tap=tap)
             return None
         self.write_skips(screen, seen.observation.screen, tap=tap)
         self.record(seen, self.gate_epoch)
@@ -623,11 +625,19 @@ class _Run:
 
         The pin is checked first: a dump writes a file on the device and
         removes it, so even reading goes only to the device that was checked.
+        Reads that an event on the pin crossed are read again from the pin
+        check on (bounded: every event makes the next check prove the device
+        again, which `MAX_RECONNECTS` limits), before anything is written.
         """
-        self.device.check_pin(emulator=self.emulator)
-        self.epoch_seen = self.device.pin_epoch
-        screen = self.dump()
-        foreground = self.device.foreground()
+        while True:
+            self.device.check_pin(emulator=self.emulator)
+            self.epoch_seen = self.device.pin_epoch
+            screen = self.dump()
+            foreground = self.device.foreground()
+            keyboard = self.device.keyboard_shown()
+            focus = self.device.focused_window()
+            if self.device.pin_epoch == self.epoch_seen:
+                break
         if self._open is not None:
             action_id, self._open = self._open, None
             if screen is None:
@@ -636,8 +646,6 @@ class _Run:
                 self.writer.write_transition_end(action_id, screen.screen_id)
         if screen is not None and self.on_target(screen, foreground):
             self.screens_seen.add(screen.screen_id)  # counted when observed
-        keyboard = self.device.keyboard_shown()
-        focus = self.device.focused_window()
         observation = Observation(screen, foreground, keyboard, self.clock())
         self.record(_Seen(observation, focus), self.epoch_seen)
         return observation
@@ -671,7 +679,11 @@ class _Run:
             )
             return
         if self.device.pin_epoch != epoch:
-            return  # an event crossed the screenshot's reads
+            # An event crossed the screenshot's reads: the image is dropped.
+            self.notes.append(
+                f"no screenshot of {screen.screen_id}: the device was proven again"
+            )
+            return
         self.writer.write_screenshot(screen.screen_id, png)
 
     def on_target(self, screen: Screen, foreground: str | None) -> bool:

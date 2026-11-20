@@ -337,11 +337,12 @@ def test_a_crawl_goes_on_after_a_renumbered_transport(
     _renumber_after(monkeypatch, fake_adb, device, "foreground", 2, TRANSPORT + 1)
     out = tmp_path / "run"
     result = run(device, clock, out, limits=Limits(actions=6))
-    assert result.stop_reason in {"max_actions", "exhausted"}  # not an error
+    assert result.stop_reason == "max_actions"  # not an error, nothing lost
     assert device.repins == ((TRANSPORT, TRANSPORT + 1),)
-    # the action chosen before the device was away was not sent
+    # the move came during an observation, which was read again before
+    # anything was chosen on it, so nothing was refused
     records = lines(out / "transitions.jsonl")
-    assert [r["reason"] for r in records if r.get("not_sent")] == ["device_reconnected"]
+    assert [r["reason"] for r in records if r.get("not_sent")] == []
     begin = json.loads((out / "run-start.json").read_bytes())
     assert begin["repin"] is True
     end = json.loads((out / "run.json").read_bytes())

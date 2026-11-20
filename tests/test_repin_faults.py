@@ -53,7 +53,7 @@ KINDS: dict[str, Callable[[], Exception]] = {
     "other": lambda: ValueError("address family not supported"),
 }
 CHANGING = ("input ", "monkey ", "am ")
-LIMITS = Limits(actions=3)
+LIMITS = Limits(actions=4)
 OTHER_BOOT = "0f1e2d3c-4b5a-4968-8778-695a4b3c2d1e"
 
 
@@ -156,8 +156,11 @@ def violations(faults: Faults) -> list[str]:
 def test_the_crawl_without_faults_sends_inputs(tmp_path, monkeypatch):
     faults = Faults(None, "offline")
     crawl_with(tmp_path, monkeypatch, faults, "clean")
-    inputs = [e for e in faults.log if e[2] and e[2].startswith(CHANGING)]
-    assert len(inputs) >= 3  # a launch and taps: the faults have things to hit
+    inputs = [e[2] for e in faults.log if e[2] and e[2].startswith(CHANGING)]
+    # a launch, taps and a BACK: the faults have every kind of input to hit
+    assert any(c.startswith("monkey ") for c in inputs)
+    assert any(c.startswith("input swipe ") for c in inputs)  # a tap held 10 ms
+    assert any("KEYCODE_BACK" in c for c in inputs)
     assert violations(faults) == []
 
 
