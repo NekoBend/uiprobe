@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import io
 import json
 from typing import TYPE_CHECKING
 
@@ -446,3 +447,24 @@ def test_a_closed_plan_stream_refuses_before_anything_is_sent(
     assert "stderr is closed" in error["message"]
     assert device_writes(fake_adb) == []
     assert not out.exists()
+
+
+class _BrokenOutput(io.StringIO):
+    """An output whose writes fail as a closed pipe does."""
+
+    def write(self, _text: str) -> int:
+        raise BrokenPipeError(32, "Broken pipe")
+
+
+@pytest.mark.usefixtures("here", "android")
+@pytest.mark.parametrize("as_json", [False, True])
+def test_a_plan_that_cannot_be_written_stops_before_the_launch(
+    fake_adb, tmp_path, monkeypatch, as_json
+):
+    monkeypatch.setattr("sys.stderr" if as_json else "sys.stdout", _BrokenOutput())
+    argv = ["crawl", SHOP, "--press", "--out", str(tmp_path / "r")]
+    code = cli.run(
+        ["--adb-server", fake_adb.address, *argv, *(["--json"] if as_json else [])]
+    )
+    assert code != 0
+    assert device_writes(fake_adb) == []
