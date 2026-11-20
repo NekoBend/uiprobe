@@ -1240,6 +1240,8 @@ class Device:
         start_server: bool = True,
         pin: bool = False,
     ) -> None:
+        if isinstance(serial, str):
+            serial = str.__str__(serial)  # a plain str from here on
         _check_serial(serial)
         if not isinstance(pin, bool):
             msg = f"pin must be a bool, not {type(pin).__name__}"
@@ -1294,35 +1296,40 @@ class Device:
         """
         if self._broken is not None:
             raise self._broken_error()
+        if self._repinning:
+            # A request while the device is being proven (first or again;
+            # from the watch, say): nothing goes out, and the proof fails.
+            raise self._fail(self._changed("was asked for during a proof"))
         if self._transport_id is None:
             return {}
-        if self._repinning:
-            # A request while the device is being proven again (from the
-            # watch, say): nothing goes out, and the wait ends with it.
-            raise self._fail(self._changed("was asked for during a wait"))
+        succeeded = False
         try:
             self._check_listed(strict=strict)
-        except _OPTIONAL_ERRORS:
-            self._epoch += 1  # the check itself failed: the proof is stale
-            raise
+            succeeded = True
+        finally:
+            if not succeeded:
+                self._epoch += 1  # whatever stopped the check, the proof is stale
         return {"transport_id": self._transport_id}
 
     def _call[T](self, send: Callable[[dict[str, int]], T], *, strict: bool) -> T:
         """Send one request with the pin; note a lost transport at once.
 
-        A request on the pinned transport that fails at the adb level (the
-        device went offline or away, the server is gone, the protocol broke)
-        moves `pin_epoch` before the error leaves this method, so a caller
+        A request on the pinned transport that does not succeed, for any
+        reason (the device went offline or away, the server is gone, the
+        protocol broke, an interrupt), moves `pin_epoch` before the error
+        leaves this method, so a caller
         that swallows the error cannot hide it: the next read proves the
         device again and the next input is refused.
         """
-        pin = self._pin(strict=strict)
+        pin = self._pin(strict=strict)  # moves the epoch itself on a failure
+        succeeded = False
         try:
-            return send(pin)
-        except _OPTIONAL_ERRORS:
-            if pin:
-                self._epoch += 1
-            raise
+            result = send(pin)
+            succeeded = True
+        finally:
+            if pin and not succeeded:
+                self._epoch += 1  # any way out but success, whatever the error
+        return result
 
     def _check_listed(self, *, strict: bool = False) -> None:
         """Hold every request to one rule; raise when it does not hold.
@@ -1348,6 +1355,11 @@ class Device:
             for d in everything
         ):
             raise self._fail(self._changed("is not usable any more"))
+        if (
+            sum(d.serial == self.serial and d.state == READY_STATE for d in everything)
+            > 1
+        ):
+            raise self._fail(self._changed("is listed more than once"))
         listed = [d for d in everything if d.transport_id == self._transport_id]
         same = len(listed) == 1 and listed[0].serial == self.serial
         ready = same and listed[0].state == READY_STATE
@@ -1426,14 +1438,18 @@ class Device:
         """Prove the device again through its own number (no boot id, so no
         wait and no move)."""
         self._repinning = True
+        succeeded = False
         try:
             self._count_reconnect()
             found = self._identity_through(transport)
             if not self._same_device(found):
                 raise self._fail(self._changed("could not be proven the same again"))
             self._proven = self._epoch
+            succeeded = True
         finally:
             self._repinning = False
+            if not succeeded:
+                self._fail(self._changed("could not be proven again"))
 
     def _repin(self) -> None:
         """Prove the device again, following it to a new number if needed.
@@ -1479,13 +1495,11 @@ class Device:
             raise self._fail(
                 self._changed(f"did not come back within {REPIN_WAIT:g} s")
             )
-        except Exception as error:
-            if self._broken is None:
-                code = error.code if isinstance(error, UiprobeError) else "error"
-                self._fail(self._changed(f"could not be proven again ({code})"))
-            raise
         finally:
             self._repinning = False
+            if self._proven != self._epoch:
+                # Any way out but a proof (an error, an interrupt): kept.
+                self._fail(self._changed("could not be proven again"))
 
     def _candidate(self, old: int) -> int | None:
         """Read the listing once; return the one ready number of this serial,
@@ -1598,12 +1612,13 @@ class Device:
         # success is kept as a failed pin (an interrupt included), so no
         # request of this Device goes out afterwards, not even by serial.
         succeeded = False
+        # From here on a server that cannot be reached is a failure, not a
+        # reason to start a new one (it would number its transports anew),
+        # and no other request goes out while the first proof runs.
+        self._client.stop_starting_server()
+        self._repinning = True
         try:
             transport, found = self._first_proof()
-            # From here on a server that cannot be reached is a failure, not
-            # a reason to start a new one (it would number its transports
-            # anew).
-            self._client.stop_starting_server()
             self._pinned_identity = found
             self._transport_id = transport
             self._proven = self._epoch
@@ -1613,6 +1628,7 @@ class Device:
             self._epoch += 1
             raise
         finally:
+            self._repinning = False
             if not succeeded and self._broken is None:
                 self._broken = (
                     f"pinning {self.serial} did not finish",
@@ -2353,6 +2369,9 @@ class Device:
                 (``details["reason"]`` is ``device_changed``).
             AdbError: `pin_transport` was not called, or the reads failed.
         """
+        if type(emulator) is not bool:
+            msg = f"emulator must be a bool, not {type(emulator).__name__}"
+            raise TypeError(msg)
         expected = self._pinned_identity
         if self._transport_id is None or expected is None:
             msg = "the transport is not pinned"
@@ -2367,7 +2386,8 @@ class Device:
             )
             details = {"serial": self.serial, "reason": "device_changed"}
             raise self._fail(DeviceNotFoundError(msg, details=details))
-        self._proven = self._epoch
+        # No mark is set here: the identity read itself went out only with a
+        # current proof (see `_check_listed`), which a proof had set.
 
     def keyboard_shown(self) -> bool | None:
         """Return whether the soft keyboard is shown, or None when unknown.

@@ -426,10 +426,10 @@ class _Run:
         to the pin during them they are mixed: they are not recorded, and the
         screen is read again from scratch.
         """
-        self.write_skips(screen, seen.observation.screen, tap=tap)
         if self.device.pin_epoch != self.gate_epoch:
             return None
-        self.record(seen)
+        self.write_skips(screen, seen.observation.screen, tap=tap)
+        self.record(seen, self.gate_epoch)
         if self.device.pin_epoch != self.gate_epoch:
             return None  # the screenshot's reads saw an event
         self.epoch_seen = self.gate_epoch
@@ -513,9 +513,12 @@ class _Run:
         # Last, after every other check: if anything happened to the pin since
         # the observation the action was chosen on (or during these reads),
         # nothing read before can be trusted.
+        # Every condition is evaluated to a reason first (the truth tests run
+        # here), then nothing but one integer comparison follows.
+        why = next((reason for failed, reason in checks if bool(failed)), None)
         if self.device.pin_epoch != self.epoch_seen:
             return NOT_SENT_RECONNECTED, seen
-        return next((why for failed, why in checks if failed), None), seen
+        return why, seen
 
     def halt(self, now: float | None = None) -> str | None:
         """The reason not to send that does not depend on the screen, if any."""
@@ -636,14 +639,20 @@ class _Run:
         keyboard = self.device.keyboard_shown()
         focus = self.device.focused_window()
         observation = Observation(screen, foreground, keyboard, self.clock())
-        self.record(_Seen(observation, focus))
+        self.record(_Seen(observation, focus), self.epoch_seen)
         return observation
 
-    def record(self, seen: _Seen) -> None:
-        """Remember the focus, count and write a target screen, then its image."""
+    def record(self, seen: _Seen, epoch: int) -> None:
+        """Remember the focus, count and write a target screen, then its image.
+
+        Nothing is written when the pin's epoch is no longer `epoch` (the one
+        the reads began at): reads that an event crossed may be mixed.
+        """
         self.focus = seen.focus
         screen = seen.observation.screen
         if screen is None or not self.on_target(screen, seen.observation.foreground):
+            return
+        if self.device.pin_epoch != epoch:
             return
         self.screens_seen.add(screen.screen_id)
         if not self.writer.write_screen(screen) or not self.screenshots:
@@ -661,6 +670,8 @@ class _Run:
                 f"no screenshot of {screen.screen_id}: the app was not in front"
             )
             return
+        if self.device.pin_epoch != epoch:
+            return  # an event crossed the screenshot's reads
         self.writer.write_screenshot(screen.screen_id, png)
 
     def on_target(self, screen: Screen, foreground: str | None) -> bool:
@@ -830,6 +841,12 @@ def crawl(
             be written.
         UiprobeError: A device or adb error that prevents going on.
     """
+    # Arguments are turned into plain values once, here, and only those are
+    # used: a subclass cannot run code (a device read, say) in the middle of
+    # a check later. The callables (stop, clock, sleep) cannot be turned into
+    # plain values; no caller code runs after the gate's last comparison.
+    if isinstance(package, str):
+        package = str.__str__(package)
     check_package(package)
     if not isinstance(policy, Policy):
         msg = f"policy must be a Policy, not {type(policy).__name__}"
@@ -837,12 +854,22 @@ def crawl(
     if not isinstance(limits, Limits):
         msg = f"limits must be a Limits, not {type(limits).__name__}"
         raise TypeError(msg)
+    limits = Limits(
+        depth=int.__int__(limits.depth),
+        actions=int.__int__(limits.actions),
+        minutes=int.__int__(limits.minutes),
+    )
     if not isinstance(out, str | os.PathLike):
         msg = f"out must be a str or a path, not {type(out).__name__}"
         raise TypeError(msg)
     _check_flag("screenshots", screenshots)
     _check_flag("allow_real_device", allow_real_device)
     _check_clock("settle", settle)
+    settle = (
+        float.__float__(settle)
+        if isinstance(settle, float)
+        else float(int.__int__(settle))
+    )
     if settle < 0:
         msg = f"settle must not be negative, got {settle}"
         raise ValueError(msg)

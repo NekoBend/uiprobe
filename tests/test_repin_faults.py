@@ -4,7 +4,13 @@ The rule: after a request on the pinned device failed, no input, force-stop
 or app start goes out until the identity was read again, successfully,
 through the number that input goes to; once the pin failed, nothing goes
 out at all. Each run fails exactly one adb client call (the N-th) with one
-kind of error, for every N of the run without faults and every kind.
+kind of error, for every N of the run without faults and every kind. The
+kind ``reply_lost`` lets the request reach the server and then fails it.
+
+In the swapped variant the device turns into another one (another boot id)
+at the moment of the failure: then no input may go out after it at all, so
+an input sent on a decision or a proof from before the failure is caught
+too.
 """
 
 from __future__ import annotations
@@ -32,7 +38,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable
     from pathlib import Path
 
-KINDS: dict[str, Callable[[], UiprobeError]] = {
+KINDS: dict[str, Callable[[], Exception]] = {
     "offline": lambda: DeviceOfflineError("device offline", details={}),
     "not_found": lambda: DeviceNotFoundError(
         f"device {SERIAL!r} not found", details={"serial": SERIAL}
@@ -41,15 +47,22 @@ KINDS: dict[str, Callable[[], UiprobeError]] = {
         "adb server is unavailable", details={}
     ),
     "broken": lambda: AdbError("connection closed", details={}),
+    "reply_lost": lambda: AdbError("connection closed", details={}),
+    # Not an adb error at all (an address family that went away, say): the
+    # rule must not depend on the kind of error.
+    "other": lambda: ValueError("address family not supported"),
 }
 CHANGING = ("input ", "monkey ", "am ")
-LIMITS = Limits(actions=4)
+LIMITS = Limits(actions=3)
+OTHER_BOOT = "0f1e2d3c-4b5a-4968-8778-695a4b3c2d1e"
 
 
 class Faults:
     """Counts adb client calls, fails the `fail_at`-th, logs every call."""
 
-    def __init__(self, fail_at: int | None, kind: str) -> None:
+    def __init__(self, fail_at: int | None, kind: str, *, swap: bool = False) -> None:
+        self.swap = swap
+        self.android: FakeAndroid | None = None
         self.calls = 0
         self.fail_at = fail_at
         self.kind = kind
@@ -66,6 +79,10 @@ class Faults:
             number = transport if isinstance(transport, int) else None
             broken = getattr(self.device, "_broken", None) is not None
             if self.calls == self.fail_at:
+                if self.kind == "reply_lost":
+                    original(client, *args, **kwargs)  # it reached the server
+                if self.swap and self.android is not None:
+                    self.android.boot_id = OTHER_BOOT
                 self.failed_at = len(self.log)
                 self.log.append(("failed", name, command, number, broken))
                 error = KINDS[self.kind]()
@@ -81,14 +98,16 @@ def crawl_with(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, faults: Faults, name: str
 ) -> None:
     with FakeAdbServer() as server, monkeypatch.context() as patch:
-        FakeAndroid(server, SERIAL, SCREENS, start="home", transport_id=TRANSPORT)
+        faults.android = FakeAndroid(
+            server, SERIAL, SCREENS, start="home", transport_id=TRANSPORT
+        )
         for method in ("devices", "shell", "exec_out"):
             patch.setattr(
                 AdbClient, method, faults.wrap(method, getattr(AdbClient, method))
             )
         try:
             device = Device(adb_server=server.address, pin=True)
-        except UiprobeError:
+        except (UiprobeError, ValueError):
             return  # the fault hit the choice or the first pin: nothing else
         faults.device = device
         ticks = [0.0]
@@ -100,7 +119,7 @@ def crawl_with(
         device._clock = clock  # the test seam of Device: no real waiting
         device._sleep = lambda _seconds: None
         # An ending with an error is allowed; what went out is checked.
-        with contextlib.suppress(UiprobeError):
+        with contextlib.suppress(UiprobeError, ValueError):
             run(device, Clock(), tmp_path / name, limits=LIMITS)
 
 
@@ -118,6 +137,9 @@ def violations(faults: Faults) -> list[str]:
         if start is None or index < start or name != "shell" or command is None:
             continue
         if not command.startswith(CHANGING):
+            continue
+        if faults.swap:
+            found.append(f"#{index} {command!r} on {number} to a swapped device")
             continue
         proven = any(
             log[j][0] == "ok"
@@ -139,16 +161,19 @@ def test_the_crawl_without_faults_sends_inputs(tmp_path, monkeypatch):
     assert violations(faults) == []
 
 
+@pytest.mark.parametrize("swap", [False, True], ids=["same", "swapped"])
 @pytest.mark.parametrize("kind", sorted(KINDS))
-def test_every_request_failed_once_keeps_the_pin_rule(tmp_path, monkeypatch, kind):
+def test_every_request_failed_once_keeps_the_pin_rule(
+    tmp_path, monkeypatch, kind, swap
+):
     clean = Faults(None, kind)
     crawl_with(tmp_path, monkeypatch, clean, f"clean-{kind}")
     total = clean.calls
     assert total > 50
     broken_runs: dict[int, list[str]] = {}
     for fail_at in range(1, total + 1):
-        faults = Faults(fail_at, kind)
-        crawl_with(tmp_path, monkeypatch, faults, f"{kind}-{fail_at}")
+        faults = Faults(fail_at, kind, swap=swap)
+        crawl_with(tmp_path, monkeypatch, faults, f"{kind}-{swap}-{fail_at}")
         assert faults.failed_at is not None
         found = violations(faults)
         if found:
