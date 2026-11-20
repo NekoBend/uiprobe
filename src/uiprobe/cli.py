@@ -1346,8 +1346,19 @@ def _cmd_crawl_press(args: argparse.Namespace, policy: Policy) -> int:
     )
     emulator = _press_device_check(device, allow_real_device=args.allow_real_device)
     # The identity read through the pin must agree before anything is shown
-    # or written (with the same emulator requirement every later check has).
-    device.check_pin(emulator=not args.allow_real_device)
+    # or written: first that it is still the same device, then (without
+    # --allow-real-device) that this identity also says emulator, which every
+    # later pin check requires.
+    device.check_pin(emulator=False)
+    if not args.allow_real_device:
+        found = device.identity()
+        if found is None or not found.emulator:
+            reason = "unreadable" if found is None else "not_emulator"
+            refusal = NotEmulatorError(
+                "conflicting emulator answers",
+                details={"serial": device.serial, "reason": reason},
+            )
+            raise _cli_not_emulator(device, refusal)
     plan: dict[str, object] = {
         "package": args.package,
         "device": {"serial": device.serial, "emulator": emulator},

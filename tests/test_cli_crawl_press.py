@@ -419,11 +419,40 @@ def test_every_pin_check_still_requires_an_emulator(
     monkeypatch.setattr(Device, "is_emulator", lambda _self: True)
     android.props["ro.kernel.qemu"] = "0"
     out = tmp_path / "r"
-    code, text, _err = press(capsys, fake_adb, "--press", "--out", str(out))
-    assert code != 0
+    code, text, err = press(capsys, fake_adb, "--press", "--out", str(out))
+    assert code == 17
+    assert "--allow-real-device" in err
     assert device_writes(fake_adb) == []
     assert not out.exists()  # refused before the plan and the folder
     assert "pressing on" not in text
+
+
+@pytest.mark.usefixtures("here", "android")
+def test_the_driver_gets_the_callers_own_real_device_choice(
+    fake_adb, capsys, tmp_path, monkeypatch
+):
+    import uiprobe.cli as cli_module
+
+    seen: list[object] = []
+    original = cli_module.crawl_run
+
+    def spy(*args: object, **kwargs: object) -> object:
+        seen.append(kwargs.get("allow_real_device"))
+        return original(*args, **kwargs)  # ty: ignore[invalid-argument-type]
+
+    monkeypatch.setattr(cli_module, "crawl_run", spy)
+    argv = ["--press", "--out", str(tmp_path / "a"), "--actions", "2"]
+    assert press(capsys, fake_adb, *argv)[0] == 0
+    argv = [
+        "--press",
+        "--out",
+        str(tmp_path / "b"),
+        "--actions",
+        "2",
+        "--allow-real-device",
+    ]
+    assert press(capsys, fake_adb, *argv)[0] == 0
+    assert seen == [False, True]
 
 
 @pytest.mark.usefixtures("here", "android")
