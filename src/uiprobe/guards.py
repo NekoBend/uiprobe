@@ -36,7 +36,11 @@ occurrence outside every exception run, or one that only overlaps a run,
 counts (``Automatically pay``, ``Recorder order``). A run joined across a
 space or a separator does not count (``Job order`` holds ``border`` only once
 spaces are removed), nor does an inflected form (``Borders``), a run with an
-invisible character, a combining mark or a full-width or circled letter in it.
+invisible character, a full-width or circled letter, or a combining mark the
+exception word does not have (or has differently) in it. A run counts only when
+it is a whole word also with the invisible characters around it removed
+(``x`` + U+200B + U+0332 + ``recorder`` is one word) and in the original text
+before NFKC (U+013F + ``recorder`` is one word; NFKC would split it).
 When the trace is not certain (NFKC of the characters one by one differs from
 NFKC of the field, or a traced form differs from the real one), every
 occurrence counts. Resource ids, the irreversibility phrases and the
@@ -777,23 +781,32 @@ def _word_runs(text: str) -> list[tuple[int, int]]:
     return runs
 
 
-def _hidden_neighbour(text: str, start: int, end: int) -> bool:
-    """True when invisible characters next to the run hide a longer word.
+def _is_combining(char: str) -> bool:
+    return unicodedata.category(char)[0] == "M"
+
+
+def _stands_alone(text: str, start: int, end: int) -> bool:
+    """True when ``text[start:end]`` is a whole word even with the invisible
+    characters around it removed.
 
     Deny matching removes invisible characters, so ``recorder`` + U+200B +
-    ``s`` reads as ``recorders``: the run ``recorder`` must not count as the
-    whole word. Looks past invisible characters on both sides for a letter,
-    digit or combining mark that would join the run once they are gone.
+    ``s`` reads as ``recorders`` and ``x`` + U+200B + U+0332 + ``recorder``
+    as one word. Before the span, invisible characters and combining marks
+    are passed over: a letter or digit found there joins the span. After it,
+    invisible characters are passed over: a letter, digit or combining mark
+    found there joins the span.
     """
     before = start - 1
-    while before >= 0 and _is_invisible(text[before]):
+    while before >= 0 and (_is_invisible(text[before]) or _is_combining(text[before])):
         before -= 1
-    if before < start - 1 and before >= 0 and _in_word(text[before], inside=True):
-        return True
+    if before >= 0 and text[before].isalnum():
+        return False
     after = end
     while after < len(text) and _is_invisible(text[after]):
         after += 1
-    return after > end and after < len(text) and _in_word(text[after], inside=True)
+    return not (
+        after < len(text) and (text[after].isalnum() or _is_combining(text[after]))
+    )
 
 
 def _exception_key(word: str) -> str:
@@ -1036,19 +1049,27 @@ class _Excuser:
             return None
         chars: list[str] = []
         unchanged: list[bool] = []
-        for char in value:
+        origin: list[int] = []
+        for index, char in enumerate(value):
             mapped = unicodedata.normalize("NFKC", char)
             chars.extend(mapped)
             unchanged.extend([mapped == char] * len(mapped))
+            origin.extend([index] * len(mapped))
         text = "".join(chars)
         if text != unicodedata.normalize("NFKC", value):
             return None
+        # A run counts only when it is a whole word both after NFKC and in the
+        # original text: NFKC can create a boundary (U+013F becomes "L" and a
+        # middle dot), and invisible characters can hide a longer word. The
+        # characters of a counted run are unchanged by NFKC, so the run is
+        # the same span of the original text.
         runs = [
             (start, end, text[start:end].casefold() in _BUILTIN_EXCEPTION_KEYS)
             for start, end in _word_runs(text)
             if text[start:end].casefold() in self.keys
             and all(unchanged[start:end])
-            and not _hidden_neighbour(text, start, end)
+            and _stands_alone(text, start, end)
+            and _stands_alone(value, origin[start], origin[end - 1] + 1)
         ]
         if not runs:
             return None

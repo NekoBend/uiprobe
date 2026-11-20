@@ -257,7 +257,10 @@ class Settings:
 
     ``warnings`` holds notes about entries that are accepted but have no
     effect, such as a fixed key under ``[keys] remove``. ``refused_keys`` always
-    holds every key of `FIXED_DEVICE_KEYS`.
+    holds every key of `FIXED_DEVICE_KEYS`. ``deny_exceptions`` holds the
+    exception words of ``[deny] except``; it is the last field and defaults to
+    ``()``, so a Settings built with the fields of an earlier version, by
+    keyword or by position, still works.
     """
 
     source: Path
@@ -265,7 +268,6 @@ class Settings:
     defaults_version: int
     press: bool
     deny_words: tuple[str, ...]
-    deny_exceptions: tuple[str, ...]
     confirm_words: tuple[str, ...]
     irreversible_phrases: tuple[str, ...]
     tap_unlabeled: bool
@@ -283,6 +285,9 @@ class Settings:
     refused_keys: tuple[str, ...]
     refused_key_prefixes: tuple[str, ...]
     warnings: tuple[str, ...] = ()
+    # Last and with a default, so that callers that build a Settings from the
+    # fields of earlier versions (by keyword or position) keep working.
+    deny_exceptions: tuple[str, ...] = ()
 
 
 def policy_from_settings(

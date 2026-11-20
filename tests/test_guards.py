@@ -3648,6 +3648,10 @@ def test_an_exception_with_an_invisible_character_is_refused(word) -> None:
         "recorder\u200b\u200bs",
         "recorder\u200b\u0332",
         "Automatically\u2060ish",
+        # A combining mark after the invisible character: without it the
+        # text reads x + U+0332 + recorder, one word.
+        "x\u200b\u0332recorder",
+        "x\u200b\u200b\u0332\u0301recorder",
     ],
 )
 def test_an_invisible_character_next_to_the_exception_cannot_hide_a_longer_word(
@@ -3657,7 +3661,14 @@ def test_an_invisible_character_next_to_the_exception_cannot_hide_a_longer_word(
 
 
 @pytest.mark.parametrize(
-    "label", ["recorder\u200b", "\u200brecorder", "recorder\u200b s"]
+    "label",
+    [
+        "recorder\u200b",
+        "\u200brecorder",
+        "recorder\u200b s",
+        # A mark after a non-letter does not join the word.
+        "-\u0332recorder",
+    ],
 )
 def test_an_invisible_character_before_a_boundary_keeps_the_exception(label) -> None:
     assert reasons(run_x([el("e2", text=label)]), "e2") == ()
@@ -3693,3 +3704,25 @@ def test_many_exception_words_in_one_text_cost_linear_time() -> None:
     small = _joined_match_seconds(500)
     large = _joined_match_seconds(4000)
     assert large < 16 * small + 0.02, (small, large)
+
+
+@pytest.mark.parametrize(
+    "label",
+    [
+        # NFKC turns U+013F into "L" and a middle dot (a separator): the
+        # boundary exists only after NFKC, the original is one word.
+        "\u013frecorder",
+        "Rec\u013frecorder",
+        "recorder\u013f",
+    ],
+)
+def test_an_exception_must_be_a_whole_word_in_the_original_text(label) -> None:
+    assert word_matches(label, "order", exceptions=("recorder",))
+    assert reasons(run_x([el("e2", text=label)]), "e2") == ("deny_word",)
+
+
+def test_an_exception_with_the_same_combining_mark_matches() -> None:
+    # Only an additional or a different mark makes another word.
+    assert not word_matches("r\u0308ecorder", "order", exceptions=("r\u0308ecorder",))
+    assert word_matches("r\u0308ecorder", "order", exceptions=("recorder",))
+    assert word_matches("r\u0308ecorder", "order", exceptions=("r\u0301ecorder",))

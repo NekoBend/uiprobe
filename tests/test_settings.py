@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import errno
 import io
 import json
@@ -2190,3 +2191,45 @@ def test_an_exception_with_an_invisible_character_is_refused_in_the_file(
     refused(
         with_except(tmp_path, f'["{word}"]'), "[deny] except", "invisible character"
     )
+
+
+# Every field of Settings at 4308851, in order (before [deny] except).
+OLD_SETTINGS_FIELDS = (
+    "source",
+    "format_version",
+    "defaults_version",
+    "press",
+    "deny_words",
+    "confirm_words",
+    "irreversible_phrases",
+    "tap_unlabeled",
+    "skip_number_only",
+    "skip_toggles",
+    "refuse_dialog_confirm",
+    "refuse_irreversible_screens",
+    "min_visible_px",
+    "edge_top_px",
+    "edge_bottom_px",
+    "edge_side_px",
+    "depth",
+    "actions",
+    "minutes",
+    "refused_keys",
+    "refused_key_prefixes",
+    "warnings",
+)
+
+
+def test_settings_built_with_the_earlier_fields_still_work(tmp_path):
+    loaded = load_settings(default_file(tmp_path))
+    values = {name: getattr(loaded, name) for name in OLD_SETTINGS_FIELDS}
+    by_keyword = settings.Settings(**values)
+    by_position = settings.Settings(*values.values())
+    assert by_keyword == by_position == loaded
+    assert by_keyword.deny_exceptions == ()
+    assert by_position.confirm_words == CONFIRM_WORDS
+    assert settings.policy_from_settings(by_position).deny_exceptions == ()
+    assert [f.name for f in dataclasses.fields(settings.Settings)] == [
+        *OLD_SETTINGS_FIELDS,
+        "deny_exceptions",
+    ]
