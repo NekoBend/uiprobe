@@ -891,12 +891,19 @@ def _group(found: _List) -> list[_Group] | _Refusal:
     return groups
 
 
-def _turned(group: _Group) -> bool | _Refusal:
-    """Whether the lines after a window line hold a rotated transform; why
-    not, unless they are nothing or a ``transform`` line with its matrix rows
-    (none for ``IDENTITY``, three for any other kind): ``unknown_line`` for
-    a line that is neither, ``transform_shape`` for matrix rows missing,
-    malformed or too many."""
+def _misshapen(group: _Group) -> _Refusal | None:
+    """Why the lines after a window line are not nothing or a ``transform``
+    line with its matrix rows (none for ``IDENTITY``, three for any other
+    kind): ``unknown_line`` for a line that is neither, ``transform_shape``
+    for matrix rows missing, malformed or too many; None when they are."""
+    turned = _turned(group, convert=False)
+    return turned if isinstance(turned, _Refusal) else None
+
+
+def _turned(group: _Group, *, convert: bool = True) -> bool | _Refusal:
+    """Whether the lines after a window line hold a rotated transform, or why
+    they are no transform (see `_misshapen`). Without `convert` the
+    rotation is not read (False)."""
     rest, rest_at = group.rest, group.rest_at
     if not rest:
         return False
@@ -912,7 +919,7 @@ def _turned(group: _Group) -> bool | _Refusal:
             return _Refusal(LINE_FORMAT, "transform_shape", rest_at[i])
     if len(rest) != 1 + rows:
         return _Refusal(LINE_FORMAT, "transform_shape", rest_at[0])
-    return _number(transform["rot"]) != 0
+    return convert and _number(transform["rot"]) != 0
 
 
 def _turns(group: _Group) -> bool:
@@ -1048,9 +1055,9 @@ def _whole(groups: list[_Group], found: _List) -> _Refusal | None:
     # Some rows have lines after them and some do not. When such lines are
     # not a transform with its rows, name that line (also refused below).
     for group in groups:
-        turned = _turned(group)
-        if isinstance(turned, _Refusal):
-            return turned
+        misshapen = _misshapen(group)
+        if misshapen is not None:
+            return misshapen
     return _Refusal(LINE_FORMAT, "transform_mismatch", odd[0].at)
 
 
@@ -1188,7 +1195,9 @@ class Verdict:
     the line it refused at, None when no one line is to blame; ``start``
     the index of the dispatcher's header line, None when there is not
     exactly one; ``lists`` the window lists found; ``list_head`` the
-    ``head`` of the list it refused in, None when it was no one list.
+    ``head`` of the list it refused in, None when it was no one list;
+    ``end`` the index of the first line after the dispatcher's part (the
+    first line not more indented than its header), None without ``start``.
     """
 
     reason: str | None
@@ -1197,6 +1206,7 @@ class Verdict:
     start: int | None
     lists: tuple[ListSpan, ...]
     list_head: int | None = None
+    end: int | None = None
 
 
 def _spans(lines: list[str], start: int) -> tuple[ListSpan, ...]:
@@ -1231,10 +1241,22 @@ def explain_input_windows(text: str, display_id: int = 0) -> Verdict:
     start = _dispatcher_start(lines)
     first = None if isinstance(start, _Refusal) else start
     lists = () if first is None else _spans(lines, first)
+    end = None if first is None else _dispatcher_end(lines, first)
     read = _checked(lines, display_id)
     if isinstance(read, _Refusal):
-        return Verdict(read.reason, read.rule, read.line, first, lists, read.head)
-    return Verdict(None, None, None, first, lists)
+        return Verdict(read.reason, read.rule, read.line, first, lists, read.head, end)
+    return Verdict(None, None, None, first, lists, end=end)
+
+
+def _dispatcher_end(lines: list[str], start: int) -> int:
+    """The index of the first line after the dispatcher's part: the first
+    non-blank line not more indented than its header (the end of the text
+    when none)."""
+    level = _indent(lines[start])
+    for i in range(start + 1, len(lines)):
+        if lines[i].strip() and _indent(lines[i]) <= level:
+            return i
+    return len(lines)
 
 
 def window_at(

@@ -180,6 +180,32 @@ def test_an_unknown_line_after_a_row_is_recorded_as_such(
     }
 
 
+def test_a_huge_rotation_after_a_row_is_refused_not_raised(
+    tmp_path: Path, device, android, clock, monkeypatch
+):
+    # A transform line with a rotation of thousands of digits after the top
+    # row: the gate records a refusal (API 24 rows have no transform lines,
+    # so the rows differ; on the other forms the extra line is unknown).
+    original = android._dumpsys_input
+    huge = " " * 8 + "transform (ROT_" + "1" * 4301 + ") (IDENTITY)"
+
+    def huge_rotation() -> str:
+        lines = original().split("\n")
+        top = next(i for i, line in enumerate(lines) if line.strip().startswith("0: "))
+        lines.insert(top + 1, huge)
+        return "\n".join(lines)
+
+    monkeypatch.setattr(android, "_dumpsys_input", huge_rotation)
+    out = tmp_path / "run"
+    run(device, clock, out, limits=Limits(actions=3))
+    refused = _covered(out)
+    assert refused
+    assert refused[0]["details"] in (
+        {"unreadable": "line_format", "rule": "transform_mismatch"},
+        {"unreadable": "line_format", "rule": "unknown_line"},
+    )
+
+
 def test_an_app_uid_that_cannot_be_read_refuses_every_tap(
     tmp_path: Path, device, android, clock, monkeypatch
 ):

@@ -1707,17 +1707,18 @@ def _diagnose_failure(
 def _cmd_diagnose(args: argparse.Namespace) -> int:
     serial = _single_serial(args)
     try:
-        device = Device(
-            serial,
-            adb_server=args.adb_server,
-            adb=args.adb,
-            start_server=args.start_server,
-        )
+        try:
+            device = Device(
+                serial,
+                adb_server=args.adb_server,
+                adb=args.adb,
+                start_server=args.start_server,
+            )
+        except (TypeError, ValueError):  # a malformed serial or server address
+            return _fail(USAGE_ERROR, _DIAGNOSE_USAGE_MESSAGE, as_json=args.json)
         found = device.diagnose_tap_window(show_flag_names=args.show_flag_names)
     except UiprobeError as exc:
         return _diagnose_failure((exc.code, exc.exit_code), as_json=args.json)
-    except (TypeError, ValueError):  # a malformed serial or server address
-        return _fail(USAGE_ERROR, _DIAGNOSE_USAGE_MESSAGE, as_json=args.json)
     except Exception as exc:  # noqa: BLE001 - its message could hold device text
         details: dict[str, object] = {"type": type(exc).__name__}
         return _diagnose_failure(INTERNAL_ERROR, as_json=args.json, details=details)
@@ -1898,12 +1899,15 @@ def _parse(argv: Sequence[str]) -> argparse.Namespace:
     When the command is ``type``, a device option after it is refused before
     anything else, and an argparse error is replaced by a message that shows
     none of the arguments, raised outside the handler so that it chains to
-    nothing that holds them. The same replacement is made for ``diagnose``,
-    whose arguments can name the device.
+    nothing that holds them. The same replacement is made whenever the
+    arguments hold the word ``diagnose``, whose arguments can name the
+    device.
     """
     where = _command_index(argv)
     is_type = where is not None and argv[where] == "type"
-    is_diagnose = where is not None and argv[where] == "diagnose"
+    # Any argv naming diagnose: an unknown option before it (--ser SERIAL)
+    # can make argparse take its value for the command and quote it.
+    is_diagnose = not is_type and "diagnose" in argv
     if is_type and where is not None and _device_option_after_type(argv[where + 1 :]):
         raise _UsageError(_DEVICE_OPTION_AFTER_TYPE)
     try:
