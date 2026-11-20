@@ -1022,7 +1022,12 @@ def _gate_run(
     device.pin_transport()
     engine = CrawlEngine(SHOP, policy, Limits(minutes=1), started_at=clock.now)
     writer = RunWriter.create(
-        tmp_path / "run", package=SHOP, limits=Limits(), deny_words=[], serial=SERIAL
+        tmp_path / "run",
+        package=SHOP,
+        limits=Limits(),
+        deny_words=[],
+        serial=SERIAL,
+        back_on_other_screens=policy.back_on_other_screens,
     )
     _WRITERS.append(writer)
     driver = crawl_driver._Run(
@@ -1816,21 +1821,37 @@ def test_a_back_on_the_apps_screen_is_not_sent_while_another_window_has_focus(
     assert "off_target" not in _start_lines(tmp_path)[-1]
 
 
+THIRD = FocusedWindow("com.example.third", "com.example.third/.Pop", "5d6e7f8")
+
+
+@pytest.mark.parametrize("focus_moves", [False, True])
 def test_an_opted_in_back_on_another_apps_screen_needs_no_app_focus(
-    tmp_path, device, android, clock
+    tmp_path, device, android, clock, monkeypatch, focus_moves
 ):
+    # Dump, foreground and focus name three different apps: the start line
+    # must take the focus owner from the focused window, where a BACK goes.
     driver, _, _ = _gate_run(tmp_path, device, clock, policy=BACK_POLICY)
     android.show("ext1")
+    monkeypatch.setattr(device, "focused_window", lambda: THIRD)
     observation = driver.observe()
+    if focus_moves:
+        monkeypatch.setattr(device, "focused_window", lambda: SHADE)
     keys = len([i for i in android.inputs if i.kind == "key"])
     driver.send(Back(), observation)
-    assert len([i for i in android.inputs if i.kind == "key"]) == keys + 1
-    # the line says where the BACK went: the owner of the focused window
+    sent = len([i for i in android.inputs if i.kind == "key"]) - keys
     assert _start_lines(tmp_path)[-1]["off_target"] == {
         "package": OTHER,
         "foreground": OTHER,
-        "focus": OTHER,
+        "focus": "com.example.third",
     }
+    if focus_moves:
+        assert sent == 0
+        assert _not_sent_reason(tmp_path) == "changed_before_send"
+    else:
+        assert sent == 1
+        assert _not_sent_reason(tmp_path) is None
+    begin = json.loads((tmp_path / "run" / "run-start.json").read_bytes())
+    assert begin["back_on_other_screens"] is True
 
 
 def test_off_target_names_the_dump_and_the_foreground_apart(

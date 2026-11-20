@@ -1118,8 +1118,8 @@ class CrawlEngine:
 
     def _off_target(self, sid: str) -> Action:
         # By default nothing goes to a screen of another app: a BACK would
-        # reach whatever app is in front. The relaunch force-stops and starts
-        # the target app only.
+        # reach the owner of the focused window, whichever app that is. The
+        # relaunch force-stops and starts the target app only.
         if self._policy.back_on_other_screens and self._backs < BACK_LIMIT:
             return self._send_back(sid, off_target=True)
         return self._relaunch(sid)

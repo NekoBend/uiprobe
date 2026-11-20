@@ -806,10 +806,11 @@ class Policy:
 
     ``back_on_other_screens`` (default False) is read by the pressing crawl
     only, not by `judge`. True lets the crawl press BACK while a screen of
-    another app is in front (up to 2 in a row, then a relaunch), so that BACK
-    reaches whatever app is in front. With the default nothing is sent to such
-    a screen: the target app is relaunched (force-stop, then start), and after
-    3 relaunches in a row without a sent tap the crawl stops.
+    another app is in front (up to 2 in a row, then a relaunch), and that BACK
+    reaches the owner of the focused window, whichever app that is. With the
+    default nothing is sent to such a screen: the target app is relaunched
+    (force-stop, then start), and when a 4th relaunch in a row without a sent
+    tap would be needed the crawl stops.
 
     ``edges`` holds the sizes in pixels ``(top, bottom, left, right)`` that
     `judge` turns into `edge_areas` of each screen's display when ``avoid`` is
