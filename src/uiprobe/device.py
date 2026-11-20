@@ -1296,7 +1296,15 @@ class Device:
             raise self._broken_error()
         if self._transport_id is None:
             return {}
-        self._check_listed(strict=strict)
+        if self._repinning:
+            # A request while the device is being proven again (from the
+            # watch, say): nothing goes out, and the wait ends with it.
+            raise self._fail(self._changed("was asked for during a wait"))
+        try:
+            self._check_listed(strict=strict)
+        except _OPTIONAL_ERRORS:
+            self._epoch += 1  # the check itself failed: the proof is stale
+            raise
         return {"transport_id": self._transport_id}
 
     def _call[T](self, send: Callable[[dict[str, int]], T], *, strict: bool) -> T:
@@ -1334,14 +1342,18 @@ class Device:
         ready. Anything else fails the pin. A request made while a wait is
         under way (from the watch, say) fails the pin too.
         """
-        listed = [
-            d for d in self._client.devices() if d.transport_id == self._transport_id
-        ]
+        everything = self._client.devices()
+        if any(
+            d.serial == self.serial and d.state not in (READY_STATE, OFFLINE_STATE)
+            for d in everything
+        ):
+            raise self._fail(self._changed("is not usable any more"))
+        listed = [d for d in everything if d.transport_id == self._transport_id]
         same = len(listed) == 1 and listed[0].serial == self.serial
         ready = same and listed[0].state == READY_STATE
         if ready and self._epoch == self._proven:
             return
-        if strict or self._repinning:
+        if strict:
             raise self._fail(self._changed())
         if self.can_repin and (
             ready or not listed or (same and listed[0].state == OFFLINE_STATE)
@@ -1446,13 +1458,9 @@ class Device:
             deadline = self._clock() + REPIN_WAIT
             while self._clock() < deadline:
                 self._stop_if_watched()
-                entries = [d for d in self._client.devices() if d.serial == self.serial]
-                if any(d.state not in (READY_STATE, OFFLINE_STATE) for d in entries):
-                    raise self._fail(self._changed("is not usable any more"))
-                ready = [d for d in entries if d.state == READY_STATE]
-                if len(ready) > 1:
-                    raise self._fail(self._changed("is listed more than once"))
-                new = ready[0].transport_id if ready else None
+                if self._clock() >= deadline:
+                    break
+                new = self._candidate(old)
                 if new is not None and self._clock() < deadline:
                     found = self._identity_through(new)
                     if found is not None:
@@ -1479,6 +1487,22 @@ class Device:
         finally:
             self._repinning = False
 
+    def _candidate(self, old: int) -> int | None:
+        """Read the listing once; return the one ready number of this serial,
+        or None to keep waiting. An entry that rules the device out fails the
+        pin: the old number under another serial, an entry of this serial
+        that is neither ready nor offline, two ready entries."""
+        everything = self._client.devices()
+        if any(d.transport_id == old and d.serial != self.serial for d in everything):
+            raise self._fail(self._changed("was given to another device"))
+        entries = [d for d in everything if d.serial == self.serial]
+        if any(d.state not in (READY_STATE, OFFLINE_STATE) for d in entries):
+            raise self._fail(self._changed("is not usable any more"))
+        ready = [d for d in entries if d.state == READY_STATE]
+        if len(ready) > 1:
+            raise self._fail(self._changed("is listed more than once"))
+        return ready[0].transport_id if ready else None
+
     def _move(self, old: int, new: int) -> None:
         if new != old:
             if len(self._repins) >= MAX_REPINS:
@@ -1500,9 +1524,47 @@ class Device:
             raw = self._client.shell(
                 self.serial, IDENTITY_COMMAND, transport_id=transport
             )
+        except (AdbServerUnavailableError, DeviceUnauthorizedError):
+            raise  # no use waiting: the wait fails with it
         except _OPTIONAL_ERRORS:
+            self._epoch += 1
             return None
         return _parse_identity(raw.decode("utf-8", errors="replace"))
+
+    def _first_proof(self) -> tuple[int, DeviceIdentity]:
+        """The transport the device was chosen on and the identity read
+        through it; nothing is published here."""
+        transport = self._info.transport_id
+        if transport is None:
+            msg = (
+                f"adb reported no transport id for {self.serial}, so the"
+                " requests cannot be kept on the device that was chosen"
+            )
+            raise AdbError(msg, details={"serial": self.serial})
+        listed = [d for d in self._client.devices() if d.transport_id == transport]
+        if not (
+            len(listed) == 1
+            and listed[0].serial == self.serial
+            and listed[0].state == READY_STATE
+        ):
+            msg = (
+                f"the transport chosen for {self.serial} ({transport}) does"
+                " not lead to that device any more"
+            )
+            details = {"serial": self.serial, "reason": "device_changed"}
+            raise DeviceNotFoundError(msg, details=details)
+        found = _parse_identity(
+            self._client.shell(
+                self.serial, IDENTITY_COMMAND, transport_id=transport
+            ).decode("utf-8", errors="replace")
+        )
+        if found is None or not found.fingerprint:
+            msg = (
+                f"the identity of {self.serial} (ro.build.fingerprint) could"
+                " not be read, so the device cannot be told apart later"
+            )
+            raise AdbError(msg, details={"serial": self.serial})
+        return transport, found
 
     def pin_transport(self) -> int:
         """Send every later request to the transport this device was chosen on.
@@ -1528,45 +1590,35 @@ class Device:
                 fingerprint, so the device could not be told apart later;
                 nothing is pinned.
         """
-        if self._transport_id is None:
-            transport = self._info.transport_id
-            if transport is None:
-                msg = (
-                    f"adb reported no transport id for {self.serial}, so the"
-                    " requests cannot be kept on the device that was chosen"
-                )
-                raise AdbError(msg, details={"serial": self.serial})
-            self._transport_id = transport
-            try:
-                listed = [
-                    d for d in self._client.devices() if d.transport_id == transport
-                ]
-                if not (
-                    len(listed) == 1
-                    and listed[0].serial == self.serial
-                    and listed[0].state == READY_STATE
-                ):
-                    raise self._changed()  # the number may already be another's
-                found = _parse_identity(
-                    self._client.shell(
-                        self.serial, IDENTITY_COMMAND, transport_id=transport
-                    ).decode("utf-8", errors="replace")
-                )
-                if found is None or not found.fingerprint:
-                    msg = (
-                        f"the identity of {self.serial} (ro.build.fingerprint)"
-                        " could not be read, so the device cannot be told apart"
-                        " later"
-                    )
-                    raise AdbError(msg, details={"serial": self.serial})
-            except UiprobeError as error:
-                # A pin that was asked for and failed is kept: no request of
-                # this Device goes out without it (not even by serial).
-                self._transport_id = None
-                self._broken = (str(error), dict(error.details))
-                raise
+        if self._broken is not None:
+            raise self._broken_error()
+        if self._transport_id is not None:
+            return self._transport_id
+        # The candidate stays local until it is proven; any way out but
+        # success is kept as a failed pin (an interrupt included), so no
+        # request of this Device goes out afterwards, not even by serial.
+        succeeded = False
+        try:
+            transport, found = self._first_proof()
+            # From here on a server that cannot be reached is a failure, not
+            # a reason to start a new one (it would number its transports
+            # anew).
+            self._client.stop_starting_server()
             self._pinned_identity = found
+            self._transport_id = transport
             self._proven = self._epoch
+            succeeded = True
+        except UiprobeError as error:
+            self._broken = (str(error), dict(error.details))
+            self._epoch += 1
+            raise
+        finally:
+            if not succeeded and self._broken is None:
+                self._broken = (
+                    f"pinning {self.serial} did not finish",
+                    {"serial": self.serial, "reason": "device_changed"},
+                )
+                self._epoch += 1
         return self._transport_id
 
     @property

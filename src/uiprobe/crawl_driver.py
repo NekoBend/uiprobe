@@ -395,16 +395,7 @@ class _Run:
         if reason is not None:
             self.writer.write_transition_end(action_id, not_sent=reason)
             if seen is not None and isinstance(action, Tap):
-                self.write_skips(screen, seen.observation.screen, tap=action)
-                self.record(seen)
-                # The gate's reads are the next observation: they began after
-                # its own pin check.
-                if self.device.pin_epoch != self.gate_epoch:
-                    # Something happened during the gate's own reads: they
-                    # are mixed, so the screen is read again from scratch.
-                    return reason, None
-                self.epoch_seen = self.gate_epoch
-                return reason, seen.observation
+                return reason, self.refused_tap(action, screen, seen)
             return reason, None
         # Nothing runs between the gate's last read and the input: no user
         # code (stop() and the clock were asked first), no other read, no write.
@@ -424,6 +415,25 @@ class _Run:
         else:
             self.launch()
         return None, None
+
+    def refused_tap(
+        self, tap: Tap, screen: Screen | None, seen: _Seen
+    ) -> Observation | None:
+        """Record what a refused tap's gate read; return it as the next
+        observation, or None to read the screen again.
+
+        The gate's reads began after its own pin check. If something happened
+        to the pin during them they are mixed: they are not recorded, and the
+        screen is read again from scratch.
+        """
+        self.write_skips(screen, seen.observation.screen, tap=tap)
+        if self.device.pin_epoch != self.gate_epoch:
+            return None
+        self.record(seen)
+        if self.device.pin_epoch != self.gate_epoch:
+            return None  # the screenshot's reads saw an event
+        self.epoch_seen = self.gate_epoch
+        return seen.observation
 
     def gate(
         self, action: Action, observation: Observation | None
@@ -455,14 +465,10 @@ class _Run:
         focus = self.device.focused_window()
         keyboard = self.device.keyboard_shown()
         seen = _Seen(Observation(screen, foreground, keyboard, now), focus)
-        # The device was away since the observation the action was chosen on
-        # (or during these reads): nothing read before can be trusted.
-        away = self.device.pin_epoch != self.epoch_seen
         if isinstance(action, Tap):
             allowed = self.engine.recheck(action, seen.observation)
             owners = {None if f is None else f.owner for f in (before, focus)}
             checks = (
-                (away, NOT_SENT_RECONNECTED),
                 (keyboard is None, NOT_SENT_KEYBOARD_UNKNOWN),
                 (keyboard is True, NOT_SENT_KEYBOARD_SHOWN),
                 (before is None or focus is None, NOT_SENT_FOCUS_UNKNOWN),
@@ -484,7 +490,6 @@ class _Run:
                 and self.on_target(before.screen, before.foreground)
             )
             checks = (
-                (away, NOT_SENT_RECONNECTED),
                 (before is None, NOT_SENT_CHANGED),  # not reached: a launch only
                 (foreground is None, NOT_SENT_FOREGROUND_UNKNOWN),
                 (focus is None, NOT_SENT_FOCUS_UNKNOWN),
@@ -505,6 +510,11 @@ class _Run:
             )
         # The engine re-checks with the same time the gate took first, which was
         # before the limit, so its refusal is never about the time.
+        # Last, after every other check: if anything happened to the pin since
+        # the observation the action was chosen on (or during these reads),
+        # nothing read before can be trusted.
+        if self.device.pin_epoch != self.epoch_seen:
+            return NOT_SENT_RECONNECTED, seen
         return next((why for failed, why in checks if failed), None), seen
 
     def halt(self, now: float | None = None) -> str | None:
