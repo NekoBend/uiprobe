@@ -11,7 +11,11 @@ What is sent. Only what the engine returned, and for a tap only what
 `CrawlEngine.recheck` allowed for that very `Tap` object, in the gate right
 before it is sent: the first launch, a
 relaunch (``force-stop`` then start), a tap at the point judge gave, and the
-BACK key. Text, long presses, swipes and other keys are never sent. Every
+BACK key. Text, long presses, swipes and other keys are never sent. By
+default the engine never returns BACK for a screen of another app (it
+relaunches instead); ``Policy.back_on_other_screens`` allows it. A BACK or
+relaunch decided on such a screen names its package (and the foreground) as
+``off_target`` in the start line. Every
 action is sent once and never retried. A tap is reported to the engine with
 `CrawlEngine.tap_sent` only after it was sent without an error; a refused tap,
 or one whose send raised, is never reported, and the engine releases it on the
@@ -32,15 +36,17 @@ The loop (the protocol of the `CrawlEngine` docstring)::
                  send did not raise; then observe; the first observation
                  after a sent action gets the transition end line
 
-The gate (`_Run.gate`) is the one place every action passes right before it
-is sent. In order: `stop` and the time limit; the pin (`Device.check_pin`:
-the same transport, serial and identity, else an error); then fresh reads,
-for a tap the dump first. It refuses, with a ``not_sent`` end line and nothing
-sent, when anything it needs cannot be read or has changed: for a tap the
-engine's `CrawlEngine.recheck` on the fresh dump, a keyboard known to be
-hidden and a focused window owned by the app; for BACK and relaunch the same
-foreground and focused window (and for BACK keyboard) as the observation they
-were chosen on. After the decision nothing else runs before the input. A
+The gate (`_Run.gate`) is the one place every action passes right before it is
+sent. In order: `stop` and the time limit; the pin (`Device.check_pin`: the
+same transport, serial and identity, else an error); then fresh reads, for a
+tap the dump first. It refuses, with a ``not_sent`` end line and nothing sent,
+when anything it needs cannot be read or has changed: for a tap the engine's
+`CrawlEngine.recheck` on the fresh dump, a keyboard known to be hidden and a
+focused window owned by the app; for BACK and relaunch the same foreground and
+focused window (and for BACK keyboard) as the observation they were chosen on,
+and for a BACK chosen on a screen of the app also a focused window owned by the
+app (a BACK goes to the focused window). The table of checks per action is in
+docs/python.md. After the decision nothing else runs before the input. A
 refused tap's fresh observation goes to `CrawlEngine.next`, which releases the
 unreported tap; a refused BACK or relaunch ends the run with ``not_sent``,
 because the engine already counted it. Every observation checks the pin too.
@@ -315,6 +321,22 @@ class _Run:
         from_id = None if screen is None else screen.screen_id
         element: Element | None = None
         point: tuple[int, int] | None = None
+        other: str | None = None  # the package of a screen of another app
+        foreground: str | None = None
+        focus: str | None = None
+        if (
+            isinstance(action, Back | Relaunch)
+            and observation is not None
+            and screen is not None
+            and not self.on_target(screen, observation.foreground)
+        ):
+            # Decided on a screen of another app: say whose it was, so the run
+            # folder tells where a BACK went or why the app was restarted.
+            # The gate sends a BACK only while the focused window is the one
+            # read here, so its owner is where that BACK goes.
+            other = screen.package
+            foreground = observation.foreground
+            focus = None if self.focus is None else self.focus.owner
         if isinstance(action, Tap):
             from_id = action.screen_id
             point = action.point
@@ -325,7 +347,14 @@ class _Run:
             msg = f"not an input: {action!r}"
             raise TypeError(msg)
         self.writer.write_transition_start(
-            action_id, _kind(action), from_id, element, point
+            action_id,
+            _kind(action),
+            from_id,
+            element,
+            point,
+            off_target_package=other,
+            off_target_foreground=foreground,
+            off_target_focus=focus,
         )
         reason, seen = self.gate(action, observation)
         if reason is not None:
@@ -396,10 +425,24 @@ class _Run:
         else:
             before = observation
             back = isinstance(action, Back)
+            # A BACK goes to the window with input focus. One decided on a
+            # screen of the app (the keyboard BACK, a navigation BACK) is sent
+            # only while the app owns that window; one decided on a screen of
+            # another app exists only with Policy.back_on_other_screens.
+            own_back = (
+                back
+                and before is not None
+                and before.screen is not None
+                and self.on_target(before.screen, before.foreground)
+            )
             checks = (
                 (before is None, NOT_SENT_CHANGED),  # not reached: a launch only
                 (foreground is None, NOT_SENT_FOREGROUND_UNKNOWN),
                 (focus is None, NOT_SENT_FOCUS_UNKNOWN),
+                (
+                    own_back and focus is not None and focus.owner != self.package,
+                    NOT_SENT_FOCUS_OTHER,
+                ),
                 (back and keyboard is None, NOT_SENT_KEYBOARD_UNKNOWN),
                 (
                     before is not None
@@ -650,7 +693,9 @@ def crawl(
 
     This presses on the selected device. It starts the app, taps elements that
     `policy` allows, presses BACK and relaunches the app, and records every
-    step in the new run folder `out` (see the run folder page). It is alpha
+    step in the new run folder `out` (see the run folder page). A screen of
+    another app gets a relaunch, not BACK, unless
+    ``policy.back_on_other_screens`` is True. It is alpha
     and not in the command line yet.
 
     The order is: check the arguments, check the device, make the run folder,
@@ -675,8 +720,9 @@ def crawl(
     between them.
 
     Only screens of the target app are written to ``screens/``; a screen of
-    another app (a permission dialog, the launcher) gets only its id in the
-    transition lines.
+    another app (a permission dialog, the launcher) gets its id in the
+    transition lines and, on the start line of a BACK or relaunch decided on
+    it, ``off_target`` with its package, the foreground and the focus owner.
 
     Ending is described in the module docstring: the engine's stop reason, or
     ``interrupted``, or ``error``. A `KeyboardInterrupt` is returned as
@@ -742,6 +788,7 @@ def crawl(
         limits=limits,
         deny_words=policy.deny_words,
         serial=device.serial,
+        back_on_other_screens=policy.back_on_other_screens,
     )
     try:
         run = _Run(

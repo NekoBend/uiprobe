@@ -13,7 +13,9 @@ that judge put in ``pressable`` for that exact observation, at judge's point,
 on a target screen; `CrawlEngine.recheck` refuses any change of that element
 or its descendants (listed under Re-check), of its screen id or of judge's
 result for it, a shown keyboard and the deadline; no input
-other than tap, BACK, launch and relaunch exists; the action and time limits
+other than tap, BACK, launch and relaunch exists; by default nothing but a
+relaunch is sent while a screen of another app is in front (BACK there only
+with ``Policy.back_on_other_screens``); the action and time limits
 hold; there is no 4th relaunch without a tap the driver reported as sent
 (`CrawlEngine.tap_sent`); the crawl always terminates; ``next``, ``recheck``
 and ``tap_sent`` never raise on valid arguments.
@@ -21,22 +23,26 @@ and ``tap_sent`` never raise on valid arguments.
 BEST EFFORT is the estimate of the path (the depth of each path, and no
 navigation BACK on the real root), and so whether the depth limit, which
 holds per path, matches the real back stack. A BACK on the real root only
-leaves the app, which the off-target handling recovers, so a wrong estimate
-costs actions, not safety. The edge cases where screen ids change are listed
-under the stated limits below.
+leaves the app, which the off-target handling recovers (by default with a
+relaunch), so a wrong estimate costs actions, not safety. The edge cases
+where screen ids change are listed under the stated limits below.
 
-* Range. A screen is the target only when the package of the dump
-  and the foreground package both equal the target package; an unknown
-  foreground (None) is not the target. Off target the engine presses BACK, and
-  after 2 BACKs in a row without a target screen it relaunches the app. After 3
-  relaunches in a row it stops with ``relaunch_limit``; the 4th relaunch is
-  never sent. Relaunches count as in a row until the driver reports with
-  `CrawlEngine.tap_sent` that a tap allowed by `CrawlEngine.recheck` was
-  sent; seeing a target screen, a tap handed out but dropped, a refused
-  recheck or an allowed recheck that is not reported does not reset the
-  count, so a cycle of BACK, BACK, Relaunch with no sent tap in between ends
-  with ``relaunch_limit``. A permission dialog belongs to another package, so it is
-  off target and gets BACK (see Pressing).
+* Range. A screen is the target only when the package of the dump and the
+  foreground package both equal the target package; an unknown foreground
+  (None) is not the target. Off target the engine sends nothing to the screen
+  in front: it relaunches the app (the driver force-stops it, then starts it).
+  Only with ``Policy.back_on_other_screens`` True does it press BACK off
+  target, and then it relaunches after 2 BACKs in a row without a target
+  screen. After 3 relaunches in a row it stops with ``relaunch_limit``; the 4th
+  relaunch is never sent. Relaunches count as in a row until the driver reports
+  with `CrawlEngine.tap_sent` that a tap allowed by `CrawlEngine.recheck` was
+  sent; seeing a target screen, a tap handed out but dropped, a refused recheck
+  or an allowed recheck that is not reported does not reset the count, so a
+  cycle of relaunches (or of BACK, BACK, Relaunch) with no sent tap in between
+  ends with ``relaunch_limit``. A permission dialog belongs to another package,
+  so it is off target and gets a relaunch (BACK with
+  ``back_on_other_screens``); an app that shows one at every start therefore
+  ends with ``relaunch_limit`` (see Pressing).
 * Limits. Depth 5 screens, 300 actions and 30 minutes by default
   (`Limits`). Every input counts as an action: the first launch, taps, BACKs
   and relaunches; a re-read sends nothing and does not count. The time limit
@@ -90,8 +96,11 @@ under the stated limits below.
   crawl that way. A screen with the root's id higher up the path (reached again
   by a tap) is not the root: with nothing left to press, or at the depth limit,
   it gets BACK like any other screen; if that BACK leaves the app, the
-  off-target handling (BACK, BACK, Relaunch) recovers. The one BACK allowed on
+  off-target handling (a relaunch, or BACK, BACK, Relaunch with
+  ``back_on_other_screens``) recovers. The one BACK allowed on
   the root is the one that hides a shown keyboard, which is not navigation.
+  The rest of this item matters only with ``back_on_other_screens``, the
+  only case where BACK is sent off target.
   Only BACKs sent while off target count toward the 2 BACKs before a
   relaunch, and a target screen resets that count. One tap can open a target
   screen with dialogs over it, so the BACK itself never pops; the mark is
@@ -212,6 +221,12 @@ Stated limits (known, not fixed here):
   limit can stay unvisited (more actions would be needed to retry).
 * The driver must make Relaunch really reset the task (force-stop, then
   start); see the root rules above.
+* By default a screen of another app gets a relaunch, which starts again at
+  the root, and tried marks keep every pressed element from being pressed
+  again. When a tap opens a dialog of another app, the rest of the screen it
+  was pressed on stays unvisited if the way back to it goes through tried
+  elements. With ``Policy.back_on_other_screens`` the dialog gets BACK and
+  that screen is tried further.
 
 How a driver uses it::
 
@@ -302,7 +317,8 @@ LABEL_CHANGES: Final = "label_changes"
 # reported as sent with `CrawlEngine.tap_sent`.
 TAP_NOT_SENT: Final = "tap_not_sent"
 
-# BACKs in a row off target before the app is relaunched; relaunches in a row
+# BACKs in a row off target before the app is relaunched (only with
+# Policy.back_on_other_screens); relaunches in a row
 # without a sent tap before the crawl stops; failed dumps in a row before
 # the crawl stops.
 BACK_LIMIT: Final = 2
@@ -1101,7 +1117,10 @@ class CrawlEngine:
         return Back()
 
     def _off_target(self, sid: str) -> Action:
-        if self._backs < BACK_LIMIT:
+        # By default nothing goes to a screen of another app: a BACK would
+        # reach the owner of the focused window, whichever app that is. The
+        # relaunch force-stops and starts the target app only.
+        if self._policy.back_on_other_screens and self._backs < BACK_LIMIT:
             return self._send_back(sid, off_target=True)
         return self._relaunch(sid)
 

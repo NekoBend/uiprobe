@@ -351,12 +351,15 @@ class RunWriter:
         deny_words: Iterable[str],
         serial: str,
         started_at: datetime | None = None,
+        back_on_other_screens: bool = False,
     ) -> RunWriter:
         """Make the run folder `out` and write ``run-start.json`` into it.
 
         `limits` is a `crawl.Limits` or a dict with ``depth``, ``actions``
         and ``minutes``. `deny_words` are the words in use, written in the
         given order. `started_at` must carry a time zone (default: now).
+        `back_on_other_screens` is written as given (the crawl's
+        ``Policy.back_on_other_screens``).
 
         Before anything is made, `out` gets the checks of
         `uiprobe.pngfile.check_new_path`: it must not be empty, hold a null
@@ -385,6 +388,9 @@ class RunWriter:
         """
         _check_text("package", package)
         _check_text("serial", serial)
+        if not isinstance(back_on_other_screens, bool):
+            msg = "back_on_other_screens must be a bool"
+            raise TypeError(msg)
         words = _check_texts("deny_words", deny_words)
         limit_values = _limits_dict(limits)
         when = _check_moment("started_at", _now() if started_at is None else started_at)
@@ -395,6 +401,7 @@ class RunWriter:
             "package": package,
             "limits": limit_values,
             "deny": words,
+            "back_on_other_screens": back_on_other_screens,
             "device": {"serial": serial},
         }
         text = _json_text(record, indent=2) + "\n"
@@ -462,12 +469,27 @@ class RunWriter:
         from_screen_id: str | None = None,
         element: Element | Mapping[str, object] | None = None,
         point: Sequence[int] | None = None,
+        *,
+        off_target_package: str | None = None,
+        off_target_foreground: str | None = None,
+        off_target_focus: str | None = None,
     ) -> None:
         """Write the line that says an action is about to be sent.
 
         Call it before the action is sent. The line is complete on disk when
         this returns. `element` is an `Element` (written in its
         ``uiprobe.screen/1`` form) or a mapping, written as given.
+
+        `off_target_package` is given when the action was decided on a screen
+        of another app: the package of that screen's dump. It is written as
+        ``off_target`` with ``package`` and, when given,
+        `off_target_foreground` (the package in front) as ``foreground`` and
+        `off_target_focus` (the owner of the window with input focus, where a
+        BACK goes) as ``focus``.
+
+        Raises:
+            ValueError: `off_target_foreground` or `off_target_focus` is given
+                without `off_target_package`.
         """
         line: dict[str, object] = {
             "schema": TRANSITION_START_SCHEMA,
@@ -483,6 +505,20 @@ class RunWriter:
         line["action"] = action
         if from_screen_id is not None:
             line["from_screen_id"] = _check_screen_id(from_screen_id)
+        if off_target_package is not None:
+            other: dict[str, object] = {
+                "package": _check_text("off_target_package", off_target_package)
+            }
+            if off_target_foreground is not None:
+                other["foreground"] = _check_text(
+                    "off_target_foreground", off_target_foreground
+                )
+            if off_target_focus is not None:
+                other["focus"] = _check_text("off_target_focus", off_target_focus)
+            line["off_target"] = other
+        elif off_target_foreground is not None or off_target_focus is not None:
+            msg = "off_target_foreground and off_target_focus need off_target_package"
+            raise ValueError(msg)
         self._append("transitions.jsonl", _json_text(line) + "\n", start=True)
 
     def write_transition_end(

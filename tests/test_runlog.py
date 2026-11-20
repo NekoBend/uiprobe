@@ -13,6 +13,7 @@ from dataclasses import replace
 from datetime import UTC, datetime, timedelta, timezone, tzinfo
 from enum import Enum
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -58,7 +59,7 @@ def _close_writers():
 
 
 def make(tmp_path: Path, name: str = "run", **overrides) -> RunWriter:
-    arguments = {
+    arguments: dict[str, Any] = {
         "package": "com.example.app",
         "limits": Limits(),
         "deny_words": ["delete", "pay"],
@@ -172,6 +173,7 @@ def test_run_start_json(tmp_path):
         "package": "com.example.app",
         "limits": {"depth": 5, "actions": 300, "minutes": 30},
         "deny": ["delete", "pay"],
+        "back_on_other_screens": False,
         "device": {"serial": "emulator-5554"},
     }
 
@@ -961,6 +963,59 @@ def test_a_failed_fsync_breaks_the_writer(tmp_path, monkeypatch):
     assert names(tmp_path / "run") == ["run-start.json", "transitions.jsonl"]
 
 
+def test_run_start_records_back_on_other_screens(tmp_path):
+    RunWriter.create(
+        tmp_path / "run",
+        package="com.example.app",
+        limits=Limits(),
+        deny_words=[],
+        serial="emulator-5554",
+        started_at=STARTED,
+        back_on_other_screens=True,
+    )
+    start = json.loads((tmp_path / "run" / "run-start.json").read_bytes())
+    assert start["back_on_other_screens"] is True
+    loose: Any = RunWriter.create
+    with pytest.raises(TypeError, match="back_on_other_screens must be a bool"):
+        loose(
+            tmp_path / "other",
+            package="com.example.app",
+            limits=Limits(),
+            deny_words=[],
+            serial="emulator-5554",
+            back_on_other_screens=1,
+        )
+    assert not (tmp_path / "other").exists()
+
+
+def test_a_start_line_names_the_screen_of_another_app(tmp_path):
+    writer = make(tmp_path)
+    writer.write_transition_start(
+        1,
+        "relaunch",
+        ID_A,
+        off_target_package="com.example.launcher",
+        off_target_foreground="com.example.launcher",
+        off_target_focus="com.android.systemui",
+    )
+    writer.write_transition_start(2, "back", ID_B, off_target_package="com.example.app")
+    writer.write_transition_start(3, "back", ID_B)
+    first, second, third = lines_of(tmp_path / "run" / "transitions.jsonl")
+    assert first["off_target"] == {
+        "package": "com.example.launcher",
+        "foreground": "com.example.launcher",
+        "focus": "com.android.systemui",
+    }
+    assert list(first)[-1] == "off_target"
+    assert second["off_target"] == {"package": "com.example.app"}
+    assert "off_target" not in third
+    with pytest.raises(ValueError, match="need off_target_package"):
+        writer.write_transition_start(4, "back", ID_B, off_target_foreground="x.y")
+    with pytest.raises(ValueError, match="need off_target_package"):
+        writer.write_transition_start(4, "back", ID_B, off_target_focus="x.y")
+    assert len(lines_of(tmp_path / "run" / "transitions.jsonl")) == 3
+
+
 def test_keys_are_written_in_a_fixed_order(tmp_path):
     writer = make(tmp_path)
     writer.write_transition_start(1, "tap", ID_A, {"text": "x"}, (1, 2))
@@ -975,6 +1030,7 @@ def test_keys_are_written_in_a_fixed_order(tmp_path):
         "package",
         "limits",
         "deny",
+        "back_on_other_screens",
         "device",
     ]
     first, second = lines_of(folder / "transitions.jsonl")

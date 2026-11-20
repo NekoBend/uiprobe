@@ -784,8 +784,9 @@ def api36_fallback_areas(display: tuple[int, int]) -> tuple[Bounds, ...]:
 
 @dataclass(frozen=True)
 class Policy:
-    """What the caller allows: the word lists and the unlabeled, number-only,
-    toggle and edge rules.
+    """What the caller allows: the word lists, the unlabeled, number-only,
+    toggle and edge rules, and whether a crawl may press BACK on a screen of
+    another app.
 
     ``avoid`` holds the screen-edge rectangles (see `edge_areas`) that a press
     point must not fall in. The default None is the safe default: `judge` uses
@@ -803,6 +804,14 @@ class Policy:
     ``skip_irreversible`` (default True) applies the ``irreversible_screen``
     reason with the phrases of ``irreversible_phrases``; False turns it off.
 
+    ``back_on_other_screens`` (default False) is read by the pressing crawl
+    only, not by `judge`. True lets the crawl press BACK while a screen of
+    another app is in front (up to 2 in a row, then a relaunch), and that BACK
+    reaches the owner of the focused window, whichever app that is. With the
+    default nothing is sent to such a screen: the target app is relaunched
+    (force-stop, then start), and when a 4th relaunch in a row without a sent
+    tap would be needed the crawl stops.
+
     ``edges`` holds the sizes in pixels ``(top, bottom, left, right)`` that
     `judge` turns into `edge_areas` of each screen's display when ``avoid`` is
     None; None keeps the API 36 sizes. An explicit ``avoid`` wins over
@@ -818,7 +827,8 @@ class Policy:
             punctuation), or
             ``edges`` is not four non-negative integers, or ``min_visible_px``
             is not an integer of at least 1.
-        TypeError: ``edges`` is not a sequence.
+        TypeError: ``edges`` is not a sequence, or ``back_on_other_screens``
+            is not a bool.
     """
 
     deny_words: tuple[str, ...] = DEFAULT_DENY_WORDS
@@ -832,8 +842,12 @@ class Policy:
     min_visible_px: int = MIN_VISIBLE_PX
     irreversible_phrases: tuple[str, ...] = IRREVERSIBLE_PHRASES
     skip_irreversible: bool = True
+    back_on_other_screens: bool = False
 
     def __post_init__(self) -> None:
+        if type(self.back_on_other_screens) is not bool:
+            msg = "back_on_other_screens must be a bool"
+            raise TypeError(msg)
         for word in (*self.deny_words, *self.confirm_words, *self.irreversible_phrases):
             _check_word(word)
         if self.edges is not None and (
@@ -874,6 +888,7 @@ class Policy:
             min_visible_px=self.min_visible_px,
             irreversible_phrases=self.irreversible_phrases,
             skip_irreversible=self.skip_irreversible,
+            back_on_other_screens=self.back_on_other_screens,
         )
 
 
