@@ -1896,3 +1896,30 @@ def test_a_relaunch_decided_on_the_apps_screen_has_no_off_target(
     driver.send(Relaunch(), observation)
     assert "off_target" not in _start_lines(tmp_path)[-1]
     assert android.stopped == [SHOP]
+
+
+def test_a_tap_whose_reads_end_past_the_limit_is_not_sent(
+    tmp_path: Path, device, android, clock, monkeypatch
+):
+    # Each dump takes 19 s on this device: the gate's own dump before a tap
+    # crosses the 1-minute limit, so the tap must not go out.
+    original = Device.dump
+
+    def slow_dump(self: Device, **kwargs: object) -> object:
+        clock.now += 19.0
+        return original(self, **kwargs)  # ty: ignore[invalid-argument-type]
+
+    monkeypatch.setattr(Device, "dump", slow_dump)
+    out = tmp_path / "run"
+    started = clock.now
+    result = run(device, clock, out, limits=Limits(minutes=1))
+    assert result.stop_reason == "max_duration"
+    taps = [i for i in android.inputs if i.kind == "tap"]
+    sent_at = [
+        r for r in lines(out / "transitions.jsonl") if r.get("reason") == "time_limit"
+    ]
+    assert sent_at, "the late tap is closed as not sent"
+    assert clock.now - started >= 60
+    # Every tap that went out was decided and checked within the limit.
+    assert len(taps) <= 2
+    assert dict(result.not_sent).get("time_limit") == 1

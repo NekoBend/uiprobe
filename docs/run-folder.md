@@ -1,6 +1,6 @@
 # The run folder
 
-A crawl run is recorded in one new folder. The library part that writes it is `uiprobe.runlog.RunWriter`. It does not talk to the device. The Python function `crawl_run()` writes a run folder (see [Crawling from Python](python.md#crawling-from-python-alpha)); no command does yet.
+A crawl run is recorded in one new folder. The library part that writes it is `uiprobe.runlog.RunWriter`. It does not talk to the device. The Python function `crawl_run()` and the command `uiprobe crawl PACKAGE --press --out DIR` write a run folder (see [Crawling from Python](python.md#crawling-from-python-alpha) and [Pressing crawl](crawl.md#pressing-crawl---press)).
 
 ## Rules
 

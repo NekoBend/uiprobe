@@ -9,7 +9,7 @@ create it with:    uiprobe init
 or name one with:  uiprobe crawl com.example.app --config PATH
 ```
 
-The last line keeps a `--dry-run` that was given (`uiprobe crawl com.example.app --dry-run --config PATH`), so that following it works with a file that says `press = true`; it also keeps a `--press` that was given (`uiprobe crawl com.example.app --press --config PATH`; add `--out DIR` again when you follow it). With `--json` the three lines are the `message` of the `uiprobe.error/1` object, and `details` holds `looked_for`, `create` and `name_one`. When the missing file was named with `--config PATH`, the `create` line is `uiprobe init PATH` with the given path filled in (only when it needs no shell quoting; otherwise the word `PATH` stays a placeholder), so that it creates the file that was looked for. A file that is given with `--config` but missing, or that is invalid, is a usage error that names the file and, for an invalid entry, the key. Warnings about the file (an entry that has no effect) go to stderr.
+The last line keeps a `--dry-run` that was given (`uiprobe crawl com.example.app --dry-run --config PATH`), so that following it works with a file that says `press = true`; with `--press` it says `add --config PATH to the same command` instead, because a pressing run has more options than the line could repeat. With `--json` the three lines are the `message` of the `uiprobe.error/1` object, and `details` holds `looked_for`, `create` and `name_one`. When the missing file was named with `--config PATH`, the `create` line is `uiprobe init PATH` with the given path filled in (only when it needs no shell quoting; otherwise the word `PATH` stays a placeholder), so that it creates the file that was looked for. A file that is given with `--config` but missing, or that is invalid, is a usage error that names the file and, for an invalid entry, the key. Warnings about the file (an entry that has no effect) go to stderr.
 
 ```console
 $ uiprobe crawl com.example.app
@@ -109,12 +109,12 @@ $ uiprobe crawl com.example.app --press --out runs/real --allow-real-device
 Safe defaults:
 
 - It presses only on an emulator. A device that is not an emulator, or whose emulator check (`getprop ro.kernel.qemu`) cannot be read, is refused with exit 17 (`not_emulator`, `details.reason` `not_emulator` or `unreadable`) before anything is written or sent; the message says to add `--allow-real-device`, which presses on that device.
-- It stops soon: at most 30 actions (the launch, taps, BACK and restarts each count), paths at most 3 screens deep, and at most 5 minutes, unless `--actions`, `--depth` or `--minutes` say otherwise. The settings file's `[limits]` are not used by `--press`, because the generated file writes larger values for every run.
+- It stops soon: after 30 sent actions (the launch, taps, BACK and restarts each count; an action the checks held back does not) or 5 minutes, unless `--actions` or `--minutes` say otherwise. `--depth` (default 3) limits how deep it taps on one path: on a screen that deep it presses BACK and goes on with another path, so the depth does not end the run. An action whose checks end past the time limit is not sent. The settings file's `[limits]` are not used by `--press`, because the generated file writes larger values for every run.
 - It sends nothing to a screen of another app: it restarts the target app instead (`am force-stop`, then start), which can lose unsaved state in that app. `--back-on-other-screens` makes it press BACK there instead; that BACK reaches whichever app has the focus.
 - Right before each tap it reads which window takes a touch at the tap's point and sends the tap only when that window belongs to the app. `--no-tap-window-check` turns this off; then an overlay of another app over the point gets the tap.
 - The device is pinned when the run starts: every request goes to that device, and a renumbered connection to the same device is followed (when its boot id can be read) or ends the run.
 
-Before the first action it prints what it will do: the device and whether it is an emulator, the app, the limits, the run folder, and the two choices above. At the end it prints why it stopped (`exhausted`, `max_actions`, `max_duration`, `relaunch_limit`, `keyboard_stuck`, `dump_failed_repeatedly`, and the other stop reasons of [Run folder](run-folder.md)), the number of actions and screens, the actions that were not sent, by reason (for example `covered_by_other`, `cover_unknown`, `device_reconnected`), the number of transport moves, and the run folder:
+Before the first action it prints what it will do (to stderr with `--json`, so that stdout holds only the JSON result), and the lines are written out before the app is started: the device and whether it is an emulator, the app, the limits, the run folder, and the two choices above. At the end it prints why it stopped (`exhausted`, `max_actions`, `max_duration`, `relaunch_limit`, `keyboard_stuck`, `dump_failed_repeatedly`, and the other stop reasons of [Run folder](run-folder.md)), the number of actions started (those not sent included, so it can be larger than `--actions`) and of screens, the actions that were not sent, by reason (for example `covered_by_other`, `cover_unknown`, `device_reconnected`), the number of transport moves, and the run folder:
 
 ```console
 $ uiprobe crawl com.example.shop --press --out runs/first
@@ -124,7 +124,7 @@ run folder: runs/first
 BACK on screens of other apps: no (restart the app)
 check the window at each tap point: yes
 stopped: max_actions
-actions: 30
+actions: 31 (started; those not sent included)
 screens: 7
 not sent: covered_by_other 1
 transport moves: 0
@@ -140,8 +140,8 @@ Lines starting with `note:` follow when one of these happened:
 | Option | Meaning |
 | --- | --- |
 | `--out DIR` | The new run folder. Required with `--press`; it must not exist. |
-| `--actions N` | The most actions, 1 to 10000 (default 30). |
-| `--depth N` | The deepest screen on one path, 1 to 50 (default 3). |
+| `--actions N` | The most sent actions, 1 to 10000 (default 30). |
+| `--depth N` | How deep it taps on one path, 1 to 50 (default 3); it does not end the run. |
 | `--minutes N` | The longest run in minutes, 1 to 1440 (default 5). |
 | `--settle SEC` | The pause after a tap or BACK, 0 to 60 seconds (default 1). |
 | `--screenshots` | Also save a screenshot of each new screen in the run folder. |
@@ -149,6 +149,6 @@ Lines starting with `note:` follow when one of these happened:
 | `--back-on-other-screens` | Press BACK on a screen of another app instead of restarting the app. |
 | `--no-tap-window-check` | Do not read which window takes a tap at its point. |
 
-`--deny`, `--tap-unlabeled` and `--config` work as for the preview. The options above are used only with `--press`; given without it, each is a usage error.
+`--deny`, `--tap-unlabeled` and `--config` work as for the preview. The options above are used only with `--press`; given without it, each is a usage error. Every value of `--actions`, `--depth`, `--minutes` and `--settle` is checked as it is read, so a wrong value is a usage error even when the option is given again later with a good one.
 
 Exit codes: 0 when the run ended by one of its stop reasons, also when nothing could be pressed; 130 on Ctrl+C, after the run folder's `run.json` was written with the stop reason `interrupted` when that was still possible (the message names the folder when it exists; a second Ctrl+C while `run.json` is written can leave the folder without it); 17 for a refused device; the other errors as for the other commands, with `details.out` naming the run folder when it was created. With `--json` the result is a `uiprobe.crawl_run/1` object (see [Output formats](output.md)); the plan is not printed separately then, because the object holds it.

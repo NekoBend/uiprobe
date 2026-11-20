@@ -76,7 +76,9 @@ def test_press_in_json(fake_adb, capsys, tmp_path):
         "--no-tap-window-check",
         "--json",
     )
-    assert (code, err) == (0, "")
+    assert code == 0
+    # The plan goes to stderr with --json, so stdout is one JSON document.
+    assert err.splitlines()[0] == f"pressing on {SERIAL} (emulator): {SHOP}"
     result = json.loads(text)
     assert result["schema"] == "uiprobe.crawl_run/1"
     assert result["package"] == SHOP
@@ -140,7 +142,7 @@ def test_a_real_device_runs_with_the_option(fake_adb, android, capsys, tmp_path)
         ),
         (
             ["--press", "--out", "x", "--settle", "-1"],
-            "--settle must be from 0 to 60 seconds, got -1.0",
+            "--settle must be from 0 to 60 seconds, got -1",
         ),
         (
             ["--press", "--out", "x", "--settle", "nan"],
@@ -237,7 +239,7 @@ def test_dumps_that_keep_failing_name_the_screen(
     note = next(
         line for line in text.splitlines() if "uiautomator dump kept failing" in line
     )
-    assert f"app in front: {SHOP}" in note
+    assert f"app in front at the last read: {SHOP}" in note
     assert "last screen read: none" in note
 
 
@@ -276,3 +278,131 @@ def test_an_unreadable_emulator_check_is_refused(
     )
     assert code == 0
     assert "(emulator check unreadable)" in text.splitlines()[0]
+
+
+def device_writes(fake_adb: FakeAdbServer) -> list[str]:
+    """The shell commands that start, stop or press something."""
+    words = ("monkey", "am start", "force-stop", "input ")
+    return [
+        r
+        for r in fake_adb.requests
+        if r.startswith(("shell:", "exec:")) and any(w in r for w in words)
+    ]
+
+
+@pytest.mark.usefixtures("here", "android")
+@pytest.mark.parametrize("as_json", [False, True])
+def test_the_plan_is_out_before_the_app_is_started(
+    fake_adb, capsys, tmp_path, monkeypatch, as_json
+):
+    seen: list[tuple[str, str]] = []
+    original = Device.launch
+
+    def launch_after_reading(self: Device, *args: object, **kwargs: object) -> object:
+        captured = capsys.readouterr()
+        seen.append((captured.out, captured.err))
+        return original(self, *args, **kwargs)  # ty: ignore[invalid-argument-type]
+
+    monkeypatch.setattr(Device, "launch", launch_after_reading)
+    out = tmp_path / "run"
+    argv = ["--press", "--out", str(out), "--actions", "2"]
+    code, _text, _err = press(capsys, fake_adb, *argv, *(["--json"] if as_json else []))
+    assert code == 0
+    assert seen, "the app was launched"
+    plan_out, plan_err = seen[0]
+    plan = plan_err if as_json else plan_out
+    assert plan.splitlines()[0] == f"pressing on {SERIAL} (emulator): {SHOP}"
+    assert "check the window at each tap point: yes" in plan
+    if as_json:
+        assert plan_out == ""
+
+
+@pytest.mark.usefixtures("here")
+@pytest.mark.parametrize(
+    ("argv", "message"),
+    [
+        (
+            ["--actions", "0", "--actions", "2"],
+            "--actions must be from 1 to 10000, got 0",
+        ),
+        (["--depth", "x", "--depth", "2"], "--depth must be a whole number, got x"),
+        (
+            ["--minutes", "0", "--minutes", "1"],
+            "--minutes must be from 1 to 1440, got 0",
+        ),
+        (
+            ["--settle", "nan", "--settle", "1"],
+            "--settle must be from 0 to 60 seconds, got nan",
+        ),
+    ],
+)
+def test_a_wrong_value_given_before_a_good_one_is_refused(
+    fake_adb, android, capsys, tmp_path, argv, message
+):
+    code, text, err = press(
+        capsys, fake_adb, "--press", "--out", str(tmp_path / "r"), *argv
+    )
+    assert (code, text) == (2, "")
+    assert err == f"uiprobe: error: {message}\n"
+    assert fake_adb.requests == []
+    assert android.inputs == []
+
+
+@pytest.mark.usefixtures("here", "android")
+def test_an_existing_file_is_not_named_as_the_run_folder(fake_adb, capsys, tmp_path):
+    taken = tmp_path / "notes.txt"
+    taken.write_text("mine", encoding="utf-8")
+    code, text, _err = press(capsys, fake_adb, "--press", "--out", str(taken), "--json")
+    assert code != 0
+    error = json.loads(text)["error"]
+    assert "out" not in error.get("details", {})
+    assert taken.read_text(encoding="utf-8") == "mine"
+    assert device_writes(fake_adb) == []
+
+
+@pytest.mark.usefixtures("here")
+def test_refusals_start_and_stop_nothing(fake_adb, android, capsys, tmp_path):
+    android.props["ro.kernel.qemu"] = "0"
+    code, _text, _err = press(capsys, fake_adb, "--press", "--out", str(tmp_path / "a"))
+    assert code == 17
+    existing = tmp_path / "b"
+    existing.mkdir()
+    android.props["ro.kernel.qemu"] = "1"
+    code, _text, _err = press(capsys, fake_adb, "--press", "--out", str(existing))
+    assert code != 0
+    assert device_writes(fake_adb) == []
+
+
+@pytest.mark.usefixtures("here", "android")
+def test_dumps_that_fail_later_name_the_last_screen_read(
+    fake_adb, capsys, tmp_path, monkeypatch
+):
+    from uiprobe.errors import DumpError
+
+    original = Device.dump
+    calls = [0]
+
+    def dump_then_fail(self: Device, **kwargs: object) -> object:
+        calls[0] += 1
+        if calls[0] > 2:
+            raise DumpError("uiautomator dump failed", details={"output": "x"})
+        return original(self, **kwargs)  # ty: ignore[invalid-argument-type]
+
+    monkeypatch.setattr(Device, "dump", dump_then_fail)
+    code, text, _err = press(capsys, fake_adb, "--press", "--out", str(tmp_path / "r"))
+    assert code == 0
+    assert "stopped: dump_failed_repeatedly" in text
+    note = next(line for line in text.splitlines() if "kept failing" in line)
+    assert "last screen read: s-" in note
+
+
+@pytest.mark.usefixtures("here")
+def test_a_rotated_display_refuses_every_tap(fake_adb, android, capsys, tmp_path):
+    android.orientation = 1
+    code, text, _err = press(capsys, fake_adb, "--press", "--out", str(tmp_path / "r"))
+    assert code == 0
+    assert [i for i in android.inputs if i.kind == "tap"] == []
+    assert "cover_unknown" in text
+    assert any(
+        "rotation" in line for line in text.splitlines() if line.startswith("note: ")
+    )

@@ -95,8 +95,8 @@ CRAWL_RUN_SCHEMA = "uiprobe.crawl_run/1"
 # default, what). The defaults are small on purpose, so a bare --press ends
 # soon; the settings file's [limits] are the preview's and are not used here.
 _PRESS_LIMITS: dict[str, tuple[int, int, int, str]] = {
-    "depth": (1, 50, 3, "the deepest screen on one path"),
-    "actions": (1, 10000, 30, "the most actions (launch, taps, BACK, restarts)"),
+    "depth": (1, 50, 3, "how deep it taps on one path (does not end the run)"),
+    "actions": (1, 10000, 30, "the most sent actions (launch, taps, BACK, restarts)"),
     "minutes": (1, 1440, 5, "the longest run in minutes"),
 }
 _PRESS_SETTLE = 1.0
@@ -565,13 +565,13 @@ def _add_press_options(crawl: argparse.ArgumentParser) -> None:
     for name, (low, high, default, what) in _PRESS_LIMITS.items():
         crawl.add_argument(
             f"--{name}",
-            type=int,
+            type=_bounded_int(f"--{name}", low, high),
             metavar="N",
             help=f"with --press: {what}, {low} to {high} (default {default})",
         )
     crawl.add_argument(
         "--settle",
-        type=float,
+        type=_settle_seconds,
         metavar="SEC",
         help=f"with --press: the pause after a tap or BACK (default {_PRESS_SETTLE})",
     )
@@ -975,8 +975,12 @@ def _crawl_settings(args: argparse.Namespace) -> Settings:
             create = _create_line(path)
         # Keep a --dry-run or --press the caller gave: a file that says
         # press = true is refused without --dry-run, and --press stays visible.
-        switch = " --dry-run" if args.dry_run else " --press" if args.press else ""
+        switch = " --dry-run" if args.dry_run else ""
         name = f"uiprobe crawl {args.package}{switch} --config PATH"
+        if args.press:
+            # A pressing run has more options (--out, limits, device) than a
+            # line could repeat safely: name the one thing to add.
+            name = "add --config PATH to the same command"
         raise _GuidedUsageError(
             (
                 "crawl needs a settings file and none was found "
@@ -1267,6 +1271,39 @@ def _cmd_crawl(args: argparse.Namespace) -> int:
     return 0
 
 
+def _bounded_int(option: str, low: int, high: int) -> Callable[[str], int]:
+    """A converter that checks every occurrence of `option` as it is read.
+
+    A wrong value is a usage error even when the option is given again later
+    with a good one (argparse keeps only the last value).
+    """
+
+    def convert(text: str) -> int:
+        try:
+            value = int(text)
+        except ValueError:
+            msg = f"{option} must be a whole number, got {_shown(text)}"
+            raise _UsageError(msg) from None
+        if not low <= value <= high:
+            msg = f"{option} must be from {low} to {high}, got {value}"
+            raise _UsageError(msg)
+        return value
+
+    return convert
+
+
+def _settle_seconds(text: str) -> float:
+    """Check one ``--settle`` value as it is read (also refuses NaN)."""
+    try:
+        value = float(text)
+    except ValueError:
+        value = float("nan")
+    if not 0 <= value <= 60:
+        msg = f"--settle must be from 0 to 60 seconds, got {_shown(text)}"
+        raise _UsageError(msg)
+    return value
+
+
 def _press_limits(args: argparse.Namespace) -> Limits:
     given = {"depth": args.depth, "actions": args.actions, "minutes": args.minutes}
     values: dict[str, int] = {}
@@ -1281,11 +1318,7 @@ def _press_limits(args: argparse.Namespace) -> Limits:
 
 
 def _press_settle(args: argparse.Namespace) -> float:
-    settle = _PRESS_SETTLE if args.settle is None else args.settle
-    if not (0 <= settle <= 60):  # also refuses NaN
-        msg = f"--settle must be from 0 to 60 seconds, got {args.settle}"
-        raise _UsageError(msg)
-    return settle
+    return _PRESS_SETTLE if args.settle is None else args.settle
 
 
 def _cmd_crawl_press(args: argparse.Namespace, policy: Policy) -> int:
@@ -1298,6 +1331,7 @@ def _cmd_crawl_press(args: argparse.Namespace, policy: Policy) -> int:
         check_tap_window=not args.no_tap_window_check,
     )
     out: str = args.out
+    shown_out = _shown(out)
     device = Device(
         _single_serial(args),
         adb_server=args.adb_server,
@@ -1305,6 +1339,7 @@ def _cmd_crawl_press(args: argparse.Namespace, policy: Policy) -> int:
         start_server=args.start_server,
         pin=True,
     )
+    moves_before = len(device.repins)
     emulator = _press_device_check(device, allow_real_device=args.allow_real_device)
     plan: dict[str, object] = {
         "package": args.package,
@@ -1319,8 +1354,11 @@ def _cmd_crawl_press(args: argparse.Namespace, policy: Policy) -> int:
         "check_tap_window": policy.check_tap_window,
         "screenshots": args.screenshots,
     }
-    if not args.json:
-        _emit(_press_plan_text(plan))
+    # The plan is out (and flushed) before the first request that changes the
+    # device; with --json it goes to stderr, so stdout stays one JSON document.
+    _emit(_press_plan_text(plan), stream=sys.stderr if args.json else None)
+    _flush(sys.stderr if args.json else sys.stdout)
+    existed = Path(out).exists() or Path(out).is_symlink()
     try:
         result = crawl_run(
             device,
@@ -1329,25 +1367,38 @@ def _cmd_crawl_press(args: argparse.Namespace, policy: Policy) -> int:
             policy=policy,
             limits=limits,
             screenshots=args.screenshots,
-            allow_real_device=args.allow_real_device,
+            # The device was checked above (one check, with the CLI's own
+            # guidance); crawl_run must not check it a second time.
+            allow_real_device=True,
             settle=settle,
         )
     except KeyboardInterrupt:
         # crawl_run wrote run.json with "interrupted" when it still could.
-        if not Path(out).exists():
+        if existed or not Path(out).exists():
             return _fail(INTERRUPTED, "interrupted", as_json=args.json)
-        msg = f"interrupted; the run so far is in {_printable(out)}"
+        msg = f"interrupted; the run so far is in {shown_out}"
         return _fail(INTERRUPTED, msg, as_json=args.json, details={"out": out})
     except UiprobeError as exc:
-        if Path(out).exists():
+        if not existed and Path(out).exists():  # made by this run
             exc.details.setdefault("out", out)
         raise
-    hints = _press_hints(result, device)
+    moves = len(device.repins) - moves_before
+    hints = _press_hints(result)
     if args.json:
-        _emit(dumps(_press_json(plan, result, hints), indent=2))
+        _emit(dumps(_press_json(plan, result, hints, moves), indent=2))
     else:
-        _emit(_press_result_text(result, hints))
+        _emit(_press_result_text(result, hints, moves))
     return 0
+
+
+def _flush(stream: TextIO) -> None:
+    """Flush `stream`; a closed output raises ``BrokenPipeError`` as in `_emit`."""
+    try:
+        stream.flush()
+    except OSError as exc:
+        if isinstance(exc, BrokenPipeError) or not _is_closed_output(exc, stream):
+            raise
+        raise BrokenPipeError(errno.EPIPE, "the output was closed") from exc
 
 
 def _press_device_check(device: Device, *, allow_real_device: bool) -> bool | None:
@@ -1394,7 +1445,7 @@ def _press_plan_text(plan: dict[str, object]) -> str:
             f" {_printable(str(plan['package']))}",
             f"limits: depth {limits['depth']}, actions {limits['actions']},"
             f" minutes {limits['minutes']}",
-            f"run folder: {_printable(str(plan['out']))}",
+            f"run folder: {_shown(str(plan['out']))}",
             "BACK on screens of other apps: "
             + ("yes" if plan["back_on_other_screens"] else "no (restart the app)"),
             "check the window at each tap point: "
@@ -1403,7 +1454,7 @@ def _press_plan_text(plan: dict[str, object]) -> str:
     )
 
 
-def _press_hints(result: CrawlResult, device: Device) -> list[str]:
+def _press_hints(result: CrawlResult) -> list[str]:
     """Advice for the endings a real device runs into; only those that apply."""
     hints: list[str] = []
     refused = dict(result.not_sent)
@@ -1420,34 +1471,32 @@ def _press_hints(result: CrawlResult, device: Device) -> list[str]:
             " adb connection ends the run instead of being followed"
         )
     if result.stop_reason == "dump_failed_repeatedly":
-        front = None
-        with contextlib.suppress(UiprobeError):
-            front = device.foreground()
+        front = result.last_foreground
         hints.append(
             "uiautomator dump kept failing; a screen that never settles (a value"
             " that changes every second, an animation) makes it fail, so avoid"
-            f" that screen (app in front: {_printable(str(front))}, last screen"
-            f" read: {result.last_screen_id or 'none'})"
+            f" that screen (app in front at the last read: {_printable(str(front))},"
+            f" last screen read: {result.last_screen_id or 'none'})"
         )
     return hints
 
 
-def _press_result_text(result: CrawlResult, hints: list[str]) -> str:
+def _press_result_text(result: CrawlResult, hints: list[str], moves: int) -> str:
     refused = ", ".join(f"{reason} {count}" for reason, count in result.not_sent)
     lines = [
         f"stopped: {result.stop_reason}",
-        f"actions: {result.actions}",
+        f"actions: {result.actions} (started; those not sent included)",
         f"screens: {result.screens}",
         f"not sent: {refused or 'none'}",
-        f"transport moves: {result.repins}",
-        f"run folder: {_printable(str(result.out))}",
+        f"transport moves: {moves}",
+        f"run folder: {_shown(str(result.out))}",
     ]
     lines.extend(f"note: {hint}" for hint in hints)
     return "\n".join(lines)
 
 
 def _press_json(
-    plan: dict[str, object], result: CrawlResult, hints: list[str]
+    plan: dict[str, object], result: CrawlResult, hints: list[str], moves: int
 ) -> dict[str, object]:
     return {
         "schema": CRAWL_RUN_SCHEMA,
@@ -1457,7 +1506,7 @@ def _press_json(
         "actions": result.actions,
         "screens": result.screens,
         "not_sent": dict(result.not_sent),
-        "repins": result.repins,
+        "repins": moves,
         "repin": result.repin,
         "notes": hints,
     }

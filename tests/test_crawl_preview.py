@@ -787,7 +787,7 @@ def test_missing_file_guidance_keeps_press(fake_adb, android, capsys, tmp_path):
         capsys, fake_adb, SHOP, "--press", "--out", str(tmp_path / "run")
     )
     assert message.splitlines()[-1] == (
-        f"or name one with:  uiprobe crawl {SHOP} --press --config PATH"
+        "or name one with:  add --config PATH to the same command"
     )
     plain = crawl_usage_error(capsys, fake_adb, SHOP)
     assert (

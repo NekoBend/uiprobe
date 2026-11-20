@@ -140,7 +140,8 @@ class CrawlResult:
     the moves of the pinned transport in this run and ``repin`` whether moves
     were allowed (the boot id could be read); ``cover_unknown`` what the
     first ``cover_unknown`` refusal could not read; ``last_screen_id`` the
-    last screen that was read.
+    last screen that was read and ``last_foreground`` the app in front at the
+    last read (None when unknown).
     """
 
     out: Path
@@ -152,6 +153,7 @@ class CrawlResult:
     repin: bool = False
     cover_unknown: str | None = None
     last_screen_id: str | None = None
+    last_foreground: str | None = None
 
 
 def _check_flag(name: str, value: object) -> None:
@@ -272,6 +274,7 @@ class _Run:
         self.not_sent: dict[str, int] = {}  # not_sent end lines by reason
         self.cover_unknown: str | None = None  # what the first cover_unknown missed
         self.last_screen_id: str | None = None  # the last screen read
+        self.last_foreground: str | None = None  # the app in front at the last read
         self.screenshots = screenshots
         self.settle = settle
         self.deadline = deadline
@@ -640,6 +643,9 @@ class _Run:
         foreground = self.device.foreground()
         focus = self.device.focused_window()
         keyboard = self.device.keyboard_shown()
+        if screen is not None:
+            self.last_screen_id = screen.screen_id
+        self.last_foreground = foreground
         seen = _Seen(Observation(screen, foreground, keyboard, now), focus)
         self.gate_details = None
         if isinstance(action, Tap):
@@ -705,8 +711,15 @@ class _Run:
         # Every condition is evaluated to a reason first (the truth tests run
         # here), then nothing but one integer comparison follows.
         why = next((reason for failed, reason in checks if bool(failed)), None)
+        # The time again, after the reads (they can take long) and before the
+        # last comparison, so that the clock, which may be the caller's code,
+        # runs before it and nothing runs after it: past the limit, nothing is
+        # sent.
+        late = self.clock() >= self.deadline
         if self.device.pin_epoch != self.epoch_seen:
             return NOT_SENT_RECONNECTED, seen
+        if late:
+            return NOT_SENT_TIME_LIMIT, None
         return why, seen
 
     def halt(self, now: float | None = None) -> str | None:
@@ -857,6 +870,7 @@ class _Run:
                 break
         if screen is not None:
             self.last_screen_id = screen.screen_id
+        self.last_foreground = foreground
         observation = Observation(screen, foreground, keyboard, self.clock())
         self.record(_Seen(observation, focus), self.epoch_seen)
         return observation
@@ -1295,4 +1309,5 @@ def _result(run: _Run, writer: RunWriter, reason: str) -> CrawlResult:
         repin=run.device.can_repin,
         cover_unknown=run.cover_unknown,
         last_screen_id=run.last_screen_id,
+        last_foreground=run.last_foreground,
     )
