@@ -6,13 +6,15 @@ lines left out but none changed or renumbered:
 * api24.txt and api36.txt: excerpts of a whole ``dumpsys input`` (the reader's
   ``Viewport`` lines of display 0 and the dispatcher's part down to the end
   of the window list).
-* api30.txt, api31.txt and api32.txt: the captures kept only the window list
-  (``Windows:`` and its lines); the ``Input Dispatcher State:`` line above it
-  is added, and there are no ``Viewport`` lines.
-* api33.txt, api34.txt and api35.txt: the window list and the ``Viewport``
-  lines of display 0 (from a search of the same output); the
-  ``Input Dispatcher State:`` line, and on API 34 and 35 the ``Display: 0``
-  line, are added above the list (both were seen there in that output).
+* api30.txt to api35.txt: the window list (``Windows:`` and its lines) of
+  one capture, with the ``Input Dispatcher State:`` and ``Display: 0`` lines
+  added above it (an emulator of the same image printed them there right
+  above ``Windows:``), and a line the capture script stopped at added below
+  it (``Connections:``; the script stopped at that line or at
+  ``MonitoringChannels:``, ``mMaximumObscuring...`` or ``Global monitors``,
+  and did not record which). The ``Viewport`` lines of display 0 above them
+  come from a search of the same output (API 33 to 35) or, for API 30 to 32,
+  from another boot of an emulator of the same image.
 
 Other text in the tests (a rotated ``Viewport`` line, a rotated transform)
 is copied from the rotated emulators; changed lines are changed in place.
@@ -114,6 +116,11 @@ def _set_line(text: str, index: int, line: str) -> str:
 
 def _with_viewport(text: str) -> str:
     return VIEWPORT24 + "\n" + text
+
+
+def _drop_viewports(text: str) -> str:
+    """`text` without its Viewport lines."""
+    return "\n".join(line for line in text.split("\n") if "Viewport" not in line)
 
 
 def _at(text: str, point: tuple[int, int]) -> InputWindow | None:
@@ -411,7 +418,8 @@ def test_the_orientation_comes_from_the_viewport_lines():
     assert display_orientation(API24) == 0
     assert display_orientation(API36) == 0
     assert display_orientation(API34) == 0  # two lines, both 0
-    assert display_orientation(API30) is None  # no Viewport line
+    assert display_orientation(API30) == 0  # API 29 on: Viewport INTERNAL
+    assert display_orientation(_drop_viewports(API30)) is None
     assert display_orientation(API24.replace(VIEWPORT24, VIEWPORT24_TURNED)) == 1
     assert display_orientation(_set_line(API34, 0, VIEWPORT36_TURNED)) is None
 
@@ -455,11 +463,22 @@ def test_a_rotated_transform_in_the_list_is_rotation():
     assert parse_input_windows(orientation) == ROTATION
 
 
-def test_forms_without_a_viewport_line_are_rotation():
-    # The API 30 to 32 captures kept only the list: no orientation is known.
-    for text in (API30, API31, API32):
-        assert read_window_at(text, (160, 320)) == ROTATION
-    assert isinstance(read_window_at(_with_viewport(API30), (160, 320)), InputWindow)
+def test_without_a_viewport_line_every_form_is_rotation():
+    for text in (API24, API30, API31, API32, API33, API34, API35, API36):
+        assert isinstance(read_window_at(text, (160, 320)), InputWindow)
+        assert read_window_at(_drop_viewports(text), (160, 320)) == ROTATION
+
+
+def test_the_api_26_and_28_viewport_form_is_read():
+    # API 26 and 28 also list "Viewport: ..., uniqueId='', ..." lines.
+    line = (
+        "          Viewport: displayId=0, orientation=0, uniqueId='',"
+        " logicalFrame=[0, 0, 320, 640], physicalFrame=[0, 0, 320, 640],"
+        " deviceSize=[320, 640]"
+    )
+    assert display_orientation(line + "\n" + API24) == 0
+    turned = line.replace("orientation=0", "orientation=1")
+    assert display_orientation(turned + "\n" + API24) is None
 
 
 # --- touch modal windows and portals (API 24 to 32) ---
@@ -593,3 +612,162 @@ def test_an_empty_rectangle_holds_no_point():
     found = _at(text, (272, 458))
     assert found is not None
     assert found.title == SETTINGS
+
+
+# --- round 2: the end of the list, Viewport lines, portals, whole values ---
+
+
+def test_a_name_that_fakes_a_row_and_the_end_of_the_list_is_line_format():
+    # A window name may hold line breaks. Quoted form (API 24): the name
+    # makes a whole row that does not take touches, then a line the list
+    # ends at; the real rest of the line, with the real owner, comes after.
+    real = _line(API24, "u0 InputMethod}")
+    fake = real.replace("visible=true", "visible=false")
+    rest = "x" + real[real.index("}', displayId") :]
+    quoted = API24.replace(real, f"{fake}\n  MonitoringChannels:\n{rest}")
+    assert parse_input_windows(quoted) == LINE_FORMAT
+    # Bare form (API 36).
+    real = _line(API36, "5ebeeda FloatingMenu")
+    fake = real.replace(
+        "inputConfig=NOT_FOCUSABLE | TRUSTED_OVERLAY", "inputConfig=NOT_TOUCHABLE"
+    )
+    rest = "x" + real[real.index(", id=133") :]
+    bare = API36.replace(
+        real,
+        f"{fake}\n      transform (ROT_0) (IDENTITY)\n"
+        f"  mMaximumObscuringOpacityForTouch: 0.800000\n{rest}",
+    )
+    assert parse_input_windows(bare) == LINE_FORMAT
+    # The rest inside the list is a line of no known form.
+    inside = API36.replace(real, f"{fake}\n{rest}")
+    assert parse_input_windows(inside) == LINE_FORMAT
+
+
+@pytest.mark.parametrize(
+    "end",
+    [
+        "  MonitoringChannels:",
+        "  mMaximumObscuringOpacityForTouch: 0.800000",
+        "  Global monitors in display 0:",
+        "  Global monitors on display 0:",
+        "  Connections:",
+    ],
+)
+def test_the_list_ends_at_a_known_line(end):
+    text = API24.replace("  MonitoringChannels:", end)
+    assert not isinstance(parse_input_windows(text), str)
+
+
+def test_a_list_without_a_known_end_is_line_format():
+    unknown = API24.replace("  MonitoringChannels:", "  Mystery:")
+    assert parse_input_windows(unknown) == LINE_FORMAT
+    cut = API24[: API24.index("  MonitoringChannels:")]
+    assert parse_input_windows(cut) == LINE_FORMAT
+    cut36 = API36[: API36.index("  mMaximumObscuring")]
+    assert parse_input_windows(cut36) == LINE_FORMAT
+
+
+def test_a_malformed_or_scaled_viewport_line_is_rotation():
+    lines = API34.split("\n")
+    malformed = _set_line(API34, 1, lines[1].replace("orientation=0", "orientation=x"))
+    assert display_orientation(malformed) is None
+    assert read_window_at(malformed, (160, 320)) == ROTATION
+    scaled = API24.replace(
+        "physicalFrame=[0, 0, 320, 640]", "physicalFrame=[0, 0, 640, 1280]"
+    )
+    assert display_orientation(scaled) is None
+    assert read_window_at(scaled, (160, 320)) == ROTATION
+    moved = API24.replace(
+        "logicalFrame=[0, 0, 320, 640]", "logicalFrame=[0, 8, 320, 648]"
+    )
+    assert read_window_at(moved, (160, 320)) == ROTATION
+    extra = API24.replace("deviceSize=[320, 640]", "deviceSize=[320, 640], more=1")
+    assert read_window_at(extra, (160, 320)) == ROTATION
+
+
+@pytest.mark.parametrize(
+    ("text", "marker"),
+    [
+        (API30, "4f4eb39 u0 com.google"),
+        (API31, "cc3bf00 com.google"),
+        (API32, "84341af com.google"),
+    ],
+)
+def test_a_missing_portal_field_is_line_format_where_the_form_has_it(text, marker):
+    assert parse_input_windows(_edit(text, marker, " portalToDisplayId=-1,", "")) == (
+        LINE_FORMAT
+    )
+
+
+@pytest.mark.parametrize(
+    ("text", "marker", "old", "new", "reason"),
+    [
+        (
+            API36,
+            "5ebeeda FloatingMenu",
+            "touchableRegion=[272,434][320,482]",
+            "touchableRegion=[272,434][320,482], [0,0][10,10]",
+            REGION_FORMAT,
+        ),
+        (
+            API36,
+            "5ebeeda FloatingMenu",
+            "ownerUid=10186,",
+            "ownerUid=10186, x,",
+            LINE_FORMAT,
+        ),
+        (
+            API36,
+            "5ebeeda FloatingMenu",
+            "TRUSTED_OVERLAY, alpha",
+            "TRUSTED_OVERLAY, SPY, alpha",
+            LINE_FORMAT,
+        ),
+        (API36, "5ebeeda FloatingMenu", "displayId=0,", "displayId=0, 1,", LINE_FORMAT),
+        (
+            API24,
+            "u0 InputMethod}",
+            "visible=true,",
+            "visible=true, false,",
+            LINE_FORMAT,
+        ),
+        (
+            API24,
+            "u0 InputMethod}",
+            "flags=0x01800108,",
+            "flags=0x01800108, 0x10,",
+            LINE_FORMAT,
+        ),
+        (
+            API30,
+            "4f4eb39 u0 com.google",
+            "portalToDisplayId=-1,",
+            "portalToDisplayId=-1, 2,",
+            LINE_FORMAT,
+        ),
+    ],
+)
+def test_a_value_with_more_text_before_the_next_field_is_refused(
+    text, marker, old, new, reason
+):
+    assert parse_input_windows(_edit(text, marker, old, new)) == reason
+
+
+def test_a_name_that_fakes_another_display_section_is_line_format():
+    # The real rest of the line (with the real displayId=0) lands in a
+    # section of another display, where it is not a row of that display.
+    real = _line(API36, "5ebeeda FloatingMenu")
+    fake = real.replace(
+        "inputConfig=NOT_FOCUSABLE | TRUSTED_OVERLAY", "inputConfig=NOT_TOUCHABLE"
+    )
+    rest = "      0: name=x" + real[real.index(", id=133") :]
+    moved = API36.replace(
+        real,
+        f"{fake}\n      transform (ROT_0) (IDENTITY)\n"
+        f"  Display: 1\n    Windows:\n{rest}",
+    )
+    assert parse_input_windows(moved) == LINE_FORMAT
+    # A damaged row in another display's list makes the whole output unknown.
+    two = API36.replace("  Display: 0\n", DISPLAY1 + "  Display: 0\n")
+    damaged = two.replace("0: name=abc Other", "0: nom=abc Other")
+    assert parse_input_windows(damaged) == LINE_FORMAT

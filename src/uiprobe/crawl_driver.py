@@ -110,6 +110,7 @@ from uiprobe.errors import (
     UiprobeError,
 )
 from uiprobe.guards import Policy, judge
+from uiprobe.inputwindows import ROTATION
 from uiprobe.runlog import RunFolderError, RunWriter
 
 if TYPE_CHECKING:
@@ -496,9 +497,21 @@ class _Run:
             off_target_focus=focus,
         )
 
-    def cover(self, point: tuple[int, int]) -> tuple[str, dict[str, str | int]] | None:
+    def cover(
+        self, point: tuple[int, int], users: set[int], screen: Screen | None
+    ) -> tuple[str, dict[str, str | int]] | None:
         """Why a tap at `point` must not go out, from the window there, or
         None when the window that takes it belongs to the app.
+
+        `users` are the Android users of the focused window as read before
+        and after the dump: any other than user 0 refuses (``target_user``).
+        `screen` is the gate's own dump: a hierarchy rotated by the dump's
+        ``rotation`` attribute refuses (``rotation``), even when the input
+        reader's Viewport lines say 0; a dump that could not be read leaves
+        this to the other checks (the engine's re-check refuses it).
+        The app's uid is read again right before the window (the app may
+        have been installed again under another uid): it must be readable
+        and the same as at the start (``target_uid``).
 
         The window's owner uid must be the app's app id exactly, so only
         Android user 0 passes (another user's uid is user * 100000 + app id).
@@ -508,18 +521,33 @@ class _Run:
         the package or begin with the package and ``/`` (as an activity's
         window does); a window of the app with another title is refused.
         """
-        if self.app_uid is None:
-            return NOT_SENT_COVER_UNKNOWN, {"unreadable": "target_uid"}
+        app = self.app_uid
+        unknown = "target_uid" if app is None else self.uncovered(app, users, screen)
+        if app is None or unknown is not None:
+            return NOT_SENT_COVER_UNKNOWN, {"unreadable": unknown or "target_uid"}
         found = self.device.window_at(point)
         if isinstance(found, str):
             return NOT_SENT_COVER_UNKNOWN, {"unreadable": found}
-        uid, shared = self.app_uid.uid, self.app_uid.shared
+        uid, shared = app.uid, app.shared
         named = found.title == self.package or found.title.startswith(
             self.package + "/"
         )
         if found.owner_uid == uid and (named or (not shared and uid >= _FIRST_APP_UID)):
             return None
         return NOT_SENT_COVERED, {"window": found.title, "owner_uid": found.owner_uid}
+
+    def uncovered(
+        self, app: PackageUid, users: set[int], screen: Screen | None
+    ) -> str | None:
+        """What makes the window at a tap's point not worth reading (see
+        `cover`), checked in this order, or None."""
+        if users - {0}:
+            return "target_user"
+        if screen is not None and screen.rotation != 0:
+            return ROTATION
+        if self.device.package_uid(self.package) != app:
+            return "target_uid"
+        return None
 
     def refused_tap(
         self, tap: Tap, screen: Screen | None, seen: _Seen
@@ -577,7 +605,12 @@ class _Run:
         self.gate_details = None
         if isinstance(action, Tap):
             # The last read: the window that takes a touch at the point.
-            cover = self.cover(action.point) if self.policy.check_tap_window else None
+            users = {f.user for f in (before, focus) if f is not None}
+            cover = (
+                self.cover(action.point, users, screen)
+                if self.policy.check_tap_window
+                else None
+            )
             allowed = self.engine.recheck(action, seen.observation)
             owners = {None if f is None else f.owner for f in (before, focus)}
             checks = (

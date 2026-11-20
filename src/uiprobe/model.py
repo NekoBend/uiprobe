@@ -7,6 +7,7 @@ every app-provided string is escaped before it is printed in the tree view.
 
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import json
 import re
@@ -206,7 +207,12 @@ def shorten_activity(package: str, activity: str) -> str:
 
 @dataclass(frozen=True)
 class Screen:
-    """A captured screen: where it came from and its elements."""
+    """A captured screen: where it came from and its elements.
+
+    ``rotation`` is the ``rotation`` attribute of the dump's hierarchy (0 to
+    3, quarter turns; 0 when missing). It is not part of the screen's id, its
+    record or its equality.
+    """
 
     serial: str
     captured_at: datetime
@@ -215,6 +221,7 @@ class Screen:
     api_level: int | None
     display: tuple[int, int]
     elements: tuple[Element, ...]
+    rotation: int = dataclasses.field(default=0, compare=False)
 
     @property
     def screen_id(self) -> str:

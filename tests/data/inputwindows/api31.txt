@@ -1,4 +1,7 @@
+      Viewport INTERNAL: displayId=0, uniqueId=local:4619827259835644672, port=0, orientation=0, logicalFrame=[0, 0, 320, 640], physicalFrame=[0, 0, 320, 640], deviceSize=[320, 640], isActive=[1]
+        Viewport INTERNAL: displayId=0, uniqueId=local:4619827259835644672, port=0, orientation=0, logicalFrame=[0, 0, 320, 640], physicalFrame=[0, 0, 320, 640], deviceSize=[320, 640], isActive=[1]
 Input Dispatcher State:
+  Display: 0
     Windows:
       0: name='d145dce StatusBar', id=73, displayId=0, portalToDisplayId=-1, paused=false, focusable=false, hasWallpaper=false, visible=true, alpha=1.00, flags=NOT_FOCUSABLE | SPLIT_TOUCH | HARDWARE_ACCELERATED | DRAWS_SYSTEM_BAR_BACKGROUNDS, type=2000, frame=[0,0][320,24], globalScale=1.000000, applicationInfo.name=, applicationInfo.token=<null>, touchableRegion=[0,0][320,24], inputFeatures=0x0, ownerPid=691, ownerUid=10134, dispatchingTimeout=5000ms, trustedOverlay=true, hasToken=true, touchOcclusionMode=BLOCK_UNTRUSTED
         transform (ROT_0) (IDENTITY)
@@ -15,3 +18,4 @@ Input Dispatcher State:
             0.0000  0.0000  1.0000
       5: name='3f82786 com.android.systemui.ImageWallpaper', id=71, displayId=0, portalToDisplayId=-1, paused=false, focusable=false, hasWallpaper=false, visible=true, alpha=1.00, flags=NOT_FOCUSABLE | NOT_TOUCHABLE | LAYOUT_IN_SCREEN | LAYOUT_NO_LIMITS | SCALED | LAYOUT_INSET_DECOR, type=2013, frame=[0,0][0,0], globalScale=1.000000, applicationInfo.name=, applicationInfo.token=<null>, touchableRegion=[0,0][776,640], inputFeatures=0x0, ownerPid=691, ownerUid=10134, dispatchingTimeout=5000ms, trustedOverlay=false, hasToken=true, touchOcclusionMode=BLOCK_UNTRUSTED
         transform (ROT_0) (IDENTITY)
+  Connections:

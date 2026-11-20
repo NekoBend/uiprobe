@@ -99,12 +99,14 @@ class FocusedWindow(NamedTuple):
     """The window that has input focus: its owner package, title and hash.
 
     ``window`` is the hash ``dumpsys window`` prints for the window, which
-    tells two windows with the same owner and title apart.
+    tells two windows with the same owner and title apart. ``user`` is the
+    Android user it belongs to (the ``u<N>`` of ``Window{<hash> u<N> ...}``).
     """
 
     owner: str
     title: str
     window: str
+    user: int = 0
 
 
 class DeviceIdentity(NamedTuple):
@@ -960,10 +962,10 @@ def _read_source(text: str, source: _Source) -> tuple[str, str] | object | None:
 
 _CURRENT_FOCUS_CLAIM: Final = re.compile(r"\s*mCurrentFocus=")
 _CURRENT_FOCUS: Final = re.compile(
-    r"\s*mCurrentFocus=Window\{([0-9a-f]{1,16}) u[0-9]{1,3} ([^{}\r\n]{1,512})\}\s*"
+    r"\s*mCurrentFocus=Window\{([0-9a-f]{1,16}) u([0-9]{1,3}) ([^{}\r\n]{1,512})\}\s*"
 )
 _WINDOW_HEAD: Final = re.compile(
-    r"  Window #[0-9]{1,4} Window\{([0-9a-f]{1,16}) u[0-9]{1,3} ([^{}\r\n]{1,512})\}:"
+    r"  Window #[0-9]{1,4} Window\{([0-9a-f]{1,16}) u([0-9]{1,3}) ([^{}\r\n]{1,512})\}:"
 )
 # The system writes this line; 24 has mShowToOwnerOnly, 30 and 36 showForAllUsers.
 _WINDOW_OWNER: Final = re.compile(
@@ -973,8 +975,8 @@ _WINDOW_OWNER: Final = re.compile(
 )
 
 
-def _read_current_focus(text: str) -> tuple[str, str] | None:
-    """The ``(hash, title)`` of the focused window, or None.
+def _read_current_focus(text: str) -> tuple[str, str, str] | None:
+    """The ``(hash, title, user)`` of the focused window, or None.
 
     Every line that claims ``mCurrentFocus`` must be well formed and all must
     name the same window; anything else is None.
@@ -984,18 +986,20 @@ def _read_current_focus(text: str) -> tuple[str, str] | None:
         for line in text.split("\n")
         if _CURRENT_FOCUS_CLAIM.match(line)
     }
-    windows: set[tuple[str, str]] = set()
+    windows: set[tuple[str, str, str]] = set()
     for line in lines:
         match = (
             _CURRENT_FOCUS.fullmatch(line) if len(line) <= _MAX_DUMPSYS_LINE else None
         )
         if match is None:
             return None
-        windows.add((match[1], match[2]))
+        windows.add((match[1], match[3], match[2]))
     return windows.pop() if len(windows) == 1 else None
 
 
-def _read_window_owner(text: str, window: str, title: str) -> FocusedWindow | None:
+def _read_window_owner(
+    text: str, window: str, title: str, user: str
+) -> FocusedWindow | None:
     """The owner of window `window` from its block, or None (see focused_window)."""
     lines = [line.rstrip("\r") for line in text.split("\n")]
     heads = [
@@ -1008,10 +1012,10 @@ def _read_window_owner(text: str, window: str, title: str) -> FocusedWindow | No
     index = heads[0]
     line = lines[index]
     head = _WINDOW_HEAD.fullmatch(line) if len(line) <= _MAX_DUMPSYS_LINE else None
-    if head is None or head[1] != window or head[2] != title:
+    if head is None or head[1] != window or head[2] != user or head[3] != title:
         return None
     owner = _WINDOW_OWNER.fullmatch(lines[index + 2])
-    return None if owner is None else FocusedWindow(owner[1], title, window)
+    return None if owner is None else FocusedWindow(owner[1], title, window, int(user))
 
 
 _BOOL = r"(true|false)"
@@ -2596,6 +2600,7 @@ class Device:
             api_level=self.api_level() if details else None,
             display=display,
             elements=tuple(elements),
+            rotation=parsed.rotation,
         )
         self._latest_screen = screen
         self._latest_display_measured = measured is not None

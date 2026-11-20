@@ -276,6 +276,10 @@ class FakeAndroid:
     # The display's orientation in ``dumpsys input`` (0 to 3); None: the input
     # reader prints no Viewport line for display 0.
     orientation: int | None = 0
+    # The Android user of the focused window (``u<N>`` in its record).
+    focus_user: int = 0
+    # The ``rotation`` attribute of the uiautomator dump's hierarchy.
+    dump_rotation: int = 0
     # What ``cat /proc/sys/kernel/random/boot_id`` prints; None: the file
     # cannot be read (the identity command then prints an empty line).
     boot_id: str | None = "3ea6a12b-8379-445f-852a-73a2c4c3ff17"
@@ -930,7 +934,7 @@ class FakeAndroid:
                 windows += self._window(KEYBOARD_PACKAGE, keys, 1)
         return (
             "<?xml version='1.0' encoding='UTF-8' standalone='yes' ?>"
-            f'<hierarchy rotation="0">{windows}</hierarchy>'
+            f'<hierarchy rotation="{self.dump_rotation}">{windows}</hierarchy>'
         ).encode()
 
     def _record(self) -> str:
@@ -957,7 +961,8 @@ class FakeAndroid:
         component = self._title_component()
         lines = [
             "WINDOW MANAGER WINDOWS (dumpsys window windows)",
-            f"  mCurrentFocus=Window{{{_hex(component)} u0 {component}}}",
+            f"  mCurrentFocus=Window{{{_hex(component)} u{self.focus_user}"
+            f" {component}}}",
         ]
         if self.focused_app_line and self.api < 30:
             token = f"Token{{{_hex(record)} {record}}}"
@@ -996,7 +1001,7 @@ class FakeAndroid:
             "    mDisplayId=0 mSession=Session{77 1:u0a1} mClient=BinderProxy@1",
             f"    mOwnerUid=10100 showForAllUsers=false package={KEYBOARD_PACKAGE}"
             " appop=NONE",
-            f"  Window #1 Window{{{_hex(title)} u0 {title}}}:",
+            f"  Window #1 Window{{{_hex(title)} u{self.focus_user} {title}}}:",
             "    mDisplayId=0 taskId=5 mSession=Session{88 2:u0a2} mClient=Proxy@2",
             f"    mOwnerUid=10150 showForAllUsers=false package={owner} appop=NONE",
         ]
@@ -1015,7 +1020,7 @@ class FakeAndroid:
 
         The stanza of a package whose name begins with `name` comes first, and
         a ``Shared users:`` section repeats the uid after the stanzas (as on
-        the emulators); neither must be read as the package's. API 24 and 33
+        the emulators); neither must be read as the package's. API 24 to 33
         print ``userId=``; ``appId=`` was seen on API 34, 35 and 36 emulators,
         so the fake prints it from API 34 on.
         """
@@ -1043,13 +1048,14 @@ class FakeAndroid:
             "    User 0: ceDataInode=1 installed=true hidden=false",
             "      gids=[3003]",
         ]
+        lines += ["", "Queries:", "  system apps queryable: false"]
         if shared is not None:
             lines += [
-                "",
                 "Shared users:",
                 f"  SharedUser [{shared}] ({_hex(shared)}):",
                 f"    {key}={self.uid_of(name)}",
             ]
+        lines.append("Dexopt state:")
         return "\n".join(lines) + "\n" + self.extra_dumpsys.get("package", "")
 
     def uid_of(self, package: str) -> int:

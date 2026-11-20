@@ -1,5 +1,6 @@
       Viewport INTERNAL: displayId=0, uniqueId=local:4619827259835644672, port=0, orientation=0, logicalFrame=[0, 0, 320, 640], physicalFrame=[0, 0, 320, 640], deviceSize=[320, 640], isActive=[1]
 Input Dispatcher State:
+  Display: 0
     Windows:
       0: name='[Gesture Monitor] swipe-up', id=72, displayId=0, inputConfig=NOT_FOCUSABLE | TRUSTED_OVERLAY | SPY, alpha=1.00, frame=[0,0][0,0], globalScale=1.000000, applicationInfo.name=[Gesture Monitor] swipe-up, applicationInfo.token=<null>, touchableRegion=[-3199,-6399][3200,6400], ownerPid=1019, ownerUid=10153, dispatchingTimeout=5000ms, hasToken=true, touchOcclusionMode=BLOCK_UNTRUSTED
         transform (ROT_0) (IDENTITY)
@@ -21,3 +22,4 @@ Input Dispatcher State:
             1.4552  -0.0000  23.2828
             -0.0000  1.4545  46.5455
             0.0000  0.0000  1.0000
+  Connections:

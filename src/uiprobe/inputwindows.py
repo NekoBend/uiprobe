@@ -37,9 +37,16 @@ read. Anything that does not read as one of these forms makes the whole list
 unknown, because a line that cannot be read could be the window on top: a
 window line of no known form, one with a read field twice (a window's title
 and ``applicationInfo.name`` are printed as the app gave them, so text there
-must not pass for a field), a flag name that is not known, row numbers that
-do not run 0, 1, 2, ..., any other line inside the list, or more than one
-list that could be the display's.
+must not pass for a field), a field whose value is followed by more text
+before the next ``, key=`` field, a flag name that is not known, row numbers
+that do not run 0, 1, 2, ..., any other line inside the list, more than one
+list that could be the display's, a list that does not end at a line it is
+known to end at (`_LIST_END`), a line outside every window list that holds
+``ownerUid=``, or a line of another display's list of no known form (those
+lists are read too). The last three matter because a window name may hold
+line breaks: it could fake a whole row and the end of the list, and the real
+rest of its line, with the real owner and display, would then land outside
+the list or in another display's list.
 
 The legacy dispatcher (API 24 to 32) gives a touch anywhere on the display to
 a visible touchable window that is "touch modal", one with neither
@@ -48,7 +55,9 @@ of Android 11 and 12), whatever its touchable region; such a window holds
 every point here. The ``inputConfig`` forms have no such flag, and their
 region is read as printed. A window with ``portalToDisplayId`` other than -1
 forwards a touch to another display, whose windows are not read: a hit on it
-is `PORTAL`.
+is `PORTAL`; on the forms that print the field (API 29 to 32: the hex form
+with ``globalScale=``, and the named flags form) a line without it is
+`LINE_FORMAT`.
 
 The display's rotation: on API 36 the touchable regions are printed in the
 display's unrotated coordinates and the dispatcher turns a tap's point by the
@@ -59,13 +68,15 @@ the rotation (the same emulator printed [0,0][640,24]), so a rotated display
 would be read right there; but the forms in between were not seen rotated, so
 every form is treated alike and a rotated display gives `ROTATION`. The
 orientation comes from the input reader's ``Viewport`` lines of the display,
-which are part of the same ``dumpsys input`` (API 24: ``Viewport: displayId=0,
-orientation=N, ...``; API 33 to 36: ``Viewport INTERNAL: displayId=0, ...,
-orientation=N, ...``, on API 34 to 36 more than once, one per input device;
-lines of other displays, such as ``displayId=-1``, are not read). Only lines
-above the dispatcher's part are read, where no window title is printed. Every
-such line must say 0: none (not checked on API 26 to 32, whose captures kept
-only the window list) or lines that disagree are `ROTATION` as well. In
+which are part of the same ``dumpsys input`` (API 24 to 28: ``Viewport:
+displayId=0, orientation=N, ...``, on API 26 and 28 also with ``uniqueId=''``;
+API 29 to 36: ``Viewport INTERNAL: displayId=0, ..., orientation=N, ...``;
+on most versions more than once; lines of other displays, such as
+``displayId=-1``, are not read). Only lines above the dispatcher's part are
+read, where no window title is printed. Every line of the display must be of
+one of these forms, say 0 and have its ``logicalFrame`` equal to its
+``physicalFrame`` (a display that is not scaled or moved); a line of another
+form, none at all, or lines that disagree are `ROTATION` as well. In
 addition a ``transform`` line in the list whose rotation is not ``ROT_0``, a
 ``displayOrientation=`` other than 0 (API 32) or a display transform that is
 not ``(ROT_0) (IDENTITY)`` (API 36; a display scaled with ``wm size`` is not
@@ -189,29 +200,47 @@ _ONCE: Final = (
     "portalToDisplayId=",
 )
 _HEADER: Final = "Input Dispatcher State:"
+# A field's value ends where the next field begins (or the line ends), so a
+# value is read whole: text after it that is not another field is no form.
+_NEXT = r"(?=, [A-Za-z][A-Za-z0-9_.]*=|$)"
 _LINE = re.compile(
     r"^(?P<index>0|[1-9]\d{0,4}): name=(?:'(?P<quoted>[^']*)'|(?P<bare>.*?)), "
-    r"(?:id=\d{1,10}, )?displayId=(?P<display>-?\d{1,10}),"
+    rf"(?:id=\d{{1,10}}, )?displayId=(?P<display>-?\d{{1,10}}){_NEXT}"
 )
 _NUMBER: Final = r"-?\d{1,7}"
 _REGION = re.compile(
     rf", touchableRegion=(?:(?P<empty><empty>)|\[(?P<l>{_NUMBER}),(?P<t>{_NUMBER})\]"
-    rf"\[(?P<r>{_NUMBER}),(?P<b>{_NUMBER})\])(?:, |$)"
+    rf"\[(?P<r>{_NUMBER}),(?P<b>{_NUMBER})\]){_NEXT}"
 )
-_UID = re.compile(r", ownerUid=(?P<uid>\d{1,10})(?:,|$)")
-_INPUT_CONFIG = re.compile(r", inputConfig=(?P<names>[^,]*),")
-_HEX_FLAGS = re.compile(r", flags=0x(?P<hex>[0-9a-fA-F]{1,8}),")
-_NAMED_FLAGS = re.compile(r", flags=(?P<names>[^,]*),")
-_VISIBLE = re.compile(r", visible=(?P<visible>true|false),")
-_PORTAL = re.compile(r", portalToDisplayId=(?P<to>-?\d{1,10}),")
+_UID = re.compile(rf", ownerUid=(?P<uid>\d{{1,10}}){_NEXT}")
+_INPUT_CONFIG = re.compile(rf", inputConfig=(?P<names>[^,]*){_NEXT}")
+_HEX_FLAGS = re.compile(rf", flags=0x(?P<hex>[0-9a-fA-F]{{1,8}}){_NEXT}")
+_NAMED_FLAGS = re.compile(rf", flags=(?P<names>[^,]*){_NEXT}")
+_VISIBLE = re.compile(rf", visible=(?P<visible>true|false){_NEXT}")
+_PORTAL = re.compile(rf", portalToDisplayId=(?P<to>-?\d{{1,10}}){_NEXT}")
 _LINE_ORIENTATION = re.compile(r"displayOrientation=(\d+)")
 _TRANSFORM = re.compile(r"^transform \(ROT_(?P<rot>\d+)\) \((?P<kind>[A-Z ]+)\)$")
 _MATRIX_ROW = re.compile(r"^-?\d+\.\d+(?: +-?\d+\.\d+){2}$")
 _INDEX = re.compile(r"^\d+:")
 _DISPLAY = re.compile(r"^Display: -?\d{1,10}$")
+_RECT: Final = r"-?\d{1,7}, -?\d{1,7}, -?\d{1,7}, -?\d{1,7}"
+# The input reader's Viewport line of a display, in the forms of API 24 to 28
+# (API 26 and 28 also list ``Viewport: ..., uniqueId='', ...``) and of API 29
+# on (``Viewport INTERNAL: ..., uniqueId=..., port=...``, isActive from 30).
+_VIEWPORT_CLAIM = re.compile(r"^\s*Viewport\b.*?\bdisplayId=(?P<display>-?\d+)\b")
 _VIEWPORT = re.compile(
-    r"^\s*Viewport(?: [A-Z]+)?: displayId=(?P<display>-?\d{1,10}), "
-    r"(?:.*?, )?orientation=(?P<orientation>\d{1,2})(?:,|$)"
+    r"\s*Viewport(?: [A-Z]+)?: displayId=(?P<display>-?\d{1,10}), "
+    r"(?:uniqueId=[^,\s]*, port=(?:\d{1,10}|<none>), )?"
+    r"orientation=(?P<orientation>[0-3]), (?:uniqueId='[^']*', )?"
+    rf"logicalFrame=\[(?P<logical>{_RECT})\], "
+    rf"physicalFrame=\[(?P<physical>{_RECT})\], deviceSize=\[\d{{1,7}}, \d{{1,7}}\]"
+    r"(?:, isActive=\[[01]\])?"
+)
+# The lines that may follow a window list (the captures' lists all ended at
+# one of the first four; a list per display may be followed by the next).
+_LIST_END = re.compile(
+    r"^(?:MonitoringChannels:|mMaximumObscuringOpacityForTouch: .*|"
+    r"Global monitors (?:in|on) display -?\d{1,10}:|Connections:|Display: -?\d{1,10})$"
 )
 _WINDOW_TITLE = re.compile(r"^Window\{[0-9a-f]+ u\d+ (?P<title>.*)\}$")
 _HASH_TITLE = re.compile(r"^[0-9a-f]+ (?P<title>.*)$")
@@ -258,6 +287,8 @@ class _List:
     lines: list[str]
     display: int | None  # the list's ``Display:`` section; None: one list
     rotated: bool  # the section's display transform is not the identity
+    problem: str | None = None  # why the list cannot be read as a whole
+    others: tuple[_List, ...] = ()  # the lists of the other displays
 
 
 def _indent(line: str) -> int:
@@ -279,19 +310,24 @@ def _under(lines: list[str], start: int) -> tuple[list[int], int]:
     return found, nearest
 
 
-def _listed(lines: list[str], head: int) -> list[str]:
-    """The non-blank lines of the window list that ``lines[head]`` begins:
-    those more indented than it, and ``transform`` lines at any indent (API
-    35 prints them at the indent of ``Windows:``), up to the first other."""
+def _listed(lines: list[str], head: int) -> tuple[list[int], bool]:
+    """The window list that ``lines[head]`` begins, and whether it ends well.
+
+    The list is the non-blank lines more indented than ``lines[head]``, and
+    ``transform`` lines at any indent (API 35 prints them at the indent of
+    ``Windows:``), up to the first other line. That line must be one a list
+    is known to end at (`_LIST_END`); the end of the text is not.
+    """
     level = _indent(lines[head])
-    found: list[str] = []
-    for line in lines[head + 1 :]:
+    taken: list[int] = []
+    for i in range(head + 1, len(lines)):
+        line = lines[i]
         if not line.strip():
             continue
         if _indent(line) <= level and not line.lstrip().startswith("transform ("):
-            break
-        found.append(line)
-    return found
+            return taken, _LIST_END.match(line.strip()) is not None
+        taken.append(i)
+    return taken, False
 
 
 def _dispatcher_start(lines: list[str]) -> int | None:
@@ -315,38 +351,88 @@ def _window_list(lines: list[str], display_id: int) -> _List | None:
 
     Either one ``Windows:`` list directly under the header (API 24 to 28,
     every display in one list) or ``Display: <id>`` sections there, each with
-    one ``Windows:`` list (API 36): never both, the display's at most once.
-    A ``Windows:`` list deeper down (the windows a touch in progress went to)
-    is not one of them.
+    at most one ``Windows:`` list (API 29 on): never both, the display's
+    section exactly once. A ``Windows:`` list deeper down (the windows a
+    touch in progress went to) is not one of them.
+
+    A window name is printed as the app gave it and may hold line breaks, so
+    a name could fake a whole row and the end of the list (or a new section):
+    the real rest of its line, with the real ``displayId=`` and
+    ``ownerUid=``, then lands outside the list or in another display's list.
+    So every list must end at a line it is known to end at, the other
+    displays' lists are read too (`_List.others`), and a line outside every
+    list that holds ``ownerUid=`` (no other line of ``dumpsys input`` has it
+    in the captures) makes the list `LINE_FORMAT`.
     """
     start = _dispatcher_start(lines)
     if start is None:
         return None
     found, level = _under(lines, start)
-    lists = _heads(lines, found, level)
-    sections = [
-        i
-        for i in found
-        if _indent(lines[i]) == level and _DISPLAY.match(lines[i].strip())
-    ]
+    tops = [i for i in found if _indent(lines[i]) == level]
+    lists = _heads(lines, tops, level)
+    sections = [i for i in tops if _DISPLAY.match(lines[i].strip())]
     if lists and not sections:
         if len(lists) != 1 or lines[lists[0]].strip() != "Windows:":
             return None
-        return _List(_listed(lines, lists[0]), None, rotated=False)
+        taken, ended = _listed(lines, lists[0])
+        problem = _stray(lines, taken, ended=ended)
+        return _List([lines[i] for i in taken], None, rotated=False, problem=problem)
     ours = [i for i in sections if lines[i].strip() == f"Display: {display_id}"]
     if lists or len(ours) != 1:
         return None
-    section, inner = _under(lines, ours[0])
-    heads = _heads(lines, section, inner)
-    if len(heads) != 1 or lines[heads[0]].strip() != "Windows:":
+    return _sections(lines, sections, ours[0], display_id)
+
+
+def _sections(
+    lines: list[str], sections: list[int], ours: int, display_id: int
+) -> _List | None:
+    """The list of the ``Display:`` section at `ours`, with the lists of the
+    other sections at `sections` (see `_window_list`)."""
+    every: list[int] = []
+    ended_all = True
+    mine: _List | None = None
+    others: list[_List] = []
+    for head in sections:
+        section, inner = _under(lines, head)
+        heads = _heads(lines, section, inner)
+        listed = [i for i in heads if lines[i].strip() == "Windows:"]
+        if len(heads) > 1 or (head == ours and len(listed) != 1):
+            return None
+        if not listed:
+            continue
+        taken, ended = _listed(lines, listed[0])
+        every += taken
+        ended_all = ended_all and ended
+        transforms = [
+            lines[i].strip()
+            for i in section
+            if i < listed[0] and lines[i].strip().startswith("transform ")
+        ]
+        rotated = len(transforms) > 1 or any(line != _IDENTITY for line in transforms)
+        shown = int(lines[head].strip().removeprefix("Display: "))
+        read = _List([lines[i] for i in taken], shown, rotated=rotated)
+        if head == ours:
+            mine = read
+        else:
+            others.append(read)
+    if mine is None:
         return None
-    transforms = [
-        lines[i].strip()
-        for i in section
-        if i < heads[0] and lines[i].strip().startswith("transform ")
-    ]
-    rotated = len(transforms) > 1 or any(line != _IDENTITY for line in transforms)
-    return _List(_listed(lines, heads[0]), display_id, rotated=rotated)
+    problem = _stray(lines, every, ended=ended_all)
+    return _List(
+        mine.lines,
+        display_id,
+        rotated=mine.rotated,
+        problem=problem,
+        others=tuple(others),
+    )
+
+
+def _stray(lines: list[str], inside: list[int], *, ended: bool) -> str | None:
+    """`LINE_FORMAT` when a list did not end well or a line outside the lists
+    (indices `inside`) holds ``ownerUid=``; None otherwise."""
+    taken = set(inside)
+    stray = any("ownerUid=" in line for i, line in enumerate(lines) if i not in taken)
+    return LINE_FORMAT if stray or not ended else None
 
 
 def _title(name: str) -> str:
@@ -365,9 +451,10 @@ def _names(value: str, known: frozenset[str]) -> frozenset[str] | None:
     return frozenset(names)
 
 
-def _touch(line: str) -> tuple[bool, bool] | None:
-    """Whether the window takes touches and whether it is touch modal; None
-    when the line has no known form."""
+def _touch(line: str) -> tuple[bool, bool, bool] | None:
+    """Whether the window takes touches, whether it is touch modal and whether
+    its form prints ``portalToDisplayId`` (API 29 to 32); None when the line
+    has no known form."""
     config = _INPUT_CONFIG.search(line)
     visible = _VISIBLE.search(line)
     hex_flags = _HEX_FLAGS.search(line)
@@ -376,7 +463,7 @@ def _touch(line: str) -> tuple[bool, bool] | None:
         names = _names(config["names"], _INPUT_CONFIG_NAMES)
         if names is None or visible is not None or named is not None:
             return None
-        return not names & _NOT_TAKING, False
+        return not names & _NOT_TAKING, False, False
     if visible is None:
         return None
     shown = visible["visible"] == "true"
@@ -384,12 +471,14 @@ def _touch(line: str) -> tuple[bool, bool] | None:
         bits = int(hex_flags["hex"], 16)
         takes = shown and not bits & _FLAG_NOT_TOUCHABLE
         not_modal = bits & (_FLAG_NOT_FOCUSABLE | _FLAG_NOT_TOUCH_MODAL)
-        return takes, takes and not not_modal
+        # API 29 and 30 print globalScale= and portalToDisplayId=; API 24 to
+        # 28 print scale= and no portal.
+        return takes, takes and not not_modal, ", globalScale=" in line
     names = None if named is None else _names(named["names"], _FLAG_NAMES)
     if names is None:  # neither form
         return None
     takes = shown and "NOT_TOUCHABLE" not in names  # API 31 and 32
-    return takes, takes and not names & {"NOT_FOCUSABLE", "NOT_TOUCH_MODAL"}
+    return takes, takes and not names & {"NOT_FOCUSABLE", "NOT_TOUCH_MODAL"}, True
 
 
 def _window(line: str, name: str) -> InputWindow | str:
@@ -399,7 +488,7 @@ def _window(line: str, name: str) -> InputWindow | str:
     portal = _PORTAL.search(line)
     if touch is None or uid is None:
         return LINE_FORMAT
-    if portal is None and "portalToDisplayId=" in line:
+    if portal is None and ("portalToDisplayId=" in line or touch[2]):
         return LINE_FORMAT
     region = _REGION.search(line)
     if region is None:
@@ -411,7 +500,7 @@ def _window(line: str, name: str) -> InputWindow | str:
         if left > right or top > bottom:
             return REGION_FORMAT
         bounds = (left, top, right, bottom)
-    takes, modal = touch
+    takes, modal, _ = touch
     return InputWindow(
         _title(name),
         takes_touch=takes,
@@ -487,9 +576,23 @@ def parse_input_windows(
     """
     lines = [line.removesuffix("\r") for line in text.split("\n")]
     found = _window_list(lines, display_id)
-    groups = None if found is None else _group(found.lines)
-    if found is None or groups is None:
-        return NO_LIST if found is None else LINE_FORMAT
+    if found is None:
+        return NO_LIST
+    if found.problem is not None:
+        return found.problem
+    for other in found.others:  # read as well: a name could have made them
+        read = _read(other, display_id if other.display is None else other.display)
+        if read in {LINE_FORMAT, REGION_FORMAT}:
+            return read
+    return _read(found, display_id)
+
+
+def _read(found: _List, display_id: int) -> tuple[InputWindow, ...] | str:
+    """Read the windows of `display_id` in the list `found` (see
+    `parse_input_windows`)."""
+    groups = _group(found.lines)
+    if groups is None:
+        return LINE_FORMAT
     windows: list[InputWindow] = []
     rotated = found.rotated
     for index, (line, rest) in enumerate(groups):
@@ -511,17 +614,24 @@ def display_orientation(text: str, display_id: int = 0) -> int | None:
     None when it cannot be read.
 
     Reads the input reader's ``Viewport`` lines of the display, above the
-    dispatcher's part of ``dumpsys input``; they must all say the same.
+    dispatcher's part of ``dumpsys input``. Every line that names the display
+    must be of a known form and have its logical frame equal to its physical
+    frame (a display that is not scaled or moved), and all must say the same
+    orientation.
     """
     lines = [line.removesuffix("\r") for line in text.split("\n")]
     start = _dispatcher_start(lines)
     if start is None:
         return None
-    said = {
-        int(match["orientation"])
-        for match in map(_VIEWPORT.match, lines[:start])
-        if match is not None and int(match["display"]) == display_id
-    }
+    said: set[int] = set()
+    for line in lines[:start]:
+        claim = _VIEWPORT_CLAIM.match(line)
+        if claim is None or int(claim["display"]) != display_id:
+            continue
+        match = _VIEWPORT.fullmatch(line)
+        if match is None or match["logical"] != match["physical"]:
+            return None
+        said.add(int(match["orientation"]))
     return next(iter(said)) if len(said) == 1 else None
 
 

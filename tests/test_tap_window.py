@@ -11,7 +11,7 @@ from tests.fake_device import FakeAndroid
 from tests.test_crawl_driver import SCREENS, SERIAL, SHOP, TRANSPORT, Clock, lines, run
 from tests.test_repin import Waits, listing, renumber
 from uiprobe.crawl import Limits
-from uiprobe.device import Device
+from uiprobe.device import EXIT_MARKER, Device
 from uiprobe.guards import Policy
 from uiprobe.packageuid import PackageUid
 
@@ -274,3 +274,102 @@ def test_a_device_away_during_the_window_read_is_device_reconnected(
     refused = _covered(out)
     assert refused[0]["reason"] == "device_reconnected"
     assert "details" not in refused[0]
+
+
+# --- round 2: the uid read again, the focused window's user, the command ---
+
+
+def test_an_app_uid_that_changes_during_the_run_refuses_the_tap(
+    tmp_path: Path, device, android, clock, monkeypatch
+):
+    # The app is installed again under another uid after the run began: the
+    # uid read right before the window no longer matches the first one.
+    original = device.package_uid
+    reads = [0]
+
+    def changed(package: str) -> object:
+        reads[0] += 1
+        if reads[0] > 1:
+            android.uids[SHOP] = 10777
+        return original(package)
+
+    monkeypatch.setattr(device, "package_uid", changed)
+    out = tmp_path / "run"
+    run(device, clock, out, limits=Limits(actions=3))
+    assert _taps(android) == []
+    refused = _covered(out)
+    assert refused
+    assert refused[0]["details"] == {"unreadable": "target_uid"}
+    assert reads[0] >= 2
+
+
+def test_an_app_uid_that_can_no_longer_be_read_refuses_the_tap(
+    tmp_path: Path, device, android, clock, monkeypatch
+):
+    original = device.package_uid
+    reads = [0]
+
+    def unreadable(package: str) -> object:
+        reads[0] += 1
+        return original(package) if reads[0] == 1 else None
+
+    monkeypatch.setattr(device, "package_uid", unreadable)
+    out = tmp_path / "run"
+    run(device, clock, out, limits=Limits(actions=3))
+    assert _taps(android) == []
+    assert _covered(out)[0]["details"] == {"unreadable": "target_uid"}
+
+
+def test_the_uid_is_read_again_before_each_window_read(
+    tmp_path: Path, device, clock, fake_adb
+):
+    out = tmp_path / "run"
+    run(device, clock, out, limits=Limits(actions=3))
+    commands = [c for _, _, c in fake_adb.commands]
+    reads = [i for i, c in enumerate(commands) if c == "dumpsys input"]
+    assert reads
+    for index in reads:
+        assert commands[index - 1] == f"dumpsys package {SHOP}"
+
+
+def test_a_focused_window_of_another_user_refuses_every_tap(
+    tmp_path: Path, device, android, clock, fake_adb
+):
+    # The app is in front for user 10 (a work profile): its windows there
+    # have another uid, so nothing proves the window at the point is its.
+    android.focus_user = 10
+    out = tmp_path / "run"
+    run(device, clock, out, limits=Limits(actions=3))
+    assert _taps(android) == []
+    refused = _covered(out)
+    assert refused
+    assert refused[0]["details"] == {"unreadable": "target_user"}
+    assert not [c for _, _, c in fake_adb.commands if c == "dumpsys input"]
+
+
+def test_the_crawl_taps_with_a_10_ms_swipe_from_the_point_to_itself(
+    tmp_path: Path, device, android, clock, fake_adb
+):
+    out = tmp_path / "run"
+    run(device, clock, out, limits=Limits(actions=3))
+    assert BROWSE in _taps(android)
+    x, y = BROWSE
+    sent = [c for _, _, c in fake_adb.commands if c.startswith("input ")]
+    assert f"input swipe {x} {y} {x} {y} 10; echo {EXIT_MARKER}$?" in sent
+    assert not [c for c in sent if c.startswith("input tap")]
+
+
+def test_a_rotated_dump_refuses_the_tap_even_with_viewport_0(
+    tmp_path: Path, device, android, clock, fake_adb
+):
+    # The input reader says orientation 0, but the gate's own dump says the
+    # hierarchy is turned once: the tap is refused before the window read.
+    android.dump_rotation = 1
+    out = tmp_path / "run"
+    run(device, clock, out, limits=Limits(actions=3))
+    assert _taps(android) == []
+    refused = _covered(out)
+    assert refused
+    assert {r["reason"] for r in refused} == {"cover_unknown"}
+    assert refused[0]["details"] == {"unreadable": "rotation"}
+    assert not [c for _, _, c in fake_adb.commands if c == "dumpsys input"]

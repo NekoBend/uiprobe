@@ -1,4 +1,7 @@
+      Viewport INTERNAL: displayId=0, uniqueId=local:4619827259835644672, port=0, orientation=0, logicalFrame=[0, 0, 320, 640], physicalFrame=[0, 0, 320, 640], deviceSize=[320, 640], isActive=[1]
+        Viewport INTERNAL: displayId=0, uniqueId=local:4619827259835644672, port=0, orientation=0, logicalFrame=[0, 0, 320, 640], physicalFrame=[0, 0, 320, 640], deviceSize=[320, 640], isActive=[1]
 Input Dispatcher State:
+  Display: 0
     Windows:
       0: name='2c0698f ScreenDecorOverlayBottom', id=71, displayId=0, portalToDisplayId=-1, paused=false, focusable=false, hasWallpaper=false, visible=true, alpha=1.00, flags=NOT_FOCUSABLE | NOT_TOUCH_MODAL | LAYOUT_IN_SCREEN | SPLIT_TOUCH | SLIPPERY, type=2024, frame=[0,616][320,640], globalScale=1.000000, applicationInfo.name=, applicationInfo.token=<null>, touchableRegion=<empty>, inputFeatures=0x0, ownerPid=700, ownerUid=10139, dispatchingTimeout=5000ms, trustedOverlay=true, hasToken=true, touchOcclusionMode=BLOCK_UNTRUSTED, displayOrientation=0
         transform (ROT_0) (TRANSLATE)
@@ -22,3 +25,4 @@ Input Dispatcher State:
             0.0000  0.0000  1.0000
       7: name='b791175 com.android.systemui.ImageWallpaper', id=69, displayId=0, portalToDisplayId=-1, paused=false, focusable=false, hasWallpaper=false, visible=true, alpha=1.00, flags=NOT_FOCUSABLE | NOT_TOUCHABLE | NOT_TOUCH_MODAL | LAYOUT_IN_SCREEN | LAYOUT_NO_LIMITS | SCALED | LAYOUT_INSET_DECOR, type=2013, frame=[0,0][0,0], globalScale=1.000000, applicationInfo.name=, applicationInfo.token=<null>, touchableRegion=<empty>, inputFeatures=0x0, ownerPid=700, ownerUid=10139, dispatchingTimeout=5000ms, trustedOverlay=false, hasToken=true, touchOcclusionMode=BLOCK_UNTRUSTED, displayOrientation=0
         transform (ROT_0) (IDENTITY)
+  Connections:
