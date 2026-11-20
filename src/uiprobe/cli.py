@@ -21,12 +21,16 @@ import os
 import re
 import stat
 import sys
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, NoReturn, TextIO, override
 
 from uiprobe import __version__
 from uiprobe._json import dumps
+from uiprobe.crawl import Limits
+from uiprobe.crawl_driver import CrawlResult, _check_device
+from uiprobe.crawl_driver import crawl as crawl_run
 from uiprobe.crawl_preview import check_package
 from uiprobe.crawl_preview import preview as make_preview
 from uiprobe.device import (
@@ -35,6 +39,7 @@ from uiprobe.device import (
     DEFAULT_SWIPE_MS,
     MAX_LAUNCH_TIMEOUT,
     MAX_PRESS_MS,
+    PIN_WAIT_STOPPED,
     Device,
     DeviceDetails,
     DisplaySizeUnknownError,
@@ -50,6 +55,7 @@ from uiprobe.errors import (
     INTERNAL_ERROR,
     INTERRUPTED,
     USAGE_ERROR,
+    NotEmulatorError,
     UiprobeError,
 )
 from uiprobe.guards import REASONS, Policy
@@ -84,6 +90,33 @@ if TYPE_CHECKING:
 __all__ = ["main", "run"]
 
 FIND_SCHEMA = "uiprobe.find/1"
+CRAWL_RUN_SCHEMA = "uiprobe.crawl_run/1"
+# The limits of a pressing crawl from the command line: (lowest, highest,
+# default, what). The defaults are small on purpose, so a bare --press ends
+# soon; the settings file's [limits] are the preview's and are not used here.
+_PRESS_LIMITS: dict[str, tuple[int, int, int, str]] = {
+    "depth": (1, 50, 3, "the deepest screen on one path"),
+    "actions": (1, 10000, 30, "the most actions (launch, taps, BACK, restarts)"),
+    "minutes": (1, 1440, 5, "the longest run in minutes"),
+}
+_PRESS_SETTLE = 1.0
+
+
+def _press_only(args: argparse.Namespace) -> list[tuple[str, bool]]:
+    """Each option that only a pressing run takes, and whether it was given."""
+    return [
+        ("--out", args.out is not None),
+        ("--depth", args.depth is not None),
+        ("--actions", args.actions is not None),
+        ("--minutes", args.minutes is not None),
+        ("--settle", args.settle is not None),
+        ("--screenshots", args.screenshots),
+        ("--allow-real-device", args.allow_real_device),
+        ("--back-on-other-screens", args.back_on_other_screens),
+        ("--no-tap-window-check", args.no_tap_window_check),
+    ]
+
+
 ACTION_SCHEMA = "uiprobe.action/1"
 CRAWL_PREVIEW_SCHEMA = "uiprobe.crawl_preview/1"
 INIT_SCHEMA = "uiprobe.init/1"
@@ -433,57 +466,7 @@ def _build_parser() -> _Parser:
         help="the new PNG file to write (required)",
     )
     _add_launch_parser(commands.add_parser)
-    crawl = commands.add_parser(
-        "crawl",
-        allow_abbrev=False,
-        help="preview what a crawl would press (pressing is not available yet)",
-        description=(
-            "The preview is the default: crawl judges the screen showing now and"
-            " lists what a crawl of PACKAGE would press and what it would skip,"
-            " with the reasons. It presses nothing, does not start the app and"
-            " writes no file on this computer. --dry-run forces the preview, even"
-            " when the settings file says press = true. --press and press = true"
-            " ask for a pressing run, which is not available yet and is refused."
-            f" The rules come from the settings file (./{SETTINGS_FILE}"
-            " or --config PATH); without one the command stops. Create it with"
-            " uiprobe init."
-        ),
-    )
-    _add_common_options(crawl, in_command=True)
-    crawl.add_argument("package", metavar="PACKAGE", help="the app's package name")
-    crawl.add_argument(
-        "--dry-run",
-        action="store_true",
-        help=(
-            "force the preview (the default): judge the screen showing now;"
-            " cannot be combined with --press"
-        ),
-    )
-    crawl.add_argument(
-        "--press",
-        action="store_true",
-        help=(
-            "ask for a pressing run (accepted, but not available yet);"
-            " cannot be combined with --dry-run"
-        ),
-    )
-    crawl.add_argument(
-        "--deny",
-        action="append",
-        default=[],
-        metavar="WORD",
-        help="also never press elements containing WORD (repeatable)",
-    )
-    crawl.add_argument(
-        "--config",
-        metavar="PATH",
-        help=f"the settings file (default ./{SETTINGS_FILE}; it must exist)",
-    )
-    crawl.add_argument(
-        "--tap-unlabeled",
-        action="store_true",
-        help="allow pressing elements that have no text, description or hint",
-    )
+    _add_crawl_parser(commands.add_parser)
     init = commands.add_parser(
         "init",
         allow_abbrev=False,
@@ -510,6 +493,113 @@ def _printable(text: str) -> str:
     return "".join(
         c if c.isprintable() else c.encode("unicode_escape").decode("ascii")
         for c in text
+    )
+
+
+def _add_crawl_parser(add_parser: Callable[..., argparse.ArgumentParser]) -> None:
+    """The crawl command: the preview, and the pressing run with --press."""
+    crawl = add_parser(
+        "crawl",
+        allow_abbrev=False,
+        help="preview what a crawl would press, or crawl for real with --press",
+        description=(
+            "The preview is the default: crawl judges the screen showing now and"
+            " lists what a crawl of PACKAGE would press and what it would skip,"
+            " with the reasons. It presses nothing, does not start the app and"
+            " writes no file on this computer. --dry-run forces the preview."
+            " --press runs a pressing crawl: it starts the app, presses what the"
+            " rules allow, presses BACK and restarts the app, and records every"
+            " step in the new folder --out DIR. It presses only on an emulator"
+            " unless --allow-real-device is given, and stops after a few actions"
+            " unless --depth, --actions or --minutes say otherwise."
+            f" The rules come from the settings file (./{SETTINGS_FILE}"
+            " or --config PATH); without one the command stops. Create it with"
+            " uiprobe init."
+        ),
+    )
+    _add_common_options(crawl, in_command=True)
+    crawl.add_argument("package", metavar="PACKAGE", help="the app's package name")
+    crawl.add_argument(
+        "--dry-run",
+        action="store_true",
+        help=(
+            "force the preview (the default): judge the screen showing now;"
+            " cannot be combined with --press"
+        ),
+    )
+    crawl.add_argument(
+        "--press",
+        action="store_true",
+        help=(
+            "press for real: start the app and press what the rules allow;"
+            " needs --out; cannot be combined with --dry-run"
+        ),
+    )
+    _add_press_options(crawl)
+    crawl.add_argument(
+        "--deny",
+        action="append",
+        default=[],
+        metavar="WORD",
+        help="also never press elements containing WORD (repeatable)",
+    )
+    crawl.add_argument(
+        "--config",
+        metavar="PATH",
+        help=f"the settings file (default ./{SETTINGS_FILE}; it must exist)",
+    )
+    crawl.add_argument(
+        "--tap-unlabeled",
+        action="store_true",
+        help="allow pressing elements that have no text, description or hint",
+    )
+
+
+def _add_press_options(crawl: argparse.ArgumentParser) -> None:
+    """The options that only a pressing crawl (--press) takes."""
+    crawl.add_argument(
+        "--out",
+        metavar="DIR",
+        help="with --press: the new run folder to record into (must not exist)",
+    )
+    for name, (low, high, default, what) in _PRESS_LIMITS.items():
+        crawl.add_argument(
+            f"--{name}",
+            type=int,
+            metavar="N",
+            help=f"with --press: {what}, {low} to {high} (default {default})",
+        )
+    crawl.add_argument(
+        "--settle",
+        type=float,
+        metavar="SEC",
+        help=f"with --press: the pause after a tap or BACK (default {_PRESS_SETTLE})",
+    )
+    crawl.add_argument(
+        "--screenshots",
+        action="store_true",
+        help="with --press: also save a screenshot of each new screen",
+    )
+    crawl.add_argument(
+        "--allow-real-device",
+        action="store_true",
+        help="with --press: also press on a device that is not an emulator",
+    )
+    crawl.add_argument(
+        "--back-on-other-screens",
+        action="store_true",
+        help=(
+            "with --press: press BACK on a screen of another app (by default the"
+            " app is restarted instead and nothing goes to the other app)"
+        ),
+    )
+    crawl.add_argument(
+        "--no-tap-window-check",
+        action="store_true",
+        help=(
+            "with --press: do not read which window takes a tap at its point (by"
+            " default a tap goes out only when a window of the app takes it)"
+        ),
     )
 
 
@@ -1014,27 +1104,20 @@ def _crawl_policy(args: argparse.Namespace) -> tuple[Policy, Settings]:
         except ValueError:
             msg = f"--deny word is empty after normalization: {word!r}"
             raise _UsageError(msg) from None
+    if not args.press:
+        given = [option for option, value in _press_only(args) if value]
+        if given:
+            msg = f"{given[0]} is used only with --press"
+            raise _UsageError(msg)
+    elif args.out is None:
+        msg = "--press needs --out DIR, the new folder to record the run into"
+        raise _UsageError(msg)
     settings = _crawl_settings(args)
-    if args.press and settings.press:
+    if settings.press and not (args.press or args.dry_run):
         msg = (
-            "pressing crawls are not available yet; this version only previews"
-            f" (--press is given and the settings file"
-            f" {_shown(str(settings.source))} says press = true: replace"
-            " --press with --dry-run, or remove --press and set"
-            " press = false there)"
-        )
-        raise _UsageError(msg)
-    if args.press:
-        msg = (
-            "pressing crawls are not available yet; this version only previews"
-            " (run without --press)"
-        )
-        raise _UsageError(msg)
-    if settings.press and not args.dry_run:
-        msg = (
-            "pressing crawls are not available yet; this version only previews"
-            f" (the settings file {_shown(str(settings.source))} says"
-            " press = true: add --dry-run, or set press = false there)"
+            f"the settings file {_shown(str(settings.source))} says press = true,"
+            " but a crawl presses only when --press is given: add --press and"
+            " --out DIR to press, or --dry-run to preview"
         )
         raise _UsageError(msg)
     policy = policy_from_settings(
@@ -1167,6 +1250,8 @@ def _preview_json(result: Preview, settings_path: str) -> dict[str, object]:
 
 def _cmd_crawl(args: argparse.Namespace) -> int:
     policy, settings = _crawl_policy(args)
+    if args.press:
+        return _cmd_crawl_press(args, policy)
     settings_path = str(settings.source)
     device = Device(
         _single_serial(args),
@@ -1180,6 +1265,202 @@ def _cmd_crawl(args: argparse.Namespace) -> int:
     else:
         _emit(_preview_text(result, settings_path, dry_run=args.dry_run))
     return 0
+
+
+def _press_limits(args: argparse.Namespace) -> Limits:
+    given = {"depth": args.depth, "actions": args.actions, "minutes": args.minutes}
+    values: dict[str, int] = {}
+    for name, (low, high, default, _what) in _PRESS_LIMITS.items():
+        value = given[name]
+        value = default if value is None else value
+        if not low <= value <= high:
+            msg = f"--{name} must be from {low} to {high}, got {value}"
+            raise _UsageError(msg)
+        values[name] = value
+    return Limits(**values)
+
+
+def _press_settle(args: argparse.Namespace) -> float:
+    settle = _PRESS_SETTLE if args.settle is None else args.settle
+    if not (0 <= settle <= 60):  # also refuses NaN
+        msg = f"--settle must be from 0 to 60 seconds, got {args.settle}"
+        raise _UsageError(msg)
+    return settle
+
+
+def _cmd_crawl_press(args: argparse.Namespace, policy: Policy) -> int:
+    """Run a pressing crawl into ``--out`` and report how it ended."""
+    limits = _press_limits(args)
+    settle = _press_settle(args)
+    policy = replace(
+        policy,
+        back_on_other_screens=args.back_on_other_screens,
+        check_tap_window=not args.no_tap_window_check,
+    )
+    out: str = args.out
+    device = Device(
+        _single_serial(args),
+        adb_server=args.adb_server,
+        adb=args.adb,
+        start_server=args.start_server,
+        pin=True,
+    )
+    emulator = _press_device_check(device, allow_real_device=args.allow_real_device)
+    plan: dict[str, object] = {
+        "package": args.package,
+        "device": {"serial": device.serial, "emulator": emulator},
+        "limits": {
+            "depth": limits.depth,
+            "actions": limits.actions,
+            "minutes": limits.minutes,
+        },
+        "out": out,
+        "back_on_other_screens": policy.back_on_other_screens,
+        "check_tap_window": policy.check_tap_window,
+        "screenshots": args.screenshots,
+    }
+    if not args.json:
+        _emit(_press_plan_text(plan))
+    try:
+        result = crawl_run(
+            device,
+            args.package,
+            out,
+            policy=policy,
+            limits=limits,
+            screenshots=args.screenshots,
+            allow_real_device=args.allow_real_device,
+            settle=settle,
+        )
+    except KeyboardInterrupt:
+        # crawl_run wrote run.json with "interrupted" when it still could.
+        if not Path(out).exists():
+            return _fail(INTERRUPTED, "interrupted", as_json=args.json)
+        msg = f"interrupted; the run so far is in {_printable(out)}"
+        return _fail(INTERRUPTED, msg, as_json=args.json, details={"out": out})
+    except UiprobeError as exc:
+        if Path(out).exists():
+            exc.details.setdefault("out", out)
+        raise
+    hints = _press_hints(result, device)
+    if args.json:
+        _emit(dumps(_press_json(plan, result, hints), indent=2))
+    else:
+        _emit(_press_result_text(result, hints))
+    return 0
+
+
+def _press_device_check(device: Device, *, allow_real_device: bool) -> bool | None:
+    """Whether the device is an emulator (None: unreadable); refuse a real one.
+
+    Without `allow_real_device`, a device that is not shown to be an emulator
+    is refused before anything is written or sent, as `crawl_run` would.
+    """
+    if not allow_real_device:
+        try:
+            _check_device(device, allow_real_device=False)
+        except NotEmulatorError as exc:
+            what = (
+                "is not an emulator"
+                if exc.details.get("reason") == "not_emulator"
+                else "could not be shown to be an emulator (unreadable check)"
+            )
+            msg = (
+                f"{_printable(str(device.serial))} {what}, so nothing was pressed"
+                " and no folder was made; a pressing crawl presses for real: to run"
+                " it on this device, add --allow-real-device"
+            )
+            raise NotEmulatorError(msg, details=exc.details) from None
+        return True
+    try:
+        return device.is_emulator()
+    except UiprobeError as exc:
+        if exc.details.get("reason") in ("device_changed", PIN_WAIT_STOPPED):
+            raise
+        return None
+
+
+def _press_plan_text(plan: dict[str, object]) -> str:
+    device = plan["device"]
+    limits = plan["limits"]
+    assert isinstance(device, dict)  # noqa: S101 - built above
+    assert isinstance(limits, dict)  # noqa: S101
+    kind = {True: "emulator", False: "real device"}.get(
+        device["emulator"], "emulator check unreadable"
+    )
+    return "\n".join(
+        [
+            f"pressing on {_printable(str(device['serial']))} ({kind}):"
+            f" {_printable(str(plan['package']))}",
+            f"limits: depth {limits['depth']}, actions {limits['actions']},"
+            f" minutes {limits['minutes']}",
+            f"run folder: {_printable(str(plan['out']))}",
+            "BACK on screens of other apps: "
+            + ("yes" if plan["back_on_other_screens"] else "no (restart the app)"),
+            "check the window at each tap point: "
+            + ("yes" if plan["check_tap_window"] else "no"),
+        ]
+    )
+
+
+def _press_hints(result: CrawlResult, device: Device) -> list[str]:
+    """Advice for the endings a real device runs into; only those that apply."""
+    hints: list[str] = []
+    refused = dict(result.not_sent)
+    if refused.get("cover_unknown"):
+        hints.append(
+            "the window at a tap point could not be read on this device"
+            f" ({result.cover_unknown or 'unknown'}); --no-tap-window-check"
+            " turns the check off, but then an overlay of another app over the"
+            " point can receive a tap"
+        )
+    if not result.repin:
+        hints.append(
+            "the boot id of this device could not be read, so a renumbered"
+            " adb connection ends the run instead of being followed"
+        )
+    if result.stop_reason == "dump_failed_repeatedly":
+        front = None
+        with contextlib.suppress(UiprobeError):
+            front = device.foreground()
+        hints.append(
+            "uiautomator dump kept failing; a screen that never settles (a value"
+            " that changes every second, an animation) makes it fail, so avoid"
+            f" that screen (app in front: {_printable(str(front))}, last screen"
+            f" read: {result.last_screen_id or 'none'})"
+        )
+    return hints
+
+
+def _press_result_text(result: CrawlResult, hints: list[str]) -> str:
+    refused = ", ".join(f"{reason} {count}" for reason, count in result.not_sent)
+    lines = [
+        f"stopped: {result.stop_reason}",
+        f"actions: {result.actions}",
+        f"screens: {result.screens}",
+        f"not sent: {refused or 'none'}",
+        f"transport moves: {result.repins}",
+        f"run folder: {_printable(str(result.out))}",
+    ]
+    lines.extend(f"note: {hint}" for hint in hints)
+    return "\n".join(lines)
+
+
+def _press_json(
+    plan: dict[str, object], result: CrawlResult, hints: list[str]
+) -> dict[str, object]:
+    return {
+        "schema": CRAWL_RUN_SCHEMA,
+        **plan,
+        "out": str(result.out),
+        "stop_reason": result.stop_reason,
+        "actions": result.actions,
+        "screens": result.screens,
+        "not_sent": dict(result.not_sent),
+        "repins": result.repins,
+        "repin": result.repin,
+        "notes": hints,
+    }
 
 
 def _cmd_init(args: argparse.Namespace) -> int:

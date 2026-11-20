@@ -5,7 +5,7 @@ every step, `Device` sends it, and `RunWriter` records it. It lives in its own
 module, not in ``crawl.py``, because that module is the pure engine (no device,
 clock or file), and the writer imports it, so the driver sits above both.
 
-The command line does not use it yet; the function is alpha.
+``uiprobe crawl --press`` runs it from the command line; the function is alpha.
 
 What is sent. Only what the engine returned, and for a tap only what
 `CrawlEngine.recheck` allowed for that very `Tap` object, in the gate right
@@ -136,12 +136,22 @@ class CrawlResult:
     ``screens`` is the number of distinct screens of the target app that were
     seen, ``actions`` the number of actions whose start line was written (the
     last one may not have reached the device if the run ended right then).
+    ``not_sent`` counts the actions closed as not sent, by reason; ``repins``
+    the moves of the pinned transport in this run and ``repin`` whether moves
+    were allowed (the boot id could be read); ``cover_unknown`` what the
+    first ``cover_unknown`` refusal could not read; ``last_screen_id`` the
+    last screen that was read.
     """
 
     out: Path
     stop_reason: str
     screens: int
     actions: int
+    not_sent: tuple[tuple[str, int], ...] = ()
+    repins: int = 0
+    repin: bool = False
+    cover_unknown: str | None = None
+    last_screen_id: str | None = None
 
 
 def _check_flag(name: str, value: object) -> None:
@@ -259,6 +269,9 @@ class _Run:
         self.emulator = emulator
         self.app_uid = app_uid  # read once at the start (check_tap_window)
         self.gate_details: dict[str, str | int] | None = None  # why, for cover
+        self.not_sent: dict[str, int] = {}  # not_sent end lines by reason
+        self.cover_unknown: str | None = None  # what the first cover_unknown missed
+        self.last_screen_id: str | None = None  # the last screen read
         self.screenshots = screenshots
         self.settle = settle
         self.deadline = deadline
@@ -346,11 +359,23 @@ class _Run:
             if error.details.get("reason") != PIN_NOT_PROVEN:
                 raise
             self._open = None
-            self.writer.write_transition_end(action_id, not_sent=NOT_SENT_RECONNECTED)
+            self.end_not_sent(action_id, NOT_SENT_RECONNECTED)
             if not isinstance(action, Launch):
                 self.withdraw(action)
             return False
         return True
+
+    def end_not_sent(
+        self,
+        action_id: int,
+        reason: str,
+        details: dict[str, str | int] | None = None,
+    ) -> None:
+        """Write a not_sent end line and count it for the result."""
+        self.writer.write_transition_end(action_id, not_sent=reason, details=details)
+        self.not_sent[reason] = self.not_sent.get(reason, 0) + 1
+        if reason == NOT_SENT_COVER_UNKNOWN and details and self.cover_unknown is None:
+            self.cover_unknown = str(details.get("unreadable", ""))
 
     def withdraw(self, action: Action) -> None:
         """Have the engine take back `action`, which was not sent."""
@@ -425,9 +450,7 @@ class _Run:
         self.unsent = None
         if reason is not None:
             details = self.gate_details if reason in _COVER_REASONS else None
-            self.writer.write_transition_end(
-                action_id, not_sent=reason, details=details
-            )
+            self.end_not_sent(action_id, reason, details)
             if reason == NOT_SENT_RECONNECTED and not isinstance(action, Launch):
                 # Nothing was sent and nothing about the screen is known: the
                 # engine takes the action back and decides again on a fresh
@@ -738,7 +761,7 @@ class _Run:
             if error.details.get("reason") != PIN_NOT_PROVEN:
                 raise
             self._open = None  # nothing was sent
-            self.writer.write_transition_end(action_id, not_sent=NOT_SENT_RECONNECTED)
+            self.end_not_sent(action_id, NOT_SENT_RECONNECTED)
             self.withdraw(action)
             return NOT_SENT_RECONNECTED
         try:
@@ -755,7 +778,7 @@ class _Run:
             # the run ends.
             self._open = None
             why = self.wait_stop or NOT_SENT_STOPPED
-            self.writer.write_transition_end(action_id, not_sent=NOT_SENT_START)
+            self.end_not_sent(action_id, NOT_SENT_START)
             self.notes.append(
                 f"{self.package} was force-stopped but not started again ({why})"
             )
@@ -764,7 +787,7 @@ class _Run:
             # The device had to be proven again after the force-stop: the
             # start is not sent on the earlier decision.
             self._open = None
-            self.writer.write_transition_end(action_id, not_sent=NOT_SENT_START)
+            self.end_not_sent(action_id, NOT_SENT_START)
             self.notes.append(
                 f"{self.package} was force-stopped but not started again"
                 f" ({NOT_SENT_RECONNECTED})"
@@ -772,7 +795,7 @@ class _Run:
             return _HALF_RELAUNCH
         if reason is not None:
             self._open = None
-            self.writer.write_transition_end(action_id, not_sent=NOT_SENT_START)
+            self.end_not_sent(action_id, NOT_SENT_START)
             self.notes.append(
                 f"{self.package} was force-stopped but not started again ({reason})"
             )
@@ -783,7 +806,7 @@ class _Run:
             if error.details.get("reason") != PIN_NOT_PROVEN:
                 raise
             self._open = None  # the force-stop went out, the start did not
-            self.writer.write_transition_end(action_id, not_sent=NOT_SENT_START)
+            self.end_not_sent(action_id, NOT_SENT_START)
             self.notes.append(
                 f"{self.package} was force-stopped but not started again"
                 f" ({NOT_SENT_RECONNECTED})"
@@ -832,6 +855,8 @@ class _Run:
                 or self.halt() is not None
             ):
                 break
+        if screen is not None:
+            self.last_screen_id = screen.screen_id
         observation = Observation(screen, foreground, keyboard, self.clock())
         self.record(_Seen(observation, focus), self.epoch_seen)
         return observation
@@ -999,8 +1024,8 @@ def crawl(
     `policy` allows, presses BACK and relaunches the app, and records every
     step in the new run folder `out` (see the run folder page). A screen of
     another app gets a relaunch, not BACK, unless
-    ``policy.back_on_other_screens`` is True. It is alpha
-    and not in the command line yet.
+    ``policy.back_on_other_screens`` is True. It is alpha;
+    ``uiprobe crawl --press`` runs it from the command line.
 
     The order is: check the arguments, check the device, make the run folder,
     run. Nothing is written and no input is sent before the first two have
@@ -1194,7 +1219,7 @@ def _drive(run: _Run, writer: RunWriter) -> CrawlResult:
         reason = MAX_DURATION if why == NOT_SENT_TIME_LIMIT else INTERRUPTED
         if run.unsent is not None:
             with contextlib.suppress(RunFolderError):
-                writer.write_transition_end(run.unsent, not_sent=why)
+                run.end_not_sent(run.unsent, why)
     except KeyboardInterrupt:
         # Returned only when stop() asks for it and run.json was written; a
         # run.json that could not be written (the interrupt hit a write and
@@ -1260,4 +1285,14 @@ def _end(
 
 def _result(run: _Run, writer: RunWriter, reason: str) -> CrawlResult:
     screens, actions = run.count()
-    return CrawlResult(writer.path, reason, screens, actions)
+    return CrawlResult(
+        writer.path,
+        reason,
+        screens,
+        actions,
+        not_sent=tuple(sorted(run.not_sent.items())),
+        repins=len(run.device.repins) - run.repins_before,
+        repin=run.device.can_repin,
+        cover_unknown=run.cover_unknown,
+        last_screen_id=run.last_screen_id,
+    )

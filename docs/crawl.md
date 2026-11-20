@@ -1,6 +1,6 @@
-# Previewing a crawl
+# Crawling an app
 
-`uiprobe crawl PACKAGE` shows what a crawl of the app `PACKAGE` would press on the screen that is showing now, and for every clickable element it would not press, why not. The preview is the default: it presses nothing. The older form `uiprobe crawl PACKAGE --dry-run` still works and always means the preview, even when the settings file says `press = true`. `--press` and `press = true` ask for a pressing run; the pressing crawl does not exist yet, so such a run stops with a usage error (exit 2) before the adb server is contacted, after the settings file was read and checked: `pressing crawls are not available yet; this version only previews (run without --press)`. When the settings file says `press = true` and `--dry-run` is not given, the message names the file and says to add `--dry-run` or set `press = false` there. When `--press` is given as well, the message names the file and says to replace `--press` with `--dry-run`, or to remove `--press` and set `press = false` there (removing only `--press` would give exit 2 again, because the file still asks for pressing). `--press` together with `--dry-run` is a usage error (`--press and --dry-run cannot be combined`). The preview needs the settings file (see [Settings file](settings.md)): its words, rules, screen-edge sizes and smallest visible size are the defaults of the run. It reads `./uiprobe.toml` in the current folder, or the file named by `--config PATH`; no other folder is searched. Without a file the command stops with a usage error (exit 2) before the adb server is contacted:
+`uiprobe crawl PACKAGE` shows what a crawl of the app `PACKAGE` would press on the screen that is showing now, and for every clickable element it would not press, why not. The preview is the default: it presses nothing. The older form `uiprobe crawl PACKAGE --dry-run` still works and always means the preview. `uiprobe crawl PACKAGE --press --out DIR` crawls for real: see [Pressing crawl](#pressing-crawl---press). A crawl presses only when `--press` is given: when the settings file says `press = true` and neither `--press` nor `--dry-run` is given, the command stops with a usage error (exit 2) before the adb server is contacted, naming the file and saying to add `--press` and `--out DIR` to press, or `--dry-run` to preview. `--press` together with `--dry-run` is a usage error (`--press and --dry-run cannot be combined`), and so is `--press` without `--out`. The preview needs the settings file (see [Settings file](settings.md)): its words, rules, screen-edge sizes and smallest visible size are the defaults of the run. It reads `./uiprobe.toml` in the current folder, or the file named by `--config PATH`; no other folder is searched. Without a file the command stops with a usage error (exit 2) before the adb server is contacted:
 
 ```console
 $ uiprobe crawl com.example.app
@@ -9,7 +9,7 @@ create it with:    uiprobe init
 or name one with:  uiprobe crawl com.example.app --config PATH
 ```
 
-The last line keeps a `--dry-run` that was given (`uiprobe crawl com.example.app --dry-run --config PATH`), so that following it works with a file that says `press = true`; it also keeps a `--press` that was given (`uiprobe crawl com.example.app --press --config PATH`); that command still reports that pressing crawls are not available while `--press` is in it. With `--json` the three lines are the `message` of the `uiprobe.error/1` object, and `details` holds `looked_for`, `create` and `name_one`. When the missing file was named with `--config PATH`, the `create` line is `uiprobe init PATH` with the given path filled in (only when it needs no shell quoting; otherwise the word `PATH` stays a placeholder), so that it creates the file that was looked for. A file that is given with `--config` but missing, or that is invalid, is a usage error that names the file and, for an invalid entry, the key. Warnings about the file (an entry that has no effect) go to stderr.
+The last line keeps a `--dry-run` that was given (`uiprobe crawl com.example.app --dry-run --config PATH`), so that following it works with a file that says `press = true`; it also keeps a `--press` that was given (`uiprobe crawl com.example.app --press --config PATH`; add `--out DIR` again when you follow it). With `--json` the three lines are the `message` of the `uiprobe.error/1` object, and `details` holds `looked_for`, `create` and `name_one`. When the missing file was named with `--config PATH`, the `create` line is `uiprobe init PATH` with the given path filled in (only when it needs no shell quoting; otherwise the word `PATH` stays a placeholder), so that it creates the file that was looked for. A file that is given with `--config` but missing, or that is invalid, is a usage error that names the file and, for an invalid entry, the key. Warnings about the file (an entry that has no effect) go to stderr.
 
 ```console
 $ uiprobe crawl com.example.app
@@ -40,7 +40,7 @@ The last line says `(--dry-run)` instead of `(the default)` when `--dry-run` was
 | Option | Meaning |
 | --- | --- |
 | `--dry-run` | Force the preview (the default): judge the screen showing now; press nothing. Wins over `press = true` in the file. Cannot be combined with `--press`. |
-| `--press` | Ask for a pressing run. Accepted but not available yet: it is refused with exit 2. Cannot be combined with `--dry-run`. |
+| `--press` | Crawl for real (see [Pressing crawl](#pressing-crawl---press)). Needs `--out DIR`. Cannot be combined with `--dry-run`. |
 | `--deny WORD` | Also never press an element that contains `WORD`, for this run only. May be given many times. |
 | `--config PATH` | The settings file to use (default `./uiprobe.toml`). It must exist. |
 | `--tap-unlabeled` | Allow pressing elements that have no text, description or hint, for this run, whatever the file says. This also allows icon-only buttons that deny words cannot see, such as a trash can. |
@@ -95,3 +95,60 @@ Limits that are known and accepted:
 - The preview judges one screen as it is. It cannot see what a press would lead to, and it does not look at the pixels, only at what `uiautomator` reports.
 
 The output with `--json` is a `uiprobe.crawl_preview/1` object (see [Output formats](output.md)).
+
+## Pressing crawl (`--press`)
+
+`uiprobe crawl PACKAGE --press --out DIR` presses for real on the selected device. It starts the app, judges every screen with the same rules as the preview, taps what they allow, presses BACK, and restarts the app when it is stuck or another app comes to the front. Every step is recorded in the new folder `DIR` (see [Run folder](run-folder.md)). It is the command form of `crawl_run()` (see [Crawling from Python](python.md#crawling-from-python-alpha)), which describes each check it makes before a tap.
+
+```console
+$ uiprobe crawl com.example.app --press --out runs/first
+$ uiprobe crawl com.example.app --press --out runs/long --actions 200 --minutes 20
+$ uiprobe crawl com.example.app --press --out runs/real --allow-real-device
+```
+
+Safe defaults:
+
+- It presses only on an emulator. A device that is not an emulator, or whose emulator check (`getprop ro.kernel.qemu`) cannot be read, is refused with exit 17 (`not_emulator`, `details.reason` `not_emulator` or `unreadable`) before anything is written or sent; the message says to add `--allow-real-device`, which presses on that device.
+- It stops soon: at most 30 actions (the launch, taps, BACK and restarts each count), paths at most 3 screens deep, and at most 5 minutes, unless `--actions`, `--depth` or `--minutes` say otherwise. The settings file's `[limits]` are not used by `--press`, because the generated file writes larger values for every run.
+- It sends nothing to a screen of another app: it restarts the target app instead (`am force-stop`, then start), which can lose unsaved state in that app. `--back-on-other-screens` makes it press BACK there instead; that BACK reaches whichever app has the focus.
+- Right before each tap it reads which window takes a touch at the tap's point and sends the tap only when that window belongs to the app. `--no-tap-window-check` turns this off; then an overlay of another app over the point gets the tap.
+- The device is pinned when the run starts: every request goes to that device, and a renumbered connection to the same device is followed (when its boot id can be read) or ends the run.
+
+Before the first action it prints what it will do: the device and whether it is an emulator, the app, the limits, the run folder, and the two choices above. At the end it prints why it stopped (`exhausted`, `max_actions`, `max_duration`, `relaunch_limit`, `keyboard_stuck`, `dump_failed_repeatedly`, and the other stop reasons of [Run folder](run-folder.md)), the number of actions and screens, the actions that were not sent, by reason (for example `covered_by_other`, `cover_unknown`, `device_reconnected`), the number of transport moves, and the run folder:
+
+```console
+$ uiprobe crawl com.example.shop --press --out runs/first
+pressing on emulator-5554 (emulator): com.example.shop
+limits: depth 3, actions 30, minutes 5
+run folder: runs/first
+BACK on screens of other apps: no (restart the app)
+check the window at each tap point: yes
+stopped: max_actions
+actions: 30
+screens: 7
+not sent: covered_by_other 1
+transport moves: 0
+run folder: runs/first
+```
+
+Lines starting with `note:` follow when one of these happened:
+
+- A tap was refused because the window at its point could not be read (`cover_unknown`): the note names what could not be read and the option that turns the check off, with its risk. On a rotated display every tap is refused this way.
+- The device's boot id could not be read: a renumbered connection then ends the run instead of being followed.
+- The run stopped with `dump_failed_repeatedly`: `uiautomator dump` fails on a screen that never settles (a value that changes every second, an animation). The note names the app in front and the last screen that was read, so you can avoid that screen.
+
+| Option | Meaning |
+| --- | --- |
+| `--out DIR` | The new run folder. Required with `--press`; it must not exist. |
+| `--actions N` | The most actions, 1 to 10000 (default 30). |
+| `--depth N` | The deepest screen on one path, 1 to 50 (default 3). |
+| `--minutes N` | The longest run in minutes, 1 to 1440 (default 5). |
+| `--settle SEC` | The pause after a tap or BACK, 0 to 60 seconds (default 1). |
+| `--screenshots` | Also save a screenshot of each new screen in the run folder. |
+| `--allow-real-device` | Also press on a device that is not an emulator. |
+| `--back-on-other-screens` | Press BACK on a screen of another app instead of restarting the app. |
+| `--no-tap-window-check` | Do not read which window takes a tap at its point. |
+
+`--deny`, `--tap-unlabeled` and `--config` work as for the preview. The options above are used only with `--press`; given without it, each is a usage error.
+
+Exit codes: 0 when the run ended by one of its stop reasons, also when nothing could be pressed; 130 on Ctrl+C, after the run folder's `run.json` was written with the stop reason `interrupted` when that was still possible (the message names the folder when it exists; a second Ctrl+C while `run.json` is written can leave the folder without it); 17 for a refused device; the other errors as for the other commands, with `details.out` naming the run folder when it was created. With `--json` the result is a `uiprobe.crawl_run/1` object (see [Output formats](output.md)); the plan is not printed separately then, because the object holds it.

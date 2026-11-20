@@ -1,6 +1,6 @@
 # Commands
 
-The `crawl` command has its own page: [Previewing a crawl](crawl.md). [Options](#options) and [environment variables](#environment-variables) are at the end of this page.
+The `crawl` command has its own page: [Crawling an app](crawl.md). [Options](#options) and [environment variables](#environment-variables) are at the end of this page.
 
 ## Listing devices
 

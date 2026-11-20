@@ -70,7 +70,7 @@ Failures that involve the device or the adb server raise a subclass of `uiprobe.
 
 ## Crawling from Python (alpha)
 
-`uiprobe.crawl_run` (the function `crawl` of `uiprobe.crawl_driver`) runs a pressing crawl and records it in a new run folder. It is alpha and not in the command line yet. **It presses on the selected device**: it launches the app, taps elements that the guards allow, presses BACK, and relaunches the app (`am force-stop`, then start), which can lose unsaved state. Read [Safety](safety.md) first.
+`uiprobe.crawl_run` (the function `crawl` of `uiprobe.crawl_driver`) runs a pressing crawl and records it in a new run folder. It is alpha; `uiprobe crawl PACKAGE --press --out DIR` runs it from the command line (see [Pressing crawl](crawl.md#pressing-crawl---press)). **It presses on the selected device**: it launches the app, taps elements that the guards allow, presses BACK, and relaunches the app (`am force-stop`, then start), which can lose unsaved state. Read [Safety](safety.md) first.
 
 ```python
 from uiprobe import Device, Policy, crawl_run

@@ -647,26 +647,14 @@ def crawl_usage_error(
     return usage_error(capsys, fake_adb, "crawl", "--json", *argv)
 
 
-PRESS_MESSAGE = (
-    "pressing crawls are not available yet; this version only previews"
-    " (run without --press)"
-)
+PRESS_MESSAGE = "--press needs --out DIR, the new folder to record the run into"
 
 
 def file_press_message(path: str) -> str:
     return (
-        "pressing crawls are not available yet; this version only previews"
-        f" (the settings file {path} says press = true: add --dry-run, or set"
-        " press = false there)"
-    )
-
-
-def both_press_message(path: str) -> str:
-    return (
-        "pressing crawls are not available yet; this version only previews"
-        f" (--press is given and the settings file {path} says press = true:"
-        " replace --press with --dry-run, or remove --press and set"
-        " press = false there)"
+        f"the settings file {path} says press = true, but a crawl presses only"
+        " when --press is given: add --press and --out DIR to press, or"
+        " --dry-run to preview"
     )
 
 
@@ -741,8 +729,7 @@ def test_press_in_the_file_with_press_names_the_file_and_dry_run(
     set_press(settings_dir)
     code, out, err = invoke(capsys, fake_adb, "crawl", SHOP, "--press")
     assert (code, out) == (2, "")
-    assert err == f"uiprobe: error: {both_press_message(SETTINGS_FILE)}\n"
-    assert "--dry-run" in err
+    assert err == f"uiprobe: error: {PRESS_MESSAGE}\n"  # before the file is read
     assert fake_adb.requests == []
     assert connections == []
     assert android.inputs == []
@@ -785,7 +772,7 @@ def test_press_refusals_show_an_unambiguous_path(
     assert "\u202e" not in err
     assert err.count("\n") == 1
     shown = _shown(str(other))
-    expected = (both_press_message if switch else file_press_message)(shown)
+    expected = PRESS_MESSAGE if switch else file_press_message(shown)
     assert err == f"uiprobe: error: {expected}\n"
     assert fake_adb.requests == []
     assert connections == []
@@ -796,7 +783,9 @@ def test_missing_file_guidance_keeps_press(fake_adb, android, capsys, tmp_path):
     here = tmp_path / "empty"
     here.mkdir()
     os.chdir(here)
-    message = crawl_usage_error(capsys, fake_adb, SHOP, "--press")
+    message = crawl_usage_error(
+        capsys, fake_adb, SHOP, "--press", "--out", str(tmp_path / "run")
+    )
     assert message.splitlines()[-1] == (
         f"or name one with:  uiprobe crawl {SHOP} --press --config PATH"
     )
@@ -831,7 +820,7 @@ def test_press_in_the_file_allows_dry_run(fake_adb, android, capsys, settings_di
     assert_read_only(fake_adb, android)
 
 
-@pytest.mark.parametrize("switch", [[], ["--dry-run"], ["--press"]])
+@pytest.mark.parametrize("switch", [[], ["--dry-run"], ["--press", "--out", "run-x"]])
 @pytest.mark.usefixtures("android")
 def test_press_is_refused_after_the_file_is_checked(
     fake_adb, capsys, tmp_path, connections, switch
@@ -1071,7 +1060,7 @@ def test_crawl_help_says_the_preview_is_the_default(capsys):
     assert code == 0
     assert "The preview is the default" in out
     assert "--dry-run forces the preview" in out
-    assert "not available yet" in out
+    assert "--press runs a pressing crawl" in out
     assert "presses nothing" in out
     assert "screen showing now" in out
     assert "cannot be combined with --press" in out
