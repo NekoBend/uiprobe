@@ -63,7 +63,8 @@ INPUT_MARKER_SUFFIX = "; echo uiprobe-exit:$?"
 # ``cmd package resolve-activity --brief -c android.intent.category.LAUNCHER
 # PKG``, captured on API 24 and 36 emulators and a Samsung API 36 phone (the
 # same text on all three): one line about the match, then the component in
-# its short form; a package that is not installed gets RESOLVE_NONE.
+# its short form; a package that is not installed gets RESOLVE_NONE. uiprobe
+# sends it in the marker form; the emulators printed exit status 0 for both.
 RESOLVE_INFO = (
     "priority=0 preferredOrder=0 match=0x108000 specificIndex=-1 isDefault=true\n"
 )
@@ -305,8 +306,12 @@ class FakeAndroid:
     # a single-segment system package such as ``android``.
     _PACKAGE = rf"{_SEGMENT}(?:\.{_SEGMENT})+"
     _DECLARED_PACKAGE = rf"{_SEGMENT}(?:\.{_SEGMENT})*"
-    # No ``$``: a nested class would need shell quoting. Known limit.
-    _CLASS = r"\.?[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*"
+    # A declared class may hold ``$`` (a nested class): uiprobe sends such a
+    # component in single quotes, and the allowlist lists each declared
+    # spelling quoted as the shell needs it. A missing package's class
+    # (`extra_packages`) is admitted only without ``$``, so unquoted.
+    _CLASS = r"\.?[A-Za-z_$][A-Za-z0-9_$]*(?:\.[A-Za-z_$][A-Za-z0-9_$]*)*"
+    _PLAIN_CLASS = r"\.?[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*"
     # `cat` and `screencap` go through the binary-safe ``exec:`` service
     # (`Device` reads the dump with `exec_out`); everything else is ``shell:``.
     # The window with input focus as (title, owner package) when it is not the
@@ -418,11 +423,17 @@ class FakeAndroid:
             if package in packages:
                 msg = f"the device already declares package {package!r}"
                 raise ValueError(msg)
+        # Every spelling of every declared component (as declared, short and
+        # full), quoted for the shell as uiprobe quotes it.
         components = sorted(
             {
-                form
+                shlex.quote(form)
                 for s in snapshot
-                for form in (s.component, _full_component(s.component))
+                for form in (
+                    s.component,
+                    _full_component(s.component),
+                    _short_component(s.component),
+                )
             }
         )
         extra = sorted(set(extra_packages))
@@ -432,11 +443,12 @@ class FakeAndroid:
             rf" -c {re.escape(LAUNCHER_CATEGORY)} -n"
         )
         patterns = [
+            # The read, the start and the stop are sent in the marker form.
             re.compile(
                 r"^cmd package resolve-activity --brief"
-                rf" -c {re.escape(LAUNCHER_CATEGORY)} (?:{names})\Z"
+                rf" -c {re.escape(LAUNCHER_CATEGORY)} (?:{names})"
+                r"; echo uiprobe-exit:\$\?\Z"
             ),
-            # The start and the stop are sent in the marker form.
             re.compile(
                 rf"{start} (?:"
                 + "|".join(re.escape(c) for c in components)
@@ -448,7 +460,8 @@ class FakeAndroid:
             missing = "|".join(re.escape(p) for p in extra)
             patterns.append(
                 re.compile(
-                    rf"{start} (?:{missing})/{self._CLASS}; echo uiprobe-exit:\$\?\Z"
+                    rf"{start} (?:{missing})/{self._PLAIN_CLASS};"
+                    r" echo uiprobe-exit:\$\?\Z"
                 )
             )
         return {
@@ -702,6 +715,8 @@ class FakeAndroid:
             if inner.startswith("am start "):
                 # am start prints its own status; answer_input does not apply.
                 return result + b"uiprobe-exit:%d\n" % self._start_status
+            if inner.startswith("cmd package "):
+                return result + b"uiprobe-exit:0\n"  # also for no activity found
             out = result + self._input_output.encode()
             if self._input_marker:
                 out += b"uiprobe-exit:%d\n" % self._input_status

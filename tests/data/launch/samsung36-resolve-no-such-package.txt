@@ -4,4 +4,6 @@
 # Command: cmd package resolve-activity --brief -c android.intent.category.LAUNCHER <a package that is not installed>
 # Checked for device-identifying values (serial, account, IMEI, build,
 # address): none found, so the body below this header is verbatim.
+# Captured without '; echo uiprobe-exit:$?', which uiprobe appends: tests
+# append the line uiprobe-exit:0.
 No activity found

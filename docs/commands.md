@@ -271,15 +271,15 @@ $ uiprobe launch com.example.shop --restart --timeout 20
 launched com.example.shop
 ```
 
-uiprobe does not use `monkey` to start an app: `monkey -p PACKAGE -c android.intent.category.LAUNCHER 1` turned the device's auto-rotate setting on (the system setting `accelerometer_rotation` went from 0 to 1) on a Samsung API 36 phone and on API 24 and API 36 emulators, while `am start -W` left it unchanged. The commands below go through the `shell:` service, each once and never resent.
+The previous version of uiprobe started apps with `monkey -p PACKAGE -c android.intent.category.LAUNCHER 1`. That turned the device's auto-rotate setting on (the system setting `accelerometer_rotation` went from 0 to 1), seen on API 24 and API 36 emulators and on a Samsung API 36 phone. uiprobe now starts apps with `am start`, which does not change it: on an API 36 emulator, the system, global and secure settings read before and after `uiprobe launch`, `uiprobe launch --restart` and a short `crawl --press` showed no setting whose value changed (auto-rotate stayed off; only new keys appeared, as they also do when nothing is sent). `monkey` is never sent, and there is no fallback to it. The commands below go through the `shell:` service, each once and never resent.
 
 First uiprobe reads the app's launcher activity (this changes nothing on the device):
 
 ```sh
-cmd package resolve-activity --brief -c android.intent.category.LAUNCHER PACKAGE
+cmd package resolve-activity --brief -c android.intent.category.LAUNCHER PACKAGE; echo uiprobe-exit:$?
 ```
 
-Its output must be zero or more lines of the form `priority=0 preferredOrder=0 match=0x108000 specificIndex=-1 isDefault=true` and then exactly one last line `PACKAGE/CLASS`, with exactly `PACKAGE` before the slash and a class made of dot-separated parts of ASCII letters, digits, `_` and `$` (it may start with `.`, at most 255 characters). Anything else, such as `No activity found` for a package that is not installed or has no launcher activity, stops the launch before anything is sent that changes the device (`launcher_unreadable`). There is no fallback to `monkey`.
+Its output must be zero or more lines of the form `priority=0 preferredOrder=0 match=0x108000 specificIndex=-1 isDefault=true`, then exactly one line `PACKAGE/CLASS`, with exactly `PACKAGE` before the slash and a class made of dot-separated parts of ASCII letters, digits, `_` and `$` (it may start with `.`, at most 255 characters), and then the line `uiprobe-exit:0`, last. Anything else stops the launch before anything is sent that changes the device (`launcher_unreadable`): `No activity found` for a package that is not installed or has no launcher activity, another exit status, or output that ends early (without the last line, a component cut off at the end of the output is never taken).
 
 With `--restart` the app is then stopped with `am force-stop PACKAGE; echo uiprobe-exit:$?`, so the launch starts a fresh task. The app loses any state it has not saved. The stop must report exit status 0 and print nothing else, empty lines aside (on the measured API 24 and API 36 emulators a stop prints nothing, also for an app that is not running or not installed); otherwise the start is not sent. Without `--restart` an app that is already running comes forward where it was.
 
@@ -289,7 +289,16 @@ Then the app is started, with `PACKAGE/CLASS` as read:
 am start -W -a android.intent.action.MAIN -c android.intent.category.LAUNCHER -n PACKAGE/CLASS; echo uiprobe-exit:$?
 ```
 
-The start counts as successful only when no line starts with `Error` (API 24 prints `Error type 3` and `Error: Activity class {...} does not exist.` with exit status 0, so the status alone proves nothing), the exit status is 0, the line `Status: ok` appears exactly once, exactly one line starts with `Activity:` and it is `Activity: PACKAGE/CLASS` for the same package (the class may differ: Settings, started as `.Settings`, reports `.homepage.SettingsHomepageActivity` on a Samsung API 36 phone and an API 36 emulator), and every other line is `Complete` or starts with `Starting:`, `Warning:`, `LaunchState:`, `ThisTime:`, `TotalTime:` or `WaitTime:` (empty lines are ignored). `-W` makes `am start` wait until the launch is done; it may stay silent for `--timeout` seconds (at least 1 second), else the launch fails with `start_timeout`.
+The start counts as successful only when all of this holds (empty lines are ignored, and one CR at the end of each line is cut):
+
+- No line holds a control character, and no line starts with `Error` (API 24 prints `Error type 3` and `Error: Activity class {...} does not exist.` with exit status 0, so the status alone proves nothing).
+- The last line is `uiprobe-exit:0`.
+- Exactly one line `Starting: Intent { act=android.intent.action.MAIN cat=[android.intent.category.LAUNCHER] cmp=PACKAGE/CLASS }` names the component that was sent (in its short `.Name` or its full spelling).
+- Exactly one line `Status: ok`.
+- Exactly one line `Activity: PACKAGE/CLASS` for the same package. The class may differ: Settings, started as `.Settings`, reports `.homepage.SettingsHomepageActivity` on a Samsung API 36 phone and an API 36 emulator.
+- Any other line is one of these, each at most once: one of the two warnings seen when the app was already running (`Warning: Activity not started, intent has been delivered to currently running top-most instance.` and `Warning: Activity not started, its current task has been brought to the front`), `LaunchState: WORD` (such as `COLD`, `WARM` or `UNKNOWN (0)`), `ThisTime: N`, `TotalTime: N`, `WaitTime: N` and `Complete`.
+
+`-W` makes `am start` wait until the launch is done; its reply may stay silent for `--timeout` seconds (at least 1 second), else the launch fails with `start_timeout`, and whether the app started is unknown.
 
 Then uiprobe reads the foreground app (as `Device.foreground` does) about every 0.5 seconds, at least once, until it equals `PACKAGE`; `--timeout SECONDS` (a plain decimal number from 0 to 600 of at most 32 characters, default 10) limits the wait. The timeout is the latest time a read may start, not a limit on the whole wait: a read that started in time still counts, so the wait can run past the timeout by the time of that read, and by how late a pause ends when the system wakes it late. This check is made even when `am start` reported success.
 
@@ -297,11 +306,12 @@ Then uiprobe reads the foreground app (as `Device.foreground` does) about every 
 
 | `details.reason` | Meaning |
 | --- | --- |
-| `launcher_unreadable` | The launcher activity could not be read on this device: the package is not installed, has no launcher activity, or the output had another shape. `details.output` is the first line that is not blank, stripped of spaces and tabs, cut to 200 characters and escaped. Nothing was stopped or started. |
+| `launcher_unreadable` | The launcher activity could not be read on this device: the package is not installed, has no launcher activity, the read did not end with exit status 0, or the output had another shape. `details.output` is the first line that is not blank, stripped of spaces and tabs, cut to 200 characters and escaped. Nothing was stopped or started. |
 | `stop_failed` | With `--restart`, `am force-stop` reported an exit status other than 0 (`details.exit_status`), no exit status, or printed something (`details.output`, escaped); each is set only when known. The start was not sent. |
 | `start_failed` | `am start` printed a line starting with `Error`, or reported an exit status other than 0 (`details.exit_status`). `details.output` is the `Error:` line (else the first `Error` line, else the first line that is not blank), cut to 200 characters and escaped. |
+| `other_activity` | `am start` reported success, but its `Activity:` line names an activity of another app (`details.activity`, escaped; `details.output` is that line). Seen on an API 36 emulator: after a tap on the Settings search bar opened a screen of `com.google.android.settings.intelligence` and Settings was force-stopped, starting Settings brought that screen back. That app is then in front. |
 | `unexpected_output` | `am start` did not report the success described above; `details.output` is the line at fault, or else its first line that is not blank, cut to 200 characters and escaped. The app may still have started. |
-| `start_timeout` | `am start -W` stayed silent for `details.timeout` seconds. The app may still have started. |
+| `start_timeout` | The reply of `am start -W` did not come: it stayed silent for `details.timeout` seconds. Whether the app started is unknown. |
 | `not_in_front` | The start reported success, but the app was not in front within the timeout; `details.foreground` is the last package seen, escaped and, past 1000 characters, cut and ended with `...` (`null` when unknown) and `details.timeout` the limit. The app may still have started. |
 
 With `--json` the result is a `uiprobe.action/1` object (see [Output formats](output.md)); `restart` is always written.

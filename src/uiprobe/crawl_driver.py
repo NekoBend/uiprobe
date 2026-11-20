@@ -101,7 +101,7 @@ from uiprobe.crawl import (
     _Prints,
 )
 from uiprobe.crawl_preview import check_package
-from uiprobe.device import PIN_NOT_PROVEN, PIN_WAIT_STOPPED
+from uiprobe.device import PIN_NOT_PROVEN, PIN_WAIT_STOPPED, SEND_STOPPED
 from uiprobe.errors import (
     DeviceNotFoundError,
     DumpError,
@@ -318,17 +318,12 @@ class _Run:
 
     def run(self) -> str:
         """Run until a stop reason is known; return it."""
-        if self.stopped():
-            return INTERRUPTED
+        reason = self.first_launch()
+        if reason is not None:
+            return reason
         engine = self.engine
-        refused, _ = self.send(engine.start(), None)
-        if refused == NOT_SENT_RECONNECTED:
-            self.notes.append(f"launch was not sent: {refused}")
-            return STOP_NOT_SENT
-        if refused is not None:  # otherwise only stop() or the time limit
-            return INTERRUPTED if self._stop_seen else MAX_DURATION
-        observation = self.observe()
-        while True:
+        observation = self.next_observation()
+        while observation is not None:
             if self.stopped():
                 return INTERRUPTED
             action = engine.next(observation)
@@ -348,18 +343,40 @@ class _Run:
             ending = self.ending(action, refused)
             if ending is not None:
                 return ending
-            if fresh is not None:
-                # A tap the gate did not send: the screen it re-read goes to
-                # the engine, which releases the unreported tap.
-                observation = fresh
-                continue
-            observation = self.observe()
+            # A tap the gate did not send: the screen it re-read goes to the
+            # engine, which releases the unreported tap.
+            observation = fresh if fresh is not None else self.next_observation()
+        return INTERRUPTED
 
-    def send_input(self, action: Action, action_id: int) -> bool:
-        """Send a tap, BACK or the first launch; False when nothing was sent
-        because the device has to be proven again first (the action is
-        closed as the gate would have closed it, and taken back unless it is
-        the first launch)."""
+    def first_launch(self) -> str | None:
+        """Send the first launch; the stop reason when the run ends there."""
+        if self.stopped():
+            return INTERRUPTED
+        refused, _ = self.send(self.engine.start(), None)
+        if refused == NOT_SENT_RECONNECTED:
+            self.notes.append(f"launch was not sent: {refused}")
+            return STOP_NOT_SENT
+        if refused is not None:  # otherwise only stop() or the time limit
+            return INTERRUPTED if self._stop_seen else MAX_DURATION
+        return None
+
+    def next_observation(self) -> Observation | None:
+        """Ask `stop` again, then read the screen; None when `stop` said so
+        (after an action, before any read of the screen)."""
+        if self.stopped():
+            return None
+        return self.observe()
+
+    def send_input(self, action: Action, action_id: int) -> str | None:
+        """Send a tap, BACK or the first launch; return why nothing was sent,
+        or None when it was sent.
+
+        ``device_reconnected``: the device has to be proven again first (the
+        action is closed as the gate would have closed it, and taken back
+        unless it is the first launch). ``time_limit``: the time limit had
+        passed when the request was about to go out (`Device.set_send_check`);
+        the action is closed as not sent and the run ends.
+        """
         try:
             if isinstance(action, Tap):
                 self.device.tap(action.point)
@@ -368,14 +385,48 @@ class _Run:
             else:
                 self.launch()
         except DeviceNotFoundError as error:
-            if error.details.get("reason") != PIN_NOT_PROVEN:
+            reason = error.details.get("reason")
+            if reason == SEND_STOPPED:
+                self._open = None
+                why = str(error.details.get("why", NOT_SENT_TIME_LIMIT))
+                self.end_not_sent(action_id, why)
+                return why
+            if reason != PIN_NOT_PROVEN:
                 raise
             self._open = None
             self.end_not_sent(action_id, NOT_SENT_RECONNECTED)
             if not isinstance(action, Launch):
                 self.withdraw(action)
-            return False
-        return True
+            return NOT_SENT_RECONNECTED
+        return None
+
+    def end_failed(self, action_id: int, error: Exception) -> None:
+        """Close a launch or relaunch whose sending failed and ends the run.
+
+        The end line has ``failed``, the reason and ``outcome: unknown``: the
+        device may have acted on what was sent. A start whose reply did not
+        come in time also gets a note in the summary.
+        """
+        self._open = None
+        if isinstance(error, LaunchFailedError):
+            reason = str(error.details.get("reason", error.code))
+        elif isinstance(error, UiprobeError):
+            reason = error.code
+        else:
+            reason = "internal_error"
+        if reason == "start_timeout":
+            seconds = (
+                error.details.get("timeout")
+                if isinstance(error, UiprobeError)
+                else None
+            )
+            self.notes.append(
+                f"the reply of am start -W for {self.package} did not come within"
+                f" {seconds} seconds; whether the app started is unknown, so the"
+                " run ended"
+            )
+        with contextlib.suppress(RunFolderError):
+            self.writer.write_transition_end(action_id, failed=reason)
 
     def end_not_sent(
         self,
@@ -435,6 +486,11 @@ class _Run:
                 self.wait_stop = NOT_SENT_TIME_LIMIT
         return self.wait_stop is not None
 
+    def send_check(self) -> str | None:
+        """The time limit, asked by the device right before a request that
+        changes it goes out (after the transport was chosen)."""
+        return NOT_SENT_TIME_LIMIT if self.clock() >= self.deadline else None
+
     def stopped(self) -> bool:
         """Whether `stop` asked to end; once it did, the answer stays True."""
         if not self._stop_seen and self.stop is not None and bool(self.stop()):
@@ -485,10 +541,18 @@ class _Run:
         # code (stop() and the clock were asked first), no other read, no write.
         self._open = action_id
         self.sent_epoch = self.device.pin_epoch
-        if isinstance(action, Relaunch):
-            return self.relaunch(action_id, action), None
-        if not self.send_input(action, action_id):
-            return NOT_SENT_RECONNECTED, None
+        try:
+            if isinstance(action, Relaunch):
+                return self.relaunch(action_id, action), None
+            refused = self.send_input(action, action_id)
+        except Exception as error:
+            # A launch or relaunch that failed ends the run; its end line says
+            # so (a tap or BACK keeps a start line alone: result unknown).
+            if isinstance(action, Launch | Relaunch) and self._open == action_id:
+                self.end_failed(action_id, error)
+            raise
+        if refused is not None:
+            return refused, None
         if isinstance(action, Tap):
             self.engine.tap_sent(action)
             if seen is not None:
@@ -644,7 +708,8 @@ class _Run:
 
         The one place every action passes right before it is sent. First `stop`
         and the time limit, then that the pinned transport still leads to the
-        checked device (an error if not), then a fresh read: for a tap the dump
+        checked device (an error if not), then `stop` again (the pin check can
+        wait for the device), then a fresh read: for a tap the dump
         first and then foreground, focused window and keyboard, so the reads
         nearest the press come last. Anything that cannot be read, or that
         differs from what the action was chosen on, is a refusal. After the
@@ -657,6 +722,10 @@ class _Run:
         self.device.check_pin(emulator=self.emulator)
         if isinstance(action, Launch):
             return self.launch_gate(), None
+        # Asked again after the pin check, which can block for long (a wait
+        # for the device); after it only the reads run before the input.
+        if self.stopped():
+            return NOT_SENT_STOPPED, None
         self.gate_epoch = self.device.pin_epoch
         # For a tap: the focused window before and after the dump must be the
         # same window of the app, so the dump shows that window (uiautomator
@@ -747,9 +816,12 @@ class _Run:
         """The end of the first launch's gate, after the pin check: the time
         again (the check's reads can take long), then the last comparison."""
         epoch = self.device.pin_epoch
+        stopped = self.stopped()  # asked again after the pin check
         late = self.clock() >= self.deadline
         if self.device.pin_epoch != epoch:
             return NOT_SENT_RECONNECTED
+        if stopped:
+            return NOT_SENT_STOPPED
         if late:
             return NOT_SENT_TIME_LIMIT
         return None
@@ -782,24 +854,26 @@ class _Run:
         start of the run (`launcher`), so nothing is read between the gate
         and the start. ``not_in_front`` means the start reported success, but
         another package (a permission dialog, a splash screen) holds the
-        focus; ``start_timeout`` means ``am start -W`` did not finish in time.
-        The engine handles an off-target screen, so the crawl observes and
-        goes on. The action stays counted as sent. Any other launch failure is
-        raised.
+        focus; ``other_activity`` means the start reported success with an
+        activity of another app (on API 36, Settings' search screen of
+        another package stays on top of its task after a force-stop). The
+        engine handles an off-target screen, so the crawl observes and goes
+        on. The action stays counted as sent. Any other launch failure,
+        ``start_timeout`` included (whether the app started is unknown), is
+        raised and ends the run.
         """
         try:
             self.device.launch(self.package, activity=self.launcher)
         except LaunchFailedError as error:
             reason = error.details.get("reason")
-            if reason == "start_timeout":
-                seconds = error.details.get("timeout")
-                self.notes.append(
-                    f"{self.package} did not finish starting in {seconds} seconds"
-                )
-                return
-            if reason != "not_in_front":
+            if reason == "other_activity":
+                # The start went to an activity of another app (one that was
+                # on top of the app's task): that app is in front.
+                seen = str(error.details.get("activity", "")).partition("/")[0]
+            elif reason == "not_in_front":
+                seen = error.details.get("foreground")
+            else:
                 raise
-            seen = error.details.get("foreground")
             self.notes.append(f"{self.package} was not in front after launch ({seen})")
 
     def relaunch(self, action_id: int, action: Relaunch) -> str | None:
@@ -811,24 +885,64 @@ class _Run:
         (``start_not_sent``) and the summary says so. Returns that reason, or
         None when the app was started.
         """
+        unsent = self.relaunch_stop(action_id, action)
+        if unsent is not None:
+            return unsent
+        reason = self.relaunch_halt(action_id)
+        if reason is None and self.device.pin_epoch != self.sent_epoch:
+            # The device had to be proven again after the force-stop: the
+            # start is not sent on the earlier decision.
+            return self.half_sent(action_id, NOT_SENT_RECONNECTED)
+        if reason is not None:
+            self.half_sent(action_id, reason)
+            return NOT_SENT_START
+        try:
+            self.launch()
+        except DeviceNotFoundError as error:
+            why = error.details.get("reason")
+            if why == SEND_STOPPED:
+                # The time limit passed right before the start went out.
+                self.half_sent(action_id, str(error.details.get("why", "")))
+                return NOT_SENT_START
+            if why != PIN_NOT_PROVEN:
+                raise
+            # The force-stop went out, the start did not.
+            return self.half_sent(action_id, NOT_SENT_RECONNECTED)
+        return None
+
+    def relaunch_stop(self, action_id: int, action: Relaunch) -> str | None:
+        """Send the force-stop of a relaunch; why it was not sent, or None."""
         try:
             self.device.stop_app(self.package)
         except DeviceNotFoundError as error:
-            if error.details.get("reason") != PIN_NOT_PROVEN:
+            reason = error.details.get("reason")
+            if reason == SEND_STOPPED:
+                self._open = None  # nothing was sent: the time limit had passed
+                why = str(error.details.get("why", NOT_SENT_TIME_LIMIT))
+                self.end_not_sent(action_id, why)
+                return why
+            if reason != PIN_NOT_PROVEN:
                 raise
             self._open = None  # nothing was sent
             self.end_not_sent(action_id, NOT_SENT_RECONNECTED)
             self.withdraw(action)
             return NOT_SENT_RECONNECTED
+        return None
+
+    def relaunch_halt(self, action_id: int) -> str | None:
+        """Between the force-stop and the start: `stop`, the time, the pin
+        check, `stop` and the time again; why not to start, or None."""
         try:
             # stop() may read the device, so it is inside the handler too.
             reason = self.halt()
             if reason is None:
                 # The device behind the pin is checked again before the start,
-                # then the time (its reads can take long), then, below, the
-                # last comparison of the pin.
+                # then stop() (the check can block for long) and the time,
+                # then, in `relaunch`, the last comparison of the pin.
                 self.device.check_pin(emulator=self.emulator)
-                if self.clock() >= self.deadline:
+                if self.stopped():
+                    reason = NOT_SENT_STOPPED
+                elif self.clock() >= self.deadline:
                     reason = NOT_SENT_TIME_LIMIT
         except DeviceNotFoundError as error:
             if error.details.get("reason") != PIN_WAIT_STOPPED:
@@ -836,45 +950,19 @@ class _Run:
             # The time limit (or a stop seen before) ended a wait for the
             # device: the start was not sent, which the record says before
             # the run ends.
-            self._open = None
-            why = self.wait_stop or NOT_SENT_STOPPED
-            self.end_not_sent(action_id, NOT_SENT_START)
-            self.notes.append(
-                f"{self.package} was force-stopped but not started again ({why})"
-            )
+            self.half_sent(action_id, self.wait_stop or NOT_SENT_STOPPED)
             raise
-        if reason is None and self.device.pin_epoch != self.sent_epoch:
-            # The device had to be proven again after the force-stop: the
-            # start is not sent on the earlier decision.
-            self._open = None
-            self.end_not_sent(action_id, NOT_SENT_START)
-            self.notes.append(
-                f"{self.package} was force-stopped but not started again"
-                f" ({NOT_SENT_RECONNECTED})"
-            )
-            return _HALF_RELAUNCH
-        if reason is not None:
-            self._open = None
-            self.end_not_sent(action_id, NOT_SENT_START)
-            self.notes.append(
-                f"{self.package} was force-stopped but not started again ({reason})"
-            )
-            return NOT_SENT_START
-        try:
-            self.launch()
-        except DeviceNotFoundError as error:
-            if error.details.get("reason") != PIN_NOT_PROVEN:
-                raise
-            self._open = None  # the force-stop went out, the start did not
-            self.end_not_sent(action_id, NOT_SENT_START)
-            self.notes.append(
-                f"{self.package} was force-stopped but not started again"
-                f" ({NOT_SENT_RECONNECTED})"
-            )
-            return _HALF_RELAUNCH
-        return None
+        return reason
 
-    # -- reading --
+    def half_sent(self, action_id: int, why: str) -> str:
+        """Close a relaunch whose force-stop went out and whose start did not;
+        return `_HALF_RELAUNCH`."""
+        self._open = None
+        self.end_not_sent(action_id, NOT_SENT_START)
+        self.notes.append(
+            f"{self.package} was force-stopped but not started again ({why})"
+        )
+        return _HALF_RELAUNCH
 
     def dump(self) -> Screen | None:
         try:
@@ -1194,7 +1282,9 @@ def crawl(
     # called while the device is being proven); the caller's own watch is put
     # back at the end.
     caller_watch = device.pin_watch
+    caller_check = device.send_check
     device.set_pin_watch(None)
+    device.set_send_check(None)
     repins_before = len(device.repins)
     try:
         return _crawl_on(
@@ -1213,6 +1303,7 @@ def crawl(
         )
     finally:
         device.set_pin_watch(caller_watch)
+        device.set_send_check(caller_check)
 
 
 def _crawl_on(
@@ -1275,6 +1366,9 @@ def _crawl_on(
         run.repins_before = repins_before  # moves made before this call
         # Asked only while the device waits for a renumbered transport.
         device.set_pin_watch(run.waiting_stopped)
+        # Asked right before each input, start or stop goes out, after the
+        # transport was chosen: past the time limit nothing more is sent.
+        device.set_send_check(run.send_check)
         return _drive(run, writer)
     finally:
         with contextlib.suppress(RunFolderError):

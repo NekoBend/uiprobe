@@ -269,6 +269,11 @@ def test_a_boot_id_that_can_no_longer_be_read_is_a_change(fake_adb, android):
         (lambda d: d.key("back"), "input"),
         (lambda d: d.tap((10, 10)), "input"),
         (lambda d: d.stop_app(SHOP), "am"),
+        # The launcher read goes out on the same rule as the start: neither
+        # follows the renumbered transport.
+        (lambda d: d.launch(SHOP), "am start"),
+        (lambda d: d.launch(SHOP, restart=True), "am "),
+        (lambda d: d.launch(SHOP), "cmd package"),
         # the launcher activity given: no read comes before the start
         (lambda d: d.launch(SHOP, activity=f"{SHOP}/.Main"), "am start"),
     ],
@@ -287,6 +292,27 @@ def test_an_input_never_follows_a_renumbered_transport(
     assert through(fake_adb, TRANSPORT + 1, since) == []
     assert not [c for _, _, c in fake_adb.commands if c.startswith(command)]
     assert android.inputs == []
+    assert android.stopped == []
+
+
+@pytest.mark.parametrize("restart", [False, True])
+def test_a_launch_sends_nothing_when_the_pin_moved_during_the_launcher_read(
+    fake_adb, android, monkeypatch, restart
+):
+    device = pinned(fake_adb)
+    original = device._shell_text
+
+    def read_then_doubt(command: str, **kwargs: object) -> str:
+        text = original(command, **kwargs)  # ty: ignore[invalid-argument-type]
+        if command.startswith("cmd package"):
+            device._epoch += 1  # as a failed request in between would
+        return text
+
+    monkeypatch.setattr(device, "_shell_text", read_then_doubt)
+    with pytest.raises(DeviceNotFoundError) as caught:
+        device.launch(SHOP, restart=restart)
+    assert caught.value.details["reason"] == PIN_NOT_PROVEN
+    assert not [c for _, _, c in fake_adb.commands if c.startswith("am ")]
     assert android.stopped == []
 
 

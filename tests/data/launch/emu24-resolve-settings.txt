@@ -5,8 +5,8 @@
 # Command: cmd package resolve-activity --brief -c android.intent.category.LAUNCHER com.android.settings; echo uiprobe-exit:$?
 # The body below this header is verbatim; nothing was replaced (an
 # emulator has no device-identifying values in this output).
-# uiprobe sends the command without '; echo uiprobe-exit:$?': tests drop
-# the last line, which only that suffix printed.
+# uiprobe sends this same command; the last line is the exit marker its
+# '; echo uiprobe-exit:$?' printed.
 priority=0 preferredOrder=0 match=0x108000 specificIndex=-1 isDefault=true
 com.android.settings/.Settings
 uiprobe-exit:0

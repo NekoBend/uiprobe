@@ -20,7 +20,7 @@ from uiprobe.adb import (
     resolve_server_address,
     start_blocked_by_environment,
 )
-from uiprobe.crawl_preview import check_package
+from uiprobe.crawl_preview import MAX_PACKAGE_LENGTH, PACKAGE_PATTERN, check_package
 from uiprobe.errors import (
     AdbError,
     AdbServerUnavailableError,
@@ -94,6 +94,10 @@ PIN_WAIT_STOPPED: Final = "pin_wait_stopped"
 # details["reason"] when a request that changes the device was not sent
 # because the device has to be proven again first (the pin itself is kept).
 PIN_NOT_PROVEN: Final = "pin_not_proven"
+# details["reason"] when a request that changes the device was not sent
+# because the check set with `Device.set_send_check` said so (asked after the
+# transport was chosen, right before the request); details["why"] is its word.
+SEND_STOPPED: Final = "send_stopped"
 
 
 # Android gives each user this many uids: uid = user * 100000 + app id.
@@ -154,20 +158,31 @@ _RESOLVE_INFO = re.compile(
 # ``_`` and ``$``, optionally starting with ``.`` (short for the package).
 _CLASS_NAME = re.compile(r"\.?[A-Za-z0-9_$]+(?:\.[A-Za-z0-9_$]+)*")
 _MAX_CLASS_NAME: Final = 255
-# Lines ``am start -W`` prints that say nothing about success and are allowed
-# (captured: ``Warning:`` when the app was running, ``LaunchState:`` on API 36,
-# ``ThisTime:`` on API 24).
-_START_INFO: Final = (
-    "Starting: ",
-    "Warning: ",
-    "LaunchState: ",
-    "ThisTime: ",
-    "TotalTime: ",
-    "WaitTime: ",
+# The lines ``am start -W`` prints, as captured on API 24 and 36 emulators and
+# a Samsung API 36 phone. The first line echoes the component (short form);
+# a Warning line is one of the two captured ones (the app was running); the
+# lines with times and the launch state say nothing about success.
+_START_ECHO: Final = (
+    "Starting: Intent {{ act=android.intent.action.MAIN"
+    " cat=[android.intent.category.LAUNCHER] cmp={} }}"
+)
+_START_WARNINGS: Final = frozenset(
+    {
+        "Warning: Activity not started, intent has been delivered to currently"
+        " running top-most instance.",
+        "Warning: Activity not started, its current task has been brought to the front",
+    }
+)
+# Captured: COLD, WARM, UNKNOWN (0) (API 36); ThisTime only on API 24.
+_START_INFO = re.compile(
+    r"(LaunchState): [A-Z]{1,16}(?: \(-?[0-9]{1,10}\))?"
+    r"|(ThisTime|TotalTime|WaitTime): -?[0-9]{1,10}"
 )
 _START_OK: Final = "Status: ok"
 _START_DONE: Final = "Complete"
 _START_ACTIVITY: Final = "Activity:"
+# C0 and C1 control characters; a line keeps none after its CR LF end is cut.
+_CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f]")
 # The silence ``am start -W`` may keep while it waits is the launch timeout,
 # but at least this long (a read timeout of 0 would not wait at all).
 START_MIN_WAIT: Final = 1.0
@@ -834,20 +849,33 @@ def _is_component(text: str, package: str) -> bool:
 
 
 def _launcher_component(output: str, package: str) -> str | None:
-    """Read the component from ``cmd package resolve-activity --brief`` output.
+    """Read the component from ``cmd package resolve-activity --brief ...;
+    echo uiprobe-exit:$?`` output.
 
     Accepted: zero or more lines of the `_RESOLVE_INFO` form, then exactly one
-    last line ``PACKAGE/CLASS`` of `package` (empty lines and one CR at each
-    line end are ignored). Anything else, ``No activity found`` included, is
-    None.
+    line ``PACKAGE/CLASS`` of `package`, then the line ``uiprobe-exit:0``,
+    last (empty lines and one CR at each line end are ignored). Anything
+    else is None: ``No activity found``, another exit status, and output that
+    ends early (no marker line, so a component cut off at the end of the
+    output is never taken).
     """
     lines = [line for line in _lines(output) if line]
-    if not lines:
+    if len(lines) < 2 or lines[-1] != f"{EXIT_MARKER}0":
         return None
-    *info, last = lines
+    *info, last = lines[:-1]
     if not all(_RESOLVE_INFO.fullmatch(line) for line in info):
         return None
     return last if _is_component(last, package) else None
+
+
+def _spellings(component: str) -> frozenset[str]:
+    """The short (``.Name``) and full spellings of ``PACKAGE/CLASS``."""
+    package, _, name = component.partition("/")
+    if name.startswith("."):
+        return frozenset({component, f"{package}/{package}{name}"})
+    if name.startswith(package + "."):
+        return frozenset({component, f"{package}/{name[len(package) :]}"})
+    return frozenset({component})
 
 
 def _check_activity(activity: object, package: str) -> str:
@@ -873,28 +901,41 @@ def _check_activity(activity: object, package: str) -> str:
 class _StartFailure(NamedTuple):
     """Why ``am start -W`` output is not a success.
 
-    ``line`` is the line to show (None: the first line that is not blank) and
-    ``exit_status`` the status when it was known and not 0.
+    ``line`` is the line to show (None: the first line that is not blank),
+    ``exit_status`` the status when it was known and not 0, and ``other``
+    the component of another package that ``Activity:`` named.
     """
 
     reason: str
     problem: str
     line: str | None = None
     exit_status: int | None = None
+    other: str | None = None
 
 
-def _start_failure(output: str, package: str) -> _StartFailure | None:
-    """Judge ``am start -W ...; echo uiprobe-exit:$?`` output; None is success.
+def _start_failure(output: str, package: str, activity: str) -> _StartFailure | None:
+    """Judge ``am start -W ... -n ACTIVITY; echo uiprobe-exit:$?`` output.
 
-    Success: no line starts with ``Error``, the marker line is last with exit
-    status 0, the line ``Status: ok`` is there exactly once, exactly one line
-    starts with ``Activity:`` and it is ``Activity: PACKAGE/CLASS`` of
-    `package` (any class: a launcher activity may hand over to another one),
-    and every other line is ``Complete`` or starts with one of `_START_INFO`.
-    Empty lines and one CR at each line end are ignored. API 24 prints its
-    ``Error`` lines with exit status 0, so the status alone proves nothing.
+    None is success: no line holds a control character (after one CR at its
+    end is cut), no line starts with ``Error``, the marker line is last with
+    exit status 0, and the other lines are, each kind at most once: exactly
+    one ``Starting: Intent { act=android.intent.action.MAIN
+    cat=[android.intent.category.LAUNCHER] cmp=ACTIVITY }`` (in the short or
+    the full spelling of `activity`), one of the two captured ``Warning:``
+    lines, exactly one ``Status: ok``, exactly one ``Activity: PACKAGE/CLASS``
+    of `package` (any class: a launcher activity may hand over to another
+    one), ``LaunchState:``, ``ThisTime:``, ``TotalTime:``, ``WaitTime:`` and
+    ``Complete``. Empty lines are ignored. API 24 prints its ``Error`` lines
+    with exit status 0, so the status alone proves nothing. Output that is a
+    success in every other way but names an activity of another package gives
+    the reason ``other_activity``.
     """
     lines = [line for line in _lines(output) if line]
+    control = next((line for line in lines if _CONTROL.search(line)), None)
+    if control is not None:
+        return _StartFailure(
+            "unexpected_output", "printed a control character", control
+        )
     marker = lines[-1] if lines and lines[-1].startswith(EXIT_MARKER) else None
     others = lines[:-1] if marker is not None else lines
     value = None if marker is None else marker[len(EXIT_MARKER) :]
@@ -912,33 +953,56 @@ def _start_failure(output: str, package: str) -> _StartFailure | None:
         )
     if status is None:
         return _StartFailure("unexpected_output", "reported no exit status")
-    return _start_report_failure(others, package)
+    return _start_report_failure(others, package, activity)
 
 
-def _start_report_failure(lines: list[str], package: str) -> _StartFailure | None:
+def _start_line_kind(line: str, echoes: frozenset[str]) -> str | None:
+    """The kind of one line of a start's report, or None when unknown."""
+    if line in echoes:
+        return "Starting"
+    if line in _START_WARNINGS:
+        return "Warning"
+    if line in (_START_OK, _START_DONE):
+        return line
+    if line.startswith(_START_ACTIVITY):
+        return _START_ACTIVITY
+    info = _START_INFO.fullmatch(line)
+    return None if info is None else info.group(1) or info.group(2)
+
+
+def _start_report_failure(
+    lines: list[str], package: str, activity: str
+) -> _StartFailure | None:
     """Judge the lines of a start that reported exit status 0 and no error."""
-    unknown = next(
-        (
-            line
-            for line in lines
-            if line not in (_START_OK, _START_DONE)
-            and not line.startswith((*_START_INFO, _START_ACTIVITY))
-        ),
-        None,
-    )
-    if unknown is not None:
-        return _StartFailure("unexpected_output", "printed an unknown line", unknown)
-    if lines.count(_START_OK) != 1:
-        return _StartFailure("unexpected_output", f"did not print '{_START_OK}' once")
-    activities = [line for line in lines if line.startswith(_START_ACTIVITY)]
-    if len(activities) != 1:
-        return _StartFailure("unexpected_output", "did not name one started activity")
-    named = activities[0].removeprefix(_START_ACTIVITY + " ")
-    if named == activities[0] or not _is_component(named, package):
+    echoes = frozenset(_START_ECHO.format(c) for c in _spellings(activity))
+    kinds: list[str] = []
+    for line in lines:
+        kind = _start_line_kind(line, echoes)
+        if kind is None:
+            return _StartFailure("unexpected_output", "printed an unknown line", line)
+        if kind in kinds:
+            return _StartFailure("unexpected_output", "printed a line twice", line)
+        kinds.append(kind)
+    missing = [k for k in ("Starting", _START_OK, _START_ACTIVITY) if k not in kinds]
+    if missing:
+        what = "the start line" if missing[0] == "Starting" else f"'{missing[0]}'"
+        return _StartFailure("unexpected_output", f"did not print {what}")
+    named = next(line for line in lines if line.startswith(_START_ACTIVITY))
+    component = named.removeprefix(_START_ACTIVITY + " ")
+    if component != named and _is_component(component, package):
+        return None
+    owner = component.partition("/")[0]
+    if (
+        component != named
+        and owner != package
+        and len(owner) <= MAX_PACKAGE_LENGTH
+        and PACKAGE_PATTERN.fullmatch(owner)
+        and _is_component(component, owner)
+    ):
         return _StartFailure(
-            "unexpected_output", f"named no activity of {package}", activities[0]
+            "other_activity", "named an activity of another app", named, None, component
         )
-    return None
+    return _StartFailure("unexpected_output", f"named no activity of {package}", named)
 
 
 def _shown_foreground(name: str) -> str:
@@ -1463,6 +1527,7 @@ class Device:
         self._pinned_identity: DeviceIdentity | None = None
         self._repins: list[tuple[int, int]] = []
         self._pin_watch: Callable[[], bool] | None = None
+        self._send_check: Callable[[], str | None] | None = None
         self._repinning = False  # inside a re-pin: no second one
         self._reconnects = 0  # times the device had to be proven again
         # Moves on every event that makes earlier reads doubtful: a failed
@@ -1514,7 +1579,13 @@ class Device:
                 self._epoch += 1  # whatever stopped the check, the proof is stale
         return {"transport_id": self._transport_id}
 
-    def _call[T](self, send: Callable[[dict[str, int]], T], *, strict: bool) -> T:
+    def _call[T](
+        self,
+        send: Callable[[dict[str, int]], T],
+        *,
+        strict: bool,
+        changing: bool = False,
+    ) -> T:
         """Send one request with the pin; note a lost transport at once.
 
         A request on the pinned transport that does not succeed, for any
@@ -1524,8 +1595,19 @@ class Device:
         that swallows the error cannot hide it: the next read proves the
         device again (without a pinned boot id it fails the pin instead) and
         the next input is refused.
+
+        A request that `changing` marks (an input, a start or stop of an app)
+        asks the send check (`set_send_check`) after the pin check, right
+        before it goes out.
         """
         pin = self._pin(strict=strict)  # moves the epoch itself on a failure
+        if changing and self._send_check is not None:
+            why = self._send_check()
+            if why is not None:
+                word = str.__str__(why) if isinstance(why, str) else "stopped"
+                msg = f"nothing was sent to {self.serial}: {_escaped(word, 40)}"
+                details = {"serial": self.serial, "reason": SEND_STOPPED, "why": word}
+                raise DeviceNotFoundError(msg, details=details)
         succeeded = False
         try:
             result = send(pin)
@@ -1919,6 +2001,27 @@ class Device:
         """The watch set with `set_pin_watch`, or None."""
         return self._pin_watch
 
+    @property
+    def send_check(self) -> Callable[[], str | None] | None:
+        """The check set with `set_send_check`, or None."""
+        return self._send_check
+
+    def set_send_check(self, check: Callable[[], str | None] | None) -> None:
+        """Ask `check` right before each request that changes the device.
+
+        It is called after the transport was chosen (the adb server's list
+        read and the pin checked), right before the request goes out, for an
+        input and for a start or stop of an app, never for a read. When it
+        returns a str, nothing is sent and the request raises
+        `DeviceNotFoundError` whose ``details["reason"]`` is ``send_stopped``
+        and ``details["why"]`` that str; the pin stays as it was. The crawl
+        uses it for its time limit. None removes it.
+        """
+        if check is not None and not callable(check):
+            msg = "check must be callable or None"
+            raise TypeError(msg)
+        self._send_check = check
+
     def set_pin_watch(self, watch: Callable[[], bool] | None) -> None:
         """Ask `watch` while waiting for a renumbered transport.
 
@@ -1939,13 +2042,17 @@ class Device:
         """Run `command` on the device and return its output as text."""
         return self._shell_text(command)
 
-    def _shell_text(self, command: str, *, timeout: float | None = None) -> str:
-        strict = command.startswith(_CHANGING_COMMANDS)
+    def _shell_text(
+        self, command: str, *, timeout: float | None = None, strict: bool = False
+    ) -> str:
+        changing = command.startswith(_CHANGING_COMMANDS)
+        strict = strict or changing
         raw = self._call(
             lambda pin: self._client.shell(
                 self.serial, command, timeout=timeout, **pin
             ),
             strict=strict,
+            changing=changing,
         )
         return raw.decode("utf-8", errors="replace")
 
@@ -2361,9 +2468,19 @@ class Device:
     ) -> None:
         """Start the app `package` and wait until it is in front.
 
+        Earlier versions started apps with ``monkey -p PACKAGE -c
+        android.intent.category.LAUNCHER 1``, which turned auto-rotate on
+        (``accelerometer_rotation`` 0 to 1; seen on API 24 and 36 emulators
+        and a Samsung API 36 phone). ``am start`` does not change it, and
+        ``monkey`` is never sent.
+
         First the launcher activity is read with ``cmd package
-        resolve-activity --brief -c android.intent.category.LAUNCHER PACKAGE``
-        (see `launcher_activity`; skipped when `activity` is given). When it
+        resolve-activity --brief -c android.intent.category.LAUNCHER PACKAGE;
+        echo uiprobe-exit:$?`` (see `launcher_activity`; skipped when
+        `activity` is given). The read goes out only to a device that needs no
+        new proof, as a request that changes it would, and when anything
+        happened to the pin during it (`pin_epoch` moved) nothing more is sent
+        (`DeviceNotFoundError` with ``pin_not_proven``). When the activity
         cannot be read, nothing is sent that changes the device.
         With ``restart=True`` the command ``am force-stop PACKAGE; echo
         uiprobe-exit:$?`` is sent next. It stops the app, so the next launch
@@ -2372,17 +2489,19 @@ class Device:
         or nothing more is sent.
         Then exactly ``am start -W -a android.intent.action.MAIN -c
         android.intent.category.LAUNCHER -n PACKAGE/CLASS; echo
-        uiprobe-exit:$?`` is sent. It succeeds only when no line starts with
-        ``Error``, the exit status is 0, ``Status: ok`` is printed exactly
-        once, exactly one ``Activity:`` line names an activity of `package`
-        (its class may differ from the one started), and every other line is
-        ``Complete`` or starts with ``Starting:``, ``Warning:``,
-        ``LaunchState:``, ``ThisTime:``, ``TotalTime:`` or ``WaitTime:``. The
-        wait of ``-W`` may stay silent for `timeout` seconds (at least
-        `START_MIN_WAIT`). Each command is sent once and never resent, not
-        even after a connection error. ``monkey`` is never sent: it turned
-        auto-rotate on (on a Samsung API 36 phone and API 24 and 36
-        emulators), ``am start`` did not.
+        uiprobe-exit:$?`` is sent. It succeeds only when no line holds a
+        control character (after one CR at its end is cut), no line starts
+        with ``Error``, the exit status is 0, and the other lines are, each
+        at most once: exactly one ``Starting: Intent {
+        act=android.intent.action.MAIN cat=[android.intent.category.LAUNCHER]
+        cmp=PACKAGE/CLASS }`` naming the component sent (short or full
+        spelling), one of the two ``Warning:`` lines seen when the app was
+        running, exactly one ``Status: ok``, exactly one ``Activity:`` line
+        naming an activity of `package` (its class may differ from the one
+        started), ``LaunchState:``, ``ThisTime:``, ``TotalTime:``,
+        ``WaitTime:`` and ``Complete``. The wait of ``-W`` may stay silent for
+        `timeout` seconds (at least `START_MIN_WAIT`). Each command is sent
+        once and never resent, not even after a connection error.
 
         Then `foreground` is read about every 0.5 seconds until it equals
         `package`. It is read at least once, and no read starts after
@@ -2414,20 +2533,26 @@ class Device:
                 status and no output neither is set; the start was not sent),
                 ``start_failed`` (``am start`` printed a line starting with
                 ``Error``, or ended with an exit status other than 0, then in
-                ``exit_status``), ``unexpected_output`` (``am start`` did not
-                report the success described above), both with ``output``, the
+                ``exit_status``), ``other_activity`` (a reply that is a
+                success in every other way named an activity of another app,
+                which is then in front; ``activity`` is that component,
+                escaped), ``unexpected_output`` (``am start`` did not report
+                the success described above), these three with ``output``, the
                 line at fault or else the first line that is not blank, cut to
-                200 characters and escaped, ``start_timeout`` (``am start -W``
-                was silent longer than ``timeout`` seconds, the read timeout
-                used) or ``not_in_front`` (the app was not the foreground app in
-                time; ``foreground`` is the last package seen (escaped; past
-                1000 characters cut and ended with ``...``), or None, and
-                ``timeout`` the limit). After ``start_failed``,
-                ``unexpected_output``, ``start_timeout`` and ``not_in_front``
-                the app may still have started.
+                200 characters and escaped, ``start_timeout`` (the reply of
+                ``am start -W`` did not come: it was silent for ``timeout``
+                seconds, the read timeout used) or ``not_in_front`` (the app
+                was not the foreground app in time; ``foreground`` is the last
+                package seen (escaped; past 1000 characters cut and ended with
+                ``...``), or None, and ``timeout`` the limit). After
+                ``start_failed``, ``other_activity``, ``unexpected_output``,
+                ``start_timeout`` and ``not_in_front`` the app may still have
+                started.
             AdbError: The adb protocol or the command failed.
             AdbServerUnavailableError: The adb server cannot be reached.
-            DeviceNotFoundError: The device is gone.
+            DeviceNotFoundError: The device is gone, has to be proven again
+                (``pin_not_proven``, nothing sent), or the send check said
+                not to send (``send_stopped``, see `set_send_check`).
             DeviceOfflineError: The device is offline.
             DeviceUnauthorizedError: The device has not authorized this host.
         """
@@ -2441,7 +2566,17 @@ class Device:
         if activity is not None:
             activity = _check_activity(activity, package)
         else:
-            activity = self._launcher_activity(package)
+            # The read goes out only to a device proven now, as a start would,
+            # and nothing follows it when anything happened to the pin.
+            epoch = self._epoch
+            activity = self._launcher_activity(package, strict=True)
+            if self._epoch != epoch:
+                msg = (
+                    f"{self.serial} has to be proven again before an input"
+                    f" (transport {self._transport_id}); nothing was sent"
+                )
+                details = {"serial": self.serial, "reason": PIN_NOT_PROVEN}
+                raise DeviceNotFoundError(msg, details=details)
         if restart:
             self._force_stop(package)
         self._start(package, activity, limit, force_stopped=restart)
@@ -2466,15 +2601,16 @@ class Device:
         """Return the launcher activity of `package` as ``PACKAGE/CLASS``.
 
         It sends ``cmd package resolve-activity --brief -c
-        android.intent.category.LAUNCHER PACKAGE`` (a read: nothing on the
-        device changes). The output must be zero or more lines like
-        ``priority=0 preferredOrder=0 match=0x108000 specificIndex=-1
-        isDefault=true`` and then exactly one last line ``PACKAGE/CLASS`` with
-        exactly `package` before the slash and a class of dot-separated parts
-        of ASCII letters, digits, ``_`` and ``$`` (it may start with ``.``; at
-        most 255 characters). Empty lines and one CR at each line end are
-        ignored. The CLASS is returned as printed, often in the short form
-        ``.Name``.
+        android.intent.category.LAUNCHER PACKAGE; echo uiprobe-exit:$?`` (a
+        read: nothing on the device changes). The output must be zero or more
+        lines like ``priority=0 preferredOrder=0 match=0x108000
+        specificIndex=-1 isDefault=true``, then exactly one line
+        ``PACKAGE/CLASS`` with exactly `package` before the slash and a class
+        of dot-separated parts of ASCII letters, digits, ``_`` and ``$`` (it
+        may start with ``.``; at most 255 characters), then the line
+        ``uiprobe-exit:0`` last, so output cut short and another exit status
+        are refused. Empty lines and one CR at each line end are ignored. The
+        CLASS is returned as printed, often in the short form ``.Name``.
 
         Raises:
             TypeError, ValueError: `package` is not a valid package name
@@ -2491,8 +2627,10 @@ class Device:
             package = str.__str__(package)
         return self._launcher_activity(check_package(package))
 
-    def _launcher_activity(self, package: str) -> str:
-        output = self._shell(
+    def _launcher_activity(self, package: str, *, strict: bool = False) -> str:
+        """Read the launcher activity; `strict` sends the read only to a device
+        that needs no new proof (as a request that changes it)."""
+        output = self._shell_text(
             quote_args(
                 "cmd",
                 "package",
@@ -2502,6 +2640,8 @@ class Device:
                 LAUNCHER_CATEGORY,
                 package,
             )
+            + _EXIT_SUFFIX,
+            strict=strict,
         )
         component = _launcher_component(output, package)
         if component is not None:
@@ -2558,11 +2698,11 @@ class Device:
             # The request failed, so the pin was already doubted.
             details.update(reason="start_timeout", timeout=wait)
             msg = (
-                f"am start -W of {package} did not finish: it was silent for"
-                f" {wait:g} seconds"
+                f"the reply of am start -W for {package} did not come within"
+                f" {wait:g} seconds; whether the app started is unknown"
             )
             raise LaunchFailedError(msg, details=details) from None
-        failure = _start_failure(output, package)
+        failure = _start_failure(output, package, activity)
         if failure is None:
             return
         line = _escaped_line(output) if failure.line is None else _escaped(failure.line)
@@ -2570,6 +2710,10 @@ class Device:
         if failure.exit_status is not None:
             details["exit_status"] = failure.exit_status
         msg = f"am start of {package} {failure.problem}; its output: '{line}'"
+        if failure.other is not None:
+            # A complete, well-formed reply: nothing about the pin is in doubt.
+            details["activity"] = _escaped(failure.other, _FOREGROUND_LIMIT)
+            raise LaunchFailedError(msg, details=details)
         raise self._doubt(LaunchFailedError(msg, details=details))
 
     def stop_app(self, package: str) -> None:

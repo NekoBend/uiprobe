@@ -175,19 +175,23 @@ class LaunchFailedError(UiprobeError):
     known, say how, and the launch was not sent),
     ``start_failed`` (``am start`` printed a line starting with ``Error`` or
     ended with an exit status other than 0, then in ``details["exit_status"]``),
+    ``other_activity`` (``am start`` reported a success that named an
+    activity of another app, which is then in front; ``details["activity"]``
+    is that component, escaped),
     ``unexpected_output`` (``am start`` did not report ``Status: ok`` and one
-    activity of the package in the known shape); for both, ``details["output"]``
-    is the line at fault, or the first line that is not blank, cut to 200
-    characters and escaped,
-    ``start_timeout`` (``am start -W`` stayed silent for ``details["timeout"]``
-    seconds) or
+    activity of the package in the known shape); for these three,
+    ``details["output"]`` is the line at fault, or the first line that is not
+    blank, cut to 200 characters and escaped,
+    ``start_timeout`` (the reply of ``am start -W`` did not come: it stayed
+    silent for ``details["timeout"]`` seconds) or
     ``not_in_front`` (the start reported success but the app was not the
     foreground app within the timeout; ``details["foreground"]`` is the last
     package seen (escaped; past 1000 characters cut and ended with ``...``), or
     None, and ``details["timeout"]`` the timeout in seconds).
 
-    A launch that failed with ``start_failed``, ``unexpected_output``,
-    ``start_timeout`` or ``not_in_front`` may still have started the app.
+    A launch that failed with ``start_failed``, ``other_activity``,
+    ``unexpected_output``, ``start_timeout`` or ``not_in_front`` may still have
+    started the app.
     """
 
     code = "launch_failed"

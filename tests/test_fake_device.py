@@ -33,6 +33,14 @@ SERIAL = "emulator-5554"
 SHOP = "com.example.shop"
 TRICKY = 'Tom & <Jerry> "x"\nnext'
 RESOLVE = f"cmd package resolve-activity --brief -c {LAUNCHER_CATEGORY} "
+MARK = "; echo uiprobe-exit:$?"
+
+
+def resolve(package: str) -> str:
+    """The launcher read uiprobe sends for `package`, in the marker form."""
+    return f"{RESOLVE}{package}{MARK}"
+
+
 START = f"am start -W -a android.intent.action.MAIN -c {LAUNCHER_CATEGORY} -n "
 
 
@@ -203,13 +211,15 @@ def test_keyboard_shows_hides_on_back_and_is_in_dumpsys_input_method(device, and
 @device_options(extra_packages=["com.unknown"])
 def test_relaunch_by_resolve_activity_and_am_start(device, android):
     android.show("launcher")
-    component = device._shell(RESOLVE + SHOP).splitlines()[-1]
+    component = device._shell(resolve(SHOP)).splitlines()[-2]
     assert component == f"{SHOP}/.Main"
     out = device._shell(am_start(component))
     assert "Status: ok" in out
     assert out.endswith("uiprobe-exit:0\n")
     assert android.stack == ["main"]  # the task came back to the front
-    assert device._shell(RESOLVE + "com.unknown") == "No activity found\n"
+    assert device._shell(resolve("com.unknown")) == (
+        "No activity found\nuiprobe-exit:0\n"
+    )
     out = device._shell(am_start("com.unknown/.Main"))
     assert "does not exist" in out
     assert out.endswith("uiprobe-exit:1\n")
@@ -412,7 +422,7 @@ VALID = (
     "input swipe 20 120 20 120 800",
     "input keyevent KEYCODE_BACK",
     "input keyevent 4",
-    RESOLVE + SHOP,
+    resolve(SHOP),
     am_start(f"{SHOP}/.Main"),
     am_start(f"{SHOP}/{SHOP}.Main"),
     f"am force-stop {SHOP}; echo uiprobe-exit:$?",
@@ -463,8 +473,9 @@ def test_strict_mode_rejects_chains_and_quoting_in_every_command_family(
         am_start(f"{SHOP}/..Main"),
         am_start(f"{SHOP}/.Main..X"),
         am_start("shop/.Main"),
-        RESOLVE + f"{SHOP};reboot",
-        RESOLVE + f" {SHOP}",
+        resolve(f"{SHOP};reboot"),
+        resolve(f" {SHOP}"),
+        RESOLVE + SHOP,  # without the exit marker
         f"cmd package resolve-activity -c {LAUNCHER_CATEGORY} {SHOP}",
         f"cmd package resolve-activity --brief {SHOP}",
         START + f"{SHOP}/.Main",  # without the exit marker
@@ -493,8 +504,8 @@ def test_strict_mode_rejects_malformed_and_chained_commands(android, command):
 @pytest.mark.parametrize(
     "command",
     [
-        RESOLVE + "com.attacker.app",
-        RESOLVE + f"{SHOP}x",
+        resolve("com.attacker.app"),
+        resolve(f"{SHOP}x"),
         f"cmd package resolve-activity --brief -c com.attacker.Category {SHOP}",
         am_start(f"{SHOP}/.Main").replace(LAUNCHER_CATEGORY, "com.attacker.Category"),
         am_start(f"{SHOP}/.Main").replace(LAUNCHER_CATEGORY, LAUNCHER_CATEGORY + ".x"),
@@ -513,11 +524,11 @@ def test_strict_mode_refuses_undeclared_packages_components_and_categories(
 
 def test_extra_packages_admit_only_the_missing_package_launches(android):
     extra = "com.example.missing"
-    assert allowed(android, RESOLVE + extra, extra)
+    assert allowed(android, resolve(extra), extra)
     assert allowed(android, am_start(f"{extra}/.Main"), extra)
-    assert not allowed(android, RESOLVE + extra)
+    assert not allowed(android, resolve(extra))
     assert not allowed(android, am_start(f"{extra}/.Main"))
-    assert not allowed(android, RESOLVE + "com.attacker.app", extra)
+    assert not allowed(android, resolve("com.attacker.app"), extra)
     other = am_start(f"{extra}/.Main").replace(LAUNCHER_CATEGORY, "com.attacker.C")
     assert not allowed(android, other, extra)
 
@@ -542,7 +553,7 @@ def test_a_configured_missing_package_gets_the_real_failure_output(fake_adb, and
     extra = "com.example.missing"
     phone = Device(adb_server=fake_adb.address)
     before = list(android.stack)
-    assert phone._shell(RESOLVE + extra) == "No activity found\n"
+    assert phone._shell(resolve(extra)) == "No activity found\nuiprobe-exit:0\n"
     assert "does not exist" in phone._shell(am_start(f"{extra}/.Main"))
     assert android.stack == before
     assert fake_adb.unexpected == []
@@ -554,7 +565,7 @@ def test_strict_mode_refuses_an_unknown_package_and_category_end_to_end(
     phone = Device(adb_server=fake_adb.address)
     android.show("launcher")
     for command in (
-        RESOLVE + "com.attacker.app",
+        resolve("com.attacker.app"),
         am_start(f"{SHOP}/.Main").replace(LAUNCHER_CATEGORY, "com.attacker.Category"),
         am_start("com.attacker.app/.Main"),
     ):
@@ -586,7 +597,7 @@ def test_strict_mode_serves_no_chain_end_to_end(fake_adb, android):
     for command in (
         am_start(f"{SHOP}/.Main;reboot"),
         am_start(f"{SHOP}/.Main\nreboot"),
-        RESOLVE + f"{SHOP} && reboot",
+        resolve(f"{SHOP} && reboot"),
     ):
         with pytest.raises(AdbError):
             phone._shell(command)
@@ -689,7 +700,6 @@ def test_a_disabled_element_still_takes_the_touch_from_what_is_below(fake_adb):
     [
         "com.example.app/.Main;reboot",
         "com.example.app/.Main\nreboot",
-        "com.example.app/.Main$Inner",
         "com.example.app/.Mainé",
         "com.example.app/.Main\n",
         "com.example.app",
@@ -929,9 +939,9 @@ def test_a_lax_device_created_first_stays_served(fake_adb):
 
 
 def test_resolve_activity_prints_the_captured_shape(device):
-    assert device._shell(RESOLVE + SHOP) == (
+    assert device._shell(resolve(SHOP)) == (
         "priority=0 preferredOrder=0 match=0x108000 specificIndex=-1 isDefault=true\n"
-        f"{SHOP}/.Main\n"
+        f"{SHOP}/.Main\nuiprobe-exit:0\n"
     )
 
 
@@ -1055,17 +1065,43 @@ def test_a_single_segment_system_package_can_be_declared(fake_adb):
     assert phone.screen.name == "chooser"
     assert client.dump().package == "android"
     assert RESOLVER in phone._dumpsys_window()
-    assert client._shell(RESOLVE + "android").endswith(f"\n{RESOLVER}\n")
+    assert client._shell(resolve("android")).endswith(f"\n{RESOLVER}\nuiprobe-exit:0\n")
 
 
-def test_a_nested_class_with_a_dollar_stays_refused(fake_adb):
-    with pytest.raises(ValueError, match="not a package/class component"):
-        FakeAndroid(
-            fake_adb,
-            SERIAL,
-            (Screen("a", "android/com.android.internal.app.Resolver$Inner"),),
-            start="a",
-        )
+def test_a_nested_class_is_declared_and_started_end_to_end(fake_adb):
+    # The component goes out in single quotes; the allowlist lists the
+    # declared spellings quoted the same way.
+    screens = (
+        Screen("home", "com.example.launcher/.Home", (El((0, 0, 9, 9)),)),
+        Screen("inner", f"{SHOP}/{SHOP}.Outer$Inner", (El((0, 0, 9, 9)),)),
+    )
+    phone = FakeAndroid(fake_adb, SERIAL, screens, start="home")
+    device = Device(adb_server=fake_adb.address)
+    assert device.launcher_activity(SHOP) == f"{SHOP}/.Outer$Inner"
+    device.launch(SHOP)
+    device.launch(SHOP, activity=f"{SHOP}/{SHOP}.Outer$Inner", restart=True)
+    assert phone.screen.name == "inner"
+    starts = [c for _, _, c in fake_adb.commands if c.startswith("am start")]
+    assert starts == [
+        am_start(f"'{SHOP}/.Outer$Inner'"),
+        am_start(f"'{SHOP}/{SHOP}.Outer$Inner'"),
+    ]
+    assert fake_adb.unexpected == []
+    # Unquoted, the same component is never admitted.
+    assert not allowed(phone, am_start(f"{SHOP}/.Outer$Inner"))
+
+
+def test_a_component_declared_in_full_is_started_in_its_short_form(fake_adb):
+    screens = (
+        Screen("home", "com.example.launcher/.Home", (El((0, 0, 9, 9)),)),
+        Screen("main", f"{SHOP}/{SHOP}.Main", (El((0, 0, 9, 9)),)),
+    )
+    phone = FakeAndroid(fake_adb, SERIAL, screens, start="home")
+    device = Device(adb_server=fake_adb.address)
+    assert device.launcher_activity(SHOP) == f"{SHOP}/.Main"  # short, as read
+    device.launch(SHOP)
+    assert phone.screen.name == "main"
+    assert fake_adb.unexpected == []
 
 
 # --- malformed commands in lax mode ---

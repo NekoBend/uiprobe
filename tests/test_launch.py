@@ -30,7 +30,8 @@ MISSING = "com.example.missing"
 SETTINGS = "com.android.settings"
 LAUNCHER = "android.intent.category.LAUNCHER"
 RESOLVE_PREFIX = f"cmd package resolve-activity --brief -c {LAUNCHER} "
-RESOLVE = RESOLVE_PREFIX + SHOP
+MARK = "; echo uiprobe-exit:$?"
+RESOLVE = RESOLVE_PREFIX + SHOP + MARK
 START_PREFIX = f"am start -W -a android.intent.action.MAIN -c {LAUNCHER} -n "
 START = f"{START_PREFIX}{SHOP}/.Main; echo uiprobe-exit:$?"
 STOP = f"am force-stop {SHOP}; echo uiprobe-exit:$?"
@@ -139,7 +140,7 @@ def no_monkey(fake_adb: FakeAdbServer) -> bool:
 
 def test_every_capture_says_where_it_comes_from_and_that_it_is_verbatim():
     names = sorted(path.name for path in DATA.glob("*.txt"))
-    assert len(names) == 15
+    assert len(names) == 18
     for name in names:
         raw = (DATA / name).read_bytes()
         head = b"".join(
@@ -265,7 +266,8 @@ def test_a_given_activity_subclass_is_used_as_plain_text(device, fake_adb):
 def test_no_activity_found_stops_the_launch_before_anything_is_sent(
     device, android, fake_adb, name
 ):
-    android.override(re.compile(r"^cmd package"), capture(name, marker=False))
+    marker = True if name.startswith("samsung") else None  # captured without
+    android.override(re.compile(r"^cmd package"), capture(name, marker=marker))
     with pytest.raises(LaunchFailedError) as info:
         device.launch(SHOP, restart=True)
     assert info.value.details == {
@@ -283,7 +285,7 @@ def test_a_missing_package_is_not_started(device, fake_adb):
     with pytest.raises(LaunchFailedError) as info:
         device.launch(MISSING)
     assert info.value.details["reason"] == "launcher_unreadable"
-    assert sent(fake_adb) == [RESOLVE_PREFIX + MISSING]
+    assert sent(fake_adb) == [RESOLVE_PREFIX + MISSING + MARK]
 
 
 @pytest.mark.parametrize(
@@ -319,7 +321,8 @@ def test_a_missing_package_is_not_started(device, fake_adb):
 def test_the_launcher_read_accepts_only_the_known_shape(
     device, android, fake_adb, output
 ):
-    android.override(re.compile(r"^cmd package"), output)
+    # The body is at fault: the exit marker after it is in order.
+    android.override(re.compile(r"^cmd package"), output + b"uiprobe-exit:0\n")
     with pytest.raises(LaunchFailedError) as info:
         device.launch(SHOP)
     assert info.value.details["reason"] == "launcher_unreadable"
@@ -346,8 +349,55 @@ def test_the_launcher_read_accepts_only_the_known_shape(
     ],
 )
 def test_the_launcher_read_accepts(device, android, output, component):
-    android.override(re.compile(r"^cmd package"), output)
+    android.override(re.compile(r"^cmd package"), output + b"\nuiprobe-exit:0\n")
     assert device.launcher_activity(SHOP) == component
+
+
+@pytest.mark.parametrize(
+    "output",
+    [
+        b"com.example.shop/.Main\n",  # the marker never came: cut short
+        b"com.example.shop/.Main",
+        b"com.example.shop/.Main\nuiprobe-exit:",
+        b"com.example.shop/.Main\nuiprobe-exit:1\n",
+        b"com.example.shop/.Main\nuiprobe-exit:255\n",
+        b"com.example.shop/.Main\nuiprobe-exit:00\n",
+        b"com.example.shop/.Main\nuiprobe-exit:0 \n",
+        b"com.example.shop/.Main\nuiprobe-exit:0\nmore\n",
+        b"com.example.shop/.Main\nuiprobe-exit:0\nuiprobe-exit:0\n",
+        b"com.example.shop/.Mainuiprobe-exit:0\n",
+        b"uiprobe-exit:0\n",
+    ],
+)
+def test_the_launcher_read_needs_its_exit_marker_last(
+    device, android, fake_adb, output
+):
+    android.override(re.compile(r"^cmd package"), output)
+    with pytest.raises(LaunchFailedError) as info:
+        device.launch(SHOP, restart=True)
+    assert info.value.details["reason"] == "launcher_unreadable"
+    assert sent(fake_adb) == [RESOLVE]  # no stop, no start
+    assert android.stopped == []
+
+
+def test_a_launcher_read_cut_short_starts_no_other_activity(fake_adb, clock):
+    # The app's launcher is .MainActivity; a reply cut after a component of
+    # the same app (.Main) must not make that one start.
+    screens = (
+        Screen("launcher", "com.example.launcher/.Home", (El((0, 0, 9, 9)),)),
+        Screen("real", f"{SHOP}/.MainActivity", (El((0, 0, 9, 9)),)),
+        Screen("other", f"{SHOP}/.Main", (El((0, 0, 9, 9)),)),
+    )
+    phone = FakeAndroid(fake_adb, SERIAL, screens, start="launcher")
+    assert clock.now == 1000.0
+    device = Device(adb_server=fake_adb.address)
+    phone.override(re.compile(r"^cmd package"), f"{SHOP}/.Main".encode())
+    with pytest.raises(LaunchFailedError) as info:
+        device.launch(SHOP, restart=True)
+    assert info.value.details["reason"] == "launcher_unreadable"
+    assert sent(fake_adb) == [RESOLVE]
+    assert phone.stopped == []
+    assert phone.screen.name == "launcher"
 
 
 @pytest.mark.parametrize(
@@ -359,7 +409,8 @@ def test_the_launcher_read_accepts(device, android, output, component):
     ],
 )
 def test_the_launcher_read_of_real_captures(device, android, name):
-    android.override(re.compile(r"^cmd package"), capture(name, marker=False))
+    marker = True if name.startswith("samsung") else None  # captured without
+    android.override(re.compile(r"^cmd package"), capture(name, marker=marker))
     assert device.launcher_activity(SETTINGS) == f"{SETTINGS}/.Settings"
 
 
@@ -381,6 +432,8 @@ def test_the_launcher_read_escapes_what_it_shows(device, android):
         ("emu36-resolve-settings.txt", "emu36-start-running.txt", None),
         ("emu24-resolve-settings.txt", "emu24-start-after-force-stop.txt", None),
         ("emu24-resolve-settings.txt", "emu24-start-running.txt", None),
+        ("emu36-resolve-settings.txt", "emu36-start-warm.txt", None),
+        ("emu36-resolve-settings.txt", "emu36-start-cold-again.txt", None),
         ("samsung36-resolve-settings.txt", "samsung36-start-running.txt", True),
         (
             "samsung36-resolve-settings.txt",
@@ -392,12 +445,13 @@ def test_the_launcher_read_escapes_what_it_shows(device, android):
 def test_real_successful_starts_are_accepted(
     device, android, fake_adb, resolve, start, marker
 ):
-    android.override(re.compile(r"^cmd package"), capture(resolve, marker=False))
+    marker_r = True if resolve.startswith("samsung") else None  # captured without
+    android.override(re.compile(r"^cmd package"), capture(resolve, marker=marker_r))
     android.override(re.compile(r"^am start"), capture(start, marker=marker))
     android.show("homepage")  # what the scripted start brought to the front
     device.launch(SETTINGS)
     assert sent(fake_adb) == [
-        RESOLVE_PREFIX + SETTINGS,
+        RESOLVE_PREFIX + SETTINGS + MARK,
         start_of(f"{SETTINGS}/.Settings"),
     ]
 
@@ -427,6 +481,29 @@ def test_real_error_outputs_fail_whatever_the_exit_status(
     assert info.value.exit_code == 15
 
 
+def test_a_start_that_names_another_apps_activity_fails_a_launch(
+    device, android, fake_adb
+):
+    # Captured on an API 36 emulator: Settings' search screen (another
+    # package) stayed on top of the task after am force-stop.
+    android.override(
+        re.compile(r"^am start"), capture("emu36-start-other-activity.txt")
+    )
+    android.show("settings")
+    with pytest.raises(LaunchFailedError) as info:
+        device.launch(SETTINGS, activity=f"{SETTINGS}/.Settings")
+    assert info.value.details == {
+        "package": SETTINGS,
+        "reason": "other_activity",
+        "output": "Activity: com.google.android.settings.intelligence"
+        "/.modules.search.activity.SearchActivity",
+        "activity": "com.google.android.settings.intelligence"
+        "/.modules.search.activity.SearchActivity",
+    }
+    assert info.value.exit_code == 15
+    assert sent(fake_adb) == [start_of(f"{SETTINGS}/.Settings")]
+
+
 # --- the start: the success rule ---
 
 
@@ -447,16 +524,32 @@ def test_the_reported_activity_may_have_another_class(device, android, activity)
 @pytest.mark.parametrize(
     ("output", "reason", "shown"),
     [
-        # another package, or not a component
+        # another package: a launch alone fails (the crawl goes on)
         (
             OK_36.replace("{activity}", "com.example.other/.Main"),
-            "unexpected_output",
+            "other_activity",
             "Activity: com.example.other/.Main",
         ),
         (
             OK_36.replace("{activity}", "com.example.shopx/.Main"),
-            "unexpected_output",
+            "other_activity",
             "Activity: com.example.shopx/.Main",
+        ),
+        # not a component of any package
+        (
+            OK_36.replace("{activity}", "shop/.Main"),
+            "unexpected_output",
+            "Activity: shop/.Main",
+        ),
+        (
+            OK_36.replace("{activity}", "com.example.other/.Ma in"),
+            "unexpected_output",
+            "Activity: com.example.other/.Ma in",
+        ),
+        (
+            OK_36.replace("{activity}", "com.example.other/"),
+            "unexpected_output",
+            "Activity: com.example.other/",
         ),
         (
             OK_36.replace("{activity}", SHOP),
@@ -485,7 +578,7 @@ def test_the_reported_activity_may_have_another_class(device, android, activity)
                 f"Activity: {SHOP}/.Main\nActivity: {SHOP}/.Main\n",
             ),
             "unexpected_output",
-            "Starting: Intent",
+            f"Activity: {SHOP}/.Main",
         ),
         (
             OK_36.replace("Status: ok\n", ""),
@@ -495,7 +588,7 @@ def test_the_reported_activity_may_have_another_class(device, android, activity)
         (
             OK_36.replace("Status: ok\n", "Status: ok\nStatus: ok\n"),
             "unexpected_output",
-            "Starting: Intent",
+            "Status: ok",
         ),
         (
             OK_36.replace("Status: ok\n", "Status: timeout\n"),
@@ -567,6 +660,132 @@ def test_the_start_must_report_the_known_success(
     assert isinstance(output, str)
     assert output.startswith(shown)
     assert sent(fake_adb) == [RESOLVE, START]  # once, never again
+
+
+@pytest.mark.parametrize(
+    ("change", "shown"),
+    [
+        # the echoed component must be the one sent
+        (
+            (f"cmp={SHOP}/.Main }}", "cmp=com.example.other/.A }"),
+            "Starting: Intent { act=android.intent.action.MAIN",
+        ),
+        ((f"cmp={SHOP}/.Main }}", f"cmp={SHOP}/.Other }}"), "Starting: Intent"),
+        ((f"cmp={SHOP}/.Main }}", f"cmp={SHOP}/.Main"), "Starting: Intent"),
+        (("Starting: Intent { act", "Starting: Intent {  act"), "Starting: Intent"),
+        # no start line at all
+        (("Starting:", "Started:"), "Started:"),
+        # a Warning only in a captured form
+        (("Status: ok\n", "Warning: task\nStatus: ok\n"), "Warning: task"),
+        (
+            (
+                "Status: ok\n",
+                "Warning: Activity not started, its current task has been"
+                " brought to the front.\nStatus: ok\n",
+            ),
+            "Warning: Activity not started, its current task has been brought",
+        ),
+        # control characters left after the CR LF end is cut
+        (("Status: ok\n", "Warning: task\rError: failed\nStatus: ok\n"), "Warning"),
+        (("TotalTime: 5", "TotalTime: 5\x1b[2J"), "TotalTime: 5\\x1b"),
+        (("Complete", "Complete\r\r"), "Complete\\r"),
+        (("Complete", "Comp\x00lete"), "Comp\\x00lete"),
+        (("Complete", "Complete\x85"), "Complete\\x85"),
+        # the informational lines in their known shapes, each once
+        (("TotalTime: 5", "TotalTime: soon"), "TotalTime: soon"),
+        (("LaunchState: COLD", "LaunchState: cold"), "LaunchState: cold"),
+        (("WaitTime: 6\n", "WaitTime: 6\nWaitTime: 6\n"), "WaitTime: 6"),
+        (("Complete\n", "Complete\nComplete\n"), "Complete"),
+        (("Status: ok\n", "Status: ok\nWarning: x\n"), "Warning: x"),
+    ],
+)
+def test_the_start_reply_must_hold_only_the_known_lines(
+    device, android, fake_adb, change, shown
+):
+    old, new = change
+    output = OK_36.replace("{activity}", f"{SHOP}/.Main")
+    assert old in output
+    scripted_start(android, output.replace(old, new, 1).encode())
+    with pytest.raises(LaunchFailedError) as info:
+        device.launch(SHOP)
+    assert info.value.details["reason"] == "unexpected_output"
+    output_shown = info.value.details["output"]
+    assert isinstance(output_shown, str)
+    assert output_shown.startswith(shown)
+    assert sent(fake_adb) == [RESOLVE, START]
+
+
+@pytest.mark.parametrize(
+    ("old", "new"),
+    [
+        ("Status: ok\n", "Warning: task\rError: failed\nStatus: ok\n"),
+        ("Complete", "Error: x\x1b[2J"),
+        ("Complete", "Complete\r\r"),
+    ],
+)
+def test_a_control_character_fails_the_start_as_such(device, android, old, new):
+    output = OK_36.replace("{activity}", f"{SHOP}/.Main").replace(old, new, 1)
+    scripted_start(android, output.encode())
+    with pytest.raises(LaunchFailedError) as info:
+        device.launch(SHOP)
+    assert info.value.details["reason"] == "unexpected_output"
+    assert "printed a control character" in info.value.message
+    assert "\x1b" not in info.value.message
+    assert "\r" not in info.value.message
+
+
+@pytest.mark.parametrize(
+    "warning",
+    [
+        "Warning: Activity not started, intent has been delivered to currently"
+        " running top-most instance.",
+        "Warning: Activity not started, its current task has been brought to the front",
+    ],
+)
+def test_the_captured_warnings_are_accepted(device, android, warning):
+    output = OK_36.replace("{activity}", f"{SHOP}/.Main")
+    output = output.replace("Status: ok", f"{warning}\nStatus: ok")
+    scripted_start(android, output.encode())
+    device.launch(SHOP)
+
+
+@pytest.mark.parametrize(
+    ("state", "ok"),
+    [
+        ("COLD", True),
+        ("WARM", True),
+        ("HOT", True),
+        ("UNKNOWN (0)", True),
+        ("UNKNOWN (-1)", True),
+        ("UNKNOWN", True),
+        ("cold", False),
+        ("COLD extra", False),
+        ("UNKNOWN (x)", False),
+        ("", False),
+    ],
+)
+def test_the_launch_state_line_has_one_shape(device, android, state, ok):
+    output = OK_36.replace("{activity}", f"{SHOP}/.Main").replace(
+        "LaunchState: COLD", f"LaunchState: {state}"
+    )
+    scripted_start(android, output.encode())
+    if ok:
+        device.launch(SHOP)
+        return
+    with pytest.raises(LaunchFailedError) as info:
+        device.launch(SHOP)
+    assert info.value.details["reason"] == "unexpected_output"
+
+
+def test_the_echo_may_name_the_full_spelling_sent(device, android, fake_adb):
+    # A full class name sent is echoed in the short form, and the reverse.
+    output = OK_36.replace("{activity}", f"{SHOP}/.Main")
+    scripted_start(android, output.encode())
+    device.launch(SHOP, activity=f"{SHOP}/{SHOP}.Main")
+    full = output.replace(f"cmp={SHOP}/.Main", f"cmp={SHOP}/{SHOP}.Main")
+    scripted_start(android, full.encode())
+    device.launch(SHOP, activity=f"{SHOP}/.Main")
+    assert sent(fake_adb) == [start_of(f"{SHOP}/{SHOP}.Main"), START]
 
 
 def test_a_non_zero_exit_status_is_reported(device, android):
@@ -1081,7 +1300,7 @@ def test_cli_launch_missing_package_exits_15(capsys, fake_adb):
     error = json.loads(out)["error"]
     assert error["code"] == "launch_failed"
     assert error["details"]["reason"] == "launcher_unreadable"
-    assert sent(fake_adb) == [RESOLVE_PREFIX + MISSING]
+    assert sent(fake_adb) == [RESOLVE_PREFIX + MISSING + MARK]
 
 
 @pytest.mark.usefixtures("clock")
