@@ -128,6 +128,19 @@ def started(limits=None, *, started_at=0.0, policy=POLICY):
     return eng
 
 
+# The engine as it was before BACK off target became a choice: BACK, BACK,
+# then a relaunch on a screen of another app.
+BACK_POLICY = Policy(back_on_other_screens=True)
+
+
+def back_engine(limits=None, *, started_at=0.0):
+    return engine(limits, started_at=started_at, policy=BACK_POLICY)
+
+
+def back_started(limits=None, *, started_at=0.0):
+    return started(limits, started_at=started_at, policy=BACK_POLICY)
+
+
 def press(eng, observation):
     """Take a tap for the observation, recheck it on the same frame, send it."""
     tap = eng.next(observation)
@@ -308,7 +321,7 @@ def test_tap_follows_document_order_and_goes_depth_first() -> None:
 
 def test_never_taps_a_permission_screen_and_presses_back_there() -> None:
     phone = Phone(small_graph())
-    log = drive(engine(), phone)
+    log = drive(back_engine(), phone)
     assert "perm" in phone.visited
     i = phone.visited.index("perm")  # visited[k] is the result of log[k]
     assert isinstance(log[i + 1], Back)
@@ -333,7 +346,7 @@ def test_start_screen_with_nothing_to_try_is_exhausted_without_back() -> None:
 
 
 def test_a_relaunch_that_lands_elsewhere_makes_that_screen_the_root() -> None:
-    eng = started()
+    eng = back_started()
     press(eng, on_screen(["Item a"], name="n0"))
     alt = on_screen(["Item b", "Item c"], name="alt")
     press(eng, alt)  # alt is known at depth 2
@@ -380,7 +393,7 @@ def test_a_relaunch_landing_on_a_different_screen_in_a_phone_does_not_loop() -> 
 
 
 def test_start_screen_is_the_first_target_screen_after_off_target() -> None:
-    eng = started()
+    eng = back_started()
     assert isinstance(eng.next(off_screen()), Back)
     first = eng.next(on_screen(["Item a"], name="late"))
     assert isinstance(first, Tap)
@@ -392,7 +405,7 @@ def test_start_screen_is_the_first_target_screen_after_off_target() -> None:
 
 
 def test_off_target_is_back_back_relaunch_then_relaunch_limit() -> None:
-    eng = started()
+    eng = back_started()
     actions = [eng.next(off_screen()) for _ in range(3 * 3 + 3)]
     expected = [Back(), Back(), Relaunch()] * 3 + [
         Back(),
@@ -404,8 +417,133 @@ def test_off_target_is_back_back_relaunch_then_relaunch_limit() -> None:
     assert eng.next(off_screen()) == Stop("relaunch_limit")  # stays stopped
 
 
-def test_a_sent_tap_resets_the_relaunch_count() -> None:
+def test_off_target_is_a_relaunch_then_relaunch_limit_by_default() -> None:
+    # Nothing is sent to a screen of another app: no BACK, only relaunches of
+    # the target app, and no 4th relaunch without a sent tap.
     eng = started()
+    actions = [eng.next(off_screen()) for _ in range(4)]
+    assert actions == [Relaunch(), Relaunch(), Relaunch(), Stop("relaunch_limit")]
+    assert eng.records.actions_sent == 1 + 3
+    assert [t.kind for t in eng.records.transitions] == [
+        "launch",
+        "relaunch",
+        "relaunch",
+        "relaunch",
+    ]
+
+
+def test_a_sent_tap_resets_the_relaunch_count_by_default() -> None:
+    eng = started()
+    assert eng.next(off_screen()) == Relaunch()
+    assert eng.next(off_screen()) == Relaunch()
+    press(eng, on_screen(["Item a"]))
+    for _ in range(3):
+        assert eng.next(off_screen()) == Relaunch()
+    assert eng.next(off_screen()) == Stop("relaunch_limit")
+
+
+def test_a_back_that_leaves_the_app_is_followed_by_a_relaunch_by_default() -> None:
+    # The engine took B for a screen above the root, but B was the bottom of
+    # the real back stack: its navigation BACK leaves the app. The launcher
+    # in front then gets nothing; the app is relaunched.
+    eng = started()
+    press(eng, on_screen(["Go"], name="A"))
+    assert eng.next(on_screen([], name="B")) == Back()  # navigation BACK
+    assert eng.next(off_screen()) == Relaunch()
+    assert eng.records.transitions[-1].kind == "back"
+    eng = back_started()
+    press(eng, on_screen(["Go"], name="A"))
+    assert eng.next(on_screen([], name="B")) == Back()
+    assert eng.next(off_screen()) == Back()  # with BACK on other screens
+
+
+def test_a_permission_dialog_after_a_tap_gets_a_relaunch_by_default() -> None:
+    eng = started()
+    tap = press(eng, on_screen(["Item a"]))
+    dialog = seen(
+        make_screen(["Allow", "Deny"], name="dialog", package=PERMISSION),
+        fg=PERMISSION,
+    )
+    assert eng.next(dialog) == Relaunch()
+    # the pressed element stays tried, so the relaunch does not repeat it
+    after = on_screen(["Item a"])
+    assert eng.next(after) == Stop("exhausted")
+    assert tap.fingerprint == fingerprint_of(after.screen, after.screen.elements[1])
+
+
+@pytest.mark.parametrize(
+    ("screen_package", "foreground"),
+    [(PKG, None), (PKG, OTHER), (OTHER, PKG), (PERMISSION, PERMISSION)],
+)
+def test_every_off_target_screen_gets_a_relaunch_by_default(
+    screen_package, foreground
+) -> None:
+    eng = started()
+    screen = make_screen(["Item a"], package=screen_package)
+    action = eng.next(Observation(screen, foreground, keyboard_shown=False, now=0.0))
+    assert action == Relaunch()
+
+
+def test_random_graphs_never_send_back_off_target_by_default() -> None:
+    rng = random.Random(20261120)  # noqa: S311
+    offs = 0
+    for _ in range(300):
+        nodes = random_graph(rng)
+        phone = Phone(nodes)
+        eng = engine(Limits(depth=rng.randint(1, 6), actions=200, minutes=30))
+        observations: list[Observation] = []
+        log = drive(eng, phone, watch=observations.append)
+        # log[0] is the launch; each later action was decided on one observation
+        for observation, action in zip(observations, log[1:], strict=True):
+            screen = observation.screen
+            assert screen is not None
+            if screen.package != PKG or observation.foreground != PKG:
+                offs += 1
+                assert isinstance(action, Relaunch | Stop), action
+    assert offs > 50  # the graphs really reach permission screens
+
+
+def test_random_graphs_of_one_app_visit_every_reachable_screen_by_default() -> None:
+    # Without screens of other apps the default changes nothing.
+    rng = random.Random(7)  # noqa: S311
+    checked = 0
+    for _ in range(300):
+        nodes = random_graph(rng, links_to_start=rng.random() < 0.5)
+        if any(node.package != PKG for node in nodes):
+            continue
+        checked += 1
+        phone = Phone(nodes)
+        eng = engine(Limits(depth=40, actions=600, minutes=30))
+        log = drive(eng, phone, depth=40)
+        assert not any(isinstance(a, Relaunch) for a in log)
+        assert log[-1] == Stop("exhausted")
+        assert {"n0", *phone.visited} >= reachable_targets(nodes)
+    assert checked > 50
+
+
+def test_a_relaunch_off_target_leaves_the_rest_of_that_screen_unvisited() -> None:
+    # Pinned cost of the default (a stated limit): a tap on A opens a dialog
+    # of another app; the relaunch starts again at the root, whose only button
+    # is tried already, so A's other buttons are never pressed. With BACK on
+    # other screens the dialog is closed and A's buttons are tried.
+    nodes = [
+        Node("n0", (("Item a", "a"),)),
+        Node("a", (("Item a", "perm"), ("Item b", "b"))),
+        Node("b"),
+        Node("perm", (("Allow", "b"),), package=PERMISSION),
+    ]
+    phone = Phone(nodes)
+    log = drive(engine(), phone)
+    assert log[-1] == Stop("exhausted")
+    assert "b" not in phone.visited
+    phone = Phone(nodes)
+    log = drive(back_engine(), phone)
+    assert log[-1] == Stop("exhausted")
+    assert "b" in phone.visited
+
+
+def test_a_sent_tap_resets_the_relaunch_count() -> None:
+    eng = back_started()
     relaunches = 0
     for _ in range(2):
         for expected in (Back(), Back(), Relaunch()):
@@ -428,7 +566,7 @@ def test_a_sent_tap_resets_the_relaunch_count() -> None:
 
 
 def test_a_target_screen_alone_does_not_reset_the_relaunch_count() -> None:
-    eng = started()
+    eng = back_started()
     for _ in range(3):
         assert eng.next(on_screen(["Item a"], keyboard=True)) == Back()
         for expected in (Back(), Back(), Relaunch()):
@@ -441,7 +579,7 @@ def test_a_target_screen_alone_does_not_reset_the_relaunch_count() -> None:
 
 
 def test_an_unsent_tap_does_not_reset_the_relaunch_count() -> None:
-    eng = started()
+    eng = back_started()
     for _ in range(3):
         for expected in (Back(), Back(), Relaunch()):
             assert eng.next(off_screen()) == expected
@@ -454,7 +592,7 @@ def test_an_unsent_tap_does_not_reset_the_relaunch_count() -> None:
 
 
 def test_an_allowed_recheck_and_a_reported_send_reset_the_relaunch_count() -> None:
-    eng = started()
+    eng = back_started()
     for _ in range(3):
         for expected in (Back(), Back(), Relaunch()):
             assert eng.next(off_screen()) == expected
@@ -468,7 +606,7 @@ def test_an_allowed_recheck_and_a_reported_send_reset_the_relaunch_count() -> No
 
 
 def test_an_allowed_recheck_without_a_reported_send_does_not_reset() -> None:
-    eng = started()
+    eng = back_started()
     for _ in range(3):
         for expected in (Back(), Back(), Relaunch()):
             assert eng.next(off_screen()) == expected
@@ -482,7 +620,7 @@ def test_an_allowed_recheck_without_a_reported_send_does_not_reset() -> None:
 
 
 def test_a_dropped_tap_does_not_permit_a_fourth_relaunch() -> None:
-    eng = started()
+    eng = back_started()
     actions = [eng.next(off_screen()) for _ in range(9)]
     assert actions == [Back(), Back(), Relaunch()] * 3
     tap = eng.next(on_screen(["Item a"]))
@@ -564,13 +702,13 @@ def test_a_dropped_tap_is_not_counted_recorded_or_placed(rechecked) -> None:
 
 
 def test_recheck_and_tap_sent_accept_only_the_issued_tap_instance() -> None:
-    a = started()
+    a = back_started()
     for _ in range(3):
         for expected in (Back(), Back(), Relaunch()):
             assert a.next(off_screen()) == expected
     screen = on_screen(["Item a"])
     tap_a = a.next(screen)
-    b = started()
+    b = back_started()
     tap_b = b.next(screen)
     assert isinstance(tap_a, Tap)
     assert isinstance(tap_b, Tap)
@@ -606,7 +744,7 @@ def test_tap_sent_needs_the_tap_recheck_allowed_last() -> None:
 
 
 def test_a_target_screen_resets_the_back_count() -> None:
-    eng = started()
+    eng = back_started()
     assert eng.next(off_screen()) == Back()
     press(eng, on_screen(["Item a"]))
     assert eng.next(off_screen()) == Back()
@@ -627,7 +765,7 @@ def test_a_target_screen_resets_the_back_count() -> None:
 def test_target_needs_dump_package_and_foreground_to_match(
     screen_package, foreground
 ) -> None:
-    eng = started()
+    eng = back_started()
     screen = make_screen(["Item a"], package=screen_package)
     action = eng.next(Observation(screen, foreground, keyboard_shown=False, now=0.0))
     assert action == Back()
@@ -635,7 +773,7 @@ def test_target_needs_dump_package_and_foreground_to_match(
 
 
 def test_a_tap_that_opens_a_permission_dialog_is_answered_with_back() -> None:
-    eng = started()
+    eng = back_started()
     press(eng, on_screen(["Item a"]))
     dialog = seen(
         make_screen(["Allow", "Deny"], name="dialog", package=PERMISSION),
@@ -666,14 +804,14 @@ def test_the_keyboard_back_counts_as_an_action() -> None:
 
 
 def test_navigation_backs_do_not_count_toward_the_off_target_backs() -> None:
-    eng = started()
+    eng = back_started()
     press(eng, on_screen(["Item a"]))
     assert eng.next(on_screen([], name="leaf")) == Back()  # navigation BACK
     assert [eng.next(off_screen()) for _ in range(3)] == [Back(), Back(), Relaunch()]
 
 
 def test_the_keyboard_back_does_not_count_toward_the_off_target_backs() -> None:
-    eng = started()
+    eng = back_started()
     assert eng.next(on_screen(["Item a"], keyboard=True)) == Back()
     assert [eng.next(off_screen()) for _ in range(3)] == [Back(), Back(), Relaunch()]
 
@@ -772,12 +910,12 @@ def test_limits_validation() -> None:
 
 
 def test_max_actions_counts_launch_taps_backs_and_relaunches() -> None:
-    eng = started(Limits(actions=4))
+    eng = back_started(Limits(actions=4))
     assert eng.next(off_screen()) == Back()  # 2
     assert eng.next(off_screen()) == Back()  # 3
     assert eng.next(off_screen()) == Relaunch()  # 4
     assert eng.next(off_screen()) == Stop("max_actions")
-    eng = started(Limits(actions=3))
+    eng = back_started(Limits(actions=3))
     press(eng, on_screen(["Item a", "Item b"]))  # 2
     press(eng, on_screen(["Item a"], name="two"))  # 3
     assert eng.next(on_screen(["Item a"], name="three")) == Stop("max_actions")
@@ -901,7 +1039,7 @@ def test_the_smallest_known_depth_is_kept() -> None:
 
 
 def test_dialogs_later_do_not_raise_the_known_depth_of_a_screen() -> None:
-    eng = started(Limits(depth=5))
+    eng = back_started(Limits(depth=5))
     root = on_screen(["Item a", "Item b"], name="root")
     press(eng, root)
     shared = on_screen([], name="shared")
@@ -1553,7 +1691,7 @@ def test_random_graphs_with_room_visit_everything_reachable() -> None:
     for _ in range(300):
         nodes = random_graph(rng, links_to_start=rng.random() < 0.5)
         phone = Phone(nodes)
-        eng = engine(Limits(depth=40, actions=600, minutes=30))
+        eng = back_engine(Limits(depth=40, actions=600, minutes=30))
         log = drive(eng, phone, depth=40)
         assert not any(isinstance(a, Relaunch) for a in log)
         assert log[-1] == Stop("exhausted")
@@ -1701,7 +1839,7 @@ def test_a_landing_on_a_screen_landed_on_before_the_last_tap_is_not_a_relaunch()
 
 
 def test_an_off_target_back_is_not_a_navigation_back() -> None:
-    eng = started()
+    eng = back_started()
     root = on_screen(["Item a"], name="root")
     mid = on_screen(["Item a"], name="mid")
     leaf = on_screen([], name="leaf")
@@ -1717,7 +1855,7 @@ def test_an_off_target_back_is_not_a_navigation_back() -> None:
 
 
 def test_dialogs_over_a_new_target_screen_place_it_at_its_true_depth() -> None:
-    eng = started(Limits(depth=3))
+    eng = back_started(Limits(depth=3))
     root = on_screen(["Item a"], name="root")
     press(eng, root)
     # the tap opened a target screen with two dialogs over it
@@ -1778,7 +1916,7 @@ def test_dialogs_over_the_pressed_screen_leave_no_extra_depth() -> None:
                 self.visited[-1] = "D1"
 
     phone = Perm(nodes)
-    log = drive(engine(Limits(depth=5)), phone, depth=5)
+    log = drive(back_engine(Limits(depth=5)), phone, depth=5)
     assert log[-1] == Stop("exhausted")
     assert "z" in phone.visited
     assert phone.stack == ["n0"]
@@ -2043,7 +2181,7 @@ def test_a_refused_tap_on_a_deeper_screen_keeps_its_depth() -> None:
 
 
 def test_a_singleton_unknown_path_does_not_crash_the_recovery() -> None:
-    eng = started()
+    eng = back_started()
     root = on_screen(["Go"], name="root")
     tap = eng.next(root)
     assert isinstance(tap, Tap)
@@ -2397,7 +2535,7 @@ def test_a_keyboard_that_returns_after_every_relaunch_never_backs_out_of_the_roo
 
 
 def test_an_off_target_back_landing_without_a_mark_is_the_same_frame() -> None:
-    eng = started()
+    eng = back_started()
     tap = eng.next(on_screen(["Item a"], name="root"))
     assert isinstance(tap, Tap)
     # the recheck sees a dialog and refuses; nothing was sent
@@ -2673,8 +2811,8 @@ def test_label_only_refusals_in_a_row_on_an_inner_screen_end_with_a_back() -> No
     assert action == Back()
 
 
-def _deferred_base():
-    eng = started()
+def _deferred_base(policy=POLICY):
+    eng = started(policy=policy)
     root = on_screen(["Go"], name="R")
     go = eng.next(root)
     assert isinstance(go, Tap)
@@ -2701,13 +2839,21 @@ def test_a_deferred_unpredicted_landing_is_resynced_to_the_depth_limit() -> None
 
 
 def test_off_target_after_the_keyboard_back_drops_the_deferral() -> None:
-    eng = _deferred_base()
+    eng = _deferred_base(BACK_POLICY)
     shown = on_screen(["Y1", "Extra"], name="Y", keyboard=True)
     assert eng.next(shown) == Back()  # the keyboard BACK
     assert eng.next(off_screen()) == Back()  # off target: the deferral is gone
     assert eng._deferred is None
     # a later screen X is not taken as the deferred navigation BACK's landing
     assert eng.next(on_screen([], name="X")) != Relaunch()
+
+
+def test_off_target_after_the_keyboard_back_relaunches_by_default() -> None:
+    eng = _deferred_base()
+    shown = on_screen(["Y1", "Extra"], name="Y", keyboard=True)
+    assert eng.next(shown) == Back()  # the keyboard BACK, on a target screen
+    assert eng.next(off_screen()) == Relaunch()  # nothing goes to the launcher
+    assert eng._deferred is None
 
 
 def test_a_stuck_keyboard_after_a_deferred_landing_stops() -> None:
@@ -2771,7 +2917,7 @@ def test_an_oversized_screen_gets_one_skip_row_and_nothing_is_pressed() -> None:
 
 
 def test_a_former_root_reached_by_back_is_not_a_root() -> None:
-    eng = started()
+    eng = back_started()
     a = on_screen(["a1"], name="A")
     tap = eng.next(a)
     assert isinstance(tap, Tap)

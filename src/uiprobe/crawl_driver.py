@@ -11,7 +11,11 @@ What is sent. Only what the engine returned, and for a tap only what
 `CrawlEngine.recheck` allowed for that very `Tap` object, in the gate right
 before it is sent: the first launch, a
 relaunch (``force-stop`` then start), a tap at the point judge gave, and the
-BACK key. Text, long presses, swipes and other keys are never sent. Every
+BACK key. Text, long presses, swipes and other keys are never sent. By
+default the engine never returns BACK for a screen of another app (it
+relaunches instead); ``Policy.back_on_other_screens`` allows it. A BACK or
+relaunch decided on such a screen names its package (and the foreground) as
+``off_target`` in the start line. Every
 action is sent once and never retried. A tap is reported to the engine with
 `CrawlEngine.tap_sent` only after it was sent without an error; a refused tap,
 or one whose send raised, is never reported, and the engine releases it on the
@@ -315,6 +319,18 @@ class _Run:
         from_id = None if screen is None else screen.screen_id
         element: Element | None = None
         point: tuple[int, int] | None = None
+        other: str | None = None  # the package of a screen of another app
+        foreground: str | None = None
+        if (
+            isinstance(action, Back | Relaunch)
+            and observation is not None
+            and screen is not None
+            and not self.on_target(screen, observation.foreground)
+        ):
+            # Decided on a screen of another app: say whose it was, so the run
+            # folder tells where a BACK went or why the app was restarted.
+            other = screen.package
+            foreground = observation.foreground
         if isinstance(action, Tap):
             from_id = action.screen_id
             point = action.point
@@ -325,7 +341,13 @@ class _Run:
             msg = f"not an input: {action!r}"
             raise TypeError(msg)
         self.writer.write_transition_start(
-            action_id, _kind(action), from_id, element, point
+            action_id,
+            _kind(action),
+            from_id,
+            element,
+            point,
+            off_target_package=other,
+            off_target_foreground=foreground,
         )
         reason, seen = self.gate(action, observation)
         if reason is not None:
@@ -650,7 +672,9 @@ def crawl(
 
     This presses on the selected device. It starts the app, taps elements that
     `policy` allows, presses BACK and relaunches the app, and records every
-    step in the new run folder `out` (see the run folder page). It is alpha
+    step in the new run folder `out` (see the run folder page). A screen of
+    another app gets a relaunch, not BACK, unless
+    ``policy.back_on_other_screens`` is True. It is alpha
     and not in the command line yet.
 
     The order is: check the arguments, check the device, make the run folder,
@@ -742,6 +766,7 @@ def crawl(
         limits=limits,
         deny_words=policy.deny_words,
         serial=device.serial,
+        back_on_other_screens=policy.back_on_other_screens,
     )
     try:
         run = _Run(

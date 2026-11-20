@@ -10,7 +10,7 @@ from collections import Counter
 from dataclasses import fields, replace
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import get_args
+from typing import Any, get_args
 
 import pytest
 
@@ -155,6 +155,7 @@ def test_with_deny_words_copies_every_other_field() -> None:
         refuse_dialog_confirm=False,
         edges=(1, 2, 3, 4),
         min_visible_px=3,
+        back_on_other_screens=True,
     )
     copy = original.with_deny_words(["rent"])
     assert copy is not original
@@ -163,6 +164,15 @@ def test_with_deny_words_copies_every_other_field() -> None:
             assert copy.deny_words == ("buy", "rent")
         else:
             assert getattr(copy, f.name) == getattr(original, f.name), f.name
+
+
+def test_back_on_other_screens_is_off_by_default_and_must_be_a_bool() -> None:
+    assert Policy().back_on_other_screens is False
+    assert Policy(back_on_other_screens=True).back_on_other_screens is True
+    loose: Any = Policy  # to pass values of a wrong type on purpose
+    for value in (1, "yes", None):
+        with pytest.raises(TypeError, match="back_on_other_screens must be a bool"):
+            loose(back_on_other_screens=value)
 
 
 def test_confirm_detail_copies_every_other_field(monkeypatch) -> None:
