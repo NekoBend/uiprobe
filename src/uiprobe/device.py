@@ -1404,9 +1404,17 @@ class Device:
         waiting for it (`_repin`); that needs a pinned boot id. Without one
         the device cannot be proven again at all (another emulator of the
         same image behind the same number would read the same), so any of
-        these fails the pin. Anything else fails the pin too, and so does a
-        request made while a wait is under way (from the watch, say).
+        these fails the pin; when something happened since the last proof,
+        it fails before the listing is read, so that an adb server that
+        cannot be reached does not leave the pin stale. Anything else fails
+        the pin too, and so does a request made while a wait is under way
+        (from the watch, say).
         """
+        if not self.can_repin and self._epoch != self._proven:
+            # No boot id: nothing would tell the pinned device from another
+            # emulator of the same image behind the same number, so a device
+            # that has to be proven again cannot be.
+            raise self._fail(self._changed("cannot be proven again without a boot id"))
         everything = self._client.devices()
         if any(
             d.serial == self.serial and d.state not in (READY_STATE, OFFLINE_STATE)
@@ -1424,15 +1432,9 @@ class Device:
         if ready and self._epoch == self._proven:
             return
         if not self.can_repin:
-            # No boot id: nothing would tell the pinned device from another
-            # emulator of the same image behind the same number, so a device
-            # that has to be proven again cannot be. A number that is not
-            # listed and ready fails with the same words as before.
-            raise self._fail(
-                self._changed("cannot be proven again without a boot id")
-                if ready
-                else self._changed()
-            )
+            # Proven and nothing happened since, but the number is not listed
+            # and ready (renumbered, offline): no boot id, so no wait.
+            raise self._fail(self._changed())
         waitable = ready or not listed or (same and listed[0].state == OFFLINE_STATE)
         if strict:
             if not waitable:

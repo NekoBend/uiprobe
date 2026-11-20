@@ -967,13 +967,47 @@ def test_without_a_boot_id_a_read_after_a_failure_ends_the_pin(
     with pytest.raises(DeviceNotFoundError) as caught:
         device.foreground()  # not proven in place: the identity is not read
     assert caught.value.details["reason"] == "device_changed"
-    assert through(fake_adb, TRANSPORT, since) == []
+    refused_at = len(fake_adb.requests)
+    assert refused_at == since  # not even the listing is read
     assert device.pin_epoch > epoch
     assert device.reconnects == 0
     with pytest.raises(DeviceNotFoundError) as again:
         device.key("back")  # the failed pin is kept
     assert again.value.details["reason"] == "device_changed"
-    assert through(fake_adb, TRANSPORT, since) == []
+    assert str(again.value) == str(caught.value)
+    assert len(fake_adb.requests) == refused_at
+    assert android.inputs == []
+
+
+def test_without_a_boot_id_an_unreachable_server_still_ends_the_pin(
+    fake_adb, android, monkeypatch
+):
+    # A reader swallows a failed request while the adb server cannot be
+    # reached; the server stays away. The next request fails the pin at once,
+    # without asking the server for its list, and the failure is kept.
+    android.boot_id = None
+    device = pinned(fake_adb)
+    fake_adb.stop()
+    original = device._client.devices
+    listings = [0]
+
+    def devices() -> object:
+        listings[0] += 1
+        return original()
+
+    monkeypatch.setattr(device._client, "devices", devices)
+    assert device.api_level() is None  # the failed read is swallowed
+    assert listings[0] == 1
+    with pytest.raises(DeviceNotFoundError) as caught:
+        device.foreground()
+    assert caught.value.details["reason"] == "device_changed"
+    assert listings[0] == 1  # no new host request
+    assert device._broken is not None
+    with pytest.raises(DeviceNotFoundError) as again:
+        device.foreground()
+    assert str(again.value) == str(caught.value)
+    assert again.value.details == caught.value.details
+    assert listings[0] == 1
     assert android.inputs == []
 
 
