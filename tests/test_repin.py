@@ -23,6 +23,7 @@ from uiprobe.device import (
     IDENTITY_COMMAND,
     MAX_RECONNECTS,
     MAX_REPINS,
+    PIN_NOT_PROVEN,
     PIN_WAIT_STOPPED,
     REPIN_POLL,
     REPIN_WAIT,
@@ -373,11 +374,13 @@ def test_a_crawl_without_a_boot_id_ends_on_a_renumbered_transport(
 
 
 @pytest.mark.usefixtures("android")
-def test_stop_during_the_wait_ends_the_crawl_as_interrupted(
+def test_the_time_limit_during_a_wait_ends_the_crawl(
     tmp_path: Path, fake_adb, clock, monkeypatch
 ):
+    # The device goes away and the time limit passes while it is waited for:
+    # the run ends with max_duration, without calling stop() in the wait.
     device = pinned(fake_adb)
-    stopping: list[bool] = []
+    asked_in_wait: list[bool] = []
     original = device.foreground
     count = [0]
 
@@ -386,25 +389,30 @@ def test_stop_during_the_wait_ends_the_crawl_as_interrupted(
         count[0] += 1
         if count[0] == 2:
             listing(fake_adb)  # the device goes away
-            stopping.append(True)  # and the caller asks to stop
+            clock.now += 3600  # and the time limit passes
         return result
+
+    def stop() -> bool:
+        if device._repinning:
+            asked_in_wait.append(True)
+        return False
 
     monkeypatch.setattr(device, "foreground", gone_after_second)
     out = tmp_path / "run"
-    result = run(device, clock, out, stop=lambda: bool(stopping))
-    assert result.stop_reason == "interrupted"
+    result = run(device, clock, out, stop=stop)
+    assert result.stop_reason == "max_duration"
+    assert asked_in_wait == []
     end = json.loads((out / "run.json").read_bytes())
-    assert end["stop_reason"] == "interrupted"
+    assert end["stop_reason"] == "max_duration"
     assert device.repins == ()
 
 
-def test_stop_during_a_wait_in_the_gate_closes_the_action_as_not_sent(
+def test_the_time_limit_during_a_wait_in_the_gate_closes_the_action(
     tmp_path: Path, fake_adb, android, clock, monkeypatch
 ):
-    # The device goes away while the gate reads for an action; the caller
-    # asks to stop during the wait: that action was never sent.
+    # The device goes away while the gate reads for an action and the time
+    # limit passes during the wait: that action was never sent.
     device = pinned(fake_adb)
-    stopping: list[bool] = []
     original = device.focused_window
     count = [0]
 
@@ -412,19 +420,19 @@ def test_stop_during_a_wait_in_the_gate_closes_the_action_as_not_sent(
         count[0] += 1
         if count[0] == 3:  # 1: after the launch; 2 and 3: the first tap's gate
             listing(fake_adb)
-            stopping.append(True)
+            clock.now += 3600
         return original()
 
     monkeypatch.setattr(device, "focused_window", gone_in_the_gate)
     out = tmp_path / "run"
-    result = run(device, clock, out, stop=lambda: bool(stopping))
-    assert result.stop_reason == "interrupted"
+    result = run(device, clock, out)
+    assert result.stop_reason == "max_duration"
     records = lines(out / "transitions.jsonl")
     starts = {r["action_id"] for r in records if "action" in r}
     ends = {r["action_id"]: r for r in records if "action" not in r}
     unsent = [ends[i] for i in starts if i in ends and ends[i].get("not_sent")]
     assert unsent
-    assert unsent[-1]["reason"] == "stopped"
+    assert unsent[-1]["reason"] == "time_limit"
     assert [i.kind for i in android.inputs] == []
 
 
@@ -448,37 +456,39 @@ def test_a_failed_pin_refuses_every_later_request(fake_adb):
 
 
 def test_a_stopped_wait_swallowed_by_a_dump_read_sends_no_tap(
-    tmp_path: Path, fake_adb, android, clock, monkeypatch
+    tmp_path: Path, fake_adb, android, monkeypatch
 ):
     # The device drops out while the gate's dump reads the display size (a
-    # read whose errors the dump swallows), the caller asks to stop during the
-    # wait, and the device comes back on its number. No tap may follow.
+    # read whose errors the dump swallows), the time limit ends the wait, and
+    # the device comes back on its number right then. No tap may follow.
     device = pinned(fake_adb)
-    stopping: list[bool] = []
     original = device._shell  # the request helper the dump's reads use
     taps_planned = [0]
+    late: list[bool] = []
 
     def shell(command: str) -> str:
         if command == "wm size" and android.screen.name == "main":
             taps_planned[0] += 1
             if taps_planned[0] == 2:  # 1: the observation; 2: the tap's gate
                 listing(fake_adb)
-                stopping.append(True)
+                late.append(True)
         return original(command)
 
-    def stop() -> bool:
-        if stopping:
-            listing(fake_adb, (TRANSPORT, "device"))  # back on its number
-        return bool(stopping)
+    class LateClock(Clock):
+        def monotonic(self) -> float:
+            if late:
+                listing(fake_adb, (TRANSPORT, "device"))  # back on its number
+                return self.now + 3600  # past the time limit
+            return self.now
 
     monkeypatch.setattr(device, "_shell", shell)
     out = tmp_path / "run"
-    result = run(device, clock, out, stop=stop)
-    assert result.stop_reason == "interrupted"
+    result = run(device, LateClock(), out)
+    assert result.stop_reason == "max_duration"
     assert not [c for _, _, c in fake_adb.commands if c.startswith("input")]
     assert android.inputs == []
     records = lines(out / "transitions.jsonl")
-    assert [r["reason"] for r in records if r.get("not_sent")] == ["stopped"]
+    assert [r["reason"] for r in records if r.get("not_sent")] == ["time_limit"]
 
 
 @pytest.mark.usefixtures("android")
@@ -607,7 +617,7 @@ def test_a_run_counts_only_its_own_repins(tmp_path: Path, fake_adb, clock):
     assert "transport" not in (out / "summary.txt").read_text(encoding="utf-8")
 
 
-def test_the_check_before_the_run_asks_stop_and_restores_the_watch(
+def test_the_check_before_the_run_does_not_ask_stop_and_restores_the_watch(
     tmp_path: Path, fake_adb, android, clock
 ):
     device = pinned(fake_adb)
@@ -622,13 +632,12 @@ def test_the_check_before_the_run_asks_stop_and_restores_the_watch(
 
     def stop() -> bool:
         asked.append(True)
-        return True
+        return False
 
     out = tmp_path / "run"
-    with pytest.raises(DeviceNotFoundError) as caught:
+    with pytest.raises(DeviceNotFoundError, match="did not come back"):
         run(device, clock, out, stop=stop)
-    assert caught.value.details["reason"] == PIN_WAIT_STOPPED
-    assert asked
+    assert asked == []  # stop() is not called while the device is waited for
     assert not out.exists()
     assert device.pin_watch is mine
     assert android.inputs == []
@@ -647,41 +656,39 @@ def _covered_after_launch(monkeypatch, device, android) -> None:
     monkeypatch.setattr(device, "launch", launch_under)
 
 
-def test_a_stop_inside_the_wait_after_force_stop_is_recorded(
-    tmp_path: Path, fake_adb, android, clock, monkeypatch
+def test_the_time_limit_inside_the_wait_after_force_stop_is_recorded(
+    tmp_path: Path, fake_adb, android, monkeypatch
 ):
-    # The device drops out right after the force-stop; the wait before the
-    # start asks stop(), which says so only once the wait has begun.
+    # The device drops out right after the force-stop and the time limit
+    # passes while it is waited for before the start.
     device = pinned(fake_adb)
     _covered_after_launch(monkeypatch, device, android)
-    waiting: list[bool] = []
+    dropped: list[bool] = []
     original_stop = device.stop_app
 
     def stop_then_drop(package: str) -> None:
         original_stop(package)
         listing(fake_adb)
-        waiting.append(True)
+        dropped.append(True)
+
+    class LateClock(Clock):
+        def monotonic(self) -> float:
+            # past the limit only once the wait has begun, not in halt()
+            if dropped and device._repinning:
+                return self.now + 3600
+            return self.now
 
     monkeypatch.setattr(device, "stop_app", stop_then_drop)
-    asked_in_wait: list[bool] = []
-
-    def stop() -> bool:
-        if waiting and device.reconnects:  # inside the wait, not in halt()
-            asked_in_wait.append(True)
-            return True
-        return False
-
     out = tmp_path / "run"
-    result = run(device, clock, out, stop=stop)
-    assert asked_in_wait
-    assert result.stop_reason == "interrupted"
+    result = run(device, LateClock(), out)
+    assert result.stop_reason == "max_duration"
     assert android.stopped == [SHOP]
     starts = [c for _, _, c in fake_adb.commands if c.startswith("monkey")]
     assert len(starts) == 1  # the first launch only
     records = lines(out / "transitions.jsonl")
     assert [r["reason"] for r in records if r.get("not_sent")] == ["start_not_sent"]
     summary = (out / "summary.txt").read_text(encoding="utf-8")
-    assert "force-stopped but not started again (stopped)" in summary
+    assert "force-stopped but not started again (time_limit)" in summary
 
 
 def test_a_device_proven_again_after_force_stop_gets_no_start(
@@ -998,3 +1005,92 @@ def test_a_failed_keyboard_read_keeps_the_destination_read_before_it(
     ends = [r for r in records if "action" not in r]
     assert [e["action_id"] for e in ends] == [1]  # the launch got its end line
     assert ends[0]["dump_failed"] is False
+
+
+# --- an input that meets a stale pin, and stop() that reads the device ---
+
+
+def test_an_input_on_a_stale_pin_sends_nothing_and_keeps_the_pin(fake_adb, android):
+    device = pinned(fake_adb)
+    Waits(device, [])
+    listing(fake_adb, (TRANSPORT + 1, "device"))  # renumbered, not proven yet
+    since = len(fake_adb.requests)
+    with pytest.raises(DeviceNotFoundError) as caught:
+        device.key("back")
+    assert caught.value.details["reason"] == PIN_NOT_PROVEN
+    assert android.inputs == []
+    assert through(fake_adb, TRANSPORT + 1, since) == []
+    assert device._broken is None  # the pin is kept
+    # the next read proves the device on the new number; inputs go again
+    since = len(fake_adb.requests)
+    device.foreground()
+    assert through(fake_adb, TRANSPORT + 1, since)[0] == f"shell:{IDENTITY_COMMAND}"
+    device.key("back")
+    assert [i.kind for i in android.inputs] == ["key"]
+
+
+def test_a_tap_that_meets_a_renumbered_pin_is_not_sent_and_the_crawl_goes_on(
+    tmp_path: Path, fake_adb, android, clock, monkeypatch
+):
+    device = pinned(fake_adb)
+    original = device.tap
+    moved: list[bool] = []
+
+    def renumber_then_tap(point: tuple[int, int]) -> tuple[int, int]:
+        if not moved:
+            moved.append(True)
+            listing(fake_adb, (TRANSPORT + 1, "device"))  # after the gate
+        return original(point)
+
+    monkeypatch.setattr(device, "tap", renumber_then_tap)
+    out = tmp_path / "run"
+    result = run(device, clock, out, limits=Limits(actions=6))
+    # 1a: the refused tap's element is released, so the crawl may run out of
+    # elements sooner; it does not end with an error
+    assert result.stop_reason in {"max_actions", "exhausted"}
+    assert device.repins == ((TRANSPORT, TRANSPORT + 1),)
+    records = lines(out / "transitions.jsonl")
+    assert [r["reason"] for r in records if r.get("not_sent")] == ["device_reconnected"]
+    taps = [i for i in android.inputs if i.kind == "tap"]
+    assert taps  # later taps went out, on the proven new number
+
+
+def test_a_back_that_meets_a_renumbered_pin_is_not_sent(
+    tmp_path: Path, fake_adb, android, clock, monkeypatch
+):
+    device = pinned(fake_adb)
+    original = device.key
+    moved: list[bool] = []
+
+    def renumber_then_key(name: str, **kwargs: object) -> str:
+        if not moved:
+            moved.append(True)
+            listing(fake_adb, (TRANSPORT + 1, "device"))
+        return original(name, **kwargs)  # ty: ignore[invalid-argument-type]
+
+    monkeypatch.setattr(device, "key", renumber_then_key)
+    out = tmp_path / "run"
+    result = run(device, clock, out)
+    assert result.stop_reason == "not_sent"  # 1a: a refused BACK ends the run
+    assert [i for i in android.inputs if i.kind == "key"] == []
+    records = lines(out / "transitions.jsonl")
+    assert [r["reason"] for r in records if r.get("not_sent")] == ["device_reconnected"]
+
+
+@pytest.mark.usefixtures("android")
+def test_a_stop_that_reads_the_device_does_not_break_a_wait(
+    tmp_path: Path, fake_adb, clock, monkeypatch
+):
+    # stop() reads the foreground (as a caller naturally writes it); it is
+    # not called while the device is waited for, so the wait succeeds.
+    device = pinned(fake_adb)
+    _renumber_after(monkeypatch, fake_adb, device, "foreground", 2, TRANSPORT + 1)
+
+    def stop() -> bool:
+        return device.foreground() is None
+
+    out = tmp_path / "run"
+    result = run(device, clock, out, stop=stop, limits=Limits(actions=6))
+    assert result.stop_reason == "max_actions"
+    assert device.repins == ((TRANSPORT, TRANSPORT + 1),)
+    assert device._broken is None

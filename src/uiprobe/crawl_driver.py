@@ -98,7 +98,7 @@ from uiprobe.crawl import (
     _Prints,
 )
 from uiprobe.crawl_preview import check_package
-from uiprobe.device import PIN_WAIT_STOPPED
+from uiprobe.device import PIN_NOT_PROVEN, PIN_WAIT_STOPPED
 from uiprobe.errors import (
     DeviceNotFoundError,
     DumpError,
@@ -281,7 +281,10 @@ class _Run:
             return INTERRUPTED
         engine = self.engine
         refused, _ = self.send(engine.start(), None)
-        if refused is not None:  # only stop() or the time limit hold a launch
+        if refused == NOT_SENT_RECONNECTED:
+            self.notes.append(f"launch was not sent: {refused}")
+            return STOP_NOT_SENT
+        if refused is not None:  # otherwise only stop() or the time limit
             return INTERRUPTED if self._stop_seen else MAX_DURATION
         observation = self.observe()
         while True:
@@ -331,10 +334,16 @@ class _Run:
         return INTERRUPTED if self._stop_seen else None
 
     def waiting_stopped(self) -> bool:
-        """Whether a wait for a renumbered transport should end: `stop` or
-        the time limit. The first reason is kept for the ending."""
+        """Whether a wait for the device should end: the time limit, or a
+        `stop` that already returned True before the wait. `stop` itself is
+        not called while the device is being proven (it may read the device,
+        which is refused then); it is asked again after the wait. The first
+        reason is kept for the ending."""
         if self.wait_stop is None:
-            self.wait_stop = self.halt()
+            if self._stop_seen:
+                self.wait_stop = NOT_SENT_STOPPED
+            elif self.clock() >= self.deadline:
+                self.wait_stop = NOT_SENT_TIME_LIMIT
         return self.wait_stop is not None
 
     def stopped(self) -> bool:
@@ -359,6 +368,51 @@ class _Run:
         """
         self._next_id += 1
         action_id = self._next_id
+        screen = None if observation is None else observation.screen
+        self.write_start(action_id, action, observation)
+        self.unsent = action_id
+        reason, seen = self.gate(action, observation)
+        self.unsent = None
+        if reason is not None:
+            self.writer.write_transition_end(action_id, not_sent=reason)
+            if seen is not None and isinstance(action, Tap):
+                return reason, self.refused_tap(action, screen, seen)
+            return reason, None
+        # Nothing runs between the gate's last read and the input: no user
+        # code (stop() and the clock were asked first), no other read, no write.
+        self._open = action_id
+        self.sent_epoch = self.device.pin_epoch
+        if isinstance(action, Relaunch):
+            return self.relaunch(action_id), None
+        try:
+            if isinstance(action, Tap):
+                self.device.tap(action.point)
+            elif isinstance(action, Back):
+                self.device.key("back")
+            else:
+                self.launch()
+        except DeviceNotFoundError as error:
+            if error.details.get("reason") != PIN_NOT_PROVEN:
+                raise
+            # Nothing was sent: the device has to be proven again first. The
+            # action is closed as the gate would have closed it.
+            self._open = None
+            self.writer.write_transition_end(action_id, not_sent=NOT_SENT_RECONNECTED)
+            if isinstance(action, Tap):
+                self.held = (action, screen)
+            return NOT_SENT_RECONNECTED, None
+        if isinstance(action, Tap):
+            self.engine.tap_sent(action)
+            if seen is not None:
+                self.write_skips(screen, seen.observation.screen, tap=action)
+        if isinstance(action, Tap | Back):
+            self.pause()
+        return None, None
+
+    def write_start(
+        self, action_id: int, action: Action, observation: Observation | None
+    ) -> None:
+        """Write the start line of `action`, before its gate."""
         screen = None if observation is None else observation.screen
         from_id = None if screen is None else screen.screen_id
         element: Element | None = None
@@ -398,32 +452,6 @@ class _Run:
             off_target_foreground=foreground,
             off_target_focus=focus,
         )
-        self.unsent = action_id
-        reason, seen = self.gate(action, observation)
-        self.unsent = None
-        if reason is not None:
-            self.writer.write_transition_end(action_id, not_sent=reason)
-            if seen is not None and isinstance(action, Tap):
-                return reason, self.refused_tap(action, screen, seen)
-            return reason, None
-        # Nothing runs between the gate's last read and the input: no user
-        # code (stop() and the clock were asked first), no other read, no write.
-        self._open = action_id
-        self.sent_epoch = self.device.pin_epoch
-        if isinstance(action, Tap):
-            self.device.tap(action.point)
-            self.engine.tap_sent(action)
-            if seen is not None:
-                self.write_skips(screen, seen.observation.screen, tap=action)
-            self.pause()
-        elif isinstance(action, Back):
-            self.device.key("back")
-            self.pause()
-        elif isinstance(action, Relaunch):
-            return self.relaunch(action_id), None
-        else:
-            self.launch()
-        return None, None
 
     def refused_tap(
         self, tap: Tap, screen: Screen | None, seen: _Seen
@@ -579,7 +607,14 @@ class _Run:
         (``start_not_sent``) and the summary says so. Returns that reason, or
         None when the app was started.
         """
-        self.device.stop_app(self.package)
+        try:
+            self.device.stop_app(self.package)
+        except DeviceNotFoundError as error:
+            if error.details.get("reason") != PIN_NOT_PROVEN:
+                raise
+            self._open = None  # nothing was sent
+            self.writer.write_transition_end(action_id, not_sent=NOT_SENT_RECONNECTED)
+            return NOT_SENT_RECONNECTED
         reason = self.halt()
         if reason is None:
             # The device behind the pin is checked again before the start.
@@ -615,7 +650,18 @@ class _Run:
                 f"{self.package} was force-stopped but not started again ({reason})"
             )
             return NOT_SENT_START
-        self.launch()
+        try:
+            self.launch()
+        except DeviceNotFoundError as error:
+            if error.details.get("reason") != PIN_NOT_PROVEN:
+                raise
+            self._open = None  # the force-stop went out, the start did not
+            self.writer.write_transition_end(action_id, not_sent=NOT_SENT_START)
+            self.notes.append(
+                f"{self.package} was force-stopped but not started again"
+                f" ({NOT_SENT_RECONNECTED})"
+            )
+            return _HALF_RELAUNCH
         return None
 
     # -- reading --
@@ -919,10 +965,11 @@ def crawl(
     # The identity read at the pin lets the gate see a different device behind
     # the same transport number (a restarted adb server numbers anew), and its
     # boot id decides whether a renumbered transport may be followed.
-    # Before the run exists, a wait for a renumbered transport asks only
-    # stop(); the caller's own watch is put back at the end.
+    # Before the run exists, a wait for the device asks nothing (stop is not
+    # called while the device is being proven); the caller's own watch is put
+    # back at the end.
     caller_watch = device.pin_watch
-    device.set_pin_watch(None if stop is None else (lambda: bool(stop())))
+    device.set_pin_watch(None)
     repins_before = len(device.repins)
     try:
         return _crawl_on(

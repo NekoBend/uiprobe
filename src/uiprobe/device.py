@@ -88,6 +88,9 @@ MAX_RECONNECTS: Final = 10
 # details["reason"] when the wait for a renumbered transport was given up
 # because the watch set with `Device.set_pin_watch` said so.
 PIN_WAIT_STOPPED: Final = "pin_wait_stopped"
+# details["reason"] when a request that changes the device was not sent
+# because the device has to be proven again first (the pin itself is kept).
+PIN_NOT_PROVEN: Final = "pin_not_proven"
 
 
 class FocusedWindow(NamedTuple):
@@ -1346,7 +1349,10 @@ class Device:
         is listed, ready, for this serial, and nothing happened since the
         identity was last proven on that number (`pin_epoch` equals the proven
         epoch: no request failed, no wait began, the pin did not move).
-        Otherwise it is refused with ``device_changed`` and the pin fails.
+        Otherwise nothing is sent: when a read could prove the device again
+        (the cases below), it is refused with ``pin_not_proven`` and the pin
+        is kept, so the caller reads again; else it is refused with
+        ``device_changed`` and the pin fails.
 
         A read goes out on the same condition. When the number is gone from
         the listing, still lists this serial but offline, or something
@@ -1372,13 +1378,24 @@ class Device:
         ready = same and listed[0].state == READY_STATE
         if ready and self._epoch == self._proven:
             return
-        if strict:
-            raise self._fail(self._changed())
-        if self.can_repin and (
+        waitable = self.can_repin and (
             ready or not listed or (same and listed[0].state == OFFLINE_STATE)
-        ):
+        )
+        provable = waitable or (ready and self._transport_id is not None)
+        if strict:
+            if not provable:
+                raise self._fail(self._changed())
+            # Nothing is sent and the pin stays: the next read proves the
+            # device again (the caller decides on that fresh read).
+            msg = (
+                f"{self.serial} has to be proven again before an input"
+                f" (transport {self._transport_id}); nothing was sent"
+            )
+            details = {"serial": self.serial, "reason": PIN_NOT_PROVEN}
+            raise DeviceNotFoundError(msg, details=details)
+        if waitable:
             self._repin()
-        elif ready and self._transport_id is not None:
+        elif provable and self._transport_id is not None:
             self._prove_in_place(self._transport_id)
         else:
             raise self._fail(self._changed())
