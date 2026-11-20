@@ -62,9 +62,27 @@ __all__ = [
 ]
 
 READY_STATE: Final = "device"
+# The boot id is a random UUID the kernel makes at every boot, so it tells two
+# emulators of one image (same serial number and build) apart, and one
+# emulator before and after a restart. ``|| echo`` keeps the line count fixed
+# when the file cannot be read.
 IDENTITY_COMMAND: Final = (
-    "getprop ro.kernel.qemu; getprop ro.serialno; getprop ro.build.fingerprint"
+    "getprop ro.kernel.qemu; getprop ro.serialno; getprop ro.build.fingerprint;"
+    " cat /proc/sys/kernel/random/boot_id 2>/dev/null || echo"
 )
+_BOOT_ID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\Z")
+# A pinned transport that the adb server renumbered: how long to wait for the
+# device to come back, how often to look, and how many times one Device may
+# move its pin.
+# Commands that change the device (inputs, starting and stopping apps): their
+# request never follows a renumbered transport.
+_CHANGING_COMMANDS: Final = ("input ", "monkey ", "am ")
+REPIN_WAIT: Final = 10.0
+REPIN_POLL: Final = 0.5
+MAX_REPINS: Final = 5
+# details["reason"] when the wait for a renumbered transport was given up
+# because the watch set with `Device.set_pin_watch` said so.
+PIN_WAIT_STOPPED: Final = "pin_wait_stopped"
 
 
 class FocusedWindow(NamedTuple):
@@ -80,11 +98,17 @@ class FocusedWindow(NamedTuple):
 
 
 class DeviceIdentity(NamedTuple):
-    """What `Device.identity` read: emulator or not, serial number, build."""
+    """What `Device.identity` read: emulator or not, serial number, build and
+    boot id.
+
+    ``boot_id`` is the kernel's random boot id (a lowercase UUID), or ``""``
+    when it could not be read.
+    """
 
     emulator: bool
     serialno: str
     fingerprint: str
+    boot_id: str = ""
 
 
 DEFAULT_LAUNCH_TIMEOUT: Final = 10.0
@@ -1196,8 +1220,12 @@ class Device:
         adb_server: str | None = None,
         adb: str | os.PathLike[str] | None = None,
         start_server: bool = True,
+        pin: bool = False,
     ) -> None:
         _check_serial(serial)
+        if not isinstance(pin, bool):
+            msg = f"pin must be a bool, not {type(pin).__name__}"
+            raise TypeError(msg)
         self._client = _make_client(adb_server, adb, start_server=start_server)
         self._info = select_device(self._client.devices(), serial)
         self._api_level: int | None = None
@@ -1209,8 +1237,16 @@ class Device:
         # The clock and the pause of `launch`; tests replace them.
         self._clock: Callable[[], float] = time.monotonic
         self._sleep: Callable[[float], None] = time.sleep
-        # Set by `pin_transport`: every later request uses this transport.
+        # Set by `pin_transport`: every later request uses this transport, and
+        # the identity read through it is what the device must keep.
         self._transport_id: int | None = None
+        self._pinned_identity: DeviceIdentity | None = None
+        self._repins: list[tuple[int, int]] = []
+        self._pin_watch: Callable[[], bool] | None = None
+        self._repinning = False  # inside a re-pin: no second one
+        if pin:
+            # Right after the listing, so the identity is the chosen device's.
+            self.pin_transport()
 
     @property
     def serial(self) -> str:
@@ -1222,7 +1258,7 @@ class Device:
         """The transport every request uses, once `pin_transport` set it."""
         return self._transport_id
 
-    def _pin(self) -> dict[str, int]:
+    def _pin(self, *, strict: bool = False) -> dict[str, int]:
         """The client keyword that selects the pinned transport, if any.
 
         While a transport is pinned, every request first checks with the adb
@@ -1233,25 +1269,99 @@ class Device:
         """
         if self._transport_id is None:
             return {}
-        self._check_listed()
+        self._check_listed(strict=strict)
         return {"transport_id": self._transport_id}
 
-    def _check_listed(self) -> None:
-        """Raise unless the server lists the pinned transport with this serial."""
+    def _check_listed(self, *, strict: bool = False) -> None:
+        """Raise unless the server lists the pinned transport with this serial.
+
+        When it does not and a re-pin is allowed (`can_repin`, not `strict`,
+        fewer than `MAX_REPINS` so far), wait for the device to come back (see
+        `_repin`) instead of raising at once. `strict` is for a request that
+        changes the device (an input, a start or a stop of an app), so nothing
+        waits between the checks before it and the request itself.
+        """
         listed = [
             d for d in self._client.devices() if d.transport_id == self._transport_id
         ]
         if (
-            len(listed) != 1
-            or listed[0].serial != self.serial
-            or listed[0].state != READY_STATE
+            len(listed) == 1
+            and listed[0].serial == self.serial
+            and listed[0].state == READY_STATE
         ):
-            msg = (
-                f"the transport pinned for {self.serial} ({self._transport_id})"
-                " does not lead to that device any more"
-            )
-            details = {"serial": self.serial, "reason": "device_changed"}
-            raise DeviceNotFoundError(msg, details=details)
+            return
+        if strict or self._repinning or not self.can_repin:
+            raise self._changed()
+        self._repin()
+
+    def _changed(
+        self, why: str = "does not lead to that device any more"
+    ) -> DeviceNotFoundError:
+        msg = f"the transport pinned for {self.serial} ({self._transport_id}) {why}"
+        details = {"serial": self.serial, "reason": "device_changed"}
+        return DeviceNotFoundError(msg, details=details)
+
+    def _repin(self) -> None:
+        """Move the pin to the transport the same device came back on.
+
+        The adb server can renumber a device that went offline for a moment.
+        For up to `REPIN_WAIT` seconds the server's listing is read every
+        `REPIN_POLL` seconds until exactly one entry has this serial and is
+        ready. The identity is then read through that transport (not taken
+        from the listing) and must equal the pinned one, boot id included;
+        only then does the pin move. Anything else raises ``device_changed``,
+        and the pin stays where it was.
+        """
+        if len(self._repins) >= MAX_REPINS:
+            raise self._changed(f"was renumbered more than {MAX_REPINS} times")
+        old = self._transport_id
+        assert old is not None  # noqa: S101 - only called while pinned
+        start = self._clock()
+        while True:
+            watch = self._pin_watch
+            if watch is not None and watch():
+                msg = f"the wait for {self.serial} to come back was stopped"
+                details = {"serial": self.serial, "reason": PIN_WAIT_STOPPED}
+                raise DeviceNotFoundError(msg, details=details)
+            entries = [d for d in self._client.devices() if d.serial == self.serial]
+            ready = [d for d in entries if d.state == READY_STATE]
+            if len(ready) > 1:
+                raise self._changed("is listed more than once")
+            if len(entries) == 1 and ready and ready[0].transport_id is not None:
+                found = self._identity_through(ready[0].transport_id)
+                if found is not None:
+                    if found != self._pinned_identity:
+                        raise self._changed("came back as another device")
+                    new = ready[0].transport_id
+                    self._transport_id = new
+                    if new != old:
+                        self._repins.append((old, new))
+                    return
+            if self._clock() - start >= REPIN_WAIT:
+                raise self._changed(f"did not come back within {REPIN_WAIT:g} s")
+            self._sleep(REPIN_POLL)
+
+    def _identity_through(self, transport: int) -> DeviceIdentity | None:
+        """The identity read through `transport`, or None when that failed.
+
+        The pin points at `transport` only while it is read; it is restored
+        afterwards whatever happens, and no re-pin can start inside.
+        """
+        old = self._transport_id
+        self._transport_id = transport
+        self._repinning = True
+        try:
+            return self.identity()
+        except (
+            AdbError,
+            AdbServerUnavailableError,
+            DeviceNotFoundError,
+            DeviceOfflineError,
+        ):
+            return None
+        finally:
+            self._repinning = False
+            self._transport_id = old
 
     def pin_transport(self) -> int:
         """Send every later request to the transport this device was chosen on.
@@ -1260,7 +1370,12 @@ class Device:
         `Device` was made. Afterwards each request selects that transport
         (``host:transport-id:N``), not the serial, so a device that later takes
         the same serial never receives anything: the requests fail instead.
-        Calling it again keeps the first transport.
+        Then the identity is read through that transport and kept
+        (`pinned_identity`); `check_pin` compares against it. Calling it again
+        keeps the first transport and identity.
+
+        When the kept identity has a boot id, a transport that the adb server
+        later renumbers is followed (see `can_repin`).
 
         Raises:
             AdbError: The adb server reported no transport id for this device,
@@ -1268,6 +1383,9 @@ class Device:
             DeviceNotFoundError: The server no longer lists that transport id
                 with this serial (``details["reason"]`` is ``device_changed``);
                 nothing is pinned and nothing is sent.
+            AdbError: The identity could not be read, or has no build
+                fingerprint, so the device could not be told apart later;
+                nothing is pinned.
         """
         if self._transport_id is None:
             transport = self._info.transport_id
@@ -1280,10 +1398,51 @@ class Device:
             self._transport_id = transport
             try:
                 self._check_listed()  # the number may already be another's
-            except DeviceNotFoundError:
+                found = self.identity()
+            except BaseException:
                 self._transport_id = None
                 raise
+            if found is None or not found.fingerprint:
+                self._transport_id = None
+                msg = (
+                    f"the identity of {self.serial} (ro.build.fingerprint) could"
+                    " not be read, so the device cannot be told apart later"
+                )
+                raise AdbError(msg, details={"serial": self.serial})
+            self._pinned_identity = found
         return self._transport_id
+
+    @property
+    def pinned_identity(self) -> DeviceIdentity | None:
+        """The identity read when the transport was pinned, None before."""
+        return self._pinned_identity
+
+    @property
+    def can_repin(self) -> bool:
+        """Whether a renumbered transport may be followed.
+
+        Only when the pinned identity has a boot id: without one, two
+        emulators of one image cannot be told apart, so a renumbered
+        transport ends the pin (``device_changed``) as it always did.
+        """
+        identity = self._pinned_identity
+        return identity is not None and bool(identity.boot_id)
+
+    @property
+    def repins(self) -> tuple[tuple[int, int], ...]:
+        """Each move of the pin so far, as (old transport, new transport)."""
+        return tuple(self._repins)
+
+    def set_pin_watch(self, watch: Callable[[], bool] | None) -> None:
+        """Ask `watch` while waiting for a renumbered transport.
+
+        When it returns True the wait ends with `DeviceNotFoundError` whose
+        ``details["reason"]`` is ``pin_wait_stopped``. None removes it.
+        """
+        if watch is not None and not callable(watch):
+            msg = "watch must be callable or None"
+            raise TypeError(msg)
+        self._pin_watch = watch
 
     @property
     def info(self) -> DeviceInfo:
@@ -1295,7 +1454,10 @@ class Device:
         return self._shell_text(command)
 
     def _shell_text(self, command: str, *, timeout: float | None = None) -> str:
-        raw = self._client.shell(self.serial, command, timeout=timeout, **self._pin())
+        strict = command.startswith(_CHANGING_COMMANDS)
+        raw = self._client.shell(
+            self.serial, command, timeout=timeout, **self._pin(strict=strict)
+        )
         return raw.decode("utf-8", errors="replace")
 
     def tap(
@@ -1927,9 +2089,10 @@ class Device:
     def identity(self) -> DeviceIdentity | None:
         """Read whether this is an emulator, its serial number and build, at once.
 
-        One command reads ``ro.kernel.qemu``, ``ro.serialno`` and
-        ``ro.build.fingerprint``. None means the answer did not have exactly
-        those three lines.
+        One command reads ``ro.kernel.qemu``, ``ro.serialno``,
+        ``ro.build.fingerprint`` and ``/proc/sys/kernel/random/boot_id``. None
+        means the answer did not have exactly those four lines. A boot id that
+        is not a lowercase UUID is kept as ``""`` (not readable).
 
         Raises:
             AdbError: The adb protocol or the command failed.
@@ -1943,16 +2106,22 @@ class Device:
             lines.pop()
         if len(lines) != len(DeviceIdentity._fields):
             return None
-        qemu, serialno, fingerprint = (line.rstrip("\r").strip() for line in lines)
-        return DeviceIdentity(qemu == "1", serialno, fingerprint)
+        qemu, serialno, fingerprint, boot_id = (
+            line.rstrip("\r").strip() for line in lines
+        )
+        if not _BOOT_ID.match(boot_id):
+            boot_id = ""
+        return DeviceIdentity(qemu == "1", serialno, fingerprint, boot_id)
 
-    def check_pin(self, expected: DeviceIdentity, *, emulator: bool) -> None:
+    def check_pin(self, *, emulator: bool) -> None:
         """Raise unless the pinned transport still leads to the same device.
 
         The adb server must still list the pinned transport id with this serial
-        (a restarted server numbers its transports anew), and `identity`
-        through it must equal `expected`; with `emulator` it must also be an
-        emulator. Nothing is sent but these two reads.
+        (a restarted server numbers its transports anew; a renumbered one is
+        followed only as `can_repin` allows), and `identity` through it must
+        equal `pinned_identity`, boot id included (a boot id that could no
+        longer be read counts as a change); with `emulator` it must also be an
+        emulator. Nothing is sent but these reads.
 
         Raises:
             DeviceNotFoundError: The pinned transport is gone, lists another
@@ -1960,7 +2129,8 @@ class Device:
                 (``details["reason"]`` is ``device_changed``).
             AdbError: `pin_transport` was not called, or the reads failed.
         """
-        if self._transport_id is None:
+        expected = self._pinned_identity
+        if self._transport_id is None or expected is None:
             msg = "the transport is not pinned"
             raise AdbError(msg, details={"serial": self.serial})
         found = self.identity()  # its request checks the server's listing first

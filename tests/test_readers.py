@@ -485,17 +485,37 @@ def test_focused_window_is_unknown_unless_everything_agrees(
     assert_no_input(fake_adb, android)
 
 
-def test_identity_reads_three_properties_at_once(fake_adb):
+def test_identity_reads_three_properties_and_the_boot_id_at_once(fake_adb):
     android, device = make(fake_adb)
     found = device.identity()
     assert found == DeviceIdentity(
         emulator=True,
         serialno=android.props["ro.serialno"],
         fingerprint=android.props["ro.build.fingerprint"],
+        boot_id="3ea6a12b-8379-445f-852a-73a2c4c3ff17",
     )
 
 
-@pytest.mark.parametrize("answer", [b"", b"1\n", b"1\na\nb\nc\n"])
+@pytest.mark.parametrize(
+    "boot_id",
+    [
+        None,  # the file cannot be read: the command prints an empty line
+        "cat: /proc/sys/kernel/random/boot_id: Permission denied",
+        "3EA6A12B-8379-445F-852A-73A2C4C3FF17",  # not the kernel's lowercase
+        "3ea6a12b-8379-445f-852a-73a2c4c3ff1",
+        "3ea6a12b8379445f852a73a2c4c3ff17",
+    ],
+)
+def test_a_boot_id_that_is_not_a_uuid_is_unknown(fake_adb, boot_id):
+    android, device = make(fake_adb)
+    android.boot_id = boot_id
+    found = device.identity()
+    assert found is not None
+    assert found.boot_id == ""
+    assert found.fingerprint == android.props["ro.build.fingerprint"]
+
+
+@pytest.mark.parametrize("answer", [b"", b"1\n", b"1\na\nb\n", b"1\na\nb\nc\nd\n"])
 def test_identity_of_another_shape_is_unknown(fake_adb, answer):
     android, device = make(fake_adb)
     android.override(re.compile(r"^getprop ro\.kernel\.qemu;"), answer)

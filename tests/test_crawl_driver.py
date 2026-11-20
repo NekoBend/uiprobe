@@ -37,7 +37,7 @@ from uiprobe.crawl import (
     Tap,
 )
 from uiprobe.crawl_driver import CrawlResult, crawl
-from uiprobe.device import Device, DeviceIdentity, FocusedWindow
+from uiprobe.device import IDENTITY_COMMAND, Device, FocusedWindow
 from uiprobe.errors import (
     AdbError,
     DeviceNotFoundError,
@@ -310,7 +310,8 @@ def test_a_real_device_is_refused_with_no_input_and_no_folder(
     assert caught.value.details == {"serial": SERIAL, "reason": "not_emulator"}
     assert not out.exists()
     assert android.inputs == []
-    assert commands(fake_adb) == ["getprop ro.kernel.qemu"]
+    # the pin reads the identity, then the emulator check: nothing else
+    assert commands(fake_adb) == [IDENTITY_COMMAND, "getprop ro.kernel.qemu"]
 
 
 def test_a_real_device_runs_when_allowed(tmp_path, device, android, fake_adb, clock):
@@ -1036,7 +1037,6 @@ def _gate_run(
         writer,
         engine,
         policy,
-        identity=_identity(device),
         emulator=True,
         screenshots=False,
         settle=0.0,
@@ -1050,12 +1050,6 @@ def _gate_run(
 
 
 _WRITERS: list[RunWriter] = []
-
-
-def _identity(device: Device) -> DeviceIdentity:
-    found = device.identity()
-    assert found is not None
-    return found
 
 
 @pytest.fixture(autouse=True)
@@ -1157,7 +1151,6 @@ def test_the_gate_holds_back_the_launch_too(
         writer,
         engine,
         Policy(),
-        identity=_identity(device),
         emulator=True,
         screenshots=False,
         settle=0.0,
@@ -1192,10 +1185,12 @@ def test_a_device_that_takes_over_the_serial_receives_nothing(
     tmp_path, device, android, fake_adb, clock, monkeypatch
 ):
     def swap(_number: int, *_args: object, **_kwargs: object) -> None:
-        # Right after the emulator check: another device takes the serial.
+        # Right after the emulator check: another device (another boot id)
+        # takes the serial under a new transport number.
         fake_adb.devices[:] = [
             {"serial": SERIAL, "state": "device", "transport_id": TRANSPORT + 1}
         ]
+        android.boot_id = "0f1e2d3c-4b5a-4968-8778-695a4b3c2d1e"
 
     original = device.is_emulator
 
@@ -1211,7 +1206,11 @@ def test_a_device_that_takes_over_the_serial_receives_nothing(
     after = fake_adb.requests[before:]
     selectors = [r for r in after if r.startswith("host:transport")]
     assert selectors
-    assert set(selectors) == {f"host:transport-id:{TRANSPORT}"}
+    # The new number was asked only for the identity, which did not match.
+    assert set(selectors) <= {
+        f"host:transport-id:{TRANSPORT}",
+        f"host:transport-id:{TRANSPORT + 1}",
+    }
     assert android.inputs == []
     assert android.stopped == []
     assert not [c for _, _, c in fake_adb.commands if c.startswith(("monkey", "input"))]

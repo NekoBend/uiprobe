@@ -988,6 +988,35 @@ def test_run_start_records_back_on_other_screens(tmp_path):
     assert not (tmp_path / "other").exists()
 
 
+def test_run_start_and_run_json_record_the_repins(tmp_path):
+    writer = make(tmp_path, repin=True)
+    writer.finish("done", screens=0, actions=0, ended_at=STARTED, repins=2)
+    folder = tmp_path / "run"
+    start = json.loads((folder / "run-start.json").read_bytes())
+    assert start["repin"] is True
+    assert list(start)[-1] == "repin"
+    end = json.loads((folder / "run.json").read_bytes())
+    assert end["repins"] == 2
+    other = make(tmp_path, "other")
+    other.finish("done", screens=0, actions=0, ended_at=STARTED)
+    assert "repin" not in json.loads(
+        (tmp_path / "other" / "run-start.json").read_bytes()
+    )
+    assert "repins" not in json.loads((tmp_path / "other" / "run.json").read_bytes())
+    loose: Any = RunWriter.create
+    with pytest.raises(TypeError, match="repin must be a bool or None"):
+        loose(
+            tmp_path / "third",
+            package="com.example.app",
+            limits=Limits(),
+            deny_words=[],
+            serial="emulator-5554",
+            repin=1,
+        )
+    with pytest.raises(ValueError, match="repins must not be negative"):
+        make(tmp_path, "fourth").finish("done", screens=0, actions=0, repins=-1)
+
+
 def test_a_start_line_names_the_screen_of_another_app(tmp_path):
     writer = make(tmp_path)
     writer.write_transition_start(
