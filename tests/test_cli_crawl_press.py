@@ -500,3 +500,40 @@ def test_a_plan_that_cannot_be_written_stops_before_the_launch(
     )
     assert code != 0
     assert device_writes(fake_adb) == []
+
+
+@pytest.mark.usefixtures("here")
+def test_a_changing_identity_answer_cannot_undo_the_refusal(
+    fake_adb, android, capsys, tmp_path, monkeypatch
+):
+    # The pinned identity says not an emulator; a later fresh read would say
+    # emulator. The refusal rests on the verified identity, before any plan.
+    monkeypatch.setattr(Device, "is_emulator", lambda _self: True)
+    real_identity = Device.identity
+    real_check = Device.check_pin
+    checked = [False]
+
+    def check_then_flip(self: Device, **kwargs: object) -> None:
+        checked[0] = False
+        real_check(self, **kwargs)  # ty: ignore[invalid-argument-type]
+        checked[0] = True  # reads after a completed pin check answer "emulator"
+
+    def flipping(self: Device) -> object:
+        found = real_identity(self)
+        if found is not None and checked[0]:
+            return found._replace(emulator=True)
+        return found
+
+    monkeypatch.setattr(Device, "check_pin", check_then_flip)
+    monkeypatch.setattr(Device, "identity", flipping)
+    android.props["ro.kernel.qemu"] = "0"
+    out = tmp_path / "r"
+    code, text, _err = press(capsys, fake_adb, "--press", "--out", str(out), "--json")
+    error = json.loads(text)["error"]
+    assert (code, error["code"], error["details"]["reason"]) == (
+        17,
+        "not_emulator",
+        "not_emulator",
+    )
+    assert not out.exists()
+    assert device_writes(fake_adb) == []

@@ -1351,7 +1351,9 @@ def _cmd_crawl_press(args: argparse.Namespace, policy: Policy) -> int:
     # later pin check requires.
     device.check_pin(emulator=False)
     if not args.allow_real_device:
-        found = device.identity()
+        # The identity the pin check just verified (not a fresh read, which
+        # could answer differently).
+        found = device.pinned_identity
         if found is None or not found.emulator:
             reason = "unreadable" if found is None else "not_emulator"
             refusal = NotEmulatorError(
