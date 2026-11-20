@@ -139,6 +139,7 @@ __all__ = [
     "RULES",
     "InputWindow",
     "ListSpan",
+    "RowFields",
     "Unreadable",
     "Verdict",
     "display_orientation",
@@ -146,6 +147,7 @@ __all__ = [
     "parse_input_windows",
     "read_window_at",
     "window_at",
+    "window_line_fields",
 ]
 
 # Why the window at a point is not known (a short word for the records).
@@ -371,16 +373,18 @@ _RECT: Final = r"-?\d{1,7}, -?\d{1,7}, -?\d{1,7}, -?\d{1,7}"
 # (API 26 and 28 also list ``Viewport: ..., uniqueId='', ...``) and of API 29
 # on (``Viewport INTERNAL: ..., uniqueId=..., port=...``, isActive from 30).
 _VIEWPORT_CLAIM = re.compile(r"^\s*Viewport\b.*?\bdisplayId=(?P<display>-?\d+)\b")
+# The named groups other than display, orientation, logical and physical
+# only tell `viewport_parts` which parts a line has; they match nothing more.
 _VIEWPORT = re.compile(
-    r"\s*Viewport(?: [A-Z]+)?: displayId=(?P<display>-?\d{1,10}), "
-    r"(?:uniqueId=[^,\s]*, port=(?:\d{1,10}|<none>), )?"
+    r"\s*Viewport(?: (?P<kind>[A-Z]+))?: displayId=(?P<display>-?\d{1,10}), "
+    r"(?:uniqueId=(?P<unique>[^,\s]*), port=(?P<port>\d{1,10}|<none>), )?"
     r"orientation=(?P<orientation>[0-3]), "
     # A Samsung phone (API 36) printed the display's density here.
-    r"(?:densityDpi=\d{1,5} xDpi=\d{1,5}\.\d{1,6}, yDpi=\d{1,5}\.\d{1,6}, )?"
-    r"(?:uniqueId='[^']*', )?"
+    r"(?P<density>densityDpi=\d{1,5} xDpi=\d{1,5}\.\d{1,6}, yDpi=\d{1,5}\.\d{1,6}, )?"
+    r"(?:uniqueId='(?P<quoted>[^']*)', )?"
     rf"logicalFrame=\[(?P<logical>{_RECT})\], "
     rf"physicalFrame=\[(?P<physical>{_RECT})\], deviceSize=\[\d{{1,7}}, \d{{1,7}}\]"
-    r"(?:, isActive=\[[01]\])?"
+    r"(?P<active>, isActive=\[[01]\])?"
 )
 # The lines that may follow a window list (the captures' lists all ended at
 # one of the first four; a list per display may be followed by the next).
@@ -957,8 +961,11 @@ def _split(text: str) -> list[str]:
     return [line.removesuffix("\r") for line in text.split("\n")]
 
 
-def _parse(lines: list[str], display_id: int) -> tuple[InputWindow, ...] | _Refusal:
-    """Read the windows of `display_id` (see `parse_input_windows`)."""
+def _parse(
+    lines: list[str], display_id: int, accepted: set[int] | None = None
+) -> tuple[InputWindow, ...] | _Refusal:
+    """Read the windows of `display_id` (see `parse_input_windows`; for
+    `accepted` see `_read`)."""
     found = _window_list(lines, display_id)
     if isinstance(found, _Refusal):
         return found
@@ -968,14 +975,15 @@ def _parse(lines: list[str], display_id: int) -> tuple[InputWindow, ...] | _Refu
     try:
         for other in found.others:  # read as well: a name could have made them
             reading = other
-            read = _read(other, display_id if other.display is None else other.display)
+            shown = display_id if other.display is None else other.display
+            read = _read(other, shown, accepted)
             if isinstance(read, _Refusal) and read.reason in {
                 LINE_FORMAT,
                 REGION_FORMAT,
             }:
                 return _in(read, other)
         reading = found
-        return _in(_read(found, display_id), found)
+        return _in(_read(found, display_id, accepted), found)
     except _TooLongError as error:
         # Such a number could be anything, 0 or display 0 included.
         return _Refusal(ROTATION, "number_too_long", error.line, reading.head)
@@ -1061,9 +1069,12 @@ def _whole(groups: list[_Group], found: _List) -> _Refusal | None:
     return _Refusal(LINE_FORMAT, "transform_mismatch", odd[0].at)
 
 
-def _read(found: _List, display_id: int) -> tuple[InputWindow, ...] | _Refusal:
+def _read(
+    found: _List, display_id: int, accepted: set[int] | None = None
+) -> tuple[InputWindow, ...] | _Refusal:
     """Read the windows of `display_id` in the list `found` (see
-    `parse_input_windows`)."""
+    `parse_input_windows`), adding to `accepted` the index of each window
+    line it read into a window."""
     groups = _group(found)
     if isinstance(groups, _Refusal):
         return groups
@@ -1085,6 +1096,8 @@ def _read(found: _List, display_id: int) -> tuple[InputWindow, ...] | _Refusal:
         if window is None:
             continue
         windows.append(window)
+        if accepted is not None:
+            accepted.add(group.at)
         if rotated is not None:
             continue
         if turned:
@@ -1151,10 +1164,13 @@ def display_orientation(text: str, display_id: int = 0) -> int | None:
     return None if isinstance(found, _Refusal) else found[0]
 
 
-def _checked(lines: list[str], display_id: int) -> tuple[InputWindow, ...] | _Refusal:
+def _checked(
+    lines: list[str], display_id: int, accepted: set[int] | None = None
+) -> tuple[InputWindow, ...] | _Refusal:
     """The windows of `display_id` when both the list and the display's
-    orientation read and the orientation is 0, else why not."""
-    read = _parse(lines, display_id)
+    orientation read and the orientation is 0, else why not (for `accepted`
+    see `_read`)."""
+    read = _parse(lines, display_id, accepted)
     if isinstance(read, _Refusal):
         return read
     turned = _orientation(lines, display_id)
@@ -1173,7 +1189,8 @@ class ListSpan:
     list of every display (API 24 to 28), and ``digits`` how many digits
     that number is written with (0 for the one list); ``head`` the index of
     its ``Windows:`` line in the text's lines, ``lines`` the indices of its
-    lines and ``rows`` how many of them are window lines.
+    lines, ``rows`` how many of them are window lines and ``section`` the
+    index of its ``Display:`` line (None for the one list).
     """
 
     display: int | None
@@ -1181,6 +1198,7 @@ class ListSpan:
     head: int
     lines: tuple[int, ...]
     rows: int
+    section: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -1197,7 +1215,9 @@ class Verdict:
     exactly one; ``lists`` the window lists found; ``list_head`` the
     ``head`` of the list it refused in, None when it was no one list;
     ``end`` the index of the first line after the dispatcher's part (the
-    first line not more indented than its header), None without ``start``.
+    first line not more indented than its header), None without ``start``;
+    ``accepted`` the indices of the window lines the reader read into a
+    window (of any list it read, before it refused).
     """
 
     reason: str | None
@@ -1207,6 +1227,7 @@ class Verdict:
     lists: tuple[ListSpan, ...]
     list_head: int | None = None
     end: int | None = None
+    accepted: frozenset[int] = frozenset()
 
 
 def _spans(lines: list[str], start: int) -> tuple[ListSpan, ...]:
@@ -1220,13 +1241,13 @@ def _spans(lines: list[str], start: int) -> tuple[ListSpan, ...]:
             section, inner = _under(lines, i)
             shown = _display_of(heading)
             digits = len(heading.removeprefix("Display: ").lstrip("-"))
-            heads = [(shown, digits, h) for h in _heads(lines, section, inner)]
+            heads = [(shown, digits, h, i) for h in _heads(lines, section, inner)]
         else:
-            heads = [(None, 0, h) for h in _heads(lines, [i], level)]
-        for display, digits, head in heads:
+            heads = [(None, 0, h, None) for h in _heads(lines, [i], level)]
+        for display, digits, head, at in heads:
             taken = _listed(lines, head).taken
             rows = sum(1 for t in taken if _INDEX.match(lines[t].strip()))
-            spans.append(ListSpan(display, digits, head, tuple(taken), rows))
+            spans.append(ListSpan(display, digits, head, tuple(taken), rows, at))
     return tuple(spans)
 
 
@@ -1242,10 +1263,14 @@ def explain_input_windows(text: str, display_id: int = 0) -> Verdict:
     first = None if isinstance(start, _Refusal) else start
     lists = () if first is None else _spans(lines, first)
     end = None if first is None else _dispatcher_end(lines, first)
-    read = _checked(lines, display_id)
+    accepted: set[int] = set()
+    read = _checked(lines, display_id, accepted)
+    taken = frozenset(accepted)
     if isinstance(read, _Refusal):
-        return Verdict(read.reason, read.rule, read.line, first, lists, read.head, end)
-    return Verdict(None, None, None, first, lists, end=end)
+        return Verdict(
+            read.reason, read.rule, read.line, first, lists, read.head, end, taken
+        )
+    return Verdict(None, None, None, first, lists, end=end, accepted=taken)
 
 
 def _dispatcher_end(lines: list[str], start: int) -> int:
@@ -1257,6 +1282,77 @@ def _dispatcher_end(lines: list[str], start: int) -> int:
         if lines[i].strip() and _indent(lines[i]) <= level:
             return i
     return len(lines)
+
+
+# The marks that end a window's name or its applicationInfo.name: each may
+# be in a window line once, or where the name ends cannot be told.
+_ROW_MARKS: Final = (
+    ", id=",
+    ", displayId=",
+    ", applicationInfo.name=",
+    ", applicationInfo.token=",
+)
+# Where a field after the name begins (``1HXY=`` of the Samsung form too).
+_FIELD = re.compile(r", ([A-Za-z0-9][A-Za-z0-9_.]*)=")
+
+
+@dataclass(frozen=True, slots=True)
+class RowFields:
+    """A window line cut the way the reader cuts it (`window_line_fields`):
+    whether the name is quoted, its length, and the fields after it as
+    (key, value), ``applicationInfo.name`` whole up to
+    ``, applicationInfo.token=``."""
+
+    quoted: bool
+    name_length: int
+    fields: tuple[tuple[str, str], ...]
+
+
+def window_line_fields(line: str) -> RowFields | None:
+    """Cut a window line where the reader cuts it, or None when where its
+    name ends cannot be told.
+
+    The line must match the reader's window line (`_LINE`) with the quoted
+    name taken as quoted (a name that starts with a quote read as bare is
+    refused); none of `_ROW_MARKS` may be in it twice, and
+    ``applicationInfo.name`` needs exactly one ``, applicationInfo.token=``
+    after it. Each field runs to the next ``, key=`` (`_NEXT`), and a field
+    holding a quote must be one quoted run."""
+    text = line.strip()
+    match = _LINE.match(text)
+    if match is None or any(text.count(mark) > 1 for mark in _ROW_MARKS):
+        return None
+    quoted = match["quoted"] is not None
+    if not quoted and text.partition(": name=")[2].startswith("'"):
+        return None
+    app = text.find(", applicationInfo.name=")
+    token = text.find(", applicationInfo.token=")
+    if (app >= 0) != (token >= 0) or token < app:
+        return None
+    name = match["quoted"] if quoted else match["bare"]
+    start = match.start("id") if match["id"] is not None else match.start("fields")
+    meta = ", " + text[start:]
+    marks = list(_FIELD.finditer(meta))
+    fields: list[tuple[str, str]] = []
+    i = 0
+    while i < len(marks):
+        key, begin = marks[i][1], marks[i].end()
+        i += 1
+        if key == "applicationInfo.name":
+            end = meta.find(", applicationInfo.token=", begin)
+            while i < len(marks) and marks[i].start() < end:
+                i += 1
+        else:
+            end = marks[i].start() if i < len(marks) else len(meta)
+        value = meta[begin:end]
+        # A quote in a value must open and close it, with no other quote:
+        # else where the value ends cannot be told.
+        if "'" in value and not (
+            len(value) >= 2 and value[0] == value[-1] == "'" and value.count("'") == 2
+        ):
+            return None
+        fields.append((key, value))
+    return RowFields(quoted, len(name), tuple(fields))
 
 
 def window_at(

@@ -6,40 +6,34 @@
 the list reads or which rule refused it and at which line, how many window
 rows each list has, and the shape of the lines around the failure.
 
-No text of the output is ever copied into the report. Every string in it is
-one of:
+No text of the output is copied into the report, by construction: a line is
+shown in detail only when the reader itself accepted its structure, and then
+only through the reader's own boundaries and regular expressions:
 
-* a constant of this module (the notice, line kinds, tags such as
-  ``<num>``, the rule and reason names of `uiprobe.inputwindows`);
-* a member of a fixed vocabulary of this module: the field names, labels,
-  value words and flag names the reader knows (`KNOWN_KEYS`,
-  `KNOWN_LABELS`, `KNOWN_VALUES`, `KNOWN_FLAGS`, `TRANSFORM_WORDS`,
-  `KNOWN_LINES`);
-* a number: a line number, or a count, length or indent of at most four
-  digits (`CAP`; more is shown as ``9999+`` in text and as 9999 in JSON
-  numbers), or a row or display number of at most four digits; or a tag
-  built from a constant and such a number (``<text:12>``, ``<num:7>``).
+* a window line the reader read into a window, cut by
+  `uiprobe.inputwindows.window_line_fields` (the name as its length, each
+  field after it as a known key with a type tag, a known value word or a
+  length);
+* a ``Viewport`` line that matches the reader's form whole, shown part by
+  part (quoted values as one length);
+* the headings and lines the reader matches by its own patterns: its
+  header, ``Windows:``, ``Display: N``, the lines a list ends at,
+  ``logicalSize=``, transform lines and their matrix rows.
 
-Text an app sets (a window's name, ``applicationInfo.name``, the names on
-other lines, `TEXT_KEYS`) is shown only as its length, never as a known
-word. The fields of a line are read only when where such text ends can be
-told: in a window line the reader must cut the name and each mark that ends
-a name (``, id=``, ``, displayId=``, ``, applicationInfo.name=``,
-``, applicationInfo.token=``) may be there once; on another line the text
-must be one quoted run with no other quote. Otherwise everything after the
-row number (or after the line's label) is shown as one length. Known value
-words (`KNOWN_VALUES`) are shown only in the rows of a window list the
-reader found and as the value of a known label (``DispatchEnabled: true``);
-elsewhere every value is a type tag or its length. Text an app sets that
-spans lines can still look like other lines of ``dumpsys input``; then the
-known words in it are shown as such, never other text.
+Every other line, a window line the reader refused or did not reach
+included, is shown as its kind and one ``<text:LEN>``. A row number or a
+display number is shown only when the reader verified it (a row it read; a
+display whose rows it all read, or the display asked for); otherwise only
+how many digits it has (``<num:W>``). Counts, lengths and indents stop at
+`CAP`. So every string is a constant, a member of a fixed vocabulary of this
+module, a tag or such a number.
 
 The one exception is opt-in: with ``show_flag_names`` an unknown name in the
-``flags=``, ``inputConfig=`` or ``inputFeatures=`` field of a row of a
-window list the reader found, whose name's end can be told, is shown when it
-is an upper-case word (`SHOWABLE_FLAG`), as ``<unknown_flag:NAME>``. A
-window name can still fake such a row, so the name can be any upper-case
-device text; the report then says so (`NOTICE_SHOWN`).
+``flags=``, ``inputConfig=`` or ``inputFeatures=`` field of a row of a found
+window list whose name's end can be told is shown when it is an upper-case
+word (`SHOWABLE_FLAG`), as ``<unknown_flag:NAME>``, also in a row the reader
+refused. Any device text, a window name included, may end up there; the
+report then says so (`NOTICE_SHOWN`).
 """
 
 from __future__ import annotations
@@ -49,14 +43,21 @@ from dataclasses import dataclass
 from typing import Final
 
 from uiprobe.inputwindows import (
+    _DISPLAY,
     _FLAG_NAMES,
+    _HEADER,
     _INDEX,
     _INPUT_CONFIG_NAMES,
-    _LINE,
+    _LIST_END,
     _MATRIX_ROW,
+    _TRANSFORM,
+    _VIEWPORT,
     RULES,
+    ListSpan,
+    RowFields,
     Verdict,
     explain_input_windows,
+    window_line_fields,
 )
 
 __all__ = [
@@ -96,9 +97,8 @@ _CONTEXT: Final = 2
 # The most lines an outline (when no one line failed) and a forms summary show.
 _OUTLINE_LINES: Final = 40
 _MAX_FORMS: Final = 20
-# The largest count, length or indent shown, and the most digits a row or
-# display number is shown with; longer ones are not numbers a dispatcher
-# prints.
+# The largest count, length or indent shown, and the most digits a verified
+# row or display number is shown with.
 CAP: Final = 9999
 _SMALL_DIGITS: Final = 4
 
@@ -107,22 +107,19 @@ LINE_KINDS: Final = (
     "transform",
     "matrix_row",
     "heading",
-    "fields",
+    "viewport",
     "other",
     "blank",
 )
-# The field names of the dispatcher's lines (window rows of API 24 to 36,
-# focus lines, connections) and of the input reader's Viewport lines.
+# The field names of the window lines the captures hold (API 24 to 36 and
+# the Samsung form).
 KNOWN_KEYS: Final = frozenset(
     {
-        "action",
+        "1HXY",
         "alpha",
         "applicationInfo.name",
         "applicationInfo.token",
         "canReceiveKeys",
-        "channelName",
-        "deviceId",
-        "deviceSize",
         "dispatchingTimeout",
         "displayId",
         "displayOrientation",
@@ -136,90 +133,31 @@ KNOWN_KEYS: Final = frozenset(
         "id",
         "inputConfig",
         "inputFeatures",
-        "isActive",
         "layer",
-        "length",
-        "logicalFrame",
-        "logicalSize",
-        "monitor",
         "name",
-        "orientation",
         "ownerPid",
         "ownerUid",
+        "pTouchableRegion",
         "paused",
-        "physicalFrame",
-        "port",
         "portalToDisplayId",
-        "responsive",
-        "result",
+        "samsungFlags",
         "scale",
-        "source",
-        "status",
         "token",
         "touchOcclusionMode",
         "touchableRegion",
         "trustedOverlay",
         "type",
-        "uniqueId",
         "visible",
-        "windowName",
         "windowScale",
     }
 )
-# Labels of ``Label: ...`` lines, with each run of digits as <num>.
-KNOWN_LABELS: Final = frozenset(
-    {
-        "AppSwitch",
-        "Configuration",
-        "Connections",
-        "Current Window with Pointer Capture",
-        "CursorStatesByDisplay",
-        "DispatchEnabled",
-        "DispatchFrozen",
-        "Display",
-        "FocusRequests",
-        "FocusedApplication",
-        "FocusedApplications",
-        "FocusedDisplayId",
-        "FocusedWindow",
-        "FocusedWindows",
-        "Global monitors in display <num>",
-        "Global monitors on display <num>",
-        "InboundQueue",
-        "Input Dispatcher State",
-        "InputFilterEnabled",
-        "KeyRepeatDelay",
-        "KeyRepeatTimeout",
-        "MonitoringChannels",
-        "PendingEvent",
-        "Pointer Capture Requested",
-        "RecentQueue",
-        "ReplacedKeys",
-        "TouchModePerDisplay",
-        "TouchStates",
-        "TouchStatesByDisplay",
-        "Viewport",
-        "Viewport EXTERNAL",
-        "Viewport INTERNAL",
-        "Viewport VIRTUAL",
-        "Windows",
-        "mMaximumObscuringOpacityForTouch",
-    }
-)
-# Whole lines shown as they are.
-KNOWN_LINES: Final = frozenset({"INPUT MANAGER (dumpsys input)"})
-# Values shown as they are.
+# Values of those fields shown as they are (in rows the reader read).
 KNOWN_VALUES: Final = frozenset(
     {
         "<empty>",
-        "<no displays touched by cursor>",
-        "<no displays touched>",
-        "<none>",
         "<null>",
         "ALLOW",
         "BLOCK_UNTRUSTED",
-        "None",
-        "OK",
         "USE_OPACITY",
         "false",
         "true",
@@ -234,13 +172,12 @@ FLAG_VOCABULARIES: Final = {
     "flags": _FLAG_NAMES,
     "inputConfig": _INPUT_CONFIG_NAMES,
     "inputFeatures": INPUT_FEATURE_NAMES,
+    "samsungFlags": frozenset({"FORCE_TRUSTED_OVERLAY"}),
 }
-KNOWN_FLAGS: Final = _FLAG_NAMES | _INPUT_CONFIG_NAMES | INPUT_FEATURE_NAMES
+KNOWN_FLAGS: Final = frozenset().union(*FLAG_VOCABULARIES.values())
 # Fields whose value is text an app sets (or a window's title): always shown
 # as its length, never as a known word.
-TEXT_KEYS: Final = frozenset(
-    {"name", "applicationInfo.name", "windowName", "channelName"}
-)
+TEXT_KEYS: Final = frozenset({"name", "applicationInfo.name"})
 # The words of a ``transform (ROT_<n>) (<kind>)`` line.
 TRANSFORM_WORDS: Final = frozenset(
     {
@@ -255,24 +192,20 @@ TRANSFORM_WORDS: Final = frozenset(
         "UNKNOWN",
     }
 )
+# The kinds of ``Viewport <KIND>:`` lines shown as they are.
+VIEWPORT_KINDS: Final = frozenset({"INTERNAL", "EXTERNAL", "VIRTUAL"})
+# The headings shown as they are (the reader's own lines; `_LIST_END`).
+HEADINGS: Final = frozenset(
+    {_HEADER, "Windows:", "Display:", "MonitoringChannels:", "Connections:"}
+)
 # An unknown flag name shown with show_flag_names.
 SHOWABLE_FLAG: Final = re.compile(r"[A-Z][A-Z0-9_]{0,47}")
-
-_APP_NAME_END: Final = ", applicationInfo.token="
-# The marks that end a window's name or its applicationInfo.name: each may
-# be in a window line once, or the end cannot be told.
-_ROW_MARKS: Final = (", id=", ", displayId=", ", applicationInfo.name=", _APP_NAME_END)
-# The most hex digits of a flags=0x... value the reader reads.
-_FLAGS_HEX: Final = len("0x") + 8
-_LABEL = re.compile(r"([A-Za-z][A-Za-z0-9 ()_-]*?):(?= |$)")
-_KEY = re.compile(r"(?:^|, )([A-Za-z][A-Za-z0-9_.]*)=")
-_TRANSFORM_LINE = re.compile(r"transform \(([^()]*)\) \(([^()]*)\)(.*)")
+_OBSCURING: Final = "mMaximumObscuringOpacityForTouch: "
+_MONITORS = re.compile(r"Global monitors (in|on) display -?(\d+):")
+_HEX = re.compile(r"0x[0-9a-fA-F]+")
 _DECIMAL = r"-?\d+\.\d+"
-_MATRIX = re.compile(rf"{_DECIMAL}(?: +{_DECIMAL})*")
-_DIGITS = re.compile(r"\d+")
 _NUMBER_LIST = re.compile(r"\[(-?\d+(?:\.\d+)?(?:, ?-?\d+(?:\.\d+)?)*)\]")
 _WORD = re.compile(r"[A-Z][A-Z0-9_]*")
-_HEX = re.compile(r"0x[0-9a-fA-F]+")
 # (pattern, tag) for values of one simple type, tried in order.
 _SIMPLE: Final = (
     (re.compile(r"-?\d+"), "<num>"),
@@ -282,6 +215,8 @@ _SIMPLE: Final = (
     (re.compile(r"\d+x\d+"), "<size>"),
     (re.compile(r"-?\d+(?:\.\d+)?ms"), "<ms>"),
 )
+# The most hex digits of a flags=0x... value the reader reads.
+_FLAGS_HEX: Final = len("0x") + 8
 
 
 @dataclass(frozen=True, slots=True)
@@ -302,10 +237,10 @@ class LineShape:
 class ListRows:
     """One window list: its place among the lists (from 1), whether it is the
     list of one ``Display:`` section (``per_display``; False for the one list
-    of every display, API 24 to 28), that display's number (None when it has
-    more than four digits, or for the one list), how many digits the number
-    has, how many window rows the list has and whether the check refused in
-    it."""
+    of every display, API 24 to 28), that display's number (None when it is
+    not verified, see the module, or for the one list), how many digits the
+    number has, how many window rows the list has and whether the check
+    refused in it."""
 
     position: int
     per_display: bool
@@ -319,9 +254,9 @@ class ListRows:
 class Form:
     """Rows of one list that look alike: whether the name is quoted, which
     fields follow it (`KNOWN_KEYS`, an unknown one as ``<unknown_key>``),
-    whether transform lines follow the row, and how many rows. A row whose
-    name's end cannot be told is of no recognised form (``recognised``
-    False, no fields)."""
+    whether transform lines follow the row, and how many rows. A row the
+    reader did not read into a window, or whose name's end cannot be told,
+    is of no recognised form (``recognised`` False, no fields)."""
 
     position: int
     quoted: bool
@@ -339,11 +274,11 @@ class TapWindowDiagnosis:
     ``reason`` and ``rule`` are None when the list reads; ``part`` is
     `DISPATCHER`, `INPUT_READER` (the Viewport lines above it) or `OUTPUT`
     (the whole output, when there is not exactly one dispatcher header or
-    the line is after the dispatcher's part) and
-    ``line`` the line number in it (from 1; the dispatcher's header is line 1
-    of `DISPATCHER`) where the check refused, both None when no one line is
-    to blame. ``show_flag_names`` says whether unknown flag names may be in
-    it (and so which notice it carries).
+    the line is after the dispatcher's part) and ``line`` the line number in
+    it (from 1; the dispatcher's header is line 1 of `DISPATCHER`) where the
+    check refused, both None when no one line is to blame.
+    ``show_flag_names`` says whether unknown flag names may be in it (and so
+    which notice it carries).
     """
 
     reason: str | None
@@ -474,7 +409,7 @@ def _form_text(form: Form) -> str:
     if not form.recognised:
         return (
             f"list {form.position}: {_count(form.rows)} rows of no recognised form"
-            f" (the name's end cannot be told), {transform}"
+            f" (not read into a window, or the name's end cannot be told), {transform}"
         )
     name = "quoted name" if form.quoted else "bare name"
     return (
@@ -488,12 +423,13 @@ def _tag(name: str, number: int) -> str:
     return f"<{name}:{_count(number)}>"
 
 
-def _row_number(digits: str) -> str:
-    """The token of a row number, from its digits (counted before any
-    conversion): the number up to four digits, else ``row:<num:DIGITS>``."""
-    if len(digits) <= _SMALL_DIGITS:
-        return f"row:{int(digits)}"
-    return "row:" + _tag("num", len(digits))
+def _number(digits: str, *, verified: bool) -> str:
+    """A row or display number from its digits (counted, never converted
+    unless short): the number when `verified` and of at most four digits,
+    else ``<num:DIGITS>``."""
+    if verified and len(digits) <= _SMALL_DIGITS:
+        return str(int(digits))
+    return _tag("num", len(digits))
 
 
 def _flag(name: str, known: frozenset[str], *, show: bool) -> str:
@@ -504,33 +440,20 @@ def _flag(name: str, known: frozenset[str], *, show: bool) -> str:
     return _tag("unknown_flag", len(name))
 
 
-def _flags(key: str, value: str, *, show: bool) -> str:
-    """A ``A | B`` value of the flags field `key` as flag tokens joined by
-    ``|``, each name checked against the names of that field."""
-    known = FLAG_VOCABULARIES[key]
-    return "|".join(
-        _flag(name, known, show=show) if name else "<blank>"
-        for name in value.split(" | ")
-    )
-
-
-def _text(value: str) -> str:
-    """Text an app sets: its length, quoted or not."""
-    if len(value) >= 2 and value[0] == value[-1] == "'":
-        return _tag("quoted", len(value) - 2)
-    return _tag("text", len(value))
-
-
 def _flag_value(key: str, value: str, *, show: bool) -> str:
     """The token of a flags field's value, by the rules of that field: only
     ``0x0`` is a number in ``inputConfig=`` (no names), up to eight hex
-    digits in ``flags=``; any other value is read as names."""
+    digits in ``flags=``; any other value is read as names ``A | B``."""
     if key == "inputConfig":
         if value == "0x0":
             return "0x0"
     elif _HEX.fullmatch(value) and (key != "flags" or len(value) <= _FLAGS_HEX):
         return "<hex>"
-    return _flags(key, value, show=show)
+    known = FLAG_VOCABULARIES[key]
+    return "|".join(
+        _flag(name, known, show=show) if name else "<blank>"
+        for name in value.split(" | ")
+    )
 
 
 def _plain(value: str, *, words: bool) -> str:
@@ -551,173 +474,153 @@ def _plain(value: str, *, words: bool) -> str:
     return _tag("word" if _WORD.fullmatch(value) else "text", len(value))
 
 
-def _value(key: str | None, value: str, *, show: bool, words: bool) -> str:
-    """The token of the value of field `key` (None: text before any field).
-
-    Text an app sets is its length; a flags field gives flag tokens (`show`
-    lets unknown names show); known value words are shown only with `words`
-    (a row of a found list, or the value of a known label) and then only
-    for a known field; anything else is a type tag or its length."""
+def _field(key: str, value: str, *, show: bool, words: bool) -> str:
+    """The token of one field of a cut window line."""
+    shown = key if key in KNOWN_KEYS else _tag("unknown_key", len(key))
     if key in TEXT_KEYS:
-        return "<blank>" if value == "" else _text(value)
-    if key is not None and key in FLAG_VOCABULARIES:
-        return _flag_value(key, value, show=show)
-    return _plain(value, words=words and (key is None or key in KNOWN_KEYS))
+        token = "<blank>" if value == "" else _tag("text", len(value))
+    elif key in FLAG_VOCABULARIES:
+        token = _flag_value(key, value, show=show)
+    else:
+        token = _plain(value, words=words and key in KNOWN_KEYS)
+    return f"{shown}={token}"
 
 
-def _fields(text: str, *, show: bool = False, words: bool = False) -> list[str]:
-    """The tokens of ``key=value, key=value`` text: each key (known, or
-    ``<unknown_key:LEN>``) with its value's token; text before the first key
-    as one value. ``applicationInfo.name`` runs to ``, applicationInfo.token=``
-    when that follows, as the reader cuts it. Callers make sure that no text
-    an app sets can be read as fields here (`_cut_row`, `_line_fields`)."""
-    keys = list(_KEY.finditer(text))
-    if not keys:
-        return [_value(None, text, show=False, words=words)] if text else []
-    tokens: list[str] = []
-    if keys[0].start() > 0:
-        tokens.append(_value(None, text[: keys[0].start()], show=False, words=False))
-    skip_to = -1
-    for i, key in enumerate(keys):
-        if key.start() < skip_to:
-            continue
-        name = key[1]
-        end = keys[i + 1].start() if i + 1 < len(keys) else len(text)
-        if name == "applicationInfo.name":
-            token = text.find(_APP_NAME_END, key.end())
-            if token >= 0:
-                end = skip_to = token
-        shown = name if name in KNOWN_KEYS else _tag("unknown_key", len(name))
-        value = _value(name, text[key.end() : end], show=show, words=words)
-        tokens.append(f"{shown}={value}")
-    return tokens
+def _row_tokens(cut: RowFields, *, show: bool, words: bool) -> list[str]:
+    name = _tag("quoted" if cut.quoted else "text", cut.name_length)
+    fields = [_field(k, v, show=show, words=words) for k, v in cut.fields]
+    return [f"name={name}", *fields]
 
 
-def _line_fields(text: str, *, words: bool) -> list[str]:
-    """The tokens of a line that is no window row (after its label).
+def _window_row(text: str, *, accepted: bool, show: bool) -> list[str]:
+    """The tokens of a window line (stripped `text`): its fields when the
+    reader read it into a window (`accepted`) or, with `show`, when it is a
+    row of a found list; only when its name's end can be told
+    (`window_line_fields`). Otherwise the number's width and one length."""
+    head = _INDEX.match(text)
+    digits = text[: head.end() - 1] if head is not None else ""
+    rest = (text[head.end() :] if head is not None else text).removeprefix(" ")
+    number = "row:" + _number(digits, verified=accepted)
+    cut = window_line_fields(text) if accepted or show else None
+    if cut is None:
+        return [number, _tag("text", len(rest))]
+    return [number, *_row_tokens(cut, show=show, words=accepted)]
 
-    A field an app sets (`TEXT_KEYS`) must be the only one, quoted, with no
-    other quote in the line; then it is its length and the fields around it
-    are read. Otherwise its end cannot be told, and the whole text is shown
-    as its length."""
-    keys = [key for key in _KEY.finditer(text) if key[1] in TEXT_KEYS]
-    if not keys:
-        return _fields(text, words=words)
-    whole = [_tag("text", len(text))]
-    key = keys[0]
-    if len(keys) > 1 or text.count("'") != 2 or text[key.end() : key.end() + 1] != "'":
-        return whole
-    close = text.index("'", key.end() + 1)
-    after = text[close + 1 :]
-    if after and not after.startswith(", "):
-        return whole
+
+def _end_tokens(text: str) -> list[str]:
+    """The tokens of a line a window list ends at (`_LIST_END`)."""
+    if text in HEADINGS:
+        return [text]
+    if text.startswith(_OBSCURING):
+        return [_OBSCURING.strip(), _tag("text", len(text) - len(_OBSCURING))]
+    monitors = _MONITORS.fullmatch(text)
+    if monitors is not None:
+        where = "in" if monitors[1] == "in" else "on"
+        return [f"Global monitors {where} display", _tag("num", len(monitors[2])) + ":"]
+    return [_tag("text", len(text))]
+
+
+def _transform_tokens(match: re.Match[str]) -> list[str]:
+    rot = f"ROT_{match['rot']}"
     tokens = [
-        *_fields(text[: key.start()]),
-        f"{key[1]}={_tag('quoted', close - key.end() - 1)}",
+        "transform",
+        rot if rot in TRANSFORM_WORDS else "ROT_" + _tag("num", len(match["rot"])),
     ]
-    return tokens + _fields(after.removeprefix(", ")) if after else tokens
-
-
-def _transform(text: str) -> list[str]:
-    match = _TRANSFORM_LINE.fullmatch(text)
-    if match is None:
-        return ["transform", _tag("text", len(text) - len("transform "))]
-    words = [match[1], *match[2].split(" ")]
-    tokens = ["transform"]
-    tokens += [w if w in TRANSFORM_WORDS else _tag("word", len(w)) for w in words]
-    if match[3]:
-        tokens.append(_tag("text", len(match[3])))
+    tokens += [
+        w if w in TRANSFORM_WORDS else _tag("word", len(w))
+        for w in match["kind"].split()
+    ]
     return tokens
 
 
-def _label(text: str) -> str:
-    shown = _DIGITS.sub("<num>", text)
-    return f"{shown}:" if shown in KNOWN_LABELS else _tag("label", len(text)) + ":"
+def _viewport_tokens(match: re.Match[str]) -> list[str]:
+    """The parts of a Viewport line the reader's form matched whole."""
+    kind = match["kind"]
+    if kind is None:
+        head = "Viewport:"
+    elif kind in VIEWPORT_KINDS:
+        head = f"Viewport {kind}:"
+    else:
+        head = "Viewport " + _tag("word", len(kind)) + ":"
+    tokens = [head, "displayId=<num>"]
+    if match["unique"] is not None:
+        unique = match["unique"]
+        tokens.append(
+            "uniqueId=" + ("<blank>" if not unique else _tag("text", len(unique)))
+        )
+        tokens.append("port=<none>" if match["port"] == "<none>" else "port=<num>")
+    tokens.append(f"orientation={match['orientation']}")
+    if match["density"] is not None:
+        tokens += ["densityDpi=<num>", "xDpi=<dec>", "yDpi=<dec>"]
+    if match["quoted"] is not None:
+        tokens.append("uniqueId=" + _tag("quoted", len(match["quoted"])))
+    tokens += ["logicalFrame=<list:4>", "physicalFrame=<list:4>", "deviceSize=<list:2>"]
+    if match["active"] is not None:
+        tokens.append("isActive=<list:1>")
+    return tokens
 
 
-def _simple_line(text: str) -> tuple[str, list[str]] | None:
-    """The kind and tokens of a blank, known, transform or matrix line (a
-    line of decimals that is not three is `other`)."""
-    if not text:
-        return "blank", []
-    if text in KNOWN_LINES:
-        return "heading", [text]
-    if text.startswith("transform ("):
-        return "transform", _transform(text)
-    if _MATRIX.fullmatch(text):
-        kind = "matrix_row" if _MATRIX_ROW.match(text) else "other"
-        return kind, ["<dec>"] * len(text.split())
+def _heading(text: str, *, verified: bool) -> list[str] | None:
+    """The tokens of a heading the reader matches by its own patterns: its
+    header, ``Windows:``, ``Display: N``, the lines a list ends at and
+    ``logicalSize=``; None for any other line."""
+    if text in (_HEADER, "Windows:"):
+        return [text]
+    if _DISPLAY.match(text):
+        digits = text.removeprefix("Display: ").lstrip("-")
+        return ["Display:", _number(digits, verified=verified)]
+    if _LIST_END.match(text):
+        return _end_tokens(text)
+    if text.startswith("logicalSize="):
+        return ["logicalSize=" + _tag("text", len(text) - len("logicalSize="))]
     return None
 
 
-def _cut_row(text: str) -> tuple[bool, int, str] | None:
-    """Where the name of a window line (stripped) ends, when that can be
-    told: whether it is quoted, its length and the fields after it.
-
-    The reader must cut it (`uiprobe.inputwindows`), and none of the marks
-    that end a name or ``applicationInfo.name`` may be in the line twice
-    (`_ROW_MARKS`); ``applicationInfo.name`` needs exactly one
-    ``, applicationInfo.token=`` after it. Otherwise text an app sets could
-    be read as fields, and None is returned."""
-    match = _LINE.match(text)
-    if match is None or any(text.count(mark) > 1 for mark in _ROW_MARKS):
-        return None
-    app = text.find(", applicationInfo.name=")
-    token = text.find(_APP_NAME_END)
-    if (app >= 0) != (token >= 0) or token < app:
-        return None
-    quoted = match["quoted"] is not None
-    name = match["quoted"] if quoted else match["bare"]
-    start = match.start("id") if match["id"] is not None else match.start("fields")
-    return quoted, len(name), text[start:]
-
-
-def _window_row(
-    text: str, digits: str, rest: str, *, show: bool, words: bool
-) -> list[str]:
-    """The tokens of a window line (stripped `text`, its row number's
-    `digits`, the `rest` after them): the name as its length and the fields
-    after it, when the name's end can be told (`_cut_row`); else everything
-    after the number as one length. Only there may unknown flag names
-    show (`show`) and known value words (`words`)."""
-    number = _row_number(digits)
-    cut = _cut_row(text)
-    if cut is None:
-        return [number, _tag("text", len(rest))]
-    quoted, length, meta = cut
-    name = _tag("quoted" if quoted else "text", length)
-    return [number, f"name={name}", *_fields(meta, show=show, words=words)]
+def _reader_line(
+    line: str, text: str, *, verified: bool
+) -> tuple[str, list[str]] | None:
+    """The kind and tokens of a line the reader matches by its own patterns
+    (no window line), or None."""
+    heading = _heading(text, verified=verified)
+    if heading is not None:
+        return "heading", heading
+    transform = _TRANSFORM.match(text)
+    if transform is not None:
+        return "transform", _transform_tokens(transform)
+    if _MATRIX_ROW.match(text):
+        return "matrix_row", ["<dec>", "<dec>", "<dec>"]
+    viewport = _VIEWPORT.fullmatch(line)
+    if viewport is not None:
+        return "viewport", _viewport_tokens(viewport)
+    return None
 
 
 def shape_line(
-    line: str, *, show_flag_names: bool = False, in_list: bool = False
+    line: str,
+    *,
+    accepted: bool = False,
+    show_flag_names: bool = False,
+    in_list: bool = False,
 ) -> tuple[str, list[str]]:
     """Return the kind (one of `LINE_KINDS`) and tokens of one line of
     ``dumpsys input``; no text of the line is in them (see the module).
 
-    Unknown flag names show only with both `show_flag_names` and `in_list`
-    (the line is a row of a window list the reader found), and only in a
-    window line whose name's end can be told; known value words only in
-    such a row (`in_list`) and as the value of a known label."""
+    `accepted` says that the reader verified the line: it read the window
+    line into a window, or the ``Display:`` line heads a verified list. A
+    window line shows its fields only when accepted, or with both
+    `show_flag_names` and `in_list` (a row of a found list), which also lets
+    unknown flag names show.
+    """
     text = line.strip()
-    simple = _simple_line(text)
-    if simple is not None:
-        return simple
-    row = _INDEX.match(text)
-    if row is not None:
-        digits = text[: row.end() - 1]
-        rest = text[row.end() :].removeprefix(" ")
+    if not text:
+        return "blank", []
+    if _INDEX.match(text):
         show = show_flag_names and in_list
-        tokens = _window_row(text, digits, rest, show=show, words=in_list)
-        return "window_row", tokens
-    label = _LABEL.match(text)
-    if label is not None and "=" not in label[1]:
-        rest = text[label.end() :].strip()
-        shown = _label(label[1])
-        known = "=" not in rest and not shown.startswith("<label:")
-        tokens = [shown, *_line_fields(rest, words=known)]
-        return ("fields" if "=" in rest else "heading"), tokens
-    return ("fields" if "=" in text else "other"), _line_fields(text, words=False)
+        return "window_row", _window_row(text, accepted=accepted, show=show)
+    known = _reader_line(line, text, verified=accepted)
+    if known is not None:
+        return known
+    return "other", [_tag("text", len(text))]
 
 
 def _indent(line: str) -> int:
@@ -726,12 +629,13 @@ def _indent(line: str) -> int:
 
 @dataclass(frozen=True, slots=True)
 class _Dump:
-    """The lines of the output, what the reader concluded, and the indices
-    of the lines of the window lists it found (only rows there may show
-    unknown flag names, and only with `show`)."""
+    """The lines of the output, what the reader concluded, which lines it
+    verified (`shape_line`), the lines of the lists it found (only rows
+    there may show unknown flag names, and only with `show`)."""
 
     lines: list[str]
     verdict: Verdict
+    verified: frozenset[int]
     listed: frozenset[int]
     show: bool
 
@@ -739,7 +643,10 @@ class _Dump:
 def _shape(dump: _Dump, index: int, *, failing: bool) -> LineShape:
     line = dump.lines[index]
     kind, tokens = shape_line(
-        line, show_flag_names=dump.show, in_list=index in dump.listed
+        line,
+        accepted=index in dump.verified,
+        show_flag_names=dump.show,
+        in_list=index in dump.listed,
     )
     number = _part(index, dump.verdict)[1]
     return LineShape(number, kind, _indent(line), len(line), tuple(tokens), failing)
@@ -802,11 +709,34 @@ def _outline(dump: _Dump) -> tuple[LineShape, ...]:
     return tuple(_shape(dump, i, failing=False) for i in chosen[:_OUTLINE_LINES])
 
 
-def _lists(verdict: Verdict) -> tuple[ListRows, ...]:
+def _row_lines(lines: list[str], span: ListSpan) -> list[int]:
+    """The indices of the lines of `span` the reader counts as rows."""
+    return [at for at in span.lines if _INDEX.match(lines[at].strip())]
+
+
+def _verified_lists(lines: list[str], verdict: Verdict) -> set[int]:
+    """The heads of the lists whose rows the reader all read into windows."""
+    return {
+        span.head
+        for span in verdict.lists
+        if span.rows and all(at in verdict.accepted for at in _row_lines(lines, span))
+    }
+
+
+def _display_shown(span: ListSpan, verified: set[int], display_id: int) -> bool:
+    """Whether a list's display number may be shown: the display asked for,
+    or a list the reader all read, and of at most four digits."""
+    trusted = span.display == display_id or span.head in verified
+    return trusted and span.digits <= _SMALL_DIGITS
+
+
+def _lists(
+    verdict: Verdict, verified: set[int], display_id: int
+) -> tuple[ListRows, ...]:
     rows: list[ListRows] = []
     for position, span in enumerate(verdict.lists, start=1):
         per_display = span.display is not None
-        shown = span.display if span.digits <= _SMALL_DIGITS else None
+        shown = span.display if _display_shown(span, verified, display_id) else None
         failed = verdict.list_head is not None and verdict.list_head == span.head
         rows.append(
             ListRows(position, per_display, shown, span.digits, span.rows, failed)
@@ -814,21 +744,19 @@ def _lists(verdict: Verdict) -> tuple[ListRows, ...]:
     return tuple(rows)
 
 
-def _row_form(line: str, after: str | None) -> tuple[bool, bool, tuple[str, ...], bool]:
+def _row_form(
+    line: str, after: str | None, *, accepted: bool
+) -> tuple[bool, bool, tuple[str, ...], bool]:
     """(recognised, quoted name, fields, followed by transform lines) of a
-    row `line`, `after` being the list's next line (None: the last). A row
-    whose name's end cannot be told is not recognised (no fields)."""
+    row `line`, `after` being the list's next line (None: the last)."""
     transform = after is not None and after.strip().startswith("transform (")
-    cut = _cut_row(line.strip())
+    cut = window_line_fields(line) if accepted else None
     if cut is None:
         return False, False, (), transform
-    quoted, _, meta = cut
-    fields: list[str] = []
-    for token in _fields(meta):
-        key, equals, _ = token.partition("=")
-        if equals:
-            fields.append("<unknown_key>" if key.startswith("<unknown_key:") else key)
-    return True, quoted, tuple(fields), transform
+    fields = tuple(
+        "<unknown_key>" if key not in KNOWN_KEYS else key for key, _ in cut.fields
+    )
+    return True, cut.quoted, fields, transform
 
 
 def _forms(lines: list[str], verdict: Verdict) -> tuple[Form, ...]:
@@ -840,7 +768,7 @@ def _forms(lines: list[str], verdict: Verdict) -> tuple[Form, ...]:
         for i, at in enumerate(span.lines):
             if _INDEX.match(lines[at].strip()):
                 after = lines[span.lines[i + 1]] if i + 1 < len(span.lines) else None
-                form = _row_form(lines[at], after)
+                form = _row_form(lines[at], after, accepted=at in verdict.accepted)
                 counts[form] = counts.get(form, 0) + 1
         forms.extend(
             Form(position, quoted, fields, transform, rows, recognised=recognised)
@@ -863,8 +791,14 @@ def diagnose_tap_window(
     if verdict.rule is not None and verdict.rule not in RULES[verdict.reason or ""]:
         msg = "the reader refused with a rule outside RULES"  # a bug, not the text
         raise AssertionError(msg)
+    heads = _verified_lists(lines, verdict)
+    sections = {
+        span.section
+        for span in verdict.lists
+        if span.section is not None and _display_shown(span, heads, display_id)
+    }
     listed = frozenset(i for span in verdict.lists for i in span.lines)
-    dump = _Dump(lines, verdict, listed, show_flag_names)
+    dump = _Dump(lines, verdict, verdict.accepted | sections, listed, show_flag_names)
     part: str | None = None
     number: int | None = None
     if verdict.line is not None:
@@ -875,7 +809,7 @@ def diagnose_tap_window(
         verdict.rule,
         part,
         number,
-        _lists(verdict),
+        _lists(verdict, heads, display_id),
         shapes,
         _forms(lines, verdict),
         show_flag_names=show_flag_names,

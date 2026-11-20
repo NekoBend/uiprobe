@@ -1,12 +1,14 @@
 """Tests for ``uiprobe diagnose tap-window``: the rule that refused, and no leak.
 
 Every rule of `uiprobe.inputwindows.RULES` has a case below, made from the
-emulator captures in tests/data/inputwindows by one edit. The same cases are
-then filled with identifier-like values (a serial, IMEI-like numbers, MAC
-and IP addresses, accounts, phone numbers, package names, window titles,
-display ids, input device names) in window names, field values, unknown
-keys, unknown flags, headings and other lines, and no output may hold any of
-them.
+captures in tests/data/inputwindows by one edit. The same cases are then
+filled with identifier-like values (a serial, IMEI-like numbers, MAC and IP
+addresses, accounts, phone numbers, package names, window titles with
+field-like text, display ids, input device names) in window names, field
+values, unknown keys, unknown flags, quoted values and lines outside the
+lists. No output may hold any of them, and the report must not change when
+those device-chosen values are changed (same lengths): a report that showed
+any part of them would.
 """
 
 from __future__ import annotations
@@ -14,6 +16,7 @@ from __future__ import annotations
 import copy
 import json
 import pickle
+import random
 import re
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -31,22 +34,16 @@ from uiprobe.inputwindows import (
     read_window_at,
 )
 from uiprobe.windowdiag import (
-    KNOWN_FLAGS,
     KNOWN_KEYS,
-    KNOWN_LABELS,
-    KNOWN_LINES,
-    KNOWN_VALUES,
-    LINE_KINDS,
     NOTICE,
     NOTICE_SHOWN,
     SCHEMA,
-    TRANSFORM_WORDS,
     diagnose_tap_window,
     shape_line,
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterator
+    from collections.abc import Callable
 
     from tests.fake_adb_server import FakeAdbServer
 
@@ -253,7 +250,17 @@ def test_each_capture_reads(name):
     assert sum(form.rows for form in found.forms) == found.lists[0].rows
 
 
-def test_the_failing_line_is_numbered_from_the_dispatcher_header():
+def _failing(found):
+    return next(shape for shape in found.lines if shape.failing)
+
+
+def _rest(line: str) -> str:
+    """The length tag of a window line after its row number."""
+    text = line.strip()
+    return f"<text:{len(text) - len(text.split(':', 1)[0]) - 2}>"
+
+
+def test_the_failing_row_is_only_its_length():
     text, _ = CASES["unknown_flag"]
     lines = text.split("\n")
     header = lines.index("Input Dispatcher State:")
@@ -261,19 +268,29 @@ def test_the_failing_line_is_numbered_from_the_dispatcher_header():
     found = diagnose_tap_window(text)
     assert (found.part, found.line) == ("dispatcher", at - header + 1)
     assert found.line is not None
-    failing = [shape for shape in found.lines if shape.failing]
-    assert [shape.number for shape in failing] == [found.line]
-    assert [shape.number for shape in found.lines] == list(
+    failing = _failing(found)
+    # The reader refused the row: its number is not verified, its text is a
+    # length.
+    assert failing.tokens == ("row:<num:1>", _rest(_row(text, 3)))
+    assert [s.number for s in found.lines] == list(
         range(found.line - 2, found.line + 3)
     )
-    assert failing[0].kind == "window_row"
-    assert "inputConfig=NOT_FOCUSABLE|TRUSTED_OVERLAY|SLIPPERY|<unknown_flag:7>" in (
-        failing[0].tokens
-    )
+    # A row the reader read keeps its shape.
+    read = next(s for s in found.lines if s.number == found.line - 2)
+    assert read.tokens[:3] == ("row:2", "name=<text:20>", "id=<num>")
     assert [item.failed for item in found.lists] == [True]
 
 
-def test_a_viewport_line_is_numbered_from_the_top():
+def test_with_show_flag_names_a_refused_row_of_the_list_shows_its_flags():
+    text, _ = CASES["unknown_flag"]
+    failing = _failing(diagnose_tap_window(text, show_flag_names=True))
+    assert failing.tokens[0] == "row:<num:1>"
+    assert (
+        "inputConfig=NOT_FOCUSABLE|TRUSTED_OVERLAY|SLIPPERY|<unknown_flag:SEM_FOO>"
+    ) in failing.tokens
+
+
+def test_a_viewport_line_the_reader_refused_is_only_its_length():
     found = diagnose_tap_window(CASES["viewport_malformed"][0])
     assert (found.reason, found.rule, found.part, found.line) == (
         "rotation",
@@ -281,9 +298,19 @@ def test_a_viewport_line_is_numbered_from_the_top():
         "input_reader",
         2,
     )
-    assert [s.number for s in found.lines] == [1, 2, 3]  # not into the dispatcher
-    assert found.lines[1].tokens[0] == "Viewport INTERNAL:"
-    assert "uniqueId=<text:25>" in found.lines[1].tokens
+    assert [s.number for s in found.lines] == [1, 2, 3]
+    refused = found.lines[1]
+    assert refused.kind == "other"
+    assert len(refused.tokens) == 1
+    assert refused.tokens[0].startswith("<text:")
+    matched = found.lines[2]
+    assert matched.kind == "viewport"
+    assert matched.tokens[:4] == (
+        "Viewport INTERNAL:",
+        "displayId=<num>",
+        "uniqueId=<text:25>",
+        "port=<num>",
+    )
 
 
 def test_without_one_line_to_blame_the_outline_is_shown():
@@ -291,8 +318,10 @@ def test_without_one_line_to_blame_the_outline_is_shown():
     assert (found.rule, found.line) == ("display_missing", None)
     tokens = [shape.tokens for shape in found.lines]
     assert tokens[0] == ("Input Dispatcher State:",)
-    assert ("Display:", "<num>") in tokens
-    assert [item.display for item in found.lists] == [1]
+    assert ("Display:", "<num:1>") in tokens  # display 1: neither asked nor read
+    assert ("<text:21>",) in tokens  # DispatchEnabled: true, not the reader's
+    lists = [(i.per_display, i.display, i.display_digits) for i in found.lists]
+    assert lists == [(True, None, 1)]
 
 
 def test_lists_of_several_displays_are_counted():
@@ -306,17 +335,31 @@ def test_lists_of_several_displays_are_counted():
     text = _sub(API36, "  Display: 0\n", second + "  Display: 0\n")
     found = diagnose_tap_window(text)
     assert (found.reason, found.rule) == ("region_format", "region_format")
+    # Display 2's only row was refused, so its number is not shown; display 0
+    # is the one asked for.
     assert [(i.position, i.display, i.rows, i.failed) for i in found.lists] == [
-        (1, 2, 1, True),
+        (1, None, 1, True),
         (2, 0, 13, False),
     ]
 
 
-def test_shapes_of_known_lines():
+def test_a_display_whose_rows_were_all_read_is_shown():
+    second = _sub(API36, "  Display: 0\n", "  Display: 0\n").split("  Display: 0\n")
+    head, rest = second[0], second[1]
+    other = rest.replace("displayId=0", "displayId=3")
+    text = head + "  Display: 3\n" + other.rstrip("\n") + "\n  Display: 0\n" + rest
+    found = diagnose_tap_window(text)
+    assert [(i.display, i.rows) for i in found.lists][:2] == [(3, 13), (0, 13)]
+
+
+VIEWPORT36 = API36.split("\n")[1]
+VIEWPORT_SAMSUNG = SAMSUNG36.split("\n")[9]
+
+
+def test_shapes_of_lines_the_reader_matched():
     row = _row(API24, 0)
-    # Outside a found list a row shows no known value words, only tags.
-    assert "paused=<text:5>" in shape_line(row)[1]
-    assert shape_line(row, in_list=True) == (
+    assert shape_line(row) == ("window_row", ["row:<num:1>", _rest(row)])
+    assert shape_line(row, accepted=True) == (
         "window_row",
         [
             "row:0",
@@ -339,25 +382,53 @@ def test_shapes_of_known_lines():
             "dispatchingTimeout=<ms>",
         ],
     )
-    assert shape_line("  Display: 0") == ("heading", ["Display:", "<num>"])
+    assert shape_line("Input Dispatcher State:") == (
+        "heading",
+        ["Input Dispatcher State:"],
+    )
+    assert shape_line("  Display: 0") == ("heading", ["Display:", "<num:1>"])
+    assert shape_line("  Display: 0", accepted=True) == ("heading", ["Display:", "0"])
     assert shape_line("    Windows:") == ("heading", ["Windows:"])
+    assert shape_line("  Connections:") == ("heading", ["Connections:"])
+    assert shape_line("  mMaximumObscuringOpacityForTouch: 0.800000") == (
+        "heading",
+        ["mMaximumObscuringOpacityForTouch:", "<text:8>"],
+    )
+    assert shape_line("  Global monitors on display 0:") == (
+        "heading",
+        ["Global monitors on display", "<num:1>:"],
+    )
+    assert shape_line("    logicalSize=320x640") == (
+        "heading",
+        ["logicalSize=<text:7>"],
+    )
     assert shape_line(" transform (ROT_90) (ROTATE TRANSLATE)") == (
         "transform",
         ["transform", "ROT_90", "ROTATE", "TRANSLATE"],
     )
+    assert shape_line(" transform (ROT_7) (IDENTITY)")[1][1] == "ROT_<num:1>"
     assert shape_line("  -1.0000  0.0000  320.0000") == (
         "matrix_row",
         ["<dec>", "<dec>", "<dec>"],
     )
+    assert shape_line(VIEWPORT36) == (
+        "viewport",
+        [
+            "Viewport INTERNAL:",
+            "displayId=<num>",
+            "uniqueId=<text:25>",
+            "port=<num>",
+            "orientation=0",
+            "logicalFrame=<list:4>",
+            "physicalFrame=<list:4>",
+            "deviceSize=<list:2>",
+            "isActive=<list:1>",
+        ],
+    )
+    assert "densityDpi=<num>" in shape_line(VIEWPORT_SAMSUNG)[1]
+    # Lines the reader does not match: their kind and length only.
     assert shape_line("  Some vendor line") == ("other", ["<text:16>"])
-    assert shape_line("  DispatchEnabled: true") == (
-        "heading",
-        ["DispatchEnabled:", "true"],
-    )
-    assert shape_line("  vendorKey=abc, flags=NOT_FOCUSABLE | Odd") == (
-        "fields",
-        ["<unknown_key:9>=<text:3>", "flags=NOT_FOCUSABLE|<unknown_flag:3>"],
-    )
+    assert shape_line("  DispatchEnabled: true") == ("other", ["<text:21>"])
     assert shape_line("") == ("blank", [])
 
 
@@ -378,15 +449,8 @@ def test_the_text_report_of_a_failure():
         "  list 1 (display 0): 13 window rows, the check refused here",
     ]
     assert report[4] == "lines (number, kind, indent, length: tokens):"
-    assert report[7].startswith("> 26 window_row 6 ")
-    assert report[7].endswith(
-        ": row:3 name=<text:15> id=<num> displayId=<num>"
-        " inputConfig=NOT_FOCUSABLE|TRUSTED_OVERLAY|SLIPPERY|<unknown_flag:7>"
-        " alpha=<num> frame=<rect> globalScale=<num> applicationInfo.name=<blank>"
-        " applicationInfo.token=<null> touchableRegion=<empty> ownerPid=<num>"
-        " ownerUid=<num> dispatchingTimeout=<ms> token=<hex>"
-        " touchOcclusionMode=BLOCK_UNTRUSTED"
-    )
+    assert report[7] == f"> 26 window_row 6 357: row:<num:1> {_rest(_row(text, 3))}"
+    assert report[6] == "  25 transform 6 34: transform ROT_0 IDENTITY"
 
 
 def test_the_json_report_of_a_readable_list():
@@ -394,8 +458,8 @@ def test_the_json_report_of_a_readable_list():
     assert payload == {
         "schema": SCHEMA,
         "notice": NOTICE,
-        "command": "dumpsys input",
         "show_flag_names": False,
+        "command": "dumpsys input",
         "readable": True,
         "reason": None,
         "rule": None,
@@ -442,7 +506,214 @@ def test_the_json_report_of_a_readable_list():
     }
 
 
-# --- no device values in any output ---
+def test_the_samsung_form_reads_and_its_other_values_are_refused():
+    assert diagnose_tap_window(SAMSUNG36).readable
+    # As on main: a Samsung field with a value the phone did not print.
+    text = _edit_row(API36, 3, ", alpha=1,", ", samsungFlags=0x10, alpha=1,")
+    assert parse_input_windows(text) == "line_format"
+    assert not diagnose_tap_window(text).readable
+
+
+def test_a_name_is_only_its_length_even_when_it_is_a_known_word():
+    for word in ("OK", "true", "false", "BLOCK_UNTRUSTED"):
+        line = _row(API36, 3).replace("name=a8ea035 Taskbar,", f"name={word},")
+        assert shape_line(line, accepted=True)[1][1] == f"name=<text:{len(word)}>"
+    line = _row(API36, 3).replace(
+        "applicationInfo.name=,", "applicationInfo.name=true, x=OK,"
+    )
+    assert "applicationInfo.name=<text:10>" in shape_line(line, accepted=True)[1]
+
+
+def test_a_quoted_name_is_cut_where_the_reader_cuts_it():
+    text = _edit_row(
+        API24, 0, "name='Window{b24c1c0 u0 StatusBar}'", "name='My title, vendor=demo'"
+    )
+    found = diagnose_tap_window(text)
+    assert found.readable  # the reader takes the whole quoted name
+    tokens = shape_line(_row(text, 0), accepted=True)[1]
+    assert tokens[1] == "name=<quoted:21>"
+    assert not any(token.startswith("<unknown_key") for token in tokens)
+    assert {(form.quoted, form.rows) for form in found.forms} == {(True, 7)}
+
+
+def test_long_row_numbers_are_not_converted():
+    # 4301 digits: past what int() converts; the reader says row_shape.
+    long_row = _edit_row(API36, 3, "3: name=", "1" * 4301 + ": name=")
+    found = diagnose_tap_window(long_row)
+    assert (found.reason, found.rule) == ("line_format", "row_shape")
+    assert _failing(found).tokens[0] == "row:<num:4301>"
+    assert shape_line("  000000000001234: name=x") == (
+        "window_row",
+        ["row:<num:15>", "<text:6>"],
+    )
+    assert shape_line("  0012: name=x")[1][0] == "row:<num:4>"
+
+
+@pytest.mark.parametrize(
+    ("new", "token"),
+    [
+        ("inputConfig=0x1", "inputConfig=<unknown_flag:3>"),
+        ("inputConfig=0x0", "inputConfig=0x0"),
+    ],
+)
+def test_each_flags_field_has_its_own_number_rule(new, token):
+    line = _row(API36, 3).replace(
+        "inputConfig=NOT_FOCUSABLE | TRUSTED_OVERLAY | SLIPPERY", new
+    )
+    assert token in shape_line(line, accepted=True)[1]
+
+
+def test_flags_and_feature_numbers_and_names():
+    row = _row(API24, 0).replace("flags=0x81840048", "flags=0x123456789")
+    assert "flags=<unknown_flag:11>" in shape_line(row, accepted=True)[1]
+    row = _row(API36, 3).replace(", alpha=1,", ", alpha=1, inputFeatures=DROP_INPUT,")
+    assert "inputFeatures=<unknown_flag:10>" in shape_line(row, accepted=True)[1]
+    row = _row(API36, 3).replace("| SLIPPERY", "| SLIPPERY | ALT_FOCUSABLE_IM")
+    tokens = shape_line(row, show_flag_names=True, in_list=True)[1]
+    assert (
+        "inputConfig=NOT_FOCUSABLE|TRUSTED_OVERLAY|SLIPPERY"
+        "|<unknown_flag:ALT_FOCUSABLE_IM>"
+    ) in tokens
+
+
+def test_a_matrix_row_has_three_columns():
+    assert shape_line("  0.0 1.0") == ("other", ["<text:7>"])
+    assert shape_line("  0.0 1.0 2.0")[0] == "matrix_row"
+
+
+def test_counts_lengths_and_indents_are_capped():
+    long_end = _sub(
+        API36, "  mMaximumObscuringOpacityForTouch: 0.800000", "  " + "x" * 12345
+    )
+    found = diagnose_tap_window(long_end)
+    assert found.rule == "list_end"
+    failing = _failing(found)
+    assert failing.tokens == ("<text:9999+>",)
+    assert f"> {found.line} other 2 9999+: <text:9999+>" in found.to_text()
+    payload = json.loads(json.dumps(found.to_dict()))
+    line = next(item for item in payload["lines"] if item["failing"])
+    assert (line["length"], line["indent"]) == (9999, 2)
+    assert shape_line(" " * 20000 + "x") == ("other", ["<text:1>"])
+
+
+# --- the reviewers' inputs ---
+
+MARK = "ZX9SERIALMARK7"  # serial-shaped and upper-case, so showable
+FRAGMENT = "status=OK"  # a known field and value
+
+
+# Window lines whose name, applicationInfo.name or a quoted value holds a
+# mark that ends a name (or lacks the one that ends it): never read.
+AMBIGUOUS = {
+    "bare_title_display_id": _edit_row(
+        API36,
+        3,
+        "name=a8ea035 Taskbar,",
+        f"name=X, displayId=0, inputConfig={MARK}, {FRAGMENT},",
+    ),
+    "bare_title_id": _edit_row(
+        API36,
+        3,
+        "name=a8ea035 Taskbar,",
+        f"name=X, id=5, inputConfig={MARK}, {FRAGMENT},",
+    ),
+    "app_name_token": _edit_row(
+        API36,
+        3,
+        "applicationInfo.name=,",
+        f"applicationInfo.name=X, applicationInfo.token=y, inputFeatures={MARK},"
+        f" {FRAGMENT},",
+    ),
+    "app_name_without_token": _edit_row(
+        _edit_row(API36, 3, ", applicationInfo.token=<null>", ""),
+        3,
+        "applicationInfo.name=,",
+        f"applicationInfo.name=X, inputConfig={MARK}, {FRAGMENT},",
+    ),
+    "quoted_title_display_id": _edit_row(
+        API24,
+        0,
+        "name='Window{b24c1c0 u0 StatusBar}'",
+        f"name='X', displayId=0, flags={MARK}, {FRAGMENT}, z='",
+    ),
+    "quoted_title_only": (
+        "Input Dispatcher State:\n  Windows:\n"
+        f"    0: name='X, displayId=0, {FRAGMENT}, z={MARK}'\n  Connections:\n"
+    ),
+    "quoted_app_name_with_token": _edit_row(
+        API36,
+        3,
+        "applicationInfo.name=, applicationInfo.token=<null>,",
+        f"applicationInfo.name='X, applicationInfo.token=y, {FRAGMENT}, z={MARK}',",
+    ),
+    "viewport_quoted_unique_id": _sub(
+        API24,
+        "orientation=0, logicalFrame=",
+        f"orientation=1, uniqueId='X, flags=SECURE, {FRAGMENT}, z={MARK}',"
+        " logicalFrame=",
+    ),
+    "two_misplaced_quotes": f"FocusedWindow: id='x, name='{MARK}, {FRAGMENT}",
+    "multiline_row_number": _edit_row(
+        API36, 3, "name=a8ea035 Taskbar,", "name=a8ea035 T\n      7319: ignored,"
+    ),
+    "multiline_display": _edit_row(
+        API36,
+        3,
+        "name=a8ea035 Taskbar,",
+        "name=T\n  Display: 7319\n    Windows:\n      0: extra,",
+    ),
+}
+
+
+@pytest.mark.parametrize("case", sorted(AMBIGUOUS))
+@pytest.mark.parametrize("show", [False, True], ids=["plain", "show_flag_names"])
+def test_reviewer_inputs_show_nothing_of_the_device_text(case, show):
+    text = AMBIGUOUS[case]
+    found = diagnose_tap_window(text, show_flag_names=show)  # never raises
+    for output in (found.to_text(), json.dumps(found.to_dict())):
+        assert MARK not in output
+        assert FRAGMENT not in output
+        assert "status" not in output
+        assert "SECURE" not in output
+        assert "7319" not in output
+    assert all(not form.fields or "status" not in form.fields for form in found.forms)
+
+
+def test_a_quoted_viewport_value_is_one_length():
+    text = AMBIGUOUS["viewport_quoted_unique_id"]
+    found = diagnose_tap_window(text)
+    assert found.rule == "rotated"
+    viewport = next(s for s in found.lines if s.kind == "viewport")
+    quoted = f"X, flags=SECURE, {FRAGMENT}, z={MARK}"
+    assert f"uniqueId=<quoted:{len(quoted)}>" in viewport.tokens
+
+
+def test_flag_names_show_only_in_rows_of_a_found_list():
+    lone = f"0: name=x, displayId=0, inputConfig={MARK}"
+    found = diagnose_tap_window(lone, show_flag_names=True)
+    assert (found.rule, found.lists) == ("no_dispatcher", ())
+    assert MARK not in found.to_text()
+    assert MARK not in json.dumps(found.to_dict())
+    outside = _sub(
+        API36, "  DispatchEnabled: true", f"  DispatchEnabled: true\n  {lone}"
+    )
+    assert MARK not in diagnose_tap_window(outside, show_flag_names=True).to_text()
+    inside = _edit_row(API36, 3, "| SLIPPERY", f"| SLIPPERY | {MARK}")
+    found = diagnose_tap_window(inside, show_flag_names=True)
+    assert f"<unknown_flag:{MARK}>" in found.to_text()
+
+
+def test_a_name_that_fakes_a_whole_window_line_can_show_its_word():
+    # Why the opt-in mode has its own notice.
+    fake = "      3: name=x, id=1, displayId=0, inputConfig=SECRETWORD"
+    text = _sub(API36, _row(API36, 3), _row(API36, 3) + "\n" + fake)
+    found = diagnose_tap_window(text, show_flag_names=True)
+    assert "<unknown_flag:SECRETWORD>" in found.to_text()
+    assert found.to_text().startswith(f"uiprobe diagnose tap-window: {NOTICE_SHOWN}")
+    assert "SECRETWORD" not in diagnose_tap_window(text).to_text()
+
+
+# --- no device values in any output, and no part of them ---
 
 SECRETS = (
     "R5CT123ABC",  # a serial
@@ -458,182 +729,296 @@ SECRETS = (
     "4619827259835644672",  # a display uniqueId
     "sec_touchscreen",  # an input device name
 )
-# Parts that must not appear either (a match of a part would leak part of one).
 PARTS = (
     "R5CT",
-    "123ABC",
     "3569380",
     "4901542",
     "5e:44",
     "192.168",
-    "10.77",
     "fe80",
-    "890a",
     "someone",
     "example",
     "5555-0199",
     "secretbank",
-    "wallet",
     "Alice",
     "Transfer",
     "46198272",
     "touchscreen",
     "status=OK",
 )
-# A single-line title with a field-like fragment that holds no mark ending a
-# name, so the verdict does not change and the fragment stays in the name.
 TITLE = " ".join(SECRETS[:3] + SECRETS[6:10]) + ", status=OK"
+APP_NAME = "com.secretbank.wallet R5CT123ABC, status=OK"
 EXTRA = (
     ", sem_imei=356938035643809, macAddress=02:00:5e:44:55:66,"
     " ip=192.168.10.77, ipv6=fe80::1ff:fe23:4567:890a, account=someone@example.com,"
     " phone=+81-90-5555-0199, R5CT123ABC=490154203237518, owner=Transfer to Alice"
 )
 HEAD = (
-    "  R5CT123ABC: someone@example.com\n"
-    "  Device 356938035643809 serial=R5CT123ABC, name=sec_touchscreen\n"
-    "  wlan0 192.168.10.77 02:00:5e:44:55:66 fe80::1ff:fe23:4567:890a\n"
-    "  Account: Transfer to Alice +81-90-5555-0199 com.secretbank.wallet\n"
+    "  R5CT123ABC: someone@example.com",
+    "  Device 356938035643809 serial=R5CT123ABC, name=sec_touchscreen",
+    "  wlan0 192.168.10.77 02:00:5e:44:55:66 fe80::1ff:fe23:4567:890a",
+    "  Account: Transfer to Alice +81-90-5555-0199 com.secretbank.wallet",
+    f"  FocusedWindow: name='X, {FRAGMENT}, z={MARK}'",
+    f"  {MARK}=1, {FRAGMENT}, owner={MARK}",
+    f"  0: name={MARK}, displayId=0, inputConfig={MARK}, {FRAGMENT}",
 )
 READER = (
-    "  Device 3: sec_touchscreen\n"
+    "  Device 3: sec_touchscreen",
     "    Identifier: bus=0x0018, vendor=0x0000, uniqueId=4619827259835644672,"
-    " descriptor=R5CT123ABC\n"
-    "  Viewport VIRTUAL: displayId=9, uniqueId=virtual:com.secretbank.wallet,"
-    " port=<none>, orientation=0\n"
+    " descriptor=R5CT123ABC",
 )
 _NAME = re.compile(r"^(\s*\d+: name=)('?)(.*?)\2(, (?:id=\d+, )?displayId=)")
+_APP = re.compile(r"applicationInfo\.name=[^,]*, applicationInfo\.token=")
+# Words the reader reads in a window line (and the field names it knows):
+# kept when values are changed, so the change does not change what the
+# reader concludes.
+PROTECTED = frozenset(
+    {
+        *(part for key in KNOWN_KEYS for part in key.split(".")),
+        "name",
+        "id",
+        "displayId",
+        "inputConfig",
+        "flags",
+        "visible",
+        "ownerUid",
+        "touchableRegion",
+        "portalToDisplayId",
+        "applicationInfo",
+        "token",
+        "scale",
+        "globalScale",
+        "windowScale",
+        "displayOrientation",
+        "samsungFlags",
+        "pTouchableRegion",
+        "1HXY",
+        "uniqueId",
+        "Display",
+        "Windows",
+        "transform",
+    }
+)
 
 
-def _hostile(text: str) -> str:
-    """`text` with secrets in names, values, unknown keys and other lines,
-    in ways that do not change what the check concludes."""
+def _same(text: str) -> str:
+    return text
+
+
+def _changed(text: str) -> str:
+    """`text` with every word and number changed, lengths and the reader's
+    words kept (a 0 stays 0, so no orientation or rotation changes)."""
+    pick = random.Random(len(text))  # noqa: S311 - a test's fixed scrambling
+
+    def change(match: re.Match[str]) -> str:
+        word = match[0]
+        if word in PROTECTED:
+            return word
+        out = []
+        for char in word:
+            if char.isdigit():
+                out.append("0" if char == "0" else pick.choice("123456789"))
+            elif char.isupper():
+                out.append(pick.choice("ABCDEFGHJKMNPQRSTUVWXYZ"))
+            else:
+                out.append(pick.choice("abcdefghjkmnpqrstuvwxyz"))
+        return "".join(out)
+
+    return re.sub(r"[A-Za-z0-9]+", change, text)
+
+
+def _hostile(text: str, chosen: Callable[[str], str]) -> str:
+    """`text` with device-chosen values (passed through `chosen`) in names,
+    applicationInfo.name, unknown fields and lines outside the lists, in ways
+    that do not change what the check concludes."""
     lines = text.split("\n")
     for i, line in enumerate(lines):
         if _NAME.match(line):
-            line = _NAME.sub(rf"\g<1>\g<2>{TITLE}\g<2>\g<4>", line)
-            line = re.sub(
-                r"applicationInfo\.name=[^,]*, applicationInfo\.token=",
-                "applicationInfo.name=com.secretbank.wallet R5CT123ABC, status=OK,"
-                " applicationInfo.token=",
-                line,
-            )
-            lines[i] = line + EXTRA
+            line = _NAME.sub(lambda m: f"{m[1]}{m[2]}{chosen(TITLE)}{m[2]}{m[4]}", line)
+            app = f"applicationInfo.name={chosen(APP_NAME)}, applicationInfo.token="
+            lines[i] = _APP.sub(lambda _m, app=app: app, line) + chosen(EXTRA)
         elif line.strip() == "Input Dispatcher State:":
-            lines[i] = line + "\n" + HEAD.rstrip("\n")
-        elif line.strip() == "INPUT MANAGER (dumpsys input)":
-            lines[i] = line + "\n" + READER.rstrip("\n")
+            lines[i] = "\n".join([line, *(chosen(h) for h in HEAD)])
     filled = "\n".join(lines)
-    return filled if "INPUT MANAGER" in text else READER + filled
+    return "\n".join(chosen(r) for r in READER) + "\n" + filled
 
 
 def _secret_flags(text: str) -> str:
-    """`text` with the unknown flag of the unknown_flag case replaced by
-    secrets, one of them an upper-case word."""
     return _sub(
         text, "| SEM_FOO", "| R5CT123ABC | someone@example.com | sec_touchscreen"
     )
 
 
-HOSTILE: dict[str, tuple[str, int]] = {
-    rule: (_hostile(text), display) for rule, (text, display) in CASES.items()
+HOSTILE: dict[str, tuple[Callable[[Callable[[str], str]], str], int]] = {
+    rule: ((lambda c, t=text: _hostile(t, c)), display)
+    for rule, (text, display) in CASES.items()
 }
-HOSTILE["unknown_flag"] = (_secret_flags(HOSTILE["unknown_flag"][0]), 0)
-HOSTILE |= {f"readable_{name}": (_hostile(text), 0) for name, text in CAPTURES.items()}
+HOSTILE["unknown_flag"] = (
+    lambda c: _secret_flags(_hostile(CASES["unknown_flag"][0], c)),
+    0,
+)
+HOSTILE |= {
+    f"readable_{name}": ((lambda c, t=text: _hostile(t, c)), 0)
+    for name, text in CAPTURES.items()
+}
 
 
-def _allowed_words() -> set[str]:
-    words: set[str] = set()
-    vocabularies = (
-        KNOWN_KEYS,
-        KNOWN_LABELS,
-        KNOWN_LINES,
-        KNOWN_VALUES,
-        KNOWN_FLAGS,
-        TRANSFORM_WORDS,
-        LINE_KINDS,
-        set(RULES),
-        set(REASON_OF),
-    )
-    for vocabulary in vocabularies:
-        for item in vocabulary:
-            words.update(_pieces(item))
-    template = (
-        f"{NOTICE} {NOTICE_SHOWN} per_display display_digits show_flag_names"
-        " output uiprobe diagnose tap-window it read dumpsys input result"
-        " readable not rule at line of the dispatcher input_reader part lists"
-        " list display every window rows check refused here none found lines"
-        " number kind indent length tokens forms quoted bare name transform no"
-        " fields display schema notice command reason position failed failing"
-        " uiprobe.diagnose_tap_window/1 <unknown_key> > True False recognised 0x0"
-        " rows of no recognised form the name's end cannot be told"
-    )
-    words.update(_pieces(template))
-    return words
-
-
-def _pieces(text: str) -> list[str]:
-    return [p for p in re.split(r"[\s=|,;:()]+", text) if p]
-
-
-ALLOWED = _allowed_words()
-TAG = re.compile(r"<[a-z_]+>|<[a-z_]+|\d+\+?>|row|-?\d+\+?")
-
-
-def _check_text(text: str, *, shown_flags: frozenset[str] = frozenset()) -> None:
-    """No secret in `text`, no digit run longer than four, and every piece
-    of it a known word, a tag or a number."""
-    for secret in (*SECRETS, *PARTS):
-        if secret in shown_flags:
-            continue
-        assert secret not in text.replace("<unknown_flag:R5CT123ABC>", ""), secret
-    runs = [len(run) for run in re.findall(r"\d+", text)]
-    assert max(runs, default=0) <= 4, text
-    for piece in _pieces(text):
-        if piece in ALLOWED or TAG.fullmatch(piece):
-            continue
-        assert piece in shown_flags or piece.removesuffix(">") in shown_flags, piece
-
-
-def _strings(value: object) -> Iterator[str]:
-    """Every string (keys too) and number in a JSON value, as text."""
-    if isinstance(value, dict):
-        for key, item in value.items():
-            yield str(key)
-            yield from _strings(item)
-    elif isinstance(value, list):
-        for item in value:
-            yield from _strings(item)
-    elif value is not None:
-        yield str(value)
+def _no_secret(text: str, *, shown: frozenset[str] = frozenset()) -> None:
+    """No secret or part of one in `text` (but the names in `shown`, as
+    shown flag names), and no digit run longer than four."""
+    for name in shown:
+        text = text.replace(f"<unknown_flag:{name}>", "")
+    for secret in (*SECRETS, *PARTS, MARK):
+        assert secret not in text, secret
+    assert max((len(run) for run in re.findall(r"\d+", text)), default=0) <= 4
 
 
 @pytest.mark.parametrize("case", sorted(HOSTILE))
 @pytest.mark.parametrize("show", [False, True], ids=["plain", "show_flag_names"])
 def test_no_device_value_reaches_the_report(case, show):
-    text, display = HOSTILE[case]
+    build, display = HOSTILE[case]
+    text = build(_same)
     for secret in SECRETS:
         assert secret in text  # the case holds every one of them
-    expected = REASON_OF.get(case)
     found = diagnose_tap_window(text, show_flag_names=show, display_id=display)
+    expected = REASON_OF.get(case)
     if expected is not None:
-        assert found.rule == case  # the secrets did not change the verdict
+        assert found.rule == case  # the values did not change the verdict
     else:
         assert found.readable
     shown = (
         frozenset({"R5CT123ABC"}) if show and case == "unknown_flag" else frozenset()
     )
-    _check_text(found.to_text(), shown_flags=shown)
-    payload = json.loads(json.dumps(found.to_dict()))
-    for item in _strings(payload):
-        _check_text(item, shown_flags=shown)
+    _no_secret(found.to_text(), shown=shown)
+    _no_secret(json.dumps(found.to_dict()), shown=shown)
+
+
+def _reports(text: str, display: int) -> tuple[str, str]:
+    found = diagnose_tap_window(text, display_id=display)
+    return found.to_text(), json.dumps(found.to_dict())
+
+
+@pytest.mark.parametrize("case", sorted(HOSTILE))
+def test_changing_the_device_values_does_not_change_the_report(case):
+    build, display = HOSTILE[case]
+    same, changed = build(_same), build(_changed)
+    assert same != changed
+    assert _reports(same, display) == _reports(changed, display)
+
+
+# The reviewers' inputs as templates: what an app chooses passes `chosen`.
+CHOSEN_CASES: dict[str, Callable[[Callable[[str], str]], str]] = {
+    "bare_title_fields": lambda c: _edit_row(
+        API36,
+        3,
+        "name=a8ea035 Taskbar,",
+        "name=" + c(f"X, displayId=0, inputConfig={MARK}, {FRAGMENT}") + ",",
+    ),
+    "quoted_title_only": lambda c: (
+        "Input Dispatcher State:\n  Windows:\n    0: name='"
+        + c(f"X, displayId=0, {FRAGMENT}, z=Y")
+        + "'\n  Connections:\n"
+    ),
+    "app_name_fields": lambda c: _edit_row(
+        API36,
+        3,
+        "applicationInfo.name=,",
+        "applicationInfo.name="
+        + c(f"X, applicationInfo.token=y, inputFeatures={MARK}, {FRAGMENT}")
+        + ",",
+    ),
+    "quoted_app_name": lambda c: _edit_row(
+        API36,
+        3,
+        "applicationInfo.name=, applicationInfo.token=<null>,",
+        "applicationInfo.name='" + c(f"X, applicationInfo.token=y, {FRAGMENT}") + "',",
+    ),
+    "viewport_unique_id": lambda c: _sub(
+        API24,
+        "orientation=0, logicalFrame=",
+        "orientation=1, uniqueId='" + c("X, flags=SECURE, z=Y") + "', logicalFrame=",
+    ),
+    "focused_window": lambda c: _sub(
+        API36,
+        "  DispatchEnabled: true",
+        "  DispatchEnabled: true\n  FocusedWindow: name='"
+        + c(f"X, {FRAGMENT}, z=Y")
+        + "'",
+    ),
+    "multiline_row_number": lambda c: _edit_row(
+        API36, 3, "name=a8ea035 Taskbar,", "name=" + c("T\n      7319: ignored") + ","
+    ),
+    "multiline_display": lambda c: _edit_row(
+        API36,
+        3,
+        "name=a8ea035 Taskbar,",
+        "name=" + c("T\n  Display: 7319\n    Windows:\n      0: extra") + ",",
+    ),
+    "app_name_known_words": lambda c: _edit_row(
+        API36,
+        3,
+        "applicationInfo.name=,",
+        "applicationInfo.name=" + c("true, x=OK") + ",",
+    ),
+    "known_word_title": lambda c: _edit_row(
+        API36, 3, "name=a8ea035 Taskbar,", "name=" + c("OK") + ","
+    ),
+}
+
+
+@pytest.mark.parametrize("case", sorted(CHOSEN_CASES))
+def test_the_reviewers_inputs_do_not_depend_on_the_values(case):
+    build = CHOSEN_CASES[case]
+    same, changed = build(_same), build(_changed)
+    assert same != changed
+    assert _reports(same, 0) == _reports(changed, 0)
+
+
+SNIPPETS = (
+    ", flags=0x8",
+    ", inputConfig=SPY",
+    ", ownerUid=10",
+    ", touchableRegion=<empty>",
+    ", displayId=0",
+    ", id=5",
+    "'",
+    "''",
+    ", applicationInfo.token=y",
+    " | DO_NOT_PILFER",
+    ", samsungFlags=0x10",
+    "\n      9: x",
+    "\n  Display: 2\n    Windows:",
+    "\n      transform (ROT_90) (ROTATE)",
+    "\nInput Dispatcher State:",
+    "\n  Connections:",
+    ": ",
+    "=",
+)
+
+
+def test_the_report_never_raises():
+    pick = random.Random(7)  # noqa: S311 - a fixed test fuzz
+    texts = [*CAPTURES.values(), *(text for text, _ in CASES.values())]
+    for _ in range(300):
+        text = pick.choice(texts)
+        for _ in range(pick.randint(1, 4)):
+            at = pick.randrange(len(text) + 1)
+            text = text[:at] + pick.choice(SNIPPETS) + text[at:]
+        for show in (False, True):
+            found = diagnose_tap_window(text, show_flag_names=show)
+            found.to_text()
+            json.dumps(found.to_dict())
+    found = diagnose_tap_window("FocusedWindow: id='x, name='y")
+    assert found.rule == "no_dispatcher"
 
 
 def test_show_flag_names_shows_only_upper_case_words():
-    text, _ = HOSTILE["unknown_flag"]
+    build, _ = HOSTILE["unknown_flag"]
+    text = build(_same)
     plain = diagnose_tap_window(text).to_text()
     shown = diagnose_tap_window(text, show_flag_names=True).to_text()
     assert "R5CT123ABC" not in plain
-    assert "|<unknown_flag:10>|<unknown_flag:19>|<unknown_flag:15>" in plain
+    assert "<unknown_flag" not in plain  # the refused row is a length
     assert "|<unknown_flag:R5CT123ABC>|<unknown_flag:19>|<unknown_flag:15>" in shown
     assert shown.count("R5CT123ABC") == 1  # only the flag, not the title or keys
     row = _row(API36, 3)
@@ -642,10 +1027,9 @@ def test_show_flag_names_shows_only_upper_case_words():
         kind, tokens = shape_line(line, show_flag_names=True, in_list=True)
         assert kind == "window_row"
         assert (f"|<unknown_flag:{name}>" in " ".join(tokens)) is visible, tokens
-    # Outside a window line's own flags fields no name is shown.
-    assert shape_line("  flags=SECRETWORD", show_flag_names=True) == (
-        "fields",
-        ["flags=<unknown_flag:10>"],
+    assert shape_line("  flags=SECRETWORD", show_flag_names=True, in_list=True) == (
+        "other",
+        ["<text:16>"],
     )
 
 
@@ -661,8 +1045,8 @@ def invoke(capsys: pytest.CaptureFixture[str], *argv: str) -> tuple[int, str, st
 @pytest.fixture
 def phone(fake_adb: FakeAdbServer) -> FakeAdbServer:
     fake_adb.add_device(SERIAL, model="Pixel_8")
-    text, _ = HOSTILE["unknown_flag"]
-    fake_adb.on_shell(SERIAL, "dumpsys input", text.encode())
+    build, _ = HOSTILE["unknown_flag"]
+    fake_adb.on_shell(SERIAL, "dumpsys input", build(_same).encode())
     return fake_adb
 
 
@@ -680,7 +1064,7 @@ def test_the_command_reads_dumpsys_input_once(phone, capsys):
     assert lines[0].startswith(f"uiprobe diagnose tap-window: {NOTICE}")
     assert lines[0].endswith("it read: dumpsys input")
     assert lines[1].startswith("result: not readable: line_format, rule unknown_flag")
-    _check_text(out)
+    _no_secret(out)
     assert SERIAL not in out
 
 
@@ -699,8 +1083,7 @@ def test_the_command_prints_json(phone, capsys):
     assert payload["part"] == "dispatcher"
     failing = [line for line in payload["lines"] if line["failing"]]
     assert [line["number"] for line in failing] == [payload["line"]]
-    for item in _strings(payload):
-        _check_text(item, shown_flags=frozenset({"R5CT123ABC"}))
+    _no_secret(out, shown=frozenset({"R5CT123ABC"}))
 
 
 @pytest.mark.parametrize("as_json", [False, True])
@@ -763,11 +1146,8 @@ def test_the_check_is_required(capsys):
     assert "uiprobe [-s SERIAL] diagnose tap-window" in err
 
 
-# --- round 2 ---
-
-
 def test_show_flag_names_has_its_own_notice():
-    text, _ = HOSTILE["unknown_flag"]
+    text = HOSTILE["unknown_flag"][0](_same)
     shown = diagnose_tap_window(text, show_flag_names=True)
     plain = diagnose_tap_window(text)
     first = shown.to_text().split("\n")[0]
@@ -783,77 +1163,6 @@ def test_show_flag_names_has_its_own_notice():
 
 # Window lines whose name or applicationInfo.name holds a flags field: the
 # reader refuses each one (a read field twice), and no mode shows the word.
-FAKED_FLAGS = {
-    "bare_title_input_config": _edit_row(
-        API36, 3, "name=a8ea035 Taskbar,", "name=Bad, inputConfig=SECRETWORD,"
-    ),
-    "quoted_title_flags": _edit_row(
-        API24,
-        0,
-        "name='Window{b24c1c0 u0 StatusBar}'",
-        "name='T, flags=SECRETWORD, z=1'",
-    ),
-    "app_name_input_config": _edit_row(
-        API36,
-        3,
-        "applicationInfo.name=,",
-        "applicationInfo.name=X, inputConfig=SECRETWORD | NOT_VISIBLE,",
-    ),
-    "app_name_flags": _edit_row(
-        _capture("api31"),
-        0,
-        "applicationInfo.name=,",
-        "applicationInfo.name=X, flags=SECRETWORD,",
-    ),
-}
-
-
-@pytest.mark.parametrize("case", sorted(FAKED_FLAGS))
-def test_flag_names_show_only_from_the_real_flags_fields(case):
-    text = FAKED_FLAGS[case]
-    found = diagnose_tap_window(text, show_flag_names=True)
-    assert found.rule == "field_twice"
-    assert any(shape.failing for shape in found.lines)
-    assert "SECRETWORD" not in found.to_text()
-    assert "SECRETWORD" not in json.dumps(found.to_dict())
-
-
-def test_a_name_that_fakes_a_whole_window_line_can_show_its_word():
-    # Why the mode has its own notice: a name holding a line break can fake a
-    # whole window line, which the reader cuts like any other.
-    fake = "      3: name=x, id=1, displayId=0, inputConfig=SECRETWORD"
-    text = _sub(API36, _row(API36, 3), _row(API36, 3) + "\n" + fake)
-    found = diagnose_tap_window(text, show_flag_names=True)
-    assert "<unknown_flag:SECRETWORD>" in found.to_text()
-    assert found.to_text().startswith(f"uiprobe diagnose tap-window: {NOTICE_SHOWN}")
-    assert "SECRETWORD" not in diagnose_tap_window(text).to_text()
-
-
-def test_a_name_is_only_its_length_even_when_it_is_a_known_word():
-    text = _edit_row(CASES["unknown_flag"][0], 3, "name=a8ea035 Taskbar,", "name=OK,")
-    found = diagnose_tap_window(text)
-    failing = next(shape for shape in found.lines if shape.failing)
-    assert failing.tokens[:2] == ("row:3", "name=<text:2>")
-    assert "OK" not in failing.tokens
-    for word in ("true", "false", "None", "BLOCK_UNTRUSTED"):
-        line = _row(API36, 3).replace("name=a8ea035 Taskbar,", f"name={word},")
-        assert shape_line(line)[1][1] == f"name=<text:{len(word)}>"
-    line = _row(API36, 3).replace(
-        "applicationInfo.name=,", "applicationInfo.name=true, x=OK,"
-    )
-    assert "applicationInfo.name=<text:10>" in shape_line(line)[1]
-
-
-def test_a_quoted_name_is_cut_where_the_reader_cuts_it():
-    text = _edit_row(
-        API24, 0, "name='Window{b24c1c0 u0 StatusBar}'", "name='My title, vendor=demo'"
-    )
-    found = diagnose_tap_window(text)
-    assert found.readable  # the reader takes the whole quoted name
-    tokens = shape_line(_row(text, 0))[1]
-    assert tokens[1] == "name=<quoted:21>"
-    assert not any(token.startswith("<unknown_key") for token in tokens)
-    assert {(form.quoted, form.rows) for form in found.forms} == {(True, 7)}
 
 
 @pytest.mark.parametrize(
@@ -879,20 +1188,6 @@ def test_diagnose_arguments_are_never_echoed(capsys, argv):
     assert "DEMO_SERIAL" not in out + err
     shown = json.loads(out)["error"]["message"] if "--json" in argv else err
     assert "uiprobe [-s SERIAL] diagnose tap-window [-s SERIAL]" in shown
-
-
-def test_long_row_numbers_are_not_converted():
-    # 4301 digits: past what int() converts; the reader says row_shape.
-    long_row = _edit_row(API36, 3, "3: name=", "1" * 4301 + ": name=")
-    found = diagnose_tap_window(long_row)
-    assert (found.reason, found.rule) == ("line_format", "row_shape")
-    failing = next(shape for shape in found.lines if shape.failing)
-    assert failing.tokens[0] == "row:<num:4301>"
-    assert shape_line("  000000000001234: name=x") == (
-        "window_row",
-        ["row:<num:15>", "<text:6>"],  # the reader cannot cut it: no fields
-    )
-    assert shape_line("  0012: name=x")[1][0] == "row:12"
 
 
 def test_the_command_reports_a_long_row_number(fake_adb, capsys):
@@ -945,23 +1240,6 @@ def test_unreadable_survives_copy_and_pickle(protocol):
         assert (made, made.rule) == ("no_list", "no_dispatcher")
 
 
-def test_counts_lengths_and_indents_are_capped():
-    long_end = _sub(
-        API36, "  mMaximumObscuringOpacityForTouch: 0.800000", "  " + "x" * 12345
-    )
-    found = diagnose_tap_window(long_end)
-    assert found.rule == "list_end"
-    failing = next(shape for shape in found.lines if shape.failing)
-    assert failing.tokens == ("<text:9999+>",)
-    assert f"> {found.line} other 2 9999+: <text:9999+>" in found.to_text()
-    payload = json.loads(json.dumps(found.to_dict()))
-    line = next(item for item in payload["lines"] if item["failing"])
-    assert (line["length"], line["indent"]) == (9999, 2)
-    deep = " " * 20000 + "x"
-    assert shape_line(deep) == ("other", ["<text:1>"])
-    _check_text(found.to_text())
-
-
 def test_the_refusing_list_is_marked_even_at_a_line_outside_it():
     found = diagnose_tap_window(CASES["list_end"][0])
     assert found.rule == "list_end"
@@ -975,20 +1253,6 @@ def test_without_one_dispatcher_lines_count_from_the_top():
     second = len(lines) - 1 - lines[::-1].index("Input Dispatcher State:")
     assert (found.part, found.line) == ("output", second + 1)
     assert "of the output part" in found.to_text()
-
-
-def test_a_flag_of_another_field_is_marked_unknown():
-    text = _edit_row(API36, 3, "| SLIPPERY", "| SLIPPERY | ALT_FOCUSABLE_IM")
-    found = diagnose_tap_window(text, show_flag_names=True)
-    assert found.rule == "unknown_flag"
-    failing = next(shape for shape in found.lines if shape.failing)
-    assert (
-        "inputConfig=NOT_FOCUSABLE|TRUSTED_OVERLAY|SLIPPERY"
-        "|<unknown_flag:ALT_FOCUSABLE_IM>"
-    ) in failing.tokens
-    assert "|<unknown_flag:16>" in " ".join(
-        next(s for s in diagnose_tap_window(text).lines if s.failing).tokens
-    )
 
 
 @pytest.mark.parametrize(
@@ -1013,114 +1277,6 @@ def test_the_crawl_hint_names_diagnose_only_with_a_reader_rule(unknown, rule, na
     [hint] = cli._press_hints(result)
     assert ("diagnose tap-window" in hint) is named
     assert (f"rule {rule}" in hint) is named
-
-
-# --- round 3: structural redaction ---
-
-MARK = "ZX9SERIALMARK7"  # serial-shaped and upper-case, so showable
-FRAGMENT = "status=OK"  # a known field and value
-
-
-def _failing(found):
-    return next(shape for shape in found.lines if shape.failing)
-
-
-# Window lines whose name or applicationInfo.name holds a mark that ends a
-# name (or lacks the one that ends it): the end cannot be told, so nothing
-# after the row number is read.
-AMBIGUOUS = {
-    "bare_title_display_id": _edit_row(
-        API36,
-        3,
-        "name=a8ea035 Taskbar,",
-        f"name=X, displayId=0, inputConfig={MARK}, {FRAGMENT},",
-    ),
-    "bare_title_id": _edit_row(
-        API36,
-        3,
-        "name=a8ea035 Taskbar,",
-        f"name=X, id=5, inputConfig={MARK}, {FRAGMENT},",
-    ),
-    "app_name_token": _edit_row(
-        API36,
-        3,
-        "applicationInfo.name=,",
-        f"applicationInfo.name=X, applicationInfo.token=y, inputFeatures={MARK},"
-        f" {FRAGMENT},",
-    ),
-    "app_name_without_token": _edit_row(
-        _edit_row(API36, 3, ", applicationInfo.token=<null>", ""),
-        3,
-        "applicationInfo.name=,",
-        f"applicationInfo.name=X, inputConfig={MARK}, {FRAGMENT},",
-    ),
-    "quoted_title_display_id": _edit_row(
-        API24,
-        0,
-        "name='Window{b24c1c0 u0 StatusBar}'",
-        f"name='X', displayId=0, flags={MARK}, {FRAGMENT}, z='",
-    ),
-}
-
-
-@pytest.mark.parametrize("case", sorted(AMBIGUOUS))
-@pytest.mark.parametrize("show", [False, True], ids=["plain", "show_flag_names"])
-def test_a_name_whose_end_cannot_be_told_hides_the_whole_line(case, show):
-    text = AMBIGUOUS[case]
-    found = diagnose_tap_window(text, show_flag_names=show)
-    assert found.reason is not None
-    row = next(s for s in found.lines if s.kind == "window_row" and len(s.tokens) == 2)
-    assert row.tokens[1].startswith("<text:")
-    for output in (found.to_text(), json.dumps(found.to_dict())):
-        assert MARK not in output
-        assert FRAGMENT not in output
-        assert "=OK" not in output
-
-
-@pytest.mark.parametrize(
-    ("line", "tokens"),
-    [
-        (
-            f"  FocusedWindow: name='X, {FRAGMENT}, z={MARK}'",
-            ["FocusedWindow:", "name=<quoted:30>"],
-        ),
-        (
-            f"    displayId=0, name='X, {FRAGMENT}', dispatchingTimeout=5000ms",
-            ["displayId=<num>", "name=<quoted:12>", "dispatchingTimeout=<ms>"],
-        ),
-        (f"  FocusedWindow: name='X's, {FRAGMENT}'", ["FocusedWindow:", "<text:21>"]),
-        (f"  FocusedWindow: name=X, {FRAGMENT}", ["FocusedWindow:", "<text:17>"]),
-        (
-            f"  FocusedWindow: name='X', windowName='{FRAGMENT}'",
-            ["FocusedWindow:", "<text:32>"],
-        ),
-        (f"  {FRAGMENT}, vendor=OK", ["status=<word:2>", "<unknown_key:6>=<word:2>"]),
-        (
-            f"  0: name=x, displayId=0, {FRAGMENT}",
-            ["row:0", "name=<text:1>", "displayId=<num>", "status=<word:2>"],
-        ),
-    ],
-)
-def test_text_an_app_sets_on_other_lines_is_only_its_length(line, tokens):
-    assert shape_line(line, show_flag_names=True)[1] == tokens
-
-
-def test_flag_names_show_only_in_rows_of_a_found_list():
-    lone = f"0: name=x, displayId=0, inputConfig={MARK}"
-    found = diagnose_tap_window(lone, show_flag_names=True)
-    assert (found.rule, found.lists) == ("no_dispatcher", ())
-    assert MARK not in found.to_text()
-    assert MARK not in json.dumps(found.to_dict())
-    # Inside the dispatcher but outside every list: not shown either.
-    outside = _sub(
-        API36, "  DispatchEnabled: true", f"  DispatchEnabled: true\n  {lone}"
-    )
-    found = diagnose_tap_window(outside, show_flag_names=True)
-    assert MARK not in found.to_text()
-    # In a row of the found list, whose name's end can be told: shown.
-    inside = _edit_row(API36, 3, "| SLIPPERY", f"| SLIPPERY | {MARK}")
-    found = diagnose_tap_window(inside, show_flag_names=True)
-    assert f"<unknown_flag:{MARK}>" in found.to_text()
 
 
 def test_the_opt_in_notice_says_any_device_text_can_appear():
@@ -1167,7 +1323,7 @@ def test_a_huge_rotation_in_one_rows_transform_is_refused_not_raised(fake_adb, c
 def _all_rows_huge_rotation() -> str:
     top = _row(API36, 0)
     return _sub(
-        top and API36,
+        API36,
         f"{top}\n{IDENTITY}",
         f"{top}\n{IDENTITY}".replace("ROT_0", "ROT_" + "1" * 4301),
     )
@@ -1219,72 +1375,3 @@ def test_a_row_of_no_recognised_form_is_counted():
     assert "1 rows of no recognised form" in found.to_text()
     payload = json.loads(json.dumps(found.to_dict()))
     assert payload["forms"][0]["recognised"] is False
-
-
-@pytest.mark.parametrize(
-    ("old", "new", "token"),
-    [
-        (
-            "inputConfig=NOT_FOCUSABLE | TRUSTED_OVERLAY | SLIPPERY",
-            "inputConfig=0x1",
-            "inputConfig=<unknown_flag:3>",
-        ),
-        (
-            "inputConfig=NOT_FOCUSABLE | TRUSTED_OVERLAY | SLIPPERY",
-            "inputConfig=0x0",
-            "inputConfig=0x0",
-        ),
-    ],
-)
-def test_each_flags_field_has_its_own_number_rule(old, new, token):
-    line = _row(API36, 3).replace(old, new)
-    assert token in shape_line(line, in_list=True)[1]
-
-
-def test_flags_and_feature_numbers_and_names():
-    assert (
-        "flags=<unknown_flag:11>"
-        in shape_line(
-            _row(API24, 0).replace("flags=0x81840048", "flags=0x123456789"),
-            in_list=True,
-        )[1]
-    )
-    assert (
-        "inputFeatures=<unknown_flag:10>"
-        in shape_line(
-            _row(API36, 3).replace(
-                ", alpha=1,", ", alpha=1, inputFeatures=DROP_INPUT,"
-            ),
-            in_list=True,
-        )[1]
-    )
-
-
-def test_a_matrix_row_has_three_columns():
-    assert shape_line("  0.0 1.0") == ("other", ["<dec>", "<dec>"])
-    assert shape_line("  0.0 1.0 2.0")[0] == "matrix_row"
-
-
-HOSTILE_LINES = {
-    "head_quoted": f"  FocusedWindow: name='X, {FRAGMENT}, z={MARK}'",
-    "head_fields": f"  {MARK}=1, {FRAGMENT}, owner={MARK}",
-    "head_label": f"  {MARK}: {MARK}",
-    "outside_row": f"  0: name={MARK}, displayId=0, inputConfig={MARK}, {FRAGMENT}",
-}
-
-
-@pytest.mark.parametrize("show", [False, True], ids=["plain", "show_flag_names"])
-@pytest.mark.parametrize("case", sorted(CASES))
-def test_marks_on_other_lines_never_show(case, show):
-    text, display = CASES[case]
-    extra = "\n".join(HOSTILE_LINES.values())
-    if "Input Dispatcher State:\n" in text:
-        text = text.replace(
-            "Input Dispatcher State:\n", f"Input Dispatcher State:\n{extra}\n", 1
-        )
-    else:
-        text = extra + "\n" + text
-    found = diagnose_tap_window(text, show_flag_names=show, display_id=display)
-    for output in (found.to_text(), json.dumps(found.to_dict())):
-        assert MARK not in output
-        assert FRAGMENT not in output
