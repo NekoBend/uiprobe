@@ -223,6 +223,38 @@ input keyevent KEYCODE_BACK; echo uiprobe-exit:$?
 
 It is sent once and never resent. Exit 14 (`input_failed`) does not prove that no key was pressed. With `--json` the result is `{"schema": "uiprobe.action/1", "action": "key", "key": "KEYCODE_BACK"}`.
 
+## Launching an app
+
+`uiprobe launch PACKAGE` starts an app through its launcher activity and waits until it is the app in front. `PACKAGE` follows the Android package rule: two or more dot-separated segments, each an ASCII letter followed by ASCII letters, digits or underscores, at most 255 characters. Anything else is a usage error (exit 2) before the adb server is contacted, so a name can never carry shell syntax to the device.
+
+```console
+$ uiprobe launch com.example.shop
+launched com.example.shop
+$ uiprobe launch com.example.shop --restart --timeout 20
+launched com.example.shop
+```
+
+The command sent to the device is exactly this, once, through the `shell:` service (a count other than 1 and other monkey options are never sent):
+
+```sh
+monkey -p PACKAGE -c android.intent.category.LAUNCHER 1
+```
+
+With `--restart` the app is stopped first with `am force-stop PACKAGE; echo uiprobe-exit:$?`, so the launch starts a fresh task. The app loses any state it has not saved. The stop must report exit status 0 and print nothing else, empty lines aside (on the measured API 24 and API 36 emulators a stop prints nothing, also for an app that is not running or not installed); otherwise monkey is not sent. Without `--restart` an app that is already running comes forward where it was.
+
+Monkey must print the line `Events injected: 1` exactly once and no other `Events injected:` line (spaces or tabs around it are allowed; other lines it prints before and after are ignored). Then uiprobe reads the foreground app (as `Device.foreground` does) about every 0.5 seconds, at least once, until it equals `PACKAGE`; `--timeout SECONDS` (a plain decimal number from 0 to 600 of at most 32 characters, default 10) limits the wait. The timeout is the latest time a read may start, not a limit on the whole wait: a read that started in time still counts, so the wait can run past the timeout by the time of that read, and by how late a pause ends when the system wakes it late. Neither command is ever resent.
+
+`launch` starts the app on whatever device is selected and does not check what was in front before. It exits with 15 (`launch_failed`) when it cannot be sure the app is in front; `details.reason` says why:
+
+| `details.reason` | Meaning |
+| --- | --- |
+| `stop_failed` | With `--restart`, `am force-stop` reported an exit status other than 0 (`details.exit_status`), no exit status, or printed something (`details.output`, escaped); each is set only when known. Monkey was not sent. |
+| `not_installed_or_no_launcher` | Monkey did not report one injected event and printed a line starting with `** No activities found`: the package is not installed, or it has no launcher activity. |
+| `unexpected_output` | Monkey did not print `Events injected: 1` exactly once; `details.output` is its first line that is not blank, stripped of spaces and tabs, cut to 200 characters and escaped. |
+| `not_in_front` | Monkey reported success, but the app was not in front within the timeout; `details.foreground` is the last package seen, escaped and, past 1000 characters, cut and ended with `...` (`null` when unknown) and `details.timeout` the limit. The app may still have started. |
+
+With `--json` the result is a `uiprobe.action/1` object (see [Output formats](output.md)); `restart` is always written.
+
 ## Creating the settings file
 
 `uiprobe init [PATH]` creates the settings file `uiprobe.toml` (at `./uiprobe.toml` unless you give a path) and prints its path. It needs no device and no adb server, and it never overwrites a file. Details are in [Settings file](settings.md).
