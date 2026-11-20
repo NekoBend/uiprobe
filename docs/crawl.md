@@ -144,7 +144,7 @@ run folder: runs/first
 
 Lines starting with `note:` follow when one of these happened:
 
-- A tap was refused because the window at its point could not be read (`cover_unknown`): the note names what could not be read and the option that turns the check off, with its risk. With the check on (the default), a rotated display prevents every tap; when another check fails as well (for example the keyboard came up), that reason may be the one recorded.
+- A tap was refused because the window at its point could not be read (`cover_unknown`): the note names what could not be read and the option that turns the check off, with its risk. When the window list reader refused it, the note also names its rule and suggests `uiprobe diagnose tap-window` (see [Diagnosing the tap window check](commands.md#diagnosing-the-tap-window-check)); a refusal made before the list was read (the gate's own dump rotated, the app's uid) has no rule and no such suggestion. With the check on (the default), a rotated display prevents every tap; when another check fails as well (for example the keyboard came up), that reason may be the one recorded.
 - The device's boot id could not be read: a renumbered connection then ends the run instead of being followed, and so does any failed adb exchange with the device, even on the same connection.
 - The run stopped with `dump_failed_repeatedly`: `uiautomator dump` fails on a screen that never settles (a value that changes every second, an animation). The note names the app in front and the last screen that was read, so you can avoid that screen.
 

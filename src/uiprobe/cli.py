@@ -467,6 +467,7 @@ def _build_parser() -> _Parser:
     )
     _add_launch_parser(commands.add_parser)
     _add_crawl_parser(commands.add_parser)
+    _add_diagnose_parser(commands.add_parser)
     init = commands.add_parser(
         "init",
         allow_abbrev=False,
@@ -486,6 +487,45 @@ def _build_parser() -> _Parser:
         help=f"where to create the file (default ./{SETTINGS_FILE})",
     )
     return parser
+
+
+def _add_diagnose_parser(add_parser: Callable[..., argparse.ArgumentParser]) -> None:
+    """The diagnose command, whose one check so far is tap-window."""
+    diagnose = add_parser(
+        "diagnose",
+        allow_abbrev=False,
+        help="tell why a check cannot read a device, without its values",
+        description=(
+            "Run one of uiprobe's device checks and tell why it cannot read"
+            " the device, in a report that holds no device values, so that it"
+            " can be shared. CHECK is tap-window."
+        ),
+    )
+    checks = diagnose.add_subparsers(dest="check", required=True, metavar="CHECK")
+    tap_window = checks.add_parser(
+        "tap-window",
+        allow_abbrev=False,
+        help="why the window list of a tap cannot be read",
+        description=(
+            "Read dumpsys input once and run the crawl's tap window check on"
+            " it (without a point). Print whether the window list reads or"
+            " which rule refused it and at which line, the window lists found"
+            " and how many windows were read, and for the lines around the"
+            " failure their kind and length. No text of the device's"
+            " output is printed: no serial, app or window names, coordinates,"
+            " accounts or network values (unless --show-device-text). Nothing"
+            " is sent to the device but that one read."
+        ),
+    )
+    _add_common_options(tap_window, in_command=True)
+    tap_window.add_argument(
+        "--show-device-text",
+        action="store_true",
+        help=(
+            "also print the shapes of the lines: field names, values and flags"
+            " from the device, where window names and app text can appear"
+        ),
+    )
 
 
 def _printable(text: str) -> str:
@@ -1485,11 +1525,18 @@ def _press_hints(result: CrawlResult) -> list[str]:
     hints: list[str] = []
     refused = dict(result.not_sent)
     if refused.get("cover_unknown"):
+        unknown = result.cover_unknown or "unknown"
+        # Only a refusal the window list reader made has a rule to diagnose.
+        diagnose = (
+            f", rule {result.cover_rule}; uiprobe diagnose tap-window shows where"
+            " without printing device values"
+            if result.cover_rule is not None
+            else ""
+        )
         hints.append(
-            "the window at a tap point could not be read on this device"
-            f" ({result.cover_unknown or 'unknown'}); --no-tap-window-check"
-            " turns the check off, but then an overlay of another app over the"
-            " point can receive a tap"
+            f"the window at a tap point could not be read on this device ({unknown}"
+            f"{diagnose}); --no-tap-window-check turns the check off, but then an"
+            " overlay of another app over the point can receive a tap"
         )
     if not result.repin:
         hints.append(
@@ -1637,6 +1684,41 @@ def _cmd_screenshot(args: argparse.Namespace) -> int:
     return 0
 
 
+def _diagnose_failure(
+    kind: tuple[str, int], *, as_json: bool, details: dict[str, object] | None = None
+) -> int:
+    """Report a failed diagnosis by its error code alone: the error's own
+    message can name the device (its serial, or text it printed)."""
+    code, _ = kind
+    message = (
+        f"the check could not run ({code}); no more is shown, as the error"
+        " can name the device"
+    )
+    return _fail(kind, message, as_json=as_json, details=details)
+
+
+def _cmd_diagnose(args: argparse.Namespace) -> int:
+    serial = _single_serial(args)
+    try:
+        try:
+            device = Device(
+                serial,
+                adb_server=args.adb_server,
+                adb=args.adb,
+                start_server=args.start_server,
+            )
+        except (TypeError, ValueError):  # a malformed serial or server address
+            return _fail(USAGE_ERROR, _DIAGNOSE_USAGE_MESSAGE, as_json=args.json)
+        found = device.diagnose_tap_window(show_device_text=args.show_device_text)
+    except UiprobeError as exc:
+        return _diagnose_failure((exc.code, exc.exit_code), as_json=args.json)
+    except Exception as exc:  # noqa: BLE001 - its message could hold device text
+        details: dict[str, object] = {"type": type(exc).__name__}
+        return _diagnose_failure(INTERNAL_ERROR, as_json=args.json, details=details)
+    _emit(dumps(found.to_dict(), indent=2) if args.json else found.to_text())
+    return 0
+
+
 _HANDLERS: dict[str, Callable[[argparse.Namespace], int]] = {
     "devices": _cmd_devices,
     "dump": _cmd_dump,
@@ -1648,6 +1730,7 @@ _HANDLERS: dict[str, Callable[[argparse.Namespace], int]] = {
     "launch": _cmd_launch,
     "screenshot": _cmd_screenshot,
     "crawl": _cmd_crawl,
+    "diagnose": _cmd_diagnose,
     "init": _cmd_init,
 }
 
@@ -1742,6 +1825,15 @@ _TYPE_USAGE_MESSAGE = (
     " text to type); give TEXT as one quoted argument, after -- when it starts"
     " with -; for how to use it see uiprobe type --help"
 )
+# argparse quotes the words it cannot place, and with diagnose those can be a
+# serial or other text that names the device.
+_DIAGNOSE_USAGE_MESSAGE = (
+    "the arguments of diagnose could not be read (they are not shown, as they"
+    " can name the device); use: uiprobe [-s SERIAL] diagnose tap-window"
+    " [-s SERIAL] [--adb PATH] [--adb-server tcp:HOST:PORT] [--no-start-server]"
+    " [--json] [--show-device-text]; device options go after tap-window or"
+    " before diagnose"
+)
 # Options before the command that take a value: their value is not a command.
 _TOP_OPTIONS_WITH_VALUE = frozenset({"-s", "--serial", "--adb", "--adb-server"})
 _DEVICE_OPTIONS = ("--serial", "--adb", "--adb-server")
@@ -1800,21 +1892,26 @@ def _parse(argv: Sequence[str]) -> argparse.Namespace:
     When the command is ``type``, a device option after it is refused before
     anything else, and an argparse error is replaced by a message that shows
     none of the arguments, raised outside the handler so that it chains to
-    nothing that holds them.
+    nothing that holds them. The same replacement is made whenever the
+    arguments hold the word ``diagnose``, whose arguments can name the
+    device.
     """
     where = _command_index(argv)
     is_type = where is not None and argv[where] == "type"
+    # Any argv naming diagnose: an unknown option before it (--ser SERIAL)
+    # can make argparse take its value for the command and quote it.
+    is_diagnose = not is_type and "diagnose" in argv
     if is_type and where is not None and _device_option_after_type(argv[where + 1 :]):
         raise _UsageError(_DEVICE_OPTION_AFTER_TYPE)
     try:
         args = _build_parser().parse_args(argv)
     except _UsageError:
-        if not is_type:
+        if not (is_type or is_diagnose):
             raise
     else:
         _single_serial(args)
         return args
-    raise _UsageError(_TYPE_USAGE_MESSAGE)
+    raise _UsageError(_DIAGNOSE_USAGE_MESSAGE if is_diagnose else _TYPE_USAGE_MESSAGE)
 
 
 def _guided_failure(exc: _GuidedUsageError, *, as_json: bool) -> int:

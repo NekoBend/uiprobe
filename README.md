@@ -80,6 +80,7 @@ Add `--json` to get JSON instead of text (`uiprobe dump --json`), or `--brief` f
 | `type` | Types ASCII text into the focused field. | [Typing text](docs/commands.md#typing-text) |
 | `launch` | Starts an app and waits until it is in front. | [Launching an app](docs/commands.md#launching-an-app) |
 | `crawl` | Previews what a crawl would press, using the settings file; with `--press`, crawls for real into a run folder. | [Crawling an app](docs/crawl.md) |
+| `diagnose tap-window` | Tells why the crawl's tap window check cannot read a device, in a report with no device values; presses nothing. | [Diagnosing the tap window check](docs/commands.md#diagnosing-the-tap-window-check) |
 | `init` | Creates the settings file `uiprobe.toml`; no device needed. | [Settings file](docs/settings.md) |
 
 Options and environment variables: [Options](docs/commands.md#options), [Environment variables](docs/commands.md#environment-variables). JSON shapes and exit codes: [docs/output.md](docs/output.md).
