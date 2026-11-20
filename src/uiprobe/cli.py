@@ -39,7 +39,9 @@ from uiprobe.device import (
     DeviceDetails,
     DisplaySizeUnknownError,
     RefusedKeys,
+    TextNotTypedError,
     _key_code,
+    _text_pieces,
     device_details,
     devices,
 )
@@ -183,6 +185,40 @@ def _add_common_options(parser: argparse.ArgumentParser, *, in_command: bool) ->
         default=argparse.SUPPRESS if in_command else False,
         help="print JSON",
     )
+
+
+def _add_type_parser(add_parser: Callable[..., _Parser]) -> None:
+    type_ = add_parser(
+        "type",
+        allow_abbrev=False,
+        add_help=False,  # only --help: an unquoted text holding -h must not
+        # end the run with the help and exit 0 while nothing is typed
+        help="type text into the focused field",
+        description=(
+            "Type TEXT into the field that has focus, in whatever app is in"
+            " front. Only printable ASCII (space to ~) is typed. A character"
+            " outside ASCII, a newline, a tab or another control character,"
+            " and empty text are usage errors and nothing is sent; to press"
+            " Enter use the key command. The text is not written to the"
+            " output and typing is not checked afterwards. Give -s, --adb and"
+            " --adb-server before the command (uiprobe -s SERIAL type TEXT):"
+            " after it they are refused, so that no word of the text is ever"
+            " read as one of them."
+        ),
+    )
+    type_.add_argument("--help", action="help", help="show this help message and exit")
+    # Only the options that take no value; the device options go before type.
+    type_.add_argument(
+        "--no-start-server",
+        dest="start_server",
+        action="store_false",
+        default=argparse.SUPPRESS,
+        help="never start the adb server",
+    )
+    type_.add_argument(
+        "--json", action="store_true", default=argparse.SUPPRESS, help="print JSON"
+    )
+    type_.add_argument("text", metavar="TEXT", help="the text to type")
 
 
 def _add_launch_parser(add_parser: Callable[..., _Parser]) -> None:
@@ -373,6 +409,7 @@ def _build_parser() -> _Parser:
         ),
     )
     key.add_argument("name", metavar="NAME", help="an alias or a KEYCODE_ name")
+    _add_type_parser(commands.add_parser)
     screenshot = commands.add_parser(
         "screenshot",
         allow_abbrev=False,
@@ -888,6 +925,30 @@ def _cmd_key(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_type(args: argparse.Namespace) -> int:
+    text = str.__str__(args.text)
+    _text_pieces(text)  # a bad text is a usage error before any server contact
+    device = Device(
+        _single_serial(args),
+        adb_server=args.adb_server,
+        adb=args.adb,
+        start_server=args.start_server,
+    )
+    device.type_text(text)
+    if args.json:
+        payload: dict[str, object] = {
+            "schema": ACTION_SCHEMA,
+            "action": "type",
+            "length": len(text),
+            "device": {"serial": device.serial},
+            "captured_at": datetime.now(UTC).astimezone().isoformat(timespec="seconds"),
+        }
+        _emit(dumps(payload))
+    else:
+        _emit(f"typed {len(text)} characters")
+    return 0
+
+
 def _parse_timeout(value: str | None) -> float:
     """Read ``--timeout``: a plain decimal number of seconds from 0 to 600.
 
@@ -1225,6 +1286,7 @@ _HANDLERS: dict[str, Callable[[argparse.Namespace], int]] = {
     "tap": _cmd_tap,
     "swipe": _cmd_swipe,
     "key": _cmd_key,
+    "type": _cmd_type,
     "launch": _cmd_launch,
     "screenshot": _cmd_screenshot,
     "crawl": _cmd_crawl,
@@ -1315,10 +1377,86 @@ def _json_requested(argv: Sequence[str]) -> bool:
     return "--json" in options
 
 
+# argparse quotes the words it cannot place ("unrecognized arguments: two"),
+# and with the type command those words can be part of the text.
+_TYPE_USAGE_MESSAGE = (
+    "the arguments could not be read (they are not shown, as they can hold the"
+    " text to type); give TEXT as one quoted argument, after -- when it starts"
+    " with -; for how to use it see uiprobe type --help"
+)
+# Options before the command that take a value: their value is not a command.
+_TOP_OPTIONS_WITH_VALUE = frozenset({"-s", "--serial", "--adb", "--adb-server"})
+_DEVICE_OPTIONS = ("--serial", "--adb", "--adb-server")
+_DEVICE_OPTION_AFTER_TYPE = (
+    "-s, --serial, --adb and --adb-server go before the type command, as in"
+    " uiprobe -s SERIAL type TEXT; after it they are refused (the value is not"
+    " shown, as it can be part of the text to type). Give TEXT as one quoted"
+    " argument, after -- when it starts with -"
+)
+
+
+def _command_index(argv: Sequence[str]) -> int | None:
+    """Return where the command word is in `argv`, or None if there is none."""
+    skip = False
+    for index, word in enumerate(argv):
+        if skip:
+            skip = False
+        elif word in _TOP_OPTIONS_WITH_VALUE:
+            skip = True
+        elif word == "--":
+            return index + 1 if index + 1 < len(argv) else None
+        elif word == "-" or not word.startswith("-"):
+            return index
+    return None
+
+
+def _names_a_device_option(word: str) -> bool:
+    """Whether argparse could read `word` as -s, --serial, --adb or --adb-server.
+
+    That covers ``-s``, ``-sVALUE``, ``--serial=VALUE`` and every leading part
+    of a long name (``--ser``, ``--adb-s``), whether or not argparse would
+    accept the shortened form. A word with a space is read as text by
+    argparse, so it is not one.
+    """
+    if " " in word:
+        return False
+    name = word.split("=", 1)[0]
+    if name.startswith("-s"):
+        return True
+    return len(name) > 2 and any(option.startswith(name) for option in _DEVICE_OPTIONS)
+
+
+def _device_option_after_type(words: Sequence[str]) -> bool:
+    """Whether a device option comes in `words` before any ``--``."""
+    for word in words:
+        if word == "--":
+            return False
+        if _names_a_device_option(word):
+            return True
+    return False
+
+
 def _parse(argv: Sequence[str]) -> argparse.Namespace:
-    args = _build_parser().parse_args(argv)
-    _single_serial(args)
-    return args
+    """Read the command line.
+
+    When the command is ``type``, a device option after it is refused before
+    anything else, and an argparse error is replaced by a message that shows
+    none of the arguments, raised outside the handler so that it chains to
+    nothing that holds them.
+    """
+    where = _command_index(argv)
+    is_type = where is not None and argv[where] == "type"
+    if is_type and where is not None and _device_option_after_type(argv[where + 1 :]):
+        raise _UsageError(_DEVICE_OPTION_AFTER_TYPE)
+    try:
+        args = _build_parser().parse_args(argv)
+    except _UsageError:
+        if not is_type:
+            raise
+    else:
+        _single_serial(args)
+        return args
+    raise _UsageError(_TYPE_USAGE_MESSAGE)
 
 
 def _guided_failure(exc: _GuidedUsageError, *, as_json: bool) -> int:
@@ -1357,7 +1495,8 @@ def _failure_code(exc: BaseException, *, as_json: bool) -> int:
     if isinstance(exc, _GuidedUsageError):
         return _guided_failure(exc, as_json=as_json)
     if isinstance(exc, _UsageError | TypeError | ValueError):
-        return _fail(USAGE_ERROR, str(exc), as_json=as_json)
+        details = exc.details if isinstance(exc, TextNotTypedError) else None
+        return _fail(USAGE_ERROR, str(exc), as_json=as_json, details=details)
     if isinstance(exc, KeyboardInterrupt):
         return _interrupt_failure(exc, as_json=as_json)
     name = type(exc).__name__
