@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import json
+import sys
 from typing import TYPE_CHECKING
 
 import pytest
 
 from tests.fake_device import FakeAndroid
 from tests.test_crawl_driver import SCREENS, SERIAL, SHOP, TRANSPORT, Clock, lines, run
+from tests.test_inputwindows import DISPLAY1
 from tests.test_repin import Waits, listing, renumber
 from uiprobe.crawl import Limits
 from uiprobe.device import EXIT_MARKER, Device
@@ -16,7 +18,7 @@ from uiprobe.guards import Policy
 from uiprobe.packageuid import PackageUid
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Iterator
     from pathlib import Path
 
     from tests.fake_adb_server import FakeAdbServer
@@ -246,55 +248,122 @@ def test_a_rotated_or_unknown_display_refuses_every_tap(
     assert refused[0]["details"] == {"unreadable": "rotation"}
 
 
-# More digits than `int` converts by default (4300): it raises ValueError.
-OVERLONG = "1" * 4301
+# Python's default limit of digits `int` converts (`_digit_limit` sets it):
+# one more digit raises ValueError. All zeros: read as 0 it would pass.
+LIMIT = 4300
+OVERLONG = "0" * (LIMIT + 1)
+LONGEST_ZERO = "0" * LIMIT  # still converts: read as 0, as before
 
 
-def _row_rotation(text: str) -> str:
-    """The first row's transform (API 31 on) with a rotation too long to read."""
-    identity = "\n      transform (ROT_0) (IDENTITY)\n"
-    return text.replace(identity, f"\n      transform (ROT_{OVERLONG}) (IDENTITY)\n", 1)
+@pytest.fixture
+def _digit_limit() -> Iterator[None]:
+    """Use Python's default int-to-str digit limit, whatever the host set."""
+    before = sys.get_int_max_str_digits()
+    sys.set_int_max_str_digits(LIMIT)
+    try:
+        yield
+    finally:
+        sys.set_int_max_str_digits(before)
 
 
-def _viewport_display(text: str) -> str:
-    """A copy of the Viewport line above it, with a display number too long
-    to read (the real line still says display 0, orientation 0)."""
+_IDENTITY_ROW = "\n      transform (ROT_0) (IDENTITY)\n"
+
+
+def _row_rotation(text: str, digits: str) -> str:
+    """The first row's transform (API 31 on) saying ``ROT_<digits>``."""
+    return text.replace(
+        _IDENTITY_ROW, f"\n      transform (ROT_{digits}) (IDENTITY)\n", 1
+    )
+
+
+def _viewport_display(text: str, digits: str) -> str:
+    """A copy of the Viewport line above it naming display `digits` (the real
+    line still says display 0, orientation 0)."""
     line = next(line for line in text.split("\n") if "Viewport" in line)
-    copy = line.replace("displayId=0,", f"displayId={OVERLONG},")
+    copy = line.replace("displayId=0,", f"displayId={digits},")
     return text.replace(line, f"{copy}\n{line}", 1)
 
 
-def _display_orientation(text: str) -> str:
-    """The first row with a ``displayOrientation=`` too long to read."""
-    field = f", displayOrientation={OVERLONG}, ownerUid="
-    return text.replace(", ownerUid=", field, 1)
+def _display_orientation(text: str, digits: str) -> str:
+    """The first row with ``displayOrientation=<digits>``."""
+    return text.replace(", ownerUid=", f", displayOrientation={digits}, ownerUid=", 1)
 
 
-@pytest.mark.parametrize(
-    ("android", "edit"),
-    [
-        *[(api, _row_rotation) for api in (31, 36)],
-        *[(api, _viewport_display) for api in (24, 31, 36)],
-        *[(api, _display_orientation) for api in (24, 31, 36)],
-    ],
-    ids=[
-        *[f"row_rotation-api{api}" for api in (31, 36)],
-        *[f"viewport_display-api{api}" for api in (24, 31, 36)],
-        *[f"display_orientation-api{api}" for api in (24, 31, 36)],
-    ],
-    indirect=["android"],
-)
-def test_a_number_too_long_to_read_in_the_window_list_refuses_every_tap(
-    tmp_path: Path,
-    device,
-    android,
-    clock,
-    monkeypatch,
-    edit: Callable[[str], str],
-):
+def _display1(text: str, rotation: str, field: str) -> str:
+    """API 36: the list of display 1 (`DISPLAY1`) above display 0's, its
+    row's transform saying ``ROT_<rotation>`` and `field` added to its row."""
+    block = DISPLAY1.replace(
+        "      transform (ROT_0) (IDENTITY)\n",
+        f"      transform (ROT_{rotation}) (IDENTITY)\n",
+    ).replace(", ownerUid=10999", f"{field}, ownerUid=10999")
+    return text.replace("  Display: 0\n", block + "  Display: 0\n", 1)
+
+
+def _display1_rotation(text: str, digits: str) -> str:
+    return _display1(text, digits, "")
+
+
+def _display1_orientation(text: str, digits: str) -> str:
+    return _display1(text, "0", f", displayOrientation={digits}")
+
+
+def _skipped_row_rotation(text: str, digits: str) -> str:
+    """API 31 (one list of every display in the fake): the last row (the
+    wallpaper) on display 1, its transform saying ``ROT_<digits>``."""
+    lines = text.split("\n")
+    row = max(i for i, line in enumerate(lines) if "ImageWallpaper" in line)
+    assert lines[row + 1] == "      transform (ROT_0) (IDENTITY)"
+    lines[row] = lines[row].replace("displayId=0,", "displayId=1,")
+    lines[row + 1] = f"      transform (ROT_{digits}) (IDENTITY)"
+    return "\n".join(lines)
+
+
+_EDITS = [
+    *[(api, "row_rotation", _row_rotation) for api in (31, 36)],
+    *[(api, "viewport_display", _viewport_display) for api in (24, 31, 36)],
+    *[(api, "display_orientation", _display_orientation) for api in (24, 31, 36)],
+    (36, "display1_rotation", _display1_rotation),
+    (36, "display1_orientation", _display1_orientation),
+    (31, "skipped_row_rotation", _skipped_row_rotation),
+]
+_OTHER_DISPLAY = {"display1_rotation", "display1_orientation", "skipped_row_rotation"}
+_REFUSED = [
+    pytest.param(api, edit, OVERLONG, id=f"{name}-api{api}-overlong")
+    for api, name, edit in _EDITS
+]
+# A Viewport line of display 0 must be of the known form, whose displayId= has
+# at most 10 digits: 4300 zeros there refused before too, so the control
+# there is display 1 written with 4300 digits (another display: not read).
+_PASSED = [
+    pytest.param(
+        api,
+        edit,
+        "0" * (LIMIT - 1) + "1" if name == "viewport_display" else LONGEST_ZERO,
+        id=f"{name}-api{api}-longest",
+    )
+    for api, name, edit in _EDITS
+] + [
+    pytest.param(api, edit, "1", id=f"{name}-api{api}-one")
+    for api, name, edit in _EDITS
+    if name in _OTHER_DISPLAY
+]
+
+
+def _edited(android, monkeypatch, edit: Callable[[str, str], str], digits: str) -> None:
+    """Make the fake print `dumpsys input` with `edit` applied."""
     original = android._dumpsys_input
-    assert edit(original()) != original()
-    monkeypatch.setattr(android, "_dumpsys_input", lambda: edit(original()))
+    assert edit(original(), digits) != original()
+    monkeypatch.setattr(android, "_dumpsys_input", lambda: edit(original(), digits))
+
+
+@pytest.mark.usefixtures("_digit_limit")
+@pytest.mark.parametrize(("android", "edit", "digits"), _REFUSED, indirect=["android"])
+def test_a_number_too_long_to_read_in_the_window_list_refuses_every_tap(
+    tmp_path: Path, device, android, clock, monkeypatch, edit, digits
+):
+    # On display 0 or on another display: such a number could be 0 or
+    # display 0 (leading zeros), so it is never discarded.
+    _edited(android, monkeypatch, edit, digits)
     out = tmp_path / "run"
     run(device, clock, out, limits=Limits(actions=3))
     assert _taps(android) == []
@@ -304,6 +373,21 @@ def test_a_number_too_long_to_read_in_the_window_list_refuses_every_tap(
     assert refused[0]["details"] == {"unreadable": "rotation"}
 
 
+@pytest.mark.usefixtures("_digit_limit")
+@pytest.mark.parametrize(("android", "edit", "digits"), _PASSED, indirect=["android"])
+def test_a_readable_number_in_the_window_list_taps_as_before(
+    tmp_path: Path, device, android, clock, monkeypatch, edit, digits
+):
+    # 4300 digits still read as before; another display's readable rotation
+    # does not matter for display 0.
+    _edited(android, monkeypatch, edit, digits)
+    out = tmp_path / "run"
+    run(device, clock, out, limits=Limits(actions=3))
+    assert BROWSE in _taps(android)
+    assert not _covered(out)
+
+
+@pytest.mark.usefixtures("_digit_limit")
 def test_a_shared_user_number_too_long_to_read_refuses_every_tap(
     tmp_path: Path, device, android, clock, monkeypatch, fake_adb
 ):

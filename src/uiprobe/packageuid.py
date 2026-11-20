@@ -133,8 +133,8 @@ def _stanza(lines: list[str], package: str) -> list[str] | None:
 def _shared_numbers(lines: list[str]) -> set[int] | None:
     """The numbers the ``Shared users:`` section gives its shared users (none
     when there is no such section), None when it is there more than once or
-    a number is too long to read (`int` refuses more than
-    `sys.get_int_max_str_digits` digits, 4300 by default, with `ValueError`;
+    a number is too long to read (`int` refuses more digits than
+    `sys.get_int_max_str_digits` with `ValueError`; Python's default is 4300;
     with leading zeros such a number could still be the package's)."""
     if lines.count(_SHARED_USERS) == 0:
         return set()

@@ -12,9 +12,15 @@ written in the API 24 form. The section lines around them
 
 from __future__ import annotations
 
+import sys
+from typing import TYPE_CHECKING
+
 import pytest
 
 from uiprobe.packageuid import PackageUid, parse_package_uid
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
 
 SETTINGS24 = """\
 Key Set Manager:
@@ -231,14 +237,42 @@ def test_two_number_lines_that_disagree_are_none():
     assert parse_package_uid(text, "com.android.calculator2") is None
 
 
-@pytest.mark.parametrize("digits", ["1" * 4301, "0" * 4297 + "1000"])
-def test_a_shared_user_number_too_long_to_read_is_none(digits):
-    # More digits than `int` converts by default (4300); with leading zeros
-    # the number could be the package's own.
+# Python's default limit of digits `int` converts (`_digit_limit` sets it).
+LIMIT = 4300
+
+
+@pytest.fixture
+def _digit_limit() -> Iterator[None]:
+    """Use Python's default int-to-str digit limit, whatever the host set."""
+    before = sys.get_int_max_str_digits()
+    sys.set_int_max_str_digits(LIMIT)
+    try:
+        yield
+    finally:
+        sys.set_int_max_str_digits(before)
+
+
+def _shared_number(digits: str) -> str:
+    """`SETTINGS24` with the number of its ``Shared users:`` entry replaced."""
     head, _, shared = SETTINGS24.partition("Shared users:")
     assert shared.count("userId=1000") == 1
-    text = head + "Shared users:" + shared.replace("userId=1000", f"userId={digits}")
-    assert parse_package_uid(text, "com.android.settings") is None
+    return head + "Shared users:" + shared.replace("userId=1000", f"userId={digits}")
+
+
+@pytest.mark.usefixtures("_digit_limit")
+@pytest.mark.parametrize(
+    "digits", ["1" * (LIMIT + 1), "0" * (LIMIT + 1 - 4) + "1000"], ids=["ones", "zeros"]
+)
+def test_a_shared_user_number_too_long_to_read_is_none(digits):
+    # With leading zeros the number could be the package's own.
+    assert parse_package_uid(_shared_number(digits), "com.android.settings") is None
+
+
+@pytest.mark.usefixtures("_digit_limit")
+def test_a_shared_user_number_of_the_longest_convertible_length_is_read():
+    digits = "0" * (LIMIT - 4) + "1000"  # the package's own number, as before
+    expected = PackageUid(1000, shared=True)
+    assert parse_package_uid(_shared_number(digits), "com.android.settings") == expected
 
 
 def test_a_shared_user_entry_with_the_number_needs_the_stanza_line():
