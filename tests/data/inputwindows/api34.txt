@@ -1,0 +1,28 @@
+      Viewport INTERNAL: displayId=0, uniqueId=local:4619827259835644672, port=0, orientation=0, logicalFrame=[0, 0, 320, 640], physicalFrame=[0, 0, 320, 640], deviceSize=[320, 640], isActive=[1]
+        Viewport INTERNAL: displayId=0, uniqueId=local:4619827259835644672, port=0, orientation=0, logicalFrame=[0, 0, 320, 640], physicalFrame=[0, 0, 320, 640], deviceSize=[320, 640], isActive=[1]
+Input Dispatcher State:
+  Display: 0
+    logicalSize=320x640
+        transform (ROT_0) (IDENTITY)
+    Windows:
+      0: name='[Gesture Monitor] swipe-up', id=73, displayId=0, inputConfig=NOT_FOCUSABLE | TRUSTED_OVERLAY | SPY, alpha=1.00, frame=[0,0][0,0], globalScale=1.000000, applicationInfo.name=[Gesture Monitor] swipe-up, applicationInfo.token=<null>, touchableRegion=[-3199,-6399][3200,6400], ownerPid=1086, ownerUid=10169, dispatchingTimeout=5000ms, hasToken=0x79cce9c85e10, touchOcclusionMode=BLOCK_UNTRUSTED
+        transform (ROT_0) (IDENTITY)
+      1: name='fd38730 StatusBar', id=80, displayId=0, inputConfig=NOT_FOCUSABLE | TRUSTED_OVERLAY, alpha=1.00, frame=[0,0][320,24], globalScale=1.000000, applicationInfo.name=, applicationInfo.token=<null>, touchableRegion=[0,0][320,24], ownerPid=828, ownerUid=10168, dispatchingTimeout=5000ms, hasToken=0x79cce9c78110, touchOcclusionMode=BLOCK_UNTRUSTED
+        transform (ROT_0) (IDENTITY)
+      2: name='c9a137 com.google.android.apps.nexuslauncher/com.google.android.apps.nexuslauncher.NexusLauncherActivity', id=97, displayId=0, inputConfig=NOT_VISIBLE | NOT_FOCUSABLE | NOT_TOUCHABLE | WATCH_OUTSIDE_TOUCH, alpha=0.00, frame=[0,0][320,640], globalScale=1.000000, applicationInfo.name=ActivityRecord{c1e3575 u0 com.google.android.apps.nexuslauncher/.NexusLauncherActivity t7}, applicationInfo.token=0x79cee9c75050, touchableRegion=[0,0][320,640], ownerPid=1779, ownerUid=10132, dispatchingTimeout=5000ms, hasToken=0x79cce9c9f710, touchOcclusionMode=BLOCK_UNTRUSTED
+        transform (ROT_0) (IDENTITY)
+      3: name='8226ec6 com.google.android.apps.nexuslauncher/com.google.android.apps.nexuslauncher.NexusLauncherActivity', id=93, displayId=0, inputConfig=DUPLICATE_TOUCH_TO_WALLPAPER, alpha=1.00, frame=[0,0][320,640], globalScale=1.000000, applicationInfo.name=ActivityRecord{c1e3575 u0 com.google.android.apps.nexuslauncher/.NexusLauncherActivity t7}, applicationInfo.token=0x79cee9c75050, touchableRegion=[0,0][320,640], ownerPid=1086, ownerUid=10169, dispatchingTimeout=5000ms, hasToken=0x79cce9c735d0, touchOcclusionMode=BLOCK_UNTRUSTED
+        transform (ROT_0) (IDENTITY)
+      4: name='70224ac ActivityRecordInputSink com.google.android.apps.nexuslauncher/.NexusLauncherActivity', id=100, displayId=0, inputConfig=NO_INPUT_CHANNEL | NOT_FOCUSABLE, alpha=1.00, frame=[0,0][0,0], globalScale=0.000000, applicationInfo.name=, applicationInfo.token=<null>, touchableRegion=[-3199,-6399][3200,6400], ownerPid=519, ownerUid=1000, dispatchingTimeout=0ms, hasToken=<null>, touchOcclusionMode=BLOCK_UNTRUSTED
+        transform (ROT_0) (IDENTITY)
+      5: name='Wallpaper BBQ wrapper#66', id=66, displayId=0, inputConfig=NO_INPUT_CHANNEL, alpha=1.00, frame=[-15,-31][618,672], globalScale=1.000000, applicationInfo.name=, applicationInfo.token=<null>, touchableRegion=<empty>, ownerPid=828, ownerUid=10168, dispatchingTimeout=5000ms, hasToken=<null>, touchOcclusionMode=BLOCK_UNTRUSTED
+        transform (ROT_0) (SCALE TRANSLATE)
+            1.4552  -0.0000  23.2828
+            -0.0000  1.4545  46.5455
+            0.0000  0.0000  1.0000
+      6: name='2f58169 com.android.systemui.wallpapers.ImageWallpaper', id=65, displayId=0, inputConfig=NOT_FOCUSABLE | NOT_TOUCHABLE | PREVENT_SPLITTING | IS_WALLPAPER, alpha=1.00, frame=[-15,-31][-15,-31], globalScale=1.000000, applicationInfo.name=, applicationInfo.token=<null>, touchableRegion=<empty>, ownerPid=828, ownerUid=10168, dispatchingTimeout=5000ms, hasToken=0x79cce9c84550, touchOcclusionMode=BLOCK_UNTRUSTED
+        transform (ROT_0) (SCALE TRANSLATE)
+            1.4552  -0.0000  23.2828
+            -0.0000  1.4545  46.5455
+            0.0000  0.0000  1.0000
+  Connections:

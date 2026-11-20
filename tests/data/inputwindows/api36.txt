@@ -1,0 +1,58 @@
+INPUT MANAGER (dumpsys input)
+      Viewport INTERNAL: displayId=0, uniqueId=local:4619827259835644672, port=0, orientation=0, logicalFrame=[0, 0, 320, 640], physicalFrame=[0, 0, 320, 640], deviceSize=[320, 640], isActive=[1]
+        Viewport INTERNAL: displayId=0, uniqueId=local:4619827259835644672, port=0, orientation=0, logicalFrame=[0, 0, 320, 640], physicalFrame=[0, 0, 320, 640], deviceSize=[320, 640], isActive=[1]
+Input Dispatcher State:
+  DispatchEnabled: true
+  DispatchFrozen: false
+  InputFilterEnabled: true
+  FocusedDisplayId: 0
+  FocusedApplications:
+    displayId=0, name='ActivityRecord{168678237 u0 com.android.settings/.Settings t8}', dispatchingTimeout=5000ms
+  FocusedWindows:
+    displayId=0, name='6461878 com.android.settings/com.android.settings.Settings'
+  FocusRequests:
+    displayId=0, name='6461878 com.android.settings/com.android.settings.Settings' result='OK'
+  Pointer Capture Requested: false
+  Current Window with Pointer Capture: None
+  TouchStatesByDisplay: <no displays touched>
+  CursorStatesByDisplay: <no displays touched by cursor>
+  Display: 0
+    logicalSize=320x640
+        transform (ROT_0) (IDENTITY)
+    Windows:
+      0: name=stylus-handwriting-event-receiver-0, id=101, displayId=0, inputConfig=NOT_FOCUSABLE | NOT_TOUCHABLE | TRUSTED_OVERLAY | SPY | INTERCEPTS_STYLUS, alpha=1, frame=[0,0][320,640], globalScale=1, applicationInfo.name=stylus-handwriting-event-receiver-0, applicationInfo.token=<null>, touchableRegion=[0,0][320,640], ownerPid=675, ownerUid=1000, dispatchingTimeout=5000ms, token=0x7f1f9e1a3390, touchOcclusionMode=BLOCK_UNTRUSTED
+      transform (ROT_0) (IDENTITY)
+      1: name=[Gesture Monitor] swipe-up, id=85, displayId=0, inputConfig=NOT_FOCUSABLE | TRUSTED_OVERLAY | SPY, alpha=1, frame=[0,0][0,0], globalScale=1, applicationInfo.name=[Gesture Monitor] swipe-up, applicationInfo.token=<null>, touchableRegion=[-3200,-6400][3200,6400], ownerPid=1283, ownerUid=10180, dispatchingTimeout=5000ms, token=0x7f1f9e1b15d0, touchOcclusionMode=BLOCK_UNTRUSTED
+      transform (ROT_0) (IDENTITY)
+      2: name=5ebeeda FloatingMenu, id=133, displayId=0, inputConfig=NOT_FOCUSABLE | TRUSTED_OVERLAY, alpha=1, frame=[0,0][320,640], globalScale=1, applicationInfo.name=, applicationInfo.token=<null>, touchableRegion=[272,434][320,482], ownerPid=1030, ownerUid=10186, dispatchingTimeout=5000ms, token=0x7f1f9e1b7410, touchOcclusionMode=BLOCK_UNTRUSTED
+      transform (ROT_0) (IDENTITY)
+      3: name=a8ea035 Taskbar, id=97, displayId=0, inputConfig=NOT_FOCUSABLE | TRUSTED_OVERLAY | SLIPPERY, alpha=1, frame=[0,616][320,640], globalScale=1, applicationInfo.name=, applicationInfo.token=<null>, touchableRegion=<empty>, ownerPid=1283, ownerUid=10180, dispatchingTimeout=5000ms, token=0x7f1f9e1af410, touchOcclusionMode=BLOCK_UNTRUSTED
+      transform (ROT_0) (TRANSLATE)
+          1.0000  0.0000  -0.0000
+          0.0000  1.0000  -616.0000
+          0.0000  0.0000  1.0000
+      4: name=fd782c1 StatusBar, id=87, displayId=0, inputConfig=NOT_FOCUSABLE | TRUSTED_OVERLAY, alpha=1, frame=[0,0][320,24], globalScale=1, applicationInfo.name=, applicationInfo.token=<null>, touchableRegion=[0,0][320,24], ownerPid=1030, ownerUid=10186, dispatchingTimeout=5000ms, token=0x7f1f9e19d550, touchOcclusionMode=BLOCK_UNTRUSTED
+      transform (ROT_0) (IDENTITY)
+      5: name=6461878 com.android.settings/com.android.settings.Settings, id=121, displayId=0, inputConfig=0x0, alpha=1, frame=[0,0][320,640], globalScale=1, applicationInfo.name=ActivityRecord{168678237 u0 com.android.settings/.Settings t8}, applicationInfo.token=0x7f203e178ab0, touchableRegion=[0,0][320,640], ownerPid=1270, ownerUid=1000, dispatchingTimeout=5000ms, token=0x7f1f9e17c750, touchOcclusionMode=BLOCK_UNTRUSTED
+      transform (ROT_0) (IDENTITY)
+      6: name=c50a46 ActivityRecordInputSink com.android.settings/.homepage.SettingsHomepageActivity, id=117, displayId=0, inputConfig=NO_INPUT_CHANNEL | NOT_FOCUSABLE, alpha=1, frame=[0,0][0,0], globalScale=0, applicationInfo.name=, applicationInfo.token=<null>, touchableRegion=[-3200,-6400][3200,6400], ownerPid=675, ownerUid=1000, dispatchingTimeout=0ms, token=0x0, touchOcclusionMode=BLOCK_UNTRUSTED
+      transform (ROT_0) (IDENTITY)
+      7: name=Dim layer#60, id=60, displayId=0, inputConfig=NO_INPUT_CHANNEL | NOT_VISIBLE, alpha=1, frame=[0,0][0,0], globalScale=1, applicationInfo.name=, applicationInfo.token=<null>, touchableRegion=<empty>, ownerPid=1030, ownerUid=10186, dispatchingTimeout=5000ms, token=0x0, touchOcclusionMode=BLOCK_UNTRUSTED
+      transform (ROT_0) (IDENTITY)
+      8: name=Dim layer#59, id=59, displayId=0, inputConfig=NO_INPUT_CHANNEL | NOT_VISIBLE, alpha=1, frame=[0,0][0,0], globalScale=1, applicationInfo.name=, applicationInfo.token=<null>, touchableRegion=<empty>, ownerPid=1030, ownerUid=10186, dispatchingTimeout=5000ms, token=0x0, touchOcclusionMode=BLOCK_UNTRUSTED
+      transform (ROT_0) (IDENTITY)
+      9: name=1d885ae ActivityRecordInputSink com.google.android.apps.nexuslauncher/.NexusLauncherActivity, id=68, displayId=0, inputConfig=NO_INPUT_CHANNEL | NOT_VISIBLE | NOT_FOCUSABLE | NOT_TOUCHABLE, alpha=1, frame=[0,0][0,0], globalScale=0, applicationInfo.name=, applicationInfo.token=<null>, touchableRegion=[-3200,-6400][3200,6400], ownerPid=675, ownerUid=1000, dispatchingTimeout=0ms, token=0x0, touchOcclusionMode=BLOCK_UNTRUSTED
+      transform (ROT_0) (IDENTITY)
+      10: name=[Gesture Monitor] minus-one, id=99, displayId=0, inputConfig=NOT_VISIBLE | NOT_FOCUSABLE | TRUSTED_OVERLAY | SPY, alpha=1, frame=[0,0][0,0], globalScale=1, applicationInfo.name=[Gesture Monitor] minus-one, applicationInfo.token=<null>, touchableRegion=[-3200,-6400][3200,6400], ownerPid=1283, ownerUid=10180, dispatchingTimeout=5000ms, token=0x7f1f9e199e90, touchOcclusionMode=BLOCK_UNTRUSTED
+      transform (ROT_0) (IDENTITY)
+      11: name=Wallpaper BBQ wrapper#72, id=72, displayId=0, inputConfig=NO_INPUT_CHANNEL | NOT_VISIBLE, alpha=1, frame=[-16,-32][618,672], globalScale=1, applicationInfo.name=, applicationInfo.token=<null>, touchableRegion=<empty>, ownerPid=1030, ownerUid=10186, dispatchingTimeout=5000ms, token=0x0, touchOcclusionMode=BLOCK_UNTRUSTED
+      transform (ROT_0) (SCALE TRANSLATE)
+          1.4552  -0.0000  23.2828
+          -0.0000  1.4545  46.5455
+          0.0000  0.0000  1.0000
+      12: name=ec45fba com.android.systemui.wallpapers.ImageWallpaper, id=71, displayId=0, inputConfig=NOT_VISIBLE | NOT_FOCUSABLE | NOT_TOUCHABLE | IS_WALLPAPER, alpha=1, frame=[-16,-32][-16,-32], globalScale=1, applicationInfo.name=, applicationInfo.token=<null>, touchableRegion=<empty>, ownerPid=1030, ownerUid=10186, dispatchingTimeout=5000ms, token=0x7f1f9e1b4750, touchOcclusionMode=BLOCK_UNTRUSTED
+      transform (ROT_0) (SCALE TRANSLATE)
+          1.4552  -0.0000  23.2828
+          -0.0000  1.4545  46.5455
+          0.0000  0.0000  1.0000
+  mMaximumObscuringOpacityForTouch: 0.800000

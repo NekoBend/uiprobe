@@ -34,6 +34,7 @@ from uiprobe.errors import (
     ScreenshotFailedError,
     UiprobeError,
 )
+from uiprobe.inputwindows import InputWindow, read_window_at
 from uiprobe.model import (
     Bounds,
     Element,
@@ -41,6 +42,7 @@ from uiprobe.model import (
     parse_uiautomator_dump,
     shorten_activity,
 )
+from uiprobe.packageuid import PackageUid, parse_package_uid
 from uiprobe.pngfile import check_png
 
 if TYPE_CHECKING:
@@ -93,16 +95,27 @@ PIN_WAIT_STOPPED: Final = "pin_wait_stopped"
 PIN_NOT_PROVEN: Final = "pin_not_proven"
 
 
+# Android gives each user this many uids: uid = user * 100000 + app id.
+_UIDS_PER_USER: Final = 100000
+
+
 class FocusedWindow(NamedTuple):
     """The window that has input focus: its owner package, title and hash.
 
     ``window`` is the hash ``dumpsys window`` prints for the window, which
-    tells two windows with the same owner and title apart.
+    tells two windows with the same owner and title apart. ``user`` is the
+    Android user it belongs to (the ``u<N>`` of ``Window{<hash> u<N> ...}``),
+    or -1 when the window's owner uid (``mOwnerUid=``, user * 100000 + app
+    id) names another user. ``owner_uid`` is that full uid (on the emulators
+    checked, API 24, 30, 33 to 36, the focused app window's equals the app's
+    uid), None when not read.
     """
 
     owner: str
     title: str
     window: str
+    user: int = 0
+    owner_uid: int | None = None
 
 
 class DeviceIdentity(NamedTuple):
@@ -958,21 +971,23 @@ def _read_source(text: str, source: _Source) -> tuple[str, str] | object | None:
 
 _CURRENT_FOCUS_CLAIM: Final = re.compile(r"\s*mCurrentFocus=")
 _CURRENT_FOCUS: Final = re.compile(
-    r"\s*mCurrentFocus=Window\{([0-9a-f]{1,16}) u[0-9]{1,3} ([^{}\r\n]{1,512})\}\s*"
+    r"\s*mCurrentFocus=Window\{([0-9a-f]{1,16}) u([0-9]{1,3}) ([^{}\r\n]{1,512})\}\s*"
 )
 _WINDOW_HEAD: Final = re.compile(
-    r"  Window #[0-9]{1,4} Window\{([0-9a-f]{1,16}) u[0-9]{1,3} ([^{}\r\n]{1,512})\}:"
+    r"  Window #[0-9]{1,4} Window\{([0-9a-f]{1,16}) u([0-9]{1,3}) ([^{}\r\n]{1,512})\}:"
 )
 # The system writes this line; 24 has mShowToOwnerOnly, 30 and 36 showForAllUsers.
 _WINDOW_OWNER: Final = re.compile(
-    r"    mOwnerUid=[0-9]{1,10} (?:mShowToOwnerOnly|showForAllUsers)=(?:true|false)"
-    r" package=([A-Za-z][A-Za-z0-9_]{0,254}(?:\.[A-Za-z][A-Za-z0-9_]{0,254}){0,64})"
+    r"    mOwnerUid=(?P<uid>[0-9]{1,10})"
+    r" (?:mShowToOwnerOnly|showForAllUsers)=(?:true|false)"
+    r" package=(?P<package>[A-Za-z][A-Za-z0-9_]{0,254}"
+    r"(?:\.[A-Za-z][A-Za-z0-9_]{0,254}){0,64})"
     r" appop=[A-Z_]{1,64}"
 )
 
 
-def _read_current_focus(text: str) -> tuple[str, str] | None:
-    """The ``(hash, title)`` of the focused window, or None.
+def _read_current_focus(text: str) -> tuple[str, str, str] | None:
+    """The ``(hash, title, user)`` of the focused window, or None.
 
     Every line that claims ``mCurrentFocus`` must be well formed and all must
     name the same window; anything else is None.
@@ -982,18 +997,20 @@ def _read_current_focus(text: str) -> tuple[str, str] | None:
         for line in text.split("\n")
         if _CURRENT_FOCUS_CLAIM.match(line)
     }
-    windows: set[tuple[str, str]] = set()
+    windows: set[tuple[str, str, str]] = set()
     for line in lines:
         match = (
             _CURRENT_FOCUS.fullmatch(line) if len(line) <= _MAX_DUMPSYS_LINE else None
         )
         if match is None:
             return None
-        windows.add((match[1], match[2]))
+        windows.add((match[1], match[3], match[2]))
     return windows.pop() if len(windows) == 1 else None
 
 
-def _read_window_owner(text: str, window: str, title: str) -> FocusedWindow | None:
+def _read_window_owner(
+    text: str, window: str, title: str, user: str
+) -> FocusedWindow | None:
     """The owner of window `window` from its block, or None (see focused_window)."""
     lines = [line.rstrip("\r") for line in text.split("\n")]
     heads = [
@@ -1006,10 +1023,15 @@ def _read_window_owner(text: str, window: str, title: str) -> FocusedWindow | No
     index = heads[0]
     line = lines[index]
     head = _WINDOW_HEAD.fullmatch(line) if len(line) <= _MAX_DUMPSYS_LINE else None
-    if head is None or head[1] != window or head[2] != title:
+    if head is None or head[1] != window or head[2] != user or head[3] != title:
         return None
     owner = _WINDOW_OWNER.fullmatch(lines[index + 2])
-    return None if owner is None else FocusedWindow(owner[1], title, window)
+    if owner is None:
+        return None
+    # The owner uid tells the user too (user * 100000 + app id); when it
+    # disagrees with u<N>, the user is not known: -1, which no check takes.
+    known = int(user) if int(owner["uid"]) // _UIDS_PER_USER == int(user) else -1
+    return FocusedWindow(owner["package"], title, window, known, int(owner["uid"]))
 
 
 _BOOL = r"(true|false)"
@@ -2488,6 +2510,52 @@ class Device:
         # No mark is set here: the identity read itself went out only with a
         # current proof (see `_check_listed`), which a proof had set.
 
+    def window_at(self, point: tuple[int, int]) -> InputWindow | str:
+        """Return the window a touch at `point` would reach, or why that is
+        not known.
+
+        Reads ``dumpsys input`` once and takes the topmost window of display
+        0 that takes touches at `point` (see `uiprobe.inputwindows`). The
+        string is one of ``no_list``, ``line_format``, ``region_format``,
+        ``rotation`` (the display is rotated, or its orientation cannot be
+        read), ``no_window`` (no window takes a touch there) or ``portal``
+        (the window there forwards touches to another display).
+
+        Raises:
+            AdbError: The adb protocol or the command failed.
+            AdbServerUnavailableError: The adb server cannot be reached.
+            DeviceNotFoundError: The device is gone.
+            DeviceOfflineError: The device is offline.
+            DeviceUnauthorizedError: The device has not authorized this host.
+        """
+        return read_window_at(self._shell("dumpsys input"), point)
+
+    def package_uid(self, package: str) -> PackageUid | None:
+        """Return the app id the system gave `package` and whether the package
+        shares it, None when not readable.
+
+        Reads ``userId=`` or ``appId=`` and ``sharedUser=`` from the
+        package's own stanza of ``dumpsys package <package>`` (see
+        `uiprobe.packageuid`); a package that is not installed, or whose
+        stanzas disagree, gives None. The app id is the uid of the package's
+        windows for Android user 0 only. It can change when the app is
+        installed again.
+
+        Raises:
+            TypeError, ValueError: `package` is not a valid package name
+                (before any request).
+            AdbError: The adb protocol or the command failed.
+            AdbServerUnavailableError: The adb server cannot be reached.
+            DeviceNotFoundError: The device is gone.
+            DeviceOfflineError: The device is offline.
+            DeviceUnauthorizedError: The device has not authorized this host.
+        """
+        if isinstance(package, str):
+            package = str.__str__(package)
+        check_package(package)
+        text = self._shell(quote_args("dumpsys", "package", package))
+        return parse_package_uid(text, package)
+
     def keyboard_shown(self) -> bool | None:
         """Return whether the soft keyboard is shown, or None when unknown.
 
@@ -2548,6 +2616,7 @@ class Device:
             api_level=self.api_level() if details else None,
             display=display,
             elements=tuple(elements),
+            rotation=parsed.rotation,
         )
         self._latest_screen = screen
         self._latest_display_measured = measured is not None

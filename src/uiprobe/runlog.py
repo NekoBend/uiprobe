@@ -153,6 +153,19 @@ def _json_text(value: dict[str, object], *, indent: int | None = None) -> str:
     return _encoded(dumps(value, indent=indent, allow_nan=False))
 
 
+def _check_details(details: Mapping[str, str | int]) -> dict[str, object]:
+    checked: dict[str, object] = {}
+    for key, value in details.items():
+        _check_text("details key", key)
+        if isinstance(value, bool) or not isinstance(value, str | int):
+            msg = f"details values must be str or int, not {type(value).__name__}"
+            raise TypeError(msg)
+        checked[key] = (
+            _check_text("details value", value) if isinstance(value, str) else value
+        )
+    return checked
+
+
 def _check_number(name: str, value: object) -> int:
     if isinstance(value, bool) or not isinstance(value, int):
         msg = f"{name} must be an int, not {type(value).__name__}"
@@ -353,6 +366,7 @@ class RunWriter:
         started_at: datetime | None = None,
         back_on_other_screens: bool = False,
         repin: bool | None = None,
+        check_tap_window: bool | None = None,
     ) -> RunWriter:
         """Make the run folder `out` and write ``run-start.json`` into it.
 
@@ -362,7 +376,9 @@ class RunWriter:
         `back_on_other_screens` is written as given (the crawl's
         ``Policy.back_on_other_screens``). `repin`, when given, is written as
         ``repin``: whether a renumbered transport may be followed in this run
-        (the device's boot id could be read).
+        (the device's boot id could be read). `check_tap_window`, when
+        given, is written as ``check_tap_window`` (the crawl's
+        ``Policy.check_tap_window``).
 
         Before anything is made, `out` gets the checks of
         `uiprobe.pngfile.check_new_path`: it must not be empty, hold a null
@@ -397,6 +413,9 @@ class RunWriter:
         if repin is not None and not isinstance(repin, bool):
             msg = "repin must be a bool or None"
             raise TypeError(msg)
+        if check_tap_window is not None and not isinstance(check_tap_window, bool):
+            msg = "check_tap_window must be a bool or None"
+            raise TypeError(msg)
         words = _check_texts("deny_words", deny_words)
         limit_values = _limits_dict(limits)
         when = _check_moment("started_at", _now() if started_at is None else started_at)
@@ -412,6 +431,8 @@ class RunWriter:
         }
         if repin is not None:
             record["repin"] = repin
+        if check_tap_window is not None:
+            record["check_tap_window"] = check_tap_window
         text = _json_text(record, indent=2) + "\n"
         try:
             _make_dir(folder)  # the very str that was checked
@@ -536,6 +557,7 @@ class RunWriter:
         *,
         dump_failed: bool = False,
         not_sent: str | None = None,
+        details: Mapping[str, str | int] | None = None,
     ) -> None:
         """Write the line that says where an action led, or that it was not sent.
 
@@ -544,10 +566,16 @@ class RunWriter:
         the action whose start line was written was then not sent; the line
         then has ``not_sent: true`` and ``reason``, and neither ``dump_failed``
         nor ``to_screen_id`` (both must be left at their defaults).
+        `details`, only with `not_sent`, is written as ``details``: short
+        words or numbers that say more about why (for example the window that
+        would have taken a tap).
         """
         if not isinstance(dump_failed, bool):
             msg = "dump_failed must be a bool"
             raise TypeError(msg)
+        if details is not None and not_sent is None:
+            msg = "details are written only for an action that was not sent"
+            raise ValueError(msg)
         if not_sent is not None:
             _check_text("not_sent", not_sent)
             if dump_failed or to_screen_id is not None:
@@ -560,6 +588,8 @@ class RunWriter:
                 "not_sent": True,
                 "reason": not_sent,
             }
+            if details:
+                skipped["details"] = _check_details(details)
             self._append("transitions.jsonl", _json_text(skipped) + "\n")
             return
         line: dict[str, object] = {
