@@ -13,20 +13,26 @@ only through the reader's own boundaries and regular expressions:
 * a window line the reader read into a window, cut by
   `uiprobe.inputwindows.window_line_fields` (the name as its length, each
   field after it as a known key with a type tag, a known value word or a
-  length);
-* a ``Viewport`` line that matches the reader's form whole, shown part by
-  part (quoted values as one length);
+  length; a quoted value as one length);
+* a ``Viewport`` line the reader read for the orientation of the display
+  asked for (`Verdict.viewports`), shown part by part with the orientation
+  it read (quoted values as one length);
 * the headings and lines the reader matches by its own patterns: its
   header, ``Windows:``, ``Display: N``, the lines a list ends at,
   ``logicalSize=``, transform lines and their matrix rows.
 
-Every other line, a window line the reader refused or did not reach
-included, is shown as its kind and one ``<text:LEN>``. A row number or a
-display number is shown only when the reader verified it (a row it read; a
-display whose rows it all read, or the display asked for); otherwise only
-how many digits it has (``<num:W>``). Counts, lengths and indents stop at
+Every other line, a window line the reader refused or did not reach and
+any other Viewport-shaped line included, is shown as its kind and one
+``<text:LEN>``. No number of the output is shown but the row number of a
+row the reader read (it is the row's place, which the reader checked), the
+orientation of a Viewport line it read, and a display number written ``0``
+when display 0 was asked for; every other number is shown as its width
+(``<num:W>``, a minus sign kept). Counts, lengths and indents stop at
 `CAP`. So every string is a constant, a member of a fixed vocabulary of this
-module, a tag or such a number.
+module, a tag or such a number. Text an app sets that holds line breaks can
+still make lines the reader matches by its patterns (a transform line, a
+heading); the words of this module's vocabulary in them are then shown as
+such (``SCALE``), never other text and never their numbers.
 
 The one exception is opt-in: with ``show_flag_names`` an unknown name in the
 ``flags=``, ``inputConfig=`` or ``inputFeatures=`` field of a row of a found
@@ -53,7 +59,6 @@ from uiprobe.inputwindows import (
     _TRANSFORM,
     _VIEWPORT,
     RULES,
-    ListSpan,
     RowFields,
     Verdict,
     explain_input_windows,
@@ -84,8 +89,8 @@ NOTICE_SHOWN: Final = (
     "this output contains no device serial, app or window names, coordinates,"
     " accounts or network values, except that --show-flag-names prints"
     " unknown upper-case flag names verbatim from the device: any device text,"
-    " including a window name with or without a line break, may appear as such"
-    " a name, so this output may include a serial"
+    " numbers included, and a window name with or without a line break, may"
+    " appear as such a name, so this output may include a serial"
 )
 DISPATCHER: Final = "dispatcher"
 INPUT_READER: Final = "input_reader"
@@ -237,10 +242,10 @@ class LineShape:
 class ListRows:
     """One window list: its place among the lists (from 1), whether it is the
     list of one ``Display:`` section (``per_display``; False for the one list
-    of every display, API 24 to 28), that display's number (None when it is
-    not verified, see the module, or for the one list), how many digits the
-    number has, how many window rows the list has and whether the check
-    refused in it."""
+    of every display, API 24 to 28), that display's number (only 0, when
+    display 0 was asked for, see the module; else None), how many digits the
+    number has, how many window rows the list has, whether the check
+    refused in it and whether the number has a minus sign."""
 
     position: int
     per_display: bool
@@ -248,6 +253,7 @@ class ListRows:
     display_digits: int
     rows: int
     failed: bool
+    negative: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -319,6 +325,7 @@ class TapWindowDiagnosis:
                     "per_display": item.per_display,
                     "display": item.display,
                     "display_digits": _capped(item.display_digits),
+                    "display_negative": item.negative,
                     "rows": _capped(item.rows),
                     "failed": item.failed,
                 }
@@ -390,7 +397,8 @@ def _list_text(item: ListRows) -> str:
     if not item.per_display:
         display = "every display"
     elif item.display is None:
-        display = f"display <num:{_count(item.display_digits)}>"
+        sign = "-" if item.negative else ""
+        display = f"display {sign}<num:{_count(item.display_digits)}>"
     else:
         display = f"display {item.display}"
     failed = ", the check refused here" if item.failed else ""
@@ -469,7 +477,7 @@ def _plain(value: str, *, words: bool) -> str:
     numbers = _NUMBER_LIST.fullmatch(value)
     if numbers is not None:
         return _tag("list", numbers[1].count(",") + 1)
-    if len(value) >= 2 and value[0] == value[-1] == "'":
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in "'\"":
         return _tag("quoted", len(value) - 2)
     return _tag("word" if _WORD.fullmatch(value) else "text", len(value))
 
@@ -521,15 +529,12 @@ def _end_tokens(text: str) -> list[str]:
 
 
 def _transform_tokens(match: re.Match[str]) -> list[str]:
-    rot = f"ROT_{match['rot']}"
-    tokens = [
-        "transform",
-        rot if rot in TRANSFORM_WORDS else "ROT_" + _tag("num", len(match["rot"])),
-    ]
-    tokens += [
-        w if w in TRANSFORM_WORDS else _tag("word", len(w))
-        for w in match["kind"].split()
-    ]
+    """A transform line's tokens: the rotation's width only (its digits are
+    device text; the rule says whether the reader found it rotated) and the
+    kind words."""
+    tokens = ["transform", "ROT_" + _tag("num", len(match["rot"]))]
+    words = match["kind"].split()
+    tokens += [w if w in TRANSFORM_WORDS else _tag("word", len(w)) for w in words]
     return tokens
 
 
@@ -560,15 +565,24 @@ def _viewport_tokens(match: re.Match[str]) -> list[str]:
     return tokens
 
 
-def _heading(text: str, *, verified: bool) -> list[str] | None:
+def _display_number(number: str, *, display_id: int) -> str:
+    """The number of a ``Display:`` line: ``0`` when it is written ``0`` and
+    display 0 was asked for, else its sign and width only."""
+    if number == "0" and display_id == 0:
+        return "0"
+    digits = number.removeprefix("-")
+    return ("-" if number.startswith("-") else "") + _tag("num", len(digits))
+
+
+def _heading(text: str, *, display_id: int) -> list[str] | None:
     """The tokens of a heading the reader matches by its own patterns: its
     header, ``Windows:``, ``Display: N``, the lines a list ends at and
     ``logicalSize=``; None for any other line."""
     if text in (_HEADER, "Windows:"):
         return [text]
     if _DISPLAY.match(text):
-        digits = text.removeprefix("Display: ").lstrip("-")
-        return ["Display:", _number(digits, verified=verified)]
+        number = text.removeprefix("Display: ")
+        return ["Display:", _display_number(number, display_id=display_id)]
     if _LIST_END.match(text):
         return _end_tokens(text)
     if text.startswith("logicalSize="):
@@ -577,11 +591,12 @@ def _heading(text: str, *, verified: bool) -> list[str] | None:
 
 
 def _reader_line(
-    line: str, text: str, *, verified: bool
+    line: str, text: str, *, viewport: bool, display_id: int
 ) -> tuple[str, list[str]] | None:
     """The kind and tokens of a line the reader matches by its own patterns
-    (no window line), or None."""
-    heading = _heading(text, verified=verified)
+    (no window line), or None. A Viewport line shows its parts only when the
+    reader read it for the display's orientation (`viewport`)."""
+    heading = _heading(text, display_id=display_id)
     if heading is not None:
         return "heading", heading
     transform = _TRANSFORM.match(text)
@@ -589,9 +604,9 @@ def _reader_line(
         return "transform", _transform_tokens(transform)
     if _MATRIX_ROW.match(text):
         return "matrix_row", ["<dec>", "<dec>", "<dec>"]
-    viewport = _VIEWPORT.fullmatch(line)
-    if viewport is not None:
-        return "viewport", _viewport_tokens(viewport)
+    match = _VIEWPORT.fullmatch(line) if viewport else None
+    if match is not None:
+        return "viewport", _viewport_tokens(match)
     return None
 
 
@@ -599,17 +614,19 @@ def shape_line(
     line: str,
     *,
     accepted: bool = False,
+    viewport: bool = False,
+    display_id: int = 0,
     show_flag_names: bool = False,
     in_list: bool = False,
 ) -> tuple[str, list[str]]:
     """Return the kind (one of `LINE_KINDS`) and tokens of one line of
     ``dumpsys input``; no text of the line is in them (see the module).
 
-    `accepted` says that the reader verified the line: it read the window
-    line into a window, or the ``Display:`` line heads a verified list. A
-    window line shows its fields only when accepted, or with both
-    `show_flag_names` and `in_list` (a row of a found list), which also lets
-    unknown flag names show.
+    `accepted` says that the reader read the window line into a window;
+    `viewport` that it read the Viewport line for the orientation of
+    `display_id`, the display asked for. A window line shows its fields
+    only when accepted, or with both `show_flag_names` and `in_list` (a row
+    of a found list), which also lets unknown flag names show.
     """
     text = line.strip()
     if not text:
@@ -617,7 +634,7 @@ def shape_line(
     if _INDEX.match(text):
         show = show_flag_names and in_list
         return "window_row", _window_row(text, accepted=accepted, show=show)
-    known = _reader_line(line, text, verified=accepted)
+    known = _reader_line(line, text, viewport=viewport, display_id=display_id)
     if known is not None:
         return known
     return "other", [_tag("text", len(text))]
@@ -629,13 +646,13 @@ def _indent(line: str) -> int:
 
 @dataclass(frozen=True, slots=True)
 class _Dump:
-    """The lines of the output, what the reader concluded, which lines it
-    verified (`shape_line`), the lines of the lists it found (only rows
-    there may show unknown flag names, and only with `show`)."""
+    """The lines of the output, what the reader concluded, the display asked
+    for, the lines of the lists it found (only rows there may show unknown
+    flag names, and only with `show`)."""
 
     lines: list[str]
     verdict: Verdict
-    verified: frozenset[int]
+    display_id: int
     listed: frozenset[int]
     show: bool
 
@@ -644,7 +661,9 @@ def _shape(dump: _Dump, index: int, *, failing: bool) -> LineShape:
     line = dump.lines[index]
     kind, tokens = shape_line(
         line,
-        accepted=index in dump.verified,
+        accepted=index in dump.verdict.accepted,
+        viewport=index in dump.verdict.viewports,
+        display_id=dump.display_id,
         show_flag_names=dump.show,
         in_list=index in dump.listed,
     )
@@ -709,37 +728,25 @@ def _outline(dump: _Dump) -> tuple[LineShape, ...]:
     return tuple(_shape(dump, i, failing=False) for i in chosen[:_OUTLINE_LINES])
 
 
-def _row_lines(lines: list[str], span: ListSpan) -> list[int]:
-    """The indices of the lines of `span` the reader counts as rows."""
-    return [at for at in span.lines if _INDEX.match(lines[at].strip())]
-
-
-def _verified_lists(lines: list[str], verdict: Verdict) -> set[int]:
-    """The heads of the lists whose rows the reader all read into windows."""
-    return {
-        span.head
-        for span in verdict.lists
-        if span.rows and all(at in verdict.accepted for at in _row_lines(lines, span))
-    }
-
-
-def _display_shown(span: ListSpan, verified: set[int], display_id: int) -> bool:
-    """Whether a list's display number may be shown: the display asked for,
-    or a list the reader all read, and of at most four digits."""
-    trusted = span.display == display_id or span.head in verified
-    return trusted and span.digits <= _SMALL_DIGITS
-
-
-def _lists(
-    verdict: Verdict, verified: set[int], display_id: int
-) -> tuple[ListRows, ...]:
+def _lists(verdict: Verdict, display_id: int) -> tuple[ListRows, ...]:
+    """The lists found; a display number is shown only when it is 0, written
+    ``0``, and display 0 was asked for (see the module)."""
     rows: list[ListRows] = []
     for position, span in enumerate(verdict.lists, start=1):
         per_display = span.display is not None
-        shown = span.display if _display_shown(span, verified, display_id) else None
+        zero = span.display == 0 and span.digits == 1 and not span.negative
+        shown = 0 if zero and display_id == 0 else None
         failed = verdict.list_head is not None and verdict.list_head == span.head
         rows.append(
-            ListRows(position, per_display, shown, span.digits, span.rows, failed)
+            ListRows(
+                position,
+                per_display,
+                shown,
+                span.digits,
+                span.rows,
+                failed,
+                negative=span.negative,
+            )
         )
     return tuple(rows)
 
@@ -749,7 +756,7 @@ def _row_form(
 ) -> tuple[bool, bool, tuple[str, ...], bool]:
     """(recognised, quoted name, fields, followed by transform lines) of a
     row `line`, `after` being the list's next line (None: the last)."""
-    transform = after is not None and after.strip().startswith("transform (")
+    transform = after is not None and _TRANSFORM.match(after.strip()) is not None
     cut = window_line_fields(line) if accepted else None
     if cut is None:
         return False, False, (), transform
@@ -791,14 +798,8 @@ def diagnose_tap_window(
     if verdict.rule is not None and verdict.rule not in RULES[verdict.reason or ""]:
         msg = "the reader refused with a rule outside RULES"  # a bug, not the text
         raise AssertionError(msg)
-    heads = _verified_lists(lines, verdict)
-    sections = {
-        span.section
-        for span in verdict.lists
-        if span.section is not None and _display_shown(span, heads, display_id)
-    }
     listed = frozenset(i for span in verdict.lists for i in span.lines)
-    dump = _Dump(lines, verdict, verdict.accepted | sections, listed, show_flag_names)
+    dump = _Dump(lines, verdict, display_id, listed, show_flag_names)
     part: str | None = None
     number: int | None = None
     if verdict.line is not None:
@@ -809,7 +810,7 @@ def diagnose_tap_window(
         verdict.rule,
         part,
         number,
-        _lists(verdict, heads, display_id),
+        _lists(verdict, display_id),
         shapes,
         _forms(lines, verdict),
         show_flag_names=show_flag_names,

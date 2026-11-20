@@ -1109,11 +1109,14 @@ def _read(
     return rotated if rotated is not None else tuple(windows)
 
 
-def _viewport_of(line: str, display_id: int, at: int) -> int | _Refusal | None:
+def _viewport_of(
+    line: str, display_id: int, at: int, used: set[int] | None = None
+) -> int | _Refusal | None:
     """The orientation a line (at index `at`) gives for `display_id`, None
     when it is no Viewport line of that display, or why it cannot be read: a
     display number too long to read (it could be this one), a line of no
-    known form, or a scaled or moved display."""
+    known form, or a scaled or moved display. A line read whole is added to
+    `used`."""
     claim = _VIEWPORT_CLAIM.match(line)
     try:
         if claim is None or _number(claim["display"]) != display_id:
@@ -1123,21 +1126,26 @@ def _viewport_of(line: str, display_id: int, at: int) -> int | _Refusal | None:
     match = _VIEWPORT.fullmatch(line)
     if match is None:
         return _Refusal(ROTATION, "viewport_malformed", at)
+    if used is not None:
+        used.add(at)
     if match["logical"] != match["physical"]:
         return _Refusal(ROTATION, "scaled", at)
     return int(match["orientation"])
 
 
-def _orientation(lines: list[str], display_id: int) -> tuple[int, int] | _Refusal:
+def _orientation(
+    lines: list[str], display_id: int, used: set[int] | None = None
+) -> tuple[int, int] | _Refusal:
     """The orientation of `display_id` (see `display_orientation`) with the
     index of the first line that says it, or why it cannot be read
-    (`ROTATION`)."""
+    (`ROTATION`), adding to `used` the index of each Viewport line it read
+    whole."""
     start = _dispatcher_start(lines)
     if isinstance(start, _Refusal):
         return _Refusal(ROTATION, start.rule, start.line)
     said: dict[int, int] = {}  # orientation: the first line that said it
     for i, line in enumerate(lines[:start]):
-        read = _viewport_of(line, display_id, i)
+        read = _viewport_of(line, display_id, i, used)
         if isinstance(read, _Refusal):
             return read
         if read is not None:
@@ -1165,15 +1173,18 @@ def display_orientation(text: str, display_id: int = 0) -> int | None:
 
 
 def _checked(
-    lines: list[str], display_id: int, accepted: set[int] | None = None
+    lines: list[str],
+    display_id: int,
+    accepted: set[int] | None = None,
+    used: set[int] | None = None,
 ) -> tuple[InputWindow, ...] | _Refusal:
     """The windows of `display_id` when both the list and the display's
     orientation read and the orientation is 0, else why not (for `accepted`
-    see `_read`)."""
+    see `_read`, for `used` `_orientation`)."""
     read = _parse(lines, display_id, accepted)
     if isinstance(read, _Refusal):
         return read
-    turned = _orientation(lines, display_id)
+    turned = _orientation(lines, display_id, used)
     if isinstance(turned, _Refusal):
         return turned
     orientation, line = turned
@@ -1189,8 +1200,9 @@ class ListSpan:
     list of every display (API 24 to 28), and ``digits`` how many digits
     that number is written with (0 for the one list); ``head`` the index of
     its ``Windows:`` line in the text's lines, ``lines`` the indices of its
-    lines, ``rows`` how many of them are window lines and ``section`` the
-    index of its ``Display:`` line (None for the one list).
+    lines, ``rows`` how many of them are window lines, ``section`` the
+    index of its ``Display:`` line (None for the one list) and ``negative``
+    whether that number is written with a minus sign.
     """
 
     display: int | None
@@ -1199,6 +1211,7 @@ class ListSpan:
     lines: tuple[int, ...]
     rows: int
     section: int | None = None
+    negative: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -1217,7 +1230,9 @@ class Verdict:
     ``end`` the index of the first line after the dispatcher's part (the
     first line not more indented than its header), None without ``start``;
     ``accepted`` the indices of the window lines the reader read into a
-    window (of any list it read, before it refused).
+    window (of any list it read, before it refused); ``viewports`` the
+    indices of the Viewport lines of the display it read whole for the
+    display's orientation (none when it refused before it read them).
     """
 
     reason: str | None
@@ -1228,6 +1243,7 @@ class Verdict:
     list_head: int | None = None
     end: int | None = None
     accepted: frozenset[int] = frozenset()
+    viewports: frozenset[int] = frozenset()
 
 
 def _spans(lines: list[str], start: int) -> tuple[ListSpan, ...]:
@@ -1247,7 +1263,10 @@ def _spans(lines: list[str], start: int) -> tuple[ListSpan, ...]:
         for display, digits, head, at in heads:
             taken = _listed(lines, head).taken
             rows = sum(1 for t in taken if _INDEX.match(lines[t].strip()))
-            spans.append(ListSpan(display, digits, head, tuple(taken), rows, at))
+            negative = at is not None and lines[at].strip().startswith("Display: -")
+            spans.append(
+                ListSpan(display, digits, head, tuple(taken), rows, at, negative)
+            )
     return tuple(spans)
 
 
@@ -1264,13 +1283,31 @@ def explain_input_windows(text: str, display_id: int = 0) -> Verdict:
     lists = () if first is None else _spans(lines, first)
     end = None if first is None else _dispatcher_end(lines, first)
     accepted: set[int] = set()
-    read = _checked(lines, display_id, accepted)
-    taken = frozenset(accepted)
+    used: set[int] = set()
+    read = _checked(lines, display_id, accepted, used)
+    taken, read_viewports = frozenset(accepted), frozenset(used)
     if isinstance(read, _Refusal):
         return Verdict(
-            read.reason, read.rule, read.line, first, lists, read.head, end, taken
+            read.reason,
+            read.rule,
+            read.line,
+            first,
+            lists,
+            read.head,
+            end,
+            taken,
+            read_viewports,
         )
-    return Verdict(None, None, None, first, lists, end=end, accepted=taken)
+    return Verdict(
+        None,
+        None,
+        None,
+        first,
+        lists,
+        end=end,
+        accepted=taken,
+        viewports=read_viewports,
+    )
 
 
 def _dispatcher_end(lines: list[str], start: int) -> int:
@@ -1284,16 +1321,17 @@ def _dispatcher_end(lines: list[str], start: int) -> int:
     return len(lines)
 
 
-# The marks that end a window's name or its applicationInfo.name: each may
-# be in a window line once, or where the name ends cannot be told.
-_ROW_MARKS: Final = (
-    ", id=",
-    ", displayId=",
-    ", applicationInfo.name=",
-    ", applicationInfo.token=",
+# The fields that end a window's name or its applicationInfo.name: each may
+# be in a window line once, in any spelling (``,id=``, ``,  id=``), or where
+# the name ends cannot be told.
+_ROW_MARKS: Final = tuple(
+    re.compile(rf",\s*{re.escape(key)}=")
+    for key in ("id", "displayId", "applicationInfo.name", "applicationInfo.token")
 )
 # Where a field after the name begins (``1HXY=`` of the Samsung form too).
 _FIELD = re.compile(r", ([A-Za-z0-9][A-Za-z0-9_.]*)=")
+_QUOTES: Final = "'\""
+_APP_NAME_END: Final = ", applicationInfo.token="
 
 
 @dataclass(frozen=True, slots=True)
@@ -1301,57 +1339,84 @@ class RowFields:
     """A window line cut the way the reader cuts it (`window_line_fields`):
     whether the name is quoted, its length, and the fields after it as
     (key, value), ``applicationInfo.name`` whole up to
-    ``, applicationInfo.token=``."""
+    ``, applicationInfo.token=`` and a quoted value whole."""
 
     quoted: bool
     name_length: int
     fields: tuple[tuple[str, str], ...]
 
 
+def _value_end(meta: str, key: str, begin: int) -> int | None:
+    """Where the value of field `key` that begins at `begin` ends, or None
+    when that cannot be told: ``applicationInfo.name`` runs to
+    ``, applicationInfo.token=``; a value that opens with a quote runs to
+    the same quote, which must end it; any other value runs to the next
+    field and must hold no quote."""
+    if key == "applicationInfo.name":
+        end = meta.find(_APP_NAME_END, begin)
+        value = meta[begin:end] if end >= 0 else ""
+        if end < 0 or (_has_quote(value) and not _one_quoted(value)):
+            return None
+        return end
+    if begin < len(meta) and meta[begin] in _QUOTES:
+        close = meta.find(meta[begin], begin + 1)
+        if close < 0:
+            return None
+        end = close + 1
+        return end if end == len(meta) or _FIELD.match(meta, end) else None
+    following = _FIELD.search(meta, begin)
+    end = following.start() if following is not None else len(meta)
+    return None if _has_quote(meta[begin:end]) else end
+
+
+def _has_quote(value: str) -> bool:
+    return any(quote in value for quote in _QUOTES)
+
+
+def _one_quoted(value: str) -> bool:
+    """Whether `value` is one quoted run with no other quote in it."""
+    return (
+        len(value) >= 2
+        and value[0] == value[-1]
+        and value[0] in _QUOTES
+        and sum(value.count(quote) for quote in _QUOTES) == 2
+    )
+
+
 def window_line_fields(line: str) -> RowFields | None:
     """Cut a window line where the reader cuts it, or None when where its
-    name ends cannot be told.
+    name or a field ends cannot be told.
 
     The line must match the reader's window line (`_LINE`) with the quoted
     name taken as quoted (a name that starts with a quote read as bare is
-    refused); none of `_ROW_MARKS` may be in it twice, and
-    ``applicationInfo.name`` needs exactly one ``, applicationInfo.token=``
-    after it. Each field runs to the next ``, key=`` (`_NEXT`), and a field
-    holding a quote must be one quoted run."""
+    refused); none of `_ROW_MARKS` may be in it twice in any spelling, and
+    ``applicationInfo.name`` needs ``, applicationInfo.token=`` after it.
+    Each field runs to the next ``, key=`` (`_NEXT`); a quoted value (single
+    or double quotes) is read whole first and must be followed by a field or
+    the end, and a quote anywhere else refuses the line."""
     text = line.strip()
     match = _LINE.match(text)
-    if match is None or any(text.count(mark) > 1 for mark in _ROW_MARKS):
+    if match is None or any(len(mark.findall(text)) > 1 for mark in _ROW_MARKS):
         return None
     quoted = match["quoted"] is not None
-    if not quoted and text.partition(": name=")[2].startswith("'"):
+    if not quoted and text.partition(": name=")[2][:1] in _QUOTES:
         return None
-    app = text.find(", applicationInfo.name=")
-    token = text.find(", applicationInfo.token=")
-    if (app >= 0) != (token >= 0) or token < app:
+    if (", applicationInfo.name=" in text) != (_APP_NAME_END in text):
         return None
     name = match["quoted"] if quoted else match["bare"]
     start = match.start("id") if match["id"] is not None else match.start("fields")
     meta = ", " + text[start:]
-    marks = list(_FIELD.finditer(meta))
     fields: list[tuple[str, str]] = []
-    i = 0
-    while i < len(marks):
-        key, begin = marks[i][1], marks[i].end()
-        i += 1
-        if key == "applicationInfo.name":
-            end = meta.find(", applicationInfo.token=", begin)
-            while i < len(marks) and marks[i].start() < end:
-                i += 1
-        else:
-            end = marks[i].start() if i < len(marks) else len(meta)
-        value = meta[begin:end]
-        # A quote in a value must open and close it, with no other quote:
-        # else where the value ends cannot be told.
-        if "'" in value and not (
-            len(value) >= 2 and value[0] == value[-1] == "'" and value.count("'") == 2
-        ):
+    position = 0
+    while position < len(meta):
+        field = _FIELD.match(meta, position)
+        if field is None:
             return None
-        fields.append((key, value))
+        end = _value_end(meta, field[1], field.end())
+        if end is None:
+            return None
+        fields.append((field[1], meta[field.end() : end]))
+        position = end
     return RowFields(quoted, len(name), tuple(fields))
 
 

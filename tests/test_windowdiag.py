@@ -32,12 +32,14 @@ from uiprobe.inputwindows import (
     explain_input_windows,
     parse_input_windows,
     read_window_at,
+    window_line_fields,
 )
 from uiprobe.windowdiag import (
     KNOWN_KEYS,
     NOTICE,
     NOTICE_SHOWN,
     SCHEMA,
+    TRANSFORM_WORDS,
     diagnose_tap_window,
     shape_line,
 )
@@ -303,13 +305,25 @@ def test_a_viewport_line_the_reader_refused_is_only_its_length():
     assert refused.kind == "other"
     assert len(refused.tokens) == 1
     assert refused.tokens[0].startswith("<text:")
-    matched = found.lines[2]
-    assert matched.kind == "viewport"
-    assert matched.tokens[:4] == (
+    # The reader stopped at the refused line: it did not read the next one.
+    assert found.lines[2].kind == "other"
+
+
+def test_the_viewport_lines_the_reader_read_show_their_parts():
+    found = diagnose_tap_window(CASES["rotated"][0])
+    assert (found.rule, found.part, found.line) == ("rotated", "input_reader", 2)
+    read = [s for s in found.lines if s.kind == "viewport"]
+    assert [s.number for s in read] == [2, 3]
+    assert read[0].tokens == (
         "Viewport INTERNAL:",
         "displayId=<num>",
         "uniqueId=<text:25>",
         "port=<num>",
+        "orientation=1",
+        "logicalFrame=<list:4>",
+        "physicalFrame=<list:4>",
+        "deviceSize=<list:2>",
+        "isActive=<list:1>",
     )
 
 
@@ -343,13 +357,24 @@ def test_lists_of_several_displays_are_counted():
     ]
 
 
-def test_a_display_whose_rows_were_all_read_is_shown():
-    second = _sub(API36, "  Display: 0\n", "  Display: 0\n").split("  Display: 0\n")
-    head, rest = second[0], second[1]
+def test_a_display_number_other_than_0_is_only_its_width():
+    # Display 3's rows all read, but a window name could have written both
+    # its heading and its rows: only display 0, the one asked for, is shown.
+    head, rest = API36.split("  Display: 0\n")
     other = rest.replace("displayId=0", "displayId=3")
     text = head + "  Display: 3\n" + other.rstrip("\n") + "\n  Display: 0\n" + rest
     found = diagnose_tap_window(text)
-    assert [(i.display, i.rows) for i in found.lists][:2] == [(3, 13), (0, 13)]
+    assert [(i.display, i.display_digits, i.rows) for i in found.lists][:2] == [
+        (None, 1, 13),
+        (0, 1, 13),
+    ]
+    minus = _sub(text, "  Display: 3\n", "  Display: -7\n").replace(
+        "displayId=3", "displayId=-7"
+    )
+    found = diagnose_tap_window(minus)
+    assert (found.lists[0].display, found.lists[0].negative) == (None, True)
+    assert "list 1 (display -<num:1>)" in found.to_text()
+    assert shape_line("  Display: -7") == ("heading", ["Display:", "-<num:1>"])
 
 
 VIEWPORT36 = API36.split("\n")[1]
@@ -386,8 +411,12 @@ def test_shapes_of_lines_the_reader_matched():
         "heading",
         ["Input Dispatcher State:"],
     )
-    assert shape_line("  Display: 0") == ("heading", ["Display:", "<num:1>"])
-    assert shape_line("  Display: 0", accepted=True) == ("heading", ["Display:", "0"])
+    assert shape_line("  Display: 0") == ("heading", ["Display:", "0"])
+    assert shape_line("  Display: 0", display_id=1) == (
+        "heading",
+        ["Display:", "<num:1>"],
+    )
+    assert shape_line("  Display: 00") == ("heading", ["Display:", "<num:2>"])
     assert shape_line("    Windows:") == ("heading", ["Windows:"])
     assert shape_line("  Connections:") == ("heading", ["Connections:"])
     assert shape_line("  mMaximumObscuringOpacityForTouch: 0.800000") == (
@@ -404,14 +433,14 @@ def test_shapes_of_lines_the_reader_matched():
     )
     assert shape_line(" transform (ROT_90) (ROTATE TRANSLATE)") == (
         "transform",
-        ["transform", "ROT_90", "ROTATE", "TRANSLATE"],
+        ["transform", "ROT_<num:2>", "ROTATE", "TRANSLATE"],
     )
-    assert shape_line(" transform (ROT_7) (IDENTITY)")[1][1] == "ROT_<num:1>"
     assert shape_line("  -1.0000  0.0000  320.0000") == (
         "matrix_row",
         ["<dec>", "<dec>", "<dec>"],
     )
-    assert shape_line(VIEWPORT36) == (
+    assert shape_line(VIEWPORT36) == ("other", [f"<text:{len(VIEWPORT36.strip())}>"])
+    assert shape_line(VIEWPORT36, viewport=True) == (
         "viewport",
         [
             "Viewport INTERNAL:",
@@ -425,7 +454,7 @@ def test_shapes_of_lines_the_reader_matched():
             "isActive=<list:1>",
         ],
     )
-    assert "densityDpi=<num>" in shape_line(VIEWPORT_SAMSUNG)[1]
+    assert "densityDpi=<num>" in shape_line(VIEWPORT_SAMSUNG, viewport=True)[1]
     # Lines the reader does not match: their kind and length only.
     assert shape_line("  Some vendor line") == ("other", ["<text:16>"])
     assert shape_line("  DispatchEnabled: true") == ("other", ["<text:21>"])
@@ -450,7 +479,7 @@ def test_the_text_report_of_a_failure():
     ]
     assert report[4] == "lines (number, kind, indent, length: tokens):"
     assert report[7] == f"> 26 window_row 6 357: row:<num:1> {_rest(_row(text, 3))}"
-    assert report[6] == "  25 transform 6 34: transform ROT_0 IDENTITY"
+    assert report[6] == "  25 transform 6 34: transform ROT_<num:1> IDENTITY"
 
 
 def test_the_json_report_of_a_readable_list():
@@ -471,6 +500,7 @@ def test_the_json_report_of_a_readable_list():
                 "per_display": False,
                 "display": None,
                 "display_digits": 0,
+                "display_negative": False,
                 "rows": 7,
                 "failed": False,
             }
@@ -797,6 +827,17 @@ PROTECTED = frozenset(
         "Display",
         "Windows",
         "transform",
+        # The reader's words for a value, a transform and a list's end:
+        # vocabulary that may show (see the guide), not what is checked here.
+        "0x0",
+        "null",
+        "empty",
+        "ROT",
+        *TRANSFORM_WORDS,
+        "MonitoringChannels",
+        "Connections",
+        "Viewport",
+        "INTERNAL",
     }
 )
 
@@ -807,8 +848,14 @@ def _same(text: str) -> str:
 
 def _changed(text: str) -> str:
     """`text` with every word and number changed, lengths and the reader's
-    words kept (a 0 stays 0, so no orientation or rotation changes)."""
+    words kept. Digits change by one fixed permutation of 1 to 9 (0 stays
+    0), so numbers that were equal stay equal (a display and its rows) and
+    no orientation or rotation turns 0 or stops being 0."""
     pick = random.Random(len(text))  # noqa: S311 - a test's fixed scrambling
+    digits = list("123456789")
+    while digits == list("123456789"):
+        pick.shuffle(digits)
+    permutation = str.maketrans("123456789", "".join(digits))
 
     def change(match: re.Match[str]) -> str:
         word = match[0]
@@ -817,7 +864,7 @@ def _changed(text: str) -> str:
         out = []
         for char in word:
             if char.isdigit():
-                out.append("0" if char == "0" else pick.choice("123456789"))
+                out.append(char.translate(permutation))
             elif char.isupper():
                 out.append(pick.choice("ABCDEFGHJKMNPQRSTUVWXYZ"))
             else:
@@ -1375,3 +1422,138 @@ def test_a_row_of_no_recognised_form_is_counted():
     assert "1 rows of no recognised form" in found.to_text()
     payload = json.loads(json.dumps(found.to_dict()))
     assert payload["forms"][0]["recognised"] is False
+
+
+# --- round 5: numbers, spellings of a boundary, Viewport lines read ---
+
+FAKE_SECTION = (
+    "T\n  Display: 7319\n    Windows:\n"
+    "      0: name=x, id=1, displayId=7319, inputConfig=0x0, alpha=1,"
+    " frame=[0,0][1,1], globalScale=1, applicationInfo.name=,"
+    " applicationInfo.token=<null>, touchableRegion=<empty>, ownerPid=1, ownerUid=1\n"
+    "      transform (ROT_0) (IDENTITY)\n  MonitoringChannels:\n  X"
+)
+FAKE_VIEWPORT = (
+    "T\n" + API24.split("\n")[1].replace("orientation=0", "orientation=3") + "\n    X"
+)
+DOUBLE_SPACE = (
+    "applicationInfo.name=X, applicationInfo.token=y, trustedOverlay=true, tail=Y,"
+    "  applicationInfo.token=<null>,"
+)
+
+
+def test_a_display_section_inside_a_name_shows_no_number():
+    text = _sub(
+        API36,
+        "  DispatchEnabled: true",
+        f"  DispatchEnabled: true\n  FocusedWindow: name='{FAKE_SECTION}'",
+    )
+    for show in (False, True):
+        found = diagnose_tap_window(text, show_flag_names=show)
+        assert "7319" not in found.to_text()
+        assert "7319" not in json.dumps(found.to_dict())
+        assert all(item.display in {0, None} for item in found.lists)
+
+
+def test_a_viewport_line_inside_a_name_shows_no_orientation():
+    text = _edit_row(
+        API24, 0, "name='Window{b24c1c0 u0 StatusBar}'", f"name='{FAKE_VIEWPORT}'"
+    )
+    found = diagnose_tap_window(text)
+    assert found.reason is not None
+    assert "orientation=3" not in found.to_text()
+    assert all(s.kind != "viewport" for s in found.lines)
+
+
+def test_a_boundary_spelled_twice_refuses_the_cut():
+    text = _edit_row(
+        CASES["unknown_flag"][0],
+        2,
+        "applicationInfo.name=, applicationInfo.token=<null>,",
+        DOUBLE_SPACE,
+    )
+    assert window_line_fields(_row(text, 2)) is None
+    found = diagnose_tap_window(text)
+    assert found.rule == "unknown_flag"  # row 2 was still read into a window
+    row = next(s for s in found.lines if s.tokens[0] == "row:2")
+    assert row.tokens == ("row:2", _rest(_row(text, 2)))
+    for output in (found.to_text(), json.dumps(found.to_dict())):
+        assert "trustedOverlay" not in output
+    assert any(not form.recognised for form in found.forms)
+
+
+def test_a_quoted_value_is_read_whole_before_fields():
+    note = 'vendorNote="x, trustedOverlay=true, tail=y"'
+    row = _row(API36, 3).replace(", alpha=1,", f", {note}, alpha=1,")
+    cut = window_line_fields(row)
+    assert cut is not None
+    assert ("vendorNote", '"x, trustedOverlay=true, tail=y"') in cut.fields
+    tokens = shape_line(row, accepted=True)[1]
+    assert "<unknown_key:10>=<quoted:30>" in tokens
+    assert not any("trustedOverlay" in token for token in tokens)
+    for bad in ('vendorNote="x, a=b', 'vendorNote="x" tail', "vendorNote=a'b"):
+        assert window_line_fields(row.replace(note, bad)) is None
+
+
+def test_the_forms_use_the_readers_transform_pattern():
+    text = (
+        "Input Dispatcher State:\n  Windows:\n    0: name=x\n"
+        "    transform (broken\n  Connections:\n"
+    )
+    found = diagnose_tap_window(text)
+    assert [form.transform for form in found.forms] == [False]
+
+
+def test_changed_values_change_digits_too():
+    assert _changed("T 7319 0 orientation=3") != "T 7319 0 orientation=3"
+    assert re.sub(r"[1-9]", "1", _changed("7319 0 3")) == "1111 0 1"
+    assert len(set(_changed("7 7 7").split())) == 1  # equal numbers stay equal
+
+
+CHOSEN_CASES |= {
+    "display_section_in_a_name": lambda c: _sub(
+        API36,
+        "  DispatchEnabled: true",
+        "  DispatchEnabled: true\n  FocusedWindow: name='" + c(FAKE_SECTION) + "'",
+    ),
+    "display_section_in_a_title": lambda c: _edit_row(
+        API36, 3, "name=a8ea035 Taskbar,", "name=" + c(FAKE_SECTION) + ","
+    ),
+    "viewport_in_a_title": lambda c: _edit_row(
+        API24,
+        0,
+        "name='Window{b24c1c0 u0 StatusBar}'",
+        "name='" + c(FAKE_VIEWPORT) + "'",
+    ),
+    "app_name_double_space_token": lambda c: _edit_row(
+        CASES["unknown_flag"][0],
+        2,
+        "applicationInfo.name=, applicationInfo.token=<null>,",
+        "applicationInfo.name="
+        + c("X, applicationInfo.token=y, trustedOverlay=true, tail=Y")
+        + ",  applicationInfo.token=<null>,",
+    ),
+    "double_quoted_value": lambda c: _edit_row(
+        API36,
+        3,
+        ", alpha=1,",
+        ', vendorNote="' + c("x, trustedOverlay=true, tail=y") + '", alpha=1,',
+    ),
+}
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "display_section_in_a_name",
+        "display_section_in_a_title",
+        "viewport_in_a_title",
+        "app_name_double_space_token",
+        "double_quoted_value",
+    ],
+)
+def test_round_5_inputs_do_not_depend_on_the_values(case):
+    build = CHOSEN_CASES[case]
+    same, changed = build(_same), build(_changed)
+    assert same != changed
+    assert _reports(same, 0) == _reports(changed, 0)
