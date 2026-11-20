@@ -1549,7 +1549,9 @@ def _press_hints(result: CrawlResult) -> list[str]:
     if not result.repin:
         hints.append(
             "the boot id of this device could not be read, so a renumbered"
-            " adb connection ends the run instead of being followed"
+            " adb connection ends the run instead of being followed, and so"
+            " does any failed adb exchange with the device, even on the same"
+            " connection"
         )
     if result.stop_reason == "dump_failed_repeatedly":
         front = result.last_foreground

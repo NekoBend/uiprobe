@@ -1369,7 +1369,8 @@ class Device:
         protocol broke, an interrupt), moves `pin_epoch` before the error
         leaves this method, so a caller
         that swallows the error cannot hide it: the next read proves the
-        device again and the next input is refused.
+        device again (without a pinned boot id it fails the pin instead) and
+        the next input is refused.
         """
         pin = self._pin(strict=strict)  # moves the epoch itself on a failure
         succeeded = False
@@ -1400,12 +1401,21 @@ class Device:
 
         A read goes out on the same condition. When the number is gone from
         the listing, still lists this serial but offline, or something
-        happened since the last proof, the device is proven again first: with
-        a pinned boot id by waiting for it (`_repin`), without one by reading
-        the identity again through the same number when it is listed and
-        ready. Anything else fails the pin. A request made while a wait is
-        under way (from the watch, say) fails the pin too.
+        happened since the last proof, the device is proven again first, by
+        waiting for it (`_repin`); that needs a pinned boot id. Without one
+        the device cannot be proven again at all (another emulator of the
+        same image behind the same number would read the same), so any of
+        these fails the pin; when something happened since the last proof,
+        it fails before the listing is read, so that an adb server that
+        cannot be reached does not leave the pin stale. Anything else fails
+        the pin too, and so does a request made while a wait is under way
+        (from the watch, say).
         """
+        if not self.can_repin and self._epoch != self._proven:
+            # No boot id: nothing would tell the pinned device from another
+            # emulator of the same image behind the same number, so a device
+            # that has to be proven again cannot be.
+            raise self._fail(self._changed("cannot be proven again without a boot id"))
         everything = self._client.devices()
         if any(
             d.serial == self.serial and d.state not in (READY_STATE, OFFLINE_STATE)
@@ -1422,12 +1432,13 @@ class Device:
         ready = same and listed[0].state == READY_STATE
         if ready and self._epoch == self._proven:
             return
-        waitable = self.can_repin and (
-            ready or not listed or (same and listed[0].state == OFFLINE_STATE)
-        )
-        provable = waitable or (ready and self._transport_id is not None)
+        if not self.can_repin:
+            # Proven and nothing happened since, but the number is not listed
+            # and ready (renumbered, offline): no boot id, so no wait.
+            raise self._fail(self._changed())
+        waitable = ready or not listed or (same and listed[0].state == OFFLINE_STATE)
         if strict:
-            if not provable:
+            if not waitable:
                 raise self._fail(self._changed())
             if self._reconnects >= MAX_RECONNECTS:
                 # No proof is left to try: nothing will make this pin usable.
@@ -1442,12 +1453,9 @@ class Device:
             )
             details = {"serial": self.serial, "reason": PIN_NOT_PROVEN}
             raise DeviceNotFoundError(msg, details=details)
-        if waitable:
-            self._repin()
-        elif provable and self._transport_id is not None:
-            self._prove_in_place(self._transport_id)
-        else:
+        if not waitable:
             raise self._fail(self._changed())
+        self._repin()
 
     def _changed(
         self, why: str = "does not lead to that device any more"
@@ -1490,8 +1498,9 @@ class Device:
     def _same_device(self, found: DeviceIdentity | None) -> bool:
         """Whether `found` is the pinned device.
 
-        A pinned boot id must be read again, the same; without one, the three
-        other fields are compared and a boot id read later is ignored.
+        A pinned boot id must be read again, the same; without one (only
+        `check_pin` gets here then), the three other fields are compared and
+        a boot id read later is ignored.
         """
         expected = self._pinned_identity
         if found is None or expected is None:
@@ -1519,29 +1528,6 @@ class Device:
             )
         self._reconnects += 1
         self._epoch += 1
-
-    def _prove_in_place(self, transport: int) -> None:
-        """Prove the device again through its own number (no boot id, so no
-        wait and no move)."""
-        self._repinning = True
-        succeeded = False
-        try:
-            self._count_reconnect()
-            found = self._identity_through(transport)
-            if not self._same_device(found):
-                raise self._fail(self._changed("could not be proven the same again"))
-            self._proven = self._epoch
-            succeeded = True
-        except BaseException as error:
-            code = (
-                error.code if isinstance(error, UiprobeError) else type(error).__name__
-            )
-            self._fail(self._changed(f"could not be proven again ({code})"))
-            raise
-        finally:
-            self._repinning = False
-            if not succeeded:
-                self._fail(self._changed("could not be proven again"))
 
     def _repin(self) -> None:
         """Prove the device again, following it to a new number if needed.
@@ -1690,7 +1676,8 @@ class Device:
         keeps the first transport and identity.
 
         When the kept identity has a boot id, a transport that the adb server
-        later renumbers is followed (see `can_repin`).
+        later renumbers is followed (see `can_repin`); without one, anything
+        that makes the device be proven again fails the pin.
 
         Raises:
             AdbError: The adb server reported no transport id for this device,
@@ -1742,11 +1729,14 @@ class Device:
 
     @property
     def can_repin(self) -> bool:
-        """Whether a renumbered transport may be followed.
+        """Whether the device may be proven again: a renumbered transport
+        followed, or the identity read again after a failed request.
 
         Only when the pinned identity has a boot id: without one, two
         emulators of one image cannot be told apart, so a renumbered
-        transport ends the pin (``device_changed``) as it always did.
+        transport ends the pin (``device_changed``) as it always did, and so
+        does anything else that moves `pin_epoch` (a failed request): the
+        next request fails the pin instead of reading the identity again.
         """
         identity = self._pinned_identity
         return identity is not None and bool(identity.boot_id)
@@ -1759,7 +1749,7 @@ class Device:
     @property
     def reconnects(self) -> int:
         """How many times the pinned device had to be proven again (a wait,
-        or a new identity read after a failed request); at most
+        also one that finds it back on the same number); at most
         `MAX_RECONNECTS`."""
         return self._reconnects
 
