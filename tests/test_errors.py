@@ -22,6 +22,7 @@ from uiprobe.errors import (
     LaunchFailedError,
     MultipleDevicesError,
     MultipleElementsError,
+    NotEmulatorError,
     ScreenshotFailedError,
     UiprobeError,
 )
@@ -44,6 +45,7 @@ TABLE = [
     (InputFailedError, "input_failed", 14),
     (LaunchFailedError, "launch_failed", 15),
     (ScreenshotFailedError, "screenshot_failed", 16),
+    (NotEmulatorError, "not_emulator", 17),
 ]
 
 

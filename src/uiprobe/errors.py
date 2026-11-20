@@ -28,6 +28,7 @@ __all__ = [
     "LaunchFailedError",
     "MultipleDevicesError",
     "MultipleElementsError",
+    "NotEmulatorError",
     "ScreenshotFailedError",
     "UiprobeError",
 ]
@@ -194,3 +195,19 @@ class ScreenshotFailedError(UiprobeError):
 
     code = "screenshot_failed"
     exit_code = 16
+
+
+class NotEmulatorError(UiprobeError):
+    """A pressing crawl refused to start on a device that is not an emulator.
+
+    Raised before anything is written and before any input is sent.
+    ``details["serial"]`` is the device and ``details["reason"]`` is
+    ``not_emulator`` (the device answered and is not an emulator) or
+    ``unreadable`` (the emulator check could not be
+    read, so the device counts as a real one; ``details["error"]`` is then the
+    code of the error the check raised). Passing ``allow_real_device=True``
+    skips the check.
+    """
+
+    code = "not_emulator"
+    exit_code = 17

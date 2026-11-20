@@ -339,6 +339,7 @@ class RunWriter:
         self._pictures: set[str] = set()
         self._skipped: set[tuple[str, str, tuple[str, ...]]] = set()
         self._made_screens_folder = False
+        self._starts_written = 0
 
     @classmethod
     def create(
@@ -447,6 +448,11 @@ class RunWriter:
         """The run folder."""
         return self._root
 
+    @property
+    def starts_written(self) -> int:
+        """How many transition start lines are complete on disk."""
+        return self._starts_written
+
     # -- the records --
 
     def write_transition_start(
@@ -477,7 +483,7 @@ class RunWriter:
         line["action"] = action
         if from_screen_id is not None:
             line["from_screen_id"] = _check_screen_id(from_screen_id)
-        self._append("transitions.jsonl", _json_text(line) + "\n")
+        self._append("transitions.jsonl", _json_text(line) + "\n", start=True)
 
     def write_transition_end(
         self,
@@ -485,15 +491,33 @@ class RunWriter:
         to_screen_id: str | None = None,
         *,
         dump_failed: bool = False,
+        not_sent: str | None = None,
     ) -> None:
-        """Write the line that says where an action led.
+        """Write the line that says where an action led, or that it was not sent.
 
         ``to_screen_id`` is required when ``dump_failed`` is False and must be
-        None when it is True.
+        None when it is True. ``not_sent`` is the reason (a short word) when
+        the action whose start line was written was then not sent; the line
+        then has ``not_sent: true`` and ``reason``, and neither ``dump_failed``
+        nor ``to_screen_id`` (both must be left at their defaults).
         """
         if not isinstance(dump_failed, bool):
             msg = "dump_failed must be a bool"
             raise TypeError(msg)
+        if not_sent is not None:
+            _check_text("not_sent", not_sent)
+            if dump_failed or to_screen_id is not None:
+                msg = "an action that was not sent has no destination"
+                raise ValueError(msg)
+            skipped: dict[str, object] = {
+                "schema": TRANSITION_END_SCHEMA,
+                "recorded_at": _stamp(_now()),
+                "action_id": _check_action_id(action_id),
+                "not_sent": True,
+                "reason": not_sent,
+            }
+            self._append("transitions.jsonl", _json_text(skipped) + "\n")
+            return
         line: dict[str, object] = {
             "schema": TRANSITION_END_SCHEMA,
             "recorded_at": _stamp(_now()),
@@ -590,6 +614,7 @@ class RunWriter:
         screens: int,
         actions: int,
         ended_at: datetime | None = None,
+        notes: Sequence[str] = (),
     ) -> None:
         """End the run once: close the line files, write ``summary.txt``,
         then ``run.json``.
@@ -600,13 +625,19 @@ class RunWriter:
         does not hold: a failure at the final fsync of ``run.json`` raises
         `RunFolderError` after its bytes are already in the file. A second
         call raises `RunFolderError`.
+        `notes` are extra lines for ``summary.txt``, written after the
+        counts (for an error code or a screenshot that could not be
+        taken); they are escaped like labels.
         """
         _check_text("stop_reason", stop_reason)
         screen_count = _check_number("screens", screens)
         action_count = _check_number("actions", actions)
         when = _check_moment("ended_at", _now() if ended_at is None else ended_at)
         self._check_usable()
-        summary = _encoded(self._summary(stop_reason, screen_count, action_count))
+        note_lines = _check_texts("notes", notes)
+        summary = _encoded(
+            self._summary(stop_reason, screen_count, action_count, note_lines)
+        )
         record: dict[str, object] = {
             "schema": RUN_SCHEMA,
             "ended_at": _stamp(when),
@@ -729,7 +760,7 @@ class RunWriter:
             self._made_screens_folder = True
             _make_dir(folder)
 
-    def _append(self, name: str, line: str) -> None:
+    def _append(self, name: str, line: str, *, start: bool = False) -> None:
         _encoded(line)
         with self.critical():
             self._check_usable()
@@ -739,6 +770,8 @@ class RunWriter:
                 if handle is None:
                     handle = self._streams[name] = _create_text(path)
                 _put(handle, line)
+                if start:  # counted inside the same marked block as the write
+                    self._starts_written += 1
             except BaseException as error:
                 self._failed = path  # before the cleanup, which may be interrupted
                 self._drop_stream(name)
@@ -746,12 +779,15 @@ class RunWriter:
                     raise self._broken(path, error) from error
                 raise
 
-    def _summary(self, stop_reason: str, screens: int, actions: int) -> str:
+    def _summary(
+        self, stop_reason: str, screens: int, actions: int, notes: Sequence[str]
+    ) -> str:
         lines = [
             f"Stopped: {_name(stop_reason)}",
             f"Screens: {screens}",
             f"Actions: {actions}",
         ]
+        lines.extend(f"Note: {_quote(note)}" for note in notes)
         for screen_id, screen in self._screens.items():
             head = _name(screen.package)
             if screen.activity is not None:

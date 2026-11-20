@@ -527,6 +527,26 @@ def test_finish_writes_run_json_and_summary_once(tmp_path):
     assert {n: (folder / n).read_bytes() for n in before} == before
 
 
+def test_finish_notes_go_into_the_summary_escaped(tmp_path):
+    writer = make(tmp_path)
+    writer.finish("error", screens=0, actions=1, notes=["error: adb_error", CONTROL])
+    summary = (tmp_path / "run" / "summary.txt").read_text(encoding="utf-8")
+    assert summary.startswith(
+        'Stopped: error\nScreens: 0\nActions: 1\nNote: "error: adb_error"\nNote: "'
+    )
+    assert "\x1b" not in summary
+    assert "\\u001b" in summary
+
+
+def test_finish_refuses_notes_that_are_not_text(tmp_path):
+    writer = make(tmp_path)
+    with pytest.raises(TypeError):
+        writer.finish("exhausted", screens=0, actions=1, notes="one note")
+    with pytest.raises(TypeError):
+        writer.finish("exhausted", screens=0, actions=1, notes=[5])  # ty: ignore[invalid-argument-type]
+    assert not (tmp_path / "run" / "run.json").exists()
+
+
 def test_a_run_that_did_not_finish_has_no_run_json(tmp_path):
     writer = make(tmp_path)
     writer.write_transition_start(1, "launch")
@@ -1793,3 +1813,35 @@ def test_a_relative_path_is_fixed_when_the_run_starts(tmp_path, monkeypatch):
         "summary.txt",
     ]
     assert names(tmp_path / "other") == []
+
+
+def test_a_not_sent_end_line_has_its_reason_and_no_destination(tmp_path):
+    writer = make(tmp_path)
+    writer.write_transition_start(1, "tap", ID_A, None, (5, 5))
+    writer.write_transition_end(1, not_sent="focus_other")
+    writer.close()
+    end = lines_of(tmp_path / "run" / "transitions.jsonl")[1]
+    assert set(end) == {"schema", "recorded_at", "action_id", "not_sent", "reason"}
+    assert (end["not_sent"], end["reason"], end["action_id"]) == (
+        True,
+        "focus_other",
+        1,
+    )
+
+
+@pytest.mark.parametrize(
+    "kwargs", [{"dump_failed": True}, {"to_screen_id": ID_A}], ids=["dump", "screen"]
+)
+def test_a_not_sent_end_line_refuses_a_destination(tmp_path, kwargs):
+    writer = make(tmp_path)
+    with pytest.raises(ValueError, match="not sent"):
+        writer.write_transition_end(1, not_sent="stopped", **kwargs)
+
+
+def test_the_writer_counts_complete_start_lines(tmp_path):
+    writer = make(tmp_path)
+    assert writer.starts_written == 0
+    writer.write_transition_start(1, "launch")
+    writer.write_transition_end(1, not_sent="stopped")
+    writer.write_transition_start(2, "back", ID_A)
+    assert writer.starts_written == 2

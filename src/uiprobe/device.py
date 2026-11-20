@@ -62,6 +62,31 @@ __all__ = [
 ]
 
 READY_STATE: Final = "device"
+IDENTITY_COMMAND: Final = (
+    "getprop ro.kernel.qemu; getprop ro.serialno; getprop ro.build.fingerprint"
+)
+
+
+class FocusedWindow(NamedTuple):
+    """The window that has input focus: its owner package, title and hash.
+
+    ``window`` is the hash ``dumpsys window`` prints for the window, which
+    tells two windows with the same owner and title apart.
+    """
+
+    owner: str
+    title: str
+    window: str
+
+
+class DeviceIdentity(NamedTuple):
+    """What `Device.identity` read: emulator or not, serial number, build."""
+
+    emulator: bool
+    serialno: str
+    fingerprint: str
+
+
 DEFAULT_LAUNCH_TIMEOUT: Final = 10.0
 LAUNCH_POLL_INTERVAL: Final = 0.5
 MAX_LAUNCH_TIMEOUT: Final = 600.0
@@ -885,6 +910,62 @@ def _read_source(text: str, source: _Source) -> tuple[str, str] | object | None:
     return found.pop() if len(found) == 1 else None
 
 
+_CURRENT_FOCUS_CLAIM: Final = re.compile(r"\s*mCurrentFocus=")
+_CURRENT_FOCUS: Final = re.compile(
+    r"\s*mCurrentFocus=Window\{([0-9a-f]{1,16}) u[0-9]{1,3} ([^{}\r\n]{1,512})\}\s*"
+)
+_WINDOW_HEAD: Final = re.compile(
+    r"  Window #[0-9]{1,4} Window\{([0-9a-f]{1,16}) u[0-9]{1,3} ([^{}\r\n]{1,512})\}:"
+)
+# The system writes this line; 24 has mShowToOwnerOnly, 30 and 36 showForAllUsers.
+_WINDOW_OWNER: Final = re.compile(
+    r"    mOwnerUid=[0-9]{1,10} (?:mShowToOwnerOnly|showForAllUsers)=(?:true|false)"
+    r" package=([A-Za-z][A-Za-z0-9_]{0,254}(?:\.[A-Za-z][A-Za-z0-9_]{0,254}){0,64})"
+    r" appop=[A-Z_]{1,64}"
+)
+
+
+def _read_current_focus(text: str) -> tuple[str, str] | None:
+    """The ``(hash, title)`` of the focused window, or None.
+
+    Every line that claims ``mCurrentFocus`` must be well formed and all must
+    name the same window; anything else is None.
+    """
+    lines = {
+        line.rstrip("\r")
+        for line in text.split("\n")
+        if _CURRENT_FOCUS_CLAIM.match(line)
+    }
+    windows: set[tuple[str, str]] = set()
+    for line in lines:
+        match = (
+            _CURRENT_FOCUS.fullmatch(line) if len(line) <= _MAX_DUMPSYS_LINE else None
+        )
+        if match is None:
+            return None
+        windows.add((match[1], match[2]))
+    return windows.pop() if len(windows) == 1 else None
+
+
+def _read_window_owner(text: str, window: str, title: str) -> FocusedWindow | None:
+    """The owner of window `window` from its block, or None (see focused_window)."""
+    lines = [line.rstrip("\r") for line in text.split("\n")]
+    heads = [
+        index
+        for index, line in enumerate(lines)
+        if line.startswith("  Window #") and f" Window{{{window} " in line
+    ]
+    if len(heads) != 1 or heads[0] + 2 >= len(lines):
+        return None
+    index = heads[0]
+    line = lines[index]
+    head = _WINDOW_HEAD.fullmatch(line) if len(line) <= _MAX_DUMPSYS_LINE else None
+    if head is None or head[1] != window or head[2] != title:
+        return None
+    owner = _WINDOW_OWNER.fullmatch(lines[index + 2])
+    return None if owner is None else FocusedWindow(owner[1], title, window)
+
+
 _BOOL = r"(true|false)"
 # Both genuine shapes of the line that carries ``mInputShown``: API 24-32 print
 # it at the end of one flag line, API 36 on a line of its own (API 33-35 were
@@ -1128,11 +1209,81 @@ class Device:
         # The clock and the pause of `launch`; tests replace them.
         self._clock: Callable[[], float] = time.monotonic
         self._sleep: Callable[[float], None] = time.sleep
+        # Set by `pin_transport`: every later request uses this transport.
+        self._transport_id: int | None = None
 
     @property
     def serial(self) -> str:
         """The adb serial of this device."""
         return self._info.serial
+
+    @property
+    def transport_id(self) -> int | None:
+        """The transport every request uses, once `pin_transport` set it."""
+        return self._transport_id
+
+    def _pin(self) -> dict[str, int]:
+        """The client keyword that selects the pinned transport, if any.
+
+        While a transport is pinned, every request first checks with the adb
+        server (``host:devices-l``) that the pinned transport id still lists
+        this serial, so no request goes to a device that a restarted server
+        gave the same number. The instant between that check and the request
+        itself remains.
+        """
+        if self._transport_id is None:
+            return {}
+        self._check_listed()
+        return {"transport_id": self._transport_id}
+
+    def _check_listed(self) -> None:
+        """Raise unless the server lists the pinned transport with this serial."""
+        listed = [
+            d for d in self._client.devices() if d.transport_id == self._transport_id
+        ]
+        if (
+            len(listed) != 1
+            or listed[0].serial != self.serial
+            or listed[0].state != READY_STATE
+        ):
+            msg = (
+                f"the transport pinned for {self.serial} ({self._transport_id})"
+                " does not lead to that device any more"
+            )
+            details = {"serial": self.serial, "reason": "device_changed"}
+            raise DeviceNotFoundError(msg, details=details)
+
+    def pin_transport(self) -> int:
+        """Send every later request to the transport this device was chosen on.
+
+        The transport id is the one ``adb devices -l`` reported when the
+        `Device` was made. Afterwards each request selects that transport
+        (``host:transport-id:N``), not the serial, so a device that later takes
+        the same serial never receives anything: the requests fail instead.
+        Calling it again keeps the first transport.
+
+        Raises:
+            AdbError: The adb server reported no transport id for this device,
+                so it cannot be pinned (nothing is sent).
+            DeviceNotFoundError: The server no longer lists that transport id
+                with this serial (``details["reason"]`` is ``device_changed``);
+                nothing is pinned and nothing is sent.
+        """
+        if self._transport_id is None:
+            transport = self._info.transport_id
+            if transport is None:
+                msg = (
+                    f"adb reported no transport id for {self.serial}, so the"
+                    " requests cannot be kept on the device that was chosen"
+                )
+                raise AdbError(msg, details={"serial": self.serial})
+            self._transport_id = transport
+            try:
+                self._check_listed()  # the number may already be another's
+            except DeviceNotFoundError:
+                self._transport_id = None
+                raise
+        return self._transport_id
 
     @property
     def info(self) -> DeviceInfo:
@@ -1144,7 +1295,7 @@ class Device:
         return self._shell_text(command)
 
     def _shell_text(self, command: str, *, timeout: float | None = None) -> str:
-        raw = self._client.shell(self.serial, command, timeout=timeout)
+        raw = self._client.shell(self.serial, command, timeout=timeout, **self._pin())
         return raw.decode("utf-8", errors="replace")
 
     def tap(
@@ -1609,20 +1760,7 @@ class Device:
         limit = _check_launch_timeout(timeout)
         details: dict[str, object] = {"package": package}
         if restart:
-            stop = self._shell(quote_args("am", "force-stop", package) + _EXIT_SUFFIX)
-            failure = _input_failure("force-stop", {}, stop)
-            if failure is not None:
-                details["reason"] = "stop_failed"
-                if "exit_status" in failure.details:
-                    details["exit_status"] = failure.details["exit_status"]
-                output = failure.details.get("output")
-                if isinstance(output, str):
-                    details["output"] = _escaped(output)
-                msg = (
-                    f"am force-stop {package} did not report success, so the app"
-                    " was not launched"
-                )
-                raise LaunchFailedError(msg, details=details)
+            self._force_stop(package)
         output = self._shell(
             quote_args(
                 "monkey", "-p", package, "-c", "android.intent.category.LAUNCHER", "1"
@@ -1661,6 +1799,41 @@ class Device:
         details.update(reason="not_in_front", foreground=shown, timeout=limit)
         last = "unknown" if shown is None else shown
         msg = f"{package} was not in front after {limit:g} seconds (foreground: {last})"
+        raise LaunchFailedError(msg, details=details)
+
+    def stop_app(self, package: str) -> None:
+        """Send ``am force-stop PACKAGE`` once and require it to report success.
+
+        It is the first half of ``launch(package, restart=True)``, for a caller
+        that wants to decide between the stop and the start. State the app has
+        not saved is lost.
+
+        Raises:
+            TypeError, ValueError: `package` is not a valid package name
+                (before the adb server is contacted).
+            LaunchFailedError: The stop did not report exit status 0 with no
+                other output (``details["reason"]`` is ``stop_failed``).
+            AdbError: The adb protocol or the command failed.
+        """
+        if isinstance(package, str):
+            package = str.__str__(package)
+        self._force_stop(check_package(package))
+
+    def _force_stop(self, package: str) -> None:
+        stop = self._shell(quote_args("am", "force-stop", package) + _EXIT_SUFFIX)
+        failure = _input_failure("force-stop", {}, stop)
+        if failure is None:
+            return
+        details: dict[str, object] = {"package": package, "reason": "stop_failed"}
+        if "exit_status" in failure.details:
+            details["exit_status"] = failure.details["exit_status"]
+        output = failure.details.get("output")
+        if isinstance(output, str):
+            details["output"] = _escaped(output)
+        msg = (
+            f"am force-stop {package} did not report success, so the app was not"
+            " launched"
+        )
         raise LaunchFailedError(msg, details=details)
 
     def api_level(self) -> int | None:
@@ -1711,6 +1884,93 @@ class Device:
         """
         component = self._trusted_component()
         return None if component is None else component[0]
+
+    def focused_window(self) -> FocusedWindow | None:
+        """Return the window that has input focus: its owner and its title.
+
+        ``mCurrentFocus`` in ``dumpsys window`` names the window (``Window{HASH
+        u0 TITLE}``); its block in ``dumpsys window windows`` (``Window #N
+        Window{HASH u0 TITLE}:``) has, two lines below, the line ``mOwnerUid=...
+        package=OWNER``, which the system writes. The owner comes from that
+        line, never from the title, which an app chooses. Captured in the same
+        form on emulators at API 24, 30 and 36; the notification shade is then
+        a window of ``com.android.systemui``.
+
+        None means unknown: no or several ``mCurrentFocus`` values, ``null``,
+        a malformed line, no block or several blocks with that hash (titles
+        can hold newlines, so a forged block can be added but the genuine one
+        cannot be removed), a block whose title differs, or an owner line of
+        another shape. The two dumps are read one after the other, so a focus
+        that changed in between gives None too.
+
+        Raises:
+            AdbError: The adb protocol or the command failed.
+            AdbServerUnavailableError: The adb server cannot be reached.
+            DeviceNotFoundError: The device is gone.
+            DeviceOfflineError: The device is offline.
+            DeviceUnauthorizedError: The device has not authorized this host.
+        """
+        focus = _read_current_focus(self._shell("dumpsys window"))
+        if focus is None:
+            return None
+        found = _read_window_owner(self._shell("dumpsys window windows"), *focus)
+        # Read the focus again: a window that took it between the two dumps
+        # would otherwise be given the old window's owner.
+        if found is None:
+            return None
+        return (
+            found
+            if _read_current_focus(self._shell("dumpsys window")) == focus
+            else None
+        )
+
+    def identity(self) -> DeviceIdentity | None:
+        """Read whether this is an emulator, its serial number and build, at once.
+
+        One command reads ``ro.kernel.qemu``, ``ro.serialno`` and
+        ``ro.build.fingerprint``. None means the answer did not have exactly
+        those three lines.
+
+        Raises:
+            AdbError: The adb protocol or the command failed.
+            AdbServerUnavailableError: The adb server cannot be reached.
+            DeviceNotFoundError: The device is gone.
+            DeviceOfflineError: The device is offline.
+            DeviceUnauthorizedError: The device has not authorized this host.
+        """
+        lines = self._shell(IDENTITY_COMMAND).split("\n")
+        if lines and lines[-1] == "":
+            lines.pop()
+        if len(lines) != len(DeviceIdentity._fields):
+            return None
+        qemu, serialno, fingerprint = (line.rstrip("\r").strip() for line in lines)
+        return DeviceIdentity(qemu == "1", serialno, fingerprint)
+
+    def check_pin(self, expected: DeviceIdentity, *, emulator: bool) -> None:
+        """Raise unless the pinned transport still leads to the same device.
+
+        The adb server must still list the pinned transport id with this serial
+        (a restarted server numbers its transports anew), and `identity`
+        through it must equal `expected`; with `emulator` it must also be an
+        emulator. Nothing is sent but these two reads.
+
+        Raises:
+            DeviceNotFoundError: The pinned transport is gone, lists another
+                serial, or leads to a device whose identity differs
+                (``details["reason"]`` is ``device_changed``).
+            AdbError: `pin_transport` was not called, or the reads failed.
+        """
+        if self._transport_id is None:
+            msg = "the transport is not pinned"
+            raise AdbError(msg, details={"serial": self.serial})
+        found = self.identity()  # its request checks the server's listing first
+        if found is None or found != expected or (emulator and not found.emulator):
+            msg = (
+                f"the device pinned as {self.serial} (transport"
+                f" {self._transport_id}) is not the one that was checked any more"
+            )
+            details = {"serial": self.serial, "reason": "device_changed"}
+            raise DeviceNotFoundError(msg, details=details)
 
     def keyboard_shown(self) -> bool | None:
         """Return whether the soft keyboard is shown, or None when unknown.
@@ -1800,6 +2060,7 @@ class Device:
             self.serial,
             quote_args("screencap", "-p"),
             timeout=SCREENSHOT_TIMEOUT,
+            **self._pin(),
         )
         try:
             check_png(data)
@@ -1837,7 +2098,9 @@ class Device:
                     "uiautomator dump failed",
                     details={"output": output.strip()[:DUMP_MESSAGE_LIMIT]},
                 )
-            return self._client.exec_out(self.serial, quote_args("cat", path))
+            return self._client.exec_out(
+                self.serial, quote_args("cat", path), **self._pin()
+            )
         finally:
             with contextlib.suppress(UiprobeError):
                 self._shell(quote_args("rm", "-f", path))

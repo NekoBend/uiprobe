@@ -175,9 +175,9 @@ class _Handler(socketserver.BaseRequestHandler):
                 return
             if self._scripted(fake, request):
                 return
-            if request.startswith("host:transport:"):
-                bound = request.removeprefix("host:transport:")
-                if not self._answer_transport(fake, bound):
+            if request.startswith(("host:transport:", "host:transport-id:")):
+                bound = self._select(fake, request)
+                if bound is None:
                     return
             elif request.startswith(("shell:", "exec:")) and bound is not None:
                 self._answer_service(fake, bound, request)
@@ -248,6 +248,31 @@ class _Handler(socketserver.BaseRequestHandler):
             return True
         self._send(fake, FAIL + frame(message.encode()))
         return False
+
+    def _select(self, fake: FakeAdbServer, request: str) -> str | None:
+        """Answer a transport request; return the bound serial, or None on FAIL."""
+        if request.startswith("host:transport-id:"):
+            return self._answer_transport_id(
+                fake, request.removeprefix("host:transport-id:")
+            )
+        serial = request.removeprefix("host:transport:")
+        return serial if self._answer_transport(fake, serial) else None
+
+    def _answer_transport_id(self, fake: FakeAdbServer, wanted: str) -> str | None:
+        """Select the device listed with that ``transport_id``; return its serial.
+
+        A missing id answers FAIL with the message adb prints for it.
+        """
+        match = next(
+            (d for d in fake.devices if str(d.get("transport_id", "")) == wanted), None
+        )
+        if match is None:
+            self._send(
+                fake, FAIL + frame(f"no device with transport id '{wanted}'".encode())
+            )
+            return None
+        serial = str(match["serial"])
+        return serial if self._answer_transport(fake, serial) else None
 
     def _answer_host(self, fake: FakeAdbServer, request: str) -> None:
         if request == "host:version":
@@ -354,8 +379,9 @@ class FakeAdbServer:
         self._thread: threading.Thread | None = None
 
     def add_device(self, serial: str, state: str = "device", **fields: object) -> None:
-        """Add a device to the list."""
-        self.devices.append({"serial": serial, "state": state, **fields})
+        """Add a device to the list; a field given as None is left out."""
+        given = {key: value for key, value in fields.items() if value is not None}
+        self.devices.append({"serial": serial, "state": state, **given})
 
     def on_shell(
         self,
