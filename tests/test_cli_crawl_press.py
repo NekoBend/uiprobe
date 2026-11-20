@@ -161,7 +161,7 @@ def test_wrong_press_options_are_refused_before_any_contact(
     assert (code, text) == (2, "")
     assert err == f"uiprobe: error: {message}\n"
     assert android.inputs == []
-    assert not [r for r in fake_adb.requests if r.startswith("shell:")]
+    assert fake_adb.requests == []
 
 
 @pytest.mark.usefixtures("here")
@@ -271,6 +271,7 @@ def test_an_unreadable_emulator_check_is_refused(
     error = json.loads(text)["error"]
     assert error["details"]["reason"] == "unreadable"
     assert "--allow-real-device" in error["message"]
+    assert device_writes(fake_adb) == []
     assert not out.exists()
     assert android.inputs == []
     code, text, _err = press(
@@ -406,3 +407,42 @@ def test_a_rotated_display_refuses_every_tap(fake_adb, android, capsys, tmp_path
     assert any(
         "rotation" in line for line in text.splitlines() if line.startswith("note: ")
     )
+
+
+@pytest.mark.usefixtures("here")
+def test_every_pin_check_still_requires_an_emulator(
+    fake_adb, android, capsys, tmp_path, monkeypatch
+):
+    # The standalone check says emulator, the identity read through the pin
+    # says otherwise: without --allow-real-device nothing may be started.
+    monkeypatch.setattr(Device, "is_emulator", lambda _self: True)
+    android.props["ro.kernel.qemu"] = "0"
+    code, _text, _err = press(capsys, fake_adb, "--press", "--out", str(tmp_path / "r"))
+    assert code != 0
+    assert device_writes(fake_adb) == []
+
+
+@pytest.mark.usefixtures("here", "android")
+def test_a_closed_plan_stream_refuses_before_anything_is_sent(
+    fake_adb, capsys, tmp_path, monkeypatch
+):
+    monkeypatch.setattr("sys.stderr", None)
+    out = tmp_path / "r"
+    code = cli.run(
+        [
+            "--adb-server",
+            fake_adb.address,
+            "crawl",
+            SHOP,
+            "--press",
+            "--out",
+            str(out),
+            "--json",
+        ]
+    )
+    captured = capsys.readouterr()
+    assert code == 2
+    error = json.loads(captured.out)["error"]
+    assert "stderr is closed" in error["message"]
+    assert device_writes(fake_adb) == []
+    assert not out.exists()

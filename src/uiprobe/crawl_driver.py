@@ -451,6 +451,11 @@ class _Run:
         self.unsent = action_id
         reason, seen = self.gate(action, observation)
         self.unsent = None
+        if seen is not None and reason != NOT_SENT_RECONNECTED:
+            # A read the pin check kept: it names the last screen and app.
+            if seen.observation.screen is not None:
+                self.last_screen_id = seen.observation.screen.screen_id
+            self.last_foreground = seen.observation.foreground
         if reason is not None:
             details = self.gate_details if reason in _COVER_REASONS else None
             self.end_not_sent(action_id, reason, details)
@@ -633,7 +638,7 @@ class _Run:
             return reason, None
         self.device.check_pin(emulator=self.emulator)
         if isinstance(action, Launch):
-            return None, None
+            return self.launch_gate(), None
         self.gate_epoch = self.device.pin_epoch
         # For a tap: the focused window before and after the dump must be the
         # same window of the app, so the dump shows that window (uiautomator
@@ -643,9 +648,6 @@ class _Run:
         foreground = self.device.foreground()
         focus = self.device.focused_window()
         keyboard = self.device.keyboard_shown()
-        if screen is not None:
-            self.last_screen_id = screen.screen_id
-        self.last_foreground = foreground
         seen = _Seen(Observation(screen, foreground, keyboard, now), focus)
         self.gate_details = None
         if isinstance(action, Tap):
@@ -722,6 +724,17 @@ class _Run:
             return NOT_SENT_TIME_LIMIT, None
         return why, seen
 
+    def launch_gate(self) -> str | None:
+        """The end of the first launch's gate, after the pin check: the time
+        again (the check's reads can take long), then the last comparison."""
+        epoch = self.device.pin_epoch
+        late = self.clock() >= self.deadline
+        if self.device.pin_epoch != epoch:
+            return NOT_SENT_RECONNECTED
+        if late:
+            return NOT_SENT_TIME_LIMIT
+        return None
+
     def halt(self, now: float | None = None) -> str | None:
         """The reason not to send that does not depend on the screen, if any."""
         if self.stopped():
@@ -781,8 +794,12 @@ class _Run:
             # stop() may read the device, so it is inside the handler too.
             reason = self.halt()
             if reason is None:
-                # The device behind the pin is checked again before the start.
+                # The device behind the pin is checked again before the start,
+                # then the time (its reads can take long), then, below, the
+                # last comparison of the pin.
                 self.device.check_pin(emulator=self.emulator)
+                if self.clock() >= self.deadline:
+                    reason = NOT_SENT_TIME_LIMIT
         except DeviceNotFoundError as error:
             if error.details.get("reason") != PIN_WAIT_STOPPED:
                 raise

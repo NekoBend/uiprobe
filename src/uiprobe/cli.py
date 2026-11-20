@@ -1339,7 +1339,6 @@ def _cmd_crawl_press(args: argparse.Namespace, policy: Policy) -> int:
         start_server=args.start_server,
         pin=True,
     )
-    moves_before = len(device.repins)
     emulator = _press_device_check(device, allow_real_device=args.allow_real_device)
     plan: dict[str, object] = {
         "package": args.package,
@@ -1356,8 +1355,12 @@ def _cmd_crawl_press(args: argparse.Namespace, policy: Policy) -> int:
     }
     # The plan is out (and flushed) before the first request that changes the
     # device; with --json it goes to stderr, so stdout stays one JSON document.
-    _emit(_press_plan_text(plan), stream=sys.stderr if args.json else None)
-    _flush(sys.stderr if args.json else sys.stdout)
+    plan_stream = sys.stderr if args.json else sys.stdout
+    if plan_stream is None:  # a closed stream at start: refuse before pressing
+        msg = "the plan cannot be shown: " + ("stderr" if args.json else "stdout")
+        raise _UsageError(msg + " is closed, so nothing was pressed")
+    _emit(_press_plan_text(plan), stream=plan_stream)
+    _flush(plan_stream)
     existed = Path(out).exists() or Path(out).is_symlink()
     try:
         result = crawl_run(
@@ -1367,9 +1370,10 @@ def _cmd_crawl_press(args: argparse.Namespace, policy: Policy) -> int:
             policy=policy,
             limits=limits,
             screenshots=args.screenshots,
-            # The device was checked above (one check, with the CLI's own
-            # guidance); crawl_run must not check it a second time.
-            allow_real_device=True,
+            # The caller's own choice: crawl_run checks the device again
+            # through the pin, and every later pin check keeps requiring an
+            # emulator unless --allow-real-device was given.
+            allow_real_device=args.allow_real_device,
             settle=settle,
         )
     except KeyboardInterrupt:
@@ -1378,11 +1382,15 @@ def _cmd_crawl_press(args: argparse.Namespace, policy: Policy) -> int:
             return _fail(INTERRUPTED, "interrupted", as_json=args.json)
         msg = f"interrupted; the run so far is in {shown_out}"
         return _fail(INTERRUPTED, msg, as_json=args.json, details={"out": out})
+    except NotEmulatorError as exc:
+        # The check inside crawl_run answered differently from the first one:
+        # nothing was written or sent; say it in the command's words.
+        raise _cli_not_emulator(device, exc) from None
     except UiprobeError as exc:
         if not existed and Path(out).exists():  # made by this run
             exc.details.setdefault("out", out)
         raise
-    moves = len(device.repins) - moves_before
+    moves = result.repins  # as run.json counts them
     hints = _press_hints(result)
     if args.json:
         _emit(dumps(_press_json(plan, result, hints, moves), indent=2))
@@ -1401,6 +1409,21 @@ def _flush(stream: TextIO) -> None:
         raise BrokenPipeError(errno.EPIPE, "the output was closed") from exc
 
 
+def _cli_not_emulator(device: Device, exc: NotEmulatorError) -> NotEmulatorError:
+    """The refusal of a real device, in the command's words (same details)."""
+    what = (
+        "is not an emulator"
+        if exc.details.get("reason") == "not_emulator"
+        else "could not be shown to be an emulator (unreadable check)"
+    )
+    msg = (
+        f"{_printable(str(device.serial))} {what}, so nothing was pressed"
+        " and no folder was made; a pressing crawl presses for real: to run"
+        " it on this device, add --allow-real-device"
+    )
+    return NotEmulatorError(msg, details=exc.details)
+
+
 def _press_device_check(device: Device, *, allow_real_device: bool) -> bool | None:
     """Whether the device is an emulator (None: unreadable); refuse a real one.
 
@@ -1411,17 +1434,7 @@ def _press_device_check(device: Device, *, allow_real_device: bool) -> bool | No
         try:
             _check_device(device, allow_real_device=False)
         except NotEmulatorError as exc:
-            what = (
-                "is not an emulator"
-                if exc.details.get("reason") == "not_emulator"
-                else "could not be shown to be an emulator (unreadable check)"
-            )
-            msg = (
-                f"{_printable(str(device.serial))} {what}, so nothing was pressed"
-                " and no folder was made; a pressing crawl presses for real: to run"
-                " it on this device, add --allow-real-device"
-            )
-            raise NotEmulatorError(msg, details=exc.details) from None
+            raise _cli_not_emulator(device, exc) from None
         return True
     try:
         return device.is_emulator()
