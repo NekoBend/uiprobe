@@ -295,7 +295,7 @@ class FakeAndroid:
         re.compile(
             r"^getprop ro\.kernel\.qemu; getprop ro\.serialno;"
             r" getprop ro\.build\.fingerprint;"
-            r" cat /proc/sys/kernel/random/boot_id 2>/dev/null \|\| echo\Z"
+            r' echo "\$\(cat /proc/sys/kernel/random/boot_id 2>/dev/null\)"\Z'
         ),
         re.compile(r"^input tap [0-9]+ [0-9]+\Z"),
         re.compile(r"^input swipe ([0-9]+) ([0-9]+) \1 \2 800\Z"),
