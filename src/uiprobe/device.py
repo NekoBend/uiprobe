@@ -2541,14 +2541,14 @@ class Device:
         return read_window_at(self._shell("dumpsys input"), point)
 
     def diagnose_tap_window(
-        self, *, show_flag_names: bool = False
+        self, *, show_device_text: bool = False
     ) -> TapWindowDiagnosis:
         """Tell whether `window_at` can read this device's window list, and if
-        not which rule refused it and the shape of the lines there, with no
-        text of the device's output in the result (see `uiprobe.windowdiag`).
+        not which rule refused it and where, with no text of the device's
+        output in the result (see `uiprobe.windowdiag`).
 
-        Reads ``dumpsys input`` once. With `show_flag_names` an unknown flag
-        name that is an upper-case word is shown.
+        Reads ``dumpsys input`` once. With `show_device_text` the result
+        also holds the shapes of the lines, which hold device text.
 
         Raises:
             AdbError: The adb protocol or the command failed.
@@ -2557,11 +2557,11 @@ class Device:
             DeviceOfflineError: The device is offline.
             DeviceUnauthorizedError: The device has not authorized this host.
         """
-        if not isinstance(show_flag_names, bool):
-            msg = "show_flag_names must be a bool"
+        if not isinstance(show_device_text, bool):
+            msg = "show_device_text must be a bool"
             raise TypeError(msg)
         text = self._shell("dumpsys input")
-        return diagnose_tap_window(text, show_flag_names=show_flag_names)
+        return diagnose_tap_window(text, show_device_text=show_device_text)
 
     def package_uid(self, package: str) -> PackageUid | None:
         """Return the app id the system gave `package` and whether the package

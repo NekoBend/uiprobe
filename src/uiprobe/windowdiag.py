@@ -2,44 +2,26 @@
 
 `diagnose_tap_window` runs the same checks as the crawl's tap window check
 (`uiprobe.inputwindows.explain_input_windows`) on the whole text of
-``dumpsys input`` and reports the result so that it can be shared: whether
-the list reads or which rule refused it and at which line, how many window
-rows each list has, and the shape of the lines around the failure.
+``dumpsys input`` and reports the result so that it can be shared.
 
-No text of the output is copied into the report, by construction: a line is
-shown in detail only when the reader itself accepted its structure, and then
-only through the reader's own boundaries and regular expressions:
+By default the report is built only from uiprobe's fixed vocabulary and
+numbers uiprobe computed: the verdict (reason, rule), the part and line
+number it refused at, the window lists the reader found (whether each is a
+display's section and the display asked for, how many window lines the
+reader found and read in it, whether the check refused in it), how many
+windows it read, and for the lines around the failure (or an outline of the
+reader's headings) each line's kind, indent and length. A line's kind is
+what the reader's own anchored patterns made of it where the reader reads
+(`Verdict.kinds`); a line it did not classify is ``other`` (or ``blank``).
+No field name, value, flag, row or display number, orientation, sign or
+other character of the device's output is in it, only lengths and what the
+reader concluded; counts, lengths and indents stop at `CAP`.
 
-* a window line the reader read into a window, cut by
-  `uiprobe.inputwindows.window_line_fields` (the name as its length, each
-  field after it as a known key with a type tag, a known value word or a
-  length; a quoted value as one length);
-* a ``Viewport`` line the reader read for the orientation of the display
-  asked for (`Verdict.viewports`), shown part by part with the orientation
-  it read (quoted values as one length);
-* the headings and lines the reader matches by its own patterns: its
-  header, ``Windows:``, ``Display: N``, the lines a list ends at,
-  ``logicalSize=``, transform lines and their matrix rows.
-
-Every other line, a window line the reader refused or did not reach and
-any other Viewport-shaped line included, is shown as its kind and one
-``<text:LEN>``. No number of the output is shown but the row number of a
-row the reader read (it is the row's place, which the reader checked), the
-orientation of a Viewport line it read, and a display number written ``0``
-when display 0 was asked for; every other number is shown as its width
-(``<num:W>``, a minus sign kept). Counts, lengths and indents stop at
-`CAP`. So every string is a constant, a member of a fixed vocabulary of this
-module, a tag or such a number. Text an app sets that holds line breaks can
-still make lines the reader matches by its patterns (a transform line, a
-heading); the words of this module's vocabulary in them are then shown as
-such (``SCALE``), never other text and never their numbers.
-
-The one exception is opt-in: with ``show_flag_names`` an unknown name in the
-``flags=``, ``inputConfig=`` or ``inputFeatures=`` field of a row of a found
-window list whose name's end can be told is shown when it is an upper-case
-word (`SHOWABLE_FLAG`), as ``<unknown_flag:NAME>``, also in a row the reader
-refused. Any device text, a window name included, may end up there; the
-report then says so (`NOTICE_SHOWN`).
+With ``show_device_text`` the report also holds each shown line's tokens
+(field names, value types, known and unknown flag names, row numbers) and
+the forms of the rows; that text comes from the device, and window names
+and app text can appear in it, so it carries its own notice
+(`NOTICE_SHOWN`).
 """
 
 from __future__ import annotations
@@ -86,11 +68,10 @@ NOTICE: Final = (
     " accounts or network values"
 )
 NOTICE_SHOWN: Final = (
-    "this output contains no device serial, app or window names, coordinates,"
-    " accounts or network values, except that --show-flag-names prints"
-    " unknown upper-case flag names verbatim from the device: any device text,"
-    " numbers included, and a window name with or without a line break, may"
-    " appear as such a name, so this output may include a serial"
+    "this output includes text and numbers from the device: window names and"
+    " app text can appear as field names, values and flags, with or without"
+    " line breaks, and may include a serial or personal data; read it before"
+    " pasting it anywhere"
 )
 DISPATCHER: Final = "dispatcher"
 INPUT_READER: Final = "input_reader"
@@ -107,6 +88,29 @@ _MAX_FORMS: Final = 20
 CAP: Final = 9999
 _SMALL_DIGITS: Final = 4
 
+# The rules that refuse at a window line: the line they name is one.
+ROW_RULES: Final = frozenset(
+    {
+        "legacy_row_in_display_list",
+        "form_mismatch",
+        "transform_mismatch",
+        "row_shape",
+        "row_number",
+        "field_twice",
+        "display_mismatch",
+        "field_value",
+        "field_missing",
+        "unknown_flag",
+        "mixed_flags",
+        "hex_form",
+        "portal_missing",
+        "samsung_fields",
+        "region_missing",
+        "region_format",
+        "region_reversed",
+        "row_orientation",
+    }
+)
 LINE_KINDS: Final = (
     "window_row",
     "transform",
@@ -203,7 +207,7 @@ VIEWPORT_KINDS: Final = frozenset({"INTERNAL", "EXTERNAL", "VIRTUAL"})
 HEADINGS: Final = frozenset(
     {_HEADER, "Windows:", "Display:", "MonitoringChannels:", "Connections:"}
 )
-# An unknown flag name shown with show_flag_names.
+# An unknown flag name shown with show_device_text.
 SHOWABLE_FLAG: Final = re.compile(r"[A-Z][A-Z0-9_]{0,47}")
 _OBSCURING: Final = "mMaximumObscuringOpacityForTouch: "
 _MONITORS = re.compile(r"Global monitors (in|on) display -?(\d+):")
@@ -226,43 +230,43 @@ _FLAGS_HEX: Final = len("0x") + 8
 
 @dataclass(frozen=True, slots=True)
 class LineShape:
-    """The shape of one line: its number (from 1, in its part), kind (one of
-    `LINE_KINDS`), indent, length, tokens, and whether it is the line the
-    check refused at."""
+    """One line: its number (from 1, in its part), kind (one of
+    `LINE_KINDS`, as the reader classified it), indent and length, whether
+    it is the line the check refused at, and (only with
+    ``show_device_text``) its tokens."""
 
     number: int
     kind: str
     indent: int
     length: int
-    tokens: tuple[str, ...]
+    tokens: tuple[str, ...] = ()
     failing: bool = False
 
 
 @dataclass(frozen=True, slots=True)
 class ListRows:
-    """One window list: its place among the lists (from 1), whether it is the
-    list of one ``Display:`` section (``per_display``; False for the one list
-    of every display, API 24 to 28), that display's number (only 0, when
-    display 0 was asked for, see the module; else None), how many digits the
-    number has, how many window rows the list has, whether the check
-    refused in it and whether the number has a minus sign."""
+    """One window list the reader found: its place (from 1), whether it is
+    the list of one ``Display:`` section (``per_display``; False for the one
+    list of every display, API 24 to 28), whether that section is the
+    display asked for (``asked``), whether the reader read the list
+    (``reached``; it stops at the first refusal), how many window lines it
+    read into a window there, and whether the check refused in it."""
 
     position: int
     per_display: bool
-    display: int | None
-    display_digits: int
-    rows: int
+    asked: bool
+    reached: bool
+    read: int
     failed: bool
-    negative: bool = False
 
 
 @dataclass(frozen=True, slots=True)
 class Form:
-    """Rows of one list that look alike: whether the name is quoted, which
-    fields follow it (`KNOWN_KEYS`, an unknown one as ``<unknown_key>``),
-    whether transform lines follow the row, and how many rows. A row the
-    reader did not read into a window, or whose name's end cannot be told,
-    is of no recognised form (``recognised`` False, no fields)."""
+    """Rows of one list that look alike (only with ``show_device_text``):
+    whether the name is quoted, which fields follow it (`KNOWN_KEYS`, an
+    unknown one as ``<unknown_key>``), whether transform lines follow the
+    row, and how many rows. A row the reader did not read into a window, or
+    whose name's end cannot be told, is of no recognised form."""
 
     position: int
     quoted: bool
@@ -282,9 +286,9 @@ class TapWindowDiagnosis:
     (the whole output, when there is not exactly one dispatcher header or
     the line is after the dispatcher's part) and ``line`` the line number in
     it (from 1; the dispatcher's header is line 1 of `DISPATCHER`) where the
-    check refused, both None when no one line is to blame.
-    ``show_flag_names`` says whether unknown flag names may be in it (and so
-    which notice it carries).
+    check refused, both None when no one line is to blame. ``lists`` holds
+    only the list the reader took as the display's, and ``forms`` and the
+    lines' ``tokens`` are empty, unless ``show_device_text``.
     """
 
     reason: str | None
@@ -293,8 +297,8 @@ class TapWindowDiagnosis:
     line: int | None
     lists: tuple[ListRows, ...]
     lines: tuple[LineShape, ...]
-    forms: tuple[Form, ...]
-    show_flag_names: bool = False
+    forms: tuple[Form, ...] = ()
+    show_device_text: bool = False
 
     @property
     def readable(self) -> bool:
@@ -302,47 +306,45 @@ class TapWindowDiagnosis:
         return self.reason is None
 
     @property
+    def display_list(self) -> ListRows | None:
+        """The list the reader took as the display's, None when it took
+        none."""
+        return next((item for item in self.lists if item.asked), None)
+
+    @property
+    def windows_read(self) -> int:
+        """How many window lines the reader read into a window in the
+        display's list."""
+        chosen = self.display_list
+        return 0 if chosen is None else chosen.read
+
+    @property
     def notice(self) -> str:
         """What the report holds: `NOTICE`, or `NOTICE_SHOWN` with
-        ``show_flag_names``."""
-        return NOTICE_SHOWN if self.show_flag_names else NOTICE
+        ``show_device_text``."""
+        return NOTICE_SHOWN if self.show_device_text else NOTICE
 
     def to_dict(self) -> dict[str, object]:
         """Return the ``uiprobe.diagnose_tap_window/1`` JSON object."""
-        return {
+        payload: dict[str, object] = {
             "schema": SCHEMA,
             "notice": self.notice,
-            "show_flag_names": self.show_flag_names,
+            "show_device_text": self.show_device_text,
             "command": COMMAND,
             "readable": self.readable,
             "reason": self.reason,
             "rule": self.rule,
             "part": self.part,
             "line": self.line,
-            "lists": [
-                {
-                    "position": item.position,
-                    "per_display": item.per_display,
-                    "display": item.display,
-                    "display_digits": _capped(item.display_digits),
-                    "display_negative": item.negative,
-                    "rows": _capped(item.rows),
-                    "failed": item.failed,
-                }
-                for item in self.lists
-            ],
+            "windows_read": _capped(self.windows_read),
+            "display_list": _display_dict(self.display_list),
             "lines": [
-                {
-                    "number": shape.number,
-                    "failing": shape.failing,
-                    "kind": shape.kind,
-                    "indent": _capped(shape.indent),
-                    "length": _capped(shape.length),
-                    "tokens": list(shape.tokens),
-                }
-                for shape in self.lines
+                _line_dict(shape, tokens=self.show_device_text) for shape in self.lines
             ],
-            "forms": [
+        }
+        if self.show_device_text:
+            payload["lists"] = [_list_dict(item) for item in self.lists]
+            payload["forms"] = [
                 {
                     "position": form.position,
                     "rows": _capped(form.rows),
@@ -352,8 +354,8 @@ class TapWindowDiagnosis:
                     "fields": list(form.fields),
                 }
                 for form in self.forms
-            ],
-        }
+            ]
+        return payload
 
     def to_text(self) -> str:
         """Return the report as lines of text, the notice first."""
@@ -369,18 +371,35 @@ class TapWindowDiagnosis:
             lines.append(
                 f"result: not readable: {self.reason}, rule {self.rule}{where}"
             )
-        if self.lists:
-            lines.append("lists:")
-            lines.extend(f"  {_list_text(item)}" for item in self.lists)
-        else:
-            lines.append("lists: none found")
+        chosen = self.display_list
+        taken = "none taken" if chosen is None else _list_text(chosen)
+        lines.append(f"the display's list: {taken}")
+        if self.show_device_text:
+            lines.append("lists:" if self.lists else "lists: none found")
+            lines.extend(
+                f"  list {item.position}: {_list_text(item)}" for item in self.lists
+            )
         if self.lines:
-            lines.append("lines (number, kind, indent, length: tokens):")
+            what = "length: tokens" if self.show_device_text else "length"
+            lines.append(f"lines (number, kind, indent, {what}):")
             lines.extend(_shape_text(shape) for shape in self.lines)
         if self.forms:
             lines.append("forms:")
             lines.extend(f"  {_form_text(form)}" for form in self.forms)
         return "\n".join(lines)
+
+
+def _line_dict(shape: LineShape, *, tokens: bool) -> dict[str, object]:
+    entry: dict[str, object] = {
+        "number": shape.number,
+        "failing": shape.failing,
+        "kind": shape.kind,
+        "indent": _capped(shape.indent),
+        "length": _capped(shape.length),
+    }
+    if tokens:
+        entry["tokens"] = list(shape.tokens)
+    return entry
 
 
 def _count(number: int) -> str:
@@ -393,23 +412,47 @@ def _capped(number: int) -> int:
     return min(number, CAP)
 
 
+def _display_dict(item: ListRows | None) -> dict[str, object] | None:
+    """The display's list without its place among the lists (a window name
+    could add lists before it)."""
+    if item is None:
+        return None
+    return {
+        "per_display": item.per_display,
+        "reached": item.reached,
+        "read": _capped(item.read),
+        "failed": item.failed,
+    }
+
+
+def _list_dict(item: ListRows) -> dict[str, object]:
+    return {
+        "position": item.position,
+        "per_display": item.per_display,
+        "asked": item.asked,
+        "reached": item.reached,
+        "read": _capped(item.read),
+        "failed": item.failed,
+    }
+
+
 def _list_text(item: ListRows) -> str:
     if not item.per_display:
-        display = "every display"
-    elif item.display is None:
-        sign = "-" if item.negative else ""
-        display = f"display {sign}<num:{_count(item.display_digits)}>"
+        which = "the list of every display"
+    elif item.asked:
+        which = "its Display section"
     else:
-        display = f"display {item.display}"
+        which = "another display's section"
+    rows = f"{_count(item.read)} windows read" if item.reached else "not reached"
     failed = ", the check refused here" if item.failed else ""
-    return f"list {item.position} ({display}): {_count(item.rows)} window rows{failed}"
+    return f"{which}, {rows}{failed}"
 
 
 def _shape_text(shape: LineShape) -> str:
     mark = ">" if shape.failing else " "
-    tokens = " ".join(shape.tokens)
     head = f"{mark} {shape.number} {shape.kind} {_count(shape.indent)}"
-    return f"{head} {_count(shape.length)}: {tokens}"
+    text = f"{head} {_count(shape.length)}"
+    return f"{text}: {' '.join(shape.tokens)}" if shape.tokens else text
 
 
 def _form_text(form: Form) -> str:
@@ -616,7 +659,7 @@ def shape_line(
     accepted: bool = False,
     viewport: bool = False,
     display_id: int = 0,
-    show_flag_names: bool = False,
+    show_device_text: bool = False,
     in_list: bool = False,
 ) -> tuple[str, list[str]]:
     """Return the kind (one of `LINE_KINDS`) and tokens of one line of
@@ -625,14 +668,14 @@ def shape_line(
     `accepted` says that the reader read the window line into a window;
     `viewport` that it read the Viewport line for the orientation of
     `display_id`, the display asked for. A window line shows its fields
-    only when accepted, or with both `show_flag_names` and `in_list` (a row
+    only when accepted, or with both `show_device_text` and `in_list` (a row
     of a found list), which also lets unknown flag names show.
     """
     text = line.strip()
     if not text:
         return "blank", []
     if _INDEX.match(text):
-        show = show_flag_names and in_list
+        show = show_device_text and in_list
         return "window_row", _window_row(text, accepted=accepted, show=show)
     known = _reader_line(line, text, viewport=viewport, display_id=display_id)
     if known is not None:
@@ -647,8 +690,8 @@ def _indent(line: str) -> int:
 @dataclass(frozen=True, slots=True)
 class _Dump:
     """The lines of the output, what the reader concluded, the display asked
-    for, the lines of the lists it found (only rows there may show unknown
-    flag names, and only with `show`)."""
+    for, the lines of the lists it found, and whether device text may be
+    shown."""
 
     lines: list[str]
     verdict: Verdict
@@ -657,18 +700,34 @@ class _Dump:
     show: bool
 
 
+def _kind(dump: _Dump, index: int) -> str:
+    """The kind of a line as the reader classified it (`Verdict.kinds`), a
+    window line for the line a rule about window lines refused at, and
+    ``blank`` or ``other`` for any other line."""
+    line = dump.lines[index]
+    verdict = dump.verdict
+    if index == verdict.line and verdict.rule in ROW_RULES:
+        return "window_row"
+    return verdict.kinds.get(index, "other" if line.strip() else "blank")
+
+
 def _shape(dump: _Dump, index: int, *, failing: bool) -> LineShape:
     line = dump.lines[index]
-    kind, tokens = shape_line(
-        line,
-        accepted=index in dump.verdict.accepted,
-        viewport=index in dump.verdict.viewports,
-        display_id=dump.display_id,
-        show_flag_names=dump.show,
-        in_list=index in dump.listed,
-    )
     number = _part(index, dump.verdict)[1]
-    return LineShape(number, kind, _indent(line), len(line), tuple(tokens), failing)
+    tokens: tuple[str, ...] = ()
+    if dump.show:
+        _, shown = shape_line(
+            line,
+            accepted=index in dump.verdict.accepted,
+            viewport=index in dump.verdict.viewports,
+            display_id=dump.display_id,
+            show_device_text=True,
+            in_list=index in dump.listed,
+        )
+        tokens = tuple(shown)
+    return LineShape(
+        number, _kind(dump, index), _indent(line), len(line), tokens, failing
+    )
 
 
 def _part(index: int, verdict: Verdict) -> tuple[str, int]:
@@ -707,47 +766,26 @@ def _around(dump: _Dump) -> tuple[LineShape, ...]:
 
 
 def _outline(dump: _Dump) -> tuple[LineShape, ...]:
-    """When no one line is to blame: the dispatcher's top-level lines (with
-    no dispatcher header, the lines at indent 0; for the Viewport rules, the
-    lines above the dispatcher that name a Viewport)."""
-    lines, verdict = dump.lines, dump.verdict
-    start, end = verdict.start, verdict.end
-    if verdict.reason is None:
+    """When no one line is to blame: the lines the reader classified as
+    headings or Viewport lines (anchored patterns only), in order."""
+    if dump.verdict.reason is None:
         return ()
-    if verdict.rule == "viewport_missing":
-        top = len(lines) if start is None else start
-        chosen = [i for i in range(top) if "viewport" in lines[i].lower()]
-    elif start is None or end is None:
-        chosen = [
-            i for i, line in enumerate(lines) if line.strip() and _indent(line) == 0
-        ]
-    else:
-        under = [i for i in range(start + 1, end) if lines[i].strip()]
-        level = min((_indent(lines[i]) for i in under), default=0)
-        chosen = [start, *(i for i in under if _indent(lines[i]) == level)]
+    chosen = sorted(
+        i for i, kind in dump.verdict.kinds.items() if kind in {"heading", "viewport"}
+    )
     return tuple(_shape(dump, i, failing=False) for i in chosen[:_OUTLINE_LINES])
 
 
-def _lists(verdict: Verdict, display_id: int) -> tuple[ListRows, ...]:
-    """The lists found; a display number is shown only when it is 0, written
-    ``0``, and display 0 was asked for (see the module)."""
+def _lists(verdict: Verdict) -> tuple[ListRows, ...]:
     rows: list[ListRows] = []
-    for position, span in enumerate(verdict.lists, start=1):
-        per_display = span.display is not None
-        zero = span.display == 0 and span.digits == 1 and not span.negative
-        shown = 0 if zero and display_id == 0 else None
+    for position, (span, reached) in enumerate(
+        zip(verdict.lists, verdict.reached, strict=True), start=1
+    ):
+        read = sum(1 for at in span.lines if at in verdict.accepted)
         failed = verdict.list_head is not None and verdict.list_head == span.head
-        rows.append(
-            ListRows(
-                position,
-                per_display,
-                shown,
-                span.digits,
-                span.rows,
-                failed,
-                negative=span.negative,
-            )
-        )
+        per_display = span.display is not None
+        asked = span.head == verdict.chosen
+        rows.append(ListRows(position, per_display, asked, reached, read, failed))
     return tuple(rows)
 
 
@@ -767,8 +805,8 @@ def _row_form(
 
 
 def _forms(lines: list[str], verdict: Verdict) -> tuple[Form, ...]:
-    """The forms of the rows of each list (the rows the reader counts), in
-    order of their first row."""
+    """The forms of the rows of each list the reader grouped, in order of
+    their first row."""
     forms: list[Form] = []
     for position, span in enumerate(verdict.lists, start=1):
         counts: dict[tuple[bool, bool, tuple[str, ...], bool], int] = {}
@@ -785,13 +823,14 @@ def _forms(lines: list[str], verdict: Verdict) -> tuple[Form, ...]:
 
 
 def diagnose_tap_window(
-    text: str, *, show_flag_names: bool = False, display_id: int = 0
+    text: str, *, show_device_text: bool = False, display_id: int = 0
 ) -> TapWindowDiagnosis:
     """Diagnose the tap window check on the whole text of ``dumpsys input``.
 
-    The result holds no text of `text` (see the module); with
-    `show_flag_names` an unknown flag name that is an upper-case word, in a
-    flags field of a row of a window list the reader found, is shown.
+    By default the result holds no text of `text`: only the verdict, line
+    numbers, the kinds the reader gave lines, lengths and counts (see the
+    module). With `show_device_text` it also holds each shown line's
+    tokens and the rows' forms, which hold device text.
     """
     lines = [line.removesuffix("\r") for line in text.split("\n")]
     verdict = explain_input_windows(text, display_id)
@@ -799,7 +838,7 @@ def diagnose_tap_window(
         msg = "the reader refused with a rule outside RULES"  # a bug, not the text
         raise AssertionError(msg)
     listed = frozenset(i for span in verdict.lists for i in span.lines)
-    dump = _Dump(lines, verdict, display_id, listed, show_flag_names)
+    dump = _Dump(lines, verdict, display_id, listed, show_device_text)
     part: str | None = None
     number: int | None = None
     if verdict.line is not None:
@@ -810,8 +849,8 @@ def diagnose_tap_window(
         verdict.rule,
         part,
         number,
-        _lists(verdict, display_id),
+        tuple(item for item in _lists(verdict) if show_device_text or item.asked),
         shapes,
-        _forms(lines, verdict),
-        show_flag_names=show_flag_names,
+        _forms(lines, verdict) if show_device_text else (),
+        show_device_text=show_device_text,
     )

@@ -509,22 +509,21 @@ def _add_diagnose_parser(add_parser: Callable[..., argparse.ArgumentParser]) -> 
         description=(
             "Read dumpsys input once and run the crawl's tap window check on"
             " it (without a point). Print whether the window list reads or"
-            " which rule refused it and at which line, how many window rows"
-            " each display's list has, and the shape of the lines around the"
-            " failure: field names, flag names and line kinds that uiprobe"
-            " knows, value types, lengths and counts. No text of the device's"
+            " which rule refused it and at which line, the window lists found"
+            " and how many windows were read, and for the lines around the"
+            " failure their kind, indent and length. No text of the device's"
             " output is printed: no serial, app or window names, coordinates,"
-            " accounts or network values. Nothing is sent to the device but"
-            " that one read."
+            " accounts or network values (unless --show-device-text). Nothing"
+            " is sent to the device but that one read."
         ),
     )
     _add_common_options(tap_window, in_command=True)
     tap_window.add_argument(
-        "--show-flag-names",
+        "--show-device-text",
         action="store_true",
         help=(
-            "also print unknown flag names that are upper-case words"
-            " (A-Z, 0-9 and _, at most 48 characters)"
+            "also print the shapes of the lines: field names, values and flags"
+            " from the device, where window names and app text can appear"
         ),
     )
 
@@ -1716,7 +1715,7 @@ def _cmd_diagnose(args: argparse.Namespace) -> int:
             )
         except (TypeError, ValueError):  # a malformed serial or server address
             return _fail(USAGE_ERROR, _DIAGNOSE_USAGE_MESSAGE, as_json=args.json)
-        found = device.diagnose_tap_window(show_flag_names=args.show_flag_names)
+        found = device.diagnose_tap_window(show_device_text=args.show_device_text)
     except UiprobeError as exc:
         return _diagnose_failure((exc.code, exc.exit_code), as_json=args.json)
     except Exception as exc:  # noqa: BLE001 - its message could hold device text
@@ -1838,7 +1837,7 @@ _DIAGNOSE_USAGE_MESSAGE = (
     "the arguments of diagnose could not be read (they are not shown, as they"
     " can name the device); use: uiprobe [-s SERIAL] diagnose tap-window"
     " [-s SERIAL] [--adb PATH] [--adb-server tcp:HOST:PORT] [--no-start-server]"
-    " [--json] [--show-flag-names]; device options go after tap-window or"
+    " [--json] [--show-device-text]; device options go after tap-window or"
     " before diagnose"
 )
 # Options before the command that take a value: their value is not a command.

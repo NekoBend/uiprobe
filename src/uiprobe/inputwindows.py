@@ -126,7 +126,7 @@ return); `explain_input_windows` adds the line it refused at, for
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from typing import Final, Self
 
 __all__ = [
@@ -458,6 +458,24 @@ class _Refusal:
     rule: str
     line: int | None = None
     head: int | None = None
+
+
+@dataclass(slots=True)
+class _Trace:
+    """What the reader read, for `explain_input_windows`; it changes no
+    decision. ``accepted``: the window lines it read into a window;
+    ``viewports``: the Viewport lines of the display it read whole for the
+    orientation; ``kinds``: the kind of each line it read and accepted
+    (``window_row`` and the ``transform`` and ``matrix_row`` lines after it)
+    or matched as a Viewport line of the display (``viewport``);
+    ``reached``: the ``Windows:`` line of each list it read; ``chosen``:
+    the ``Windows:`` line of the list it took as the display's."""
+
+    accepted: set[int] = field(default_factory=set)
+    viewports: set[int] = field(default_factory=set)
+    kinds: dict[int, str] = field(default_factory=dict)
+    reached: set[int] = field(default_factory=set)
+    chosen: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -962,13 +980,15 @@ def _split(text: str) -> list[str]:
 
 
 def _parse(
-    lines: list[str], display_id: int, accepted: set[int] | None = None
+    lines: list[str], display_id: int, trace: _Trace | None = None
 ) -> tuple[InputWindow, ...] | _Refusal:
-    """Read the windows of `display_id` (see `parse_input_windows`; for
-    `accepted` see `_read`)."""
+    """Read the windows of `display_id` (see `parse_input_windows`), noting
+    in `trace` what it read."""
     found = _window_list(lines, display_id)
     if isinstance(found, _Refusal):
         return found
+    if trace is not None:
+        trace.chosen = found.head
     if found.problem is not None:
         return found.problem
     reading = found
@@ -976,14 +996,14 @@ def _parse(
         for other in found.others:  # read as well: a name could have made them
             reading = other
             shown = display_id if other.display is None else other.display
-            read = _read(other, shown, accepted)
+            read = _read(other, shown, trace)
             if isinstance(read, _Refusal) and read.reason in {
                 LINE_FORMAT,
                 REGION_FORMAT,
             }:
                 return _in(read, other)
         reading = found
-        return _in(_read(found, display_id, accepted), found)
+        return _in(_read(found, display_id, trace), found)
     except _TooLongError as error:
         # Such a number could be anything, 0 or display 0 included.
         return _Refusal(ROTATION, "number_too_long", error.line, reading.head)
@@ -1069,15 +1089,31 @@ def _whole(groups: list[_Group], found: _List) -> _Refusal | None:
     return _Refusal(LINE_FORMAT, "transform_mismatch", odd[0].at)
 
 
+def _note_rows(trace: _Trace | None, found: _List) -> None:
+    """Note in `trace` a list the reader reads."""
+    if trace is not None:
+        trace.reached.add(found.head)
+
+
+def _note_window(trace: _Trace | None, group: _Group) -> None:
+    """Note in `trace` a window line the reader read into a window, and the
+    transform line and matrix rows after it that it matched."""
+    if trace is not None:
+        trace.accepted.add(group.at)
+        trace.kinds[group.at] = "window_row"
+        for i, at in enumerate(group.rest_at):
+            trace.kinds[at] = "transform" if i == 0 else "matrix_row"
+
+
 def _read(
-    found: _List, display_id: int, accepted: set[int] | None = None
+    found: _List, display_id: int, trace: _Trace | None = None
 ) -> tuple[InputWindow, ...] | _Refusal:
     """Read the windows of `display_id` in the list `found` (see
-    `parse_input_windows`), adding to `accepted` the index of each window
-    line it read into a window."""
+    `parse_input_windows`), noting in `trace` what it read."""
     groups = _group(found)
     if isinstance(groups, _Refusal):
         return groups
+    _note_rows(trace, found)
     refused = _whole(groups, found)
     if refused is not None:
         return refused
@@ -1096,8 +1132,7 @@ def _read(
         if window is None:
             continue
         windows.append(window)
-        if accepted is not None:
-            accepted.add(group.at)
+        _note_window(trace, group)
         if rotated is not None:
             continue
         if turned:
@@ -1110,13 +1145,12 @@ def _read(
 
 
 def _viewport_of(
-    line: str, display_id: int, at: int, used: set[int] | None = None
+    line: str, display_id: int, at: int, trace: _Trace | None = None
 ) -> int | _Refusal | None:
     """The orientation a line (at index `at`) gives for `display_id`, None
     when it is no Viewport line of that display, or why it cannot be read: a
     display number too long to read (it could be this one), a line of no
-    known form, or a scaled or moved display. A line read whole is added to
-    `used`."""
+    known form, or a scaled or moved display. `trace` notes the line."""
     claim = _VIEWPORT_CLAIM.match(line)
     try:
         if claim is None or _number(claim["display"]) != display_id:
@@ -1124,28 +1158,29 @@ def _viewport_of(
     except _TooLongError:
         return _Refusal(ROTATION, "number_too_long", at)
     match = _VIEWPORT.fullmatch(line)
+    if trace is not None:
+        trace.kinds[at] = "viewport"
+        if match is not None:
+            trace.viewports.add(at)
     if match is None:
         return _Refusal(ROTATION, "viewport_malformed", at)
-    if used is not None:
-        used.add(at)
     if match["logical"] != match["physical"]:
         return _Refusal(ROTATION, "scaled", at)
     return int(match["orientation"])
 
 
 def _orientation(
-    lines: list[str], display_id: int, used: set[int] | None = None
+    lines: list[str], display_id: int, trace: _Trace | None = None
 ) -> tuple[int, int] | _Refusal:
     """The orientation of `display_id` (see `display_orientation`) with the
     index of the first line that says it, or why it cannot be read
-    (`ROTATION`), adding to `used` the index of each Viewport line it read
-    whole."""
+    (`ROTATION`), noting in `trace` the Viewport lines it read."""
     start = _dispatcher_start(lines)
     if isinstance(start, _Refusal):
         return _Refusal(ROTATION, start.rule, start.line)
     said: dict[int, int] = {}  # orientation: the first line that said it
     for i, line in enumerate(lines[:start]):
-        read = _viewport_of(line, display_id, i, used)
+        read = _viewport_of(line, display_id, i, trace)
         if isinstance(read, _Refusal):
             return read
         if read is not None:
@@ -1173,18 +1208,15 @@ def display_orientation(text: str, display_id: int = 0) -> int | None:
 
 
 def _checked(
-    lines: list[str],
-    display_id: int,
-    accepted: set[int] | None = None,
-    used: set[int] | None = None,
+    lines: list[str], display_id: int, trace: _Trace | None = None
 ) -> tuple[InputWindow, ...] | _Refusal:
     """The windows of `display_id` when both the list and the display's
-    orientation read and the orientation is 0, else why not (for `accepted`
-    see `_read`, for `used` `_orientation`)."""
-    read = _parse(lines, display_id, accepted)
+    orientation read and the orientation is 0, else why not, noting in
+    `trace` what it read."""
+    read = _parse(lines, display_id, trace)
     if isinstance(read, _Refusal):
         return read
-    turned = _orientation(lines, display_id, used)
+    turned = _orientation(lines, display_id, trace)
     if isinstance(turned, _Refusal):
         return turned
     orientation, line = turned
@@ -1232,7 +1264,14 @@ class Verdict:
     ``accepted`` the indices of the window lines the reader read into a
     window (of any list it read, before it refused); ``viewports`` the
     indices of the Viewport lines of the display it read whole for the
-    display's orientation (none when it refused before it read them).
+    display's orientation (none when it refused before it read them);
+    ``kinds`` the kind of each line the reader matched as a heading when it
+    found the lists, read and accepted (``window_row`` and the ``transform``
+    and ``matrix_row`` lines after it) or matched as a Viewport line of the
+    display (``viewport``); others are not in it; ``reached`` for each of
+    ``lists`` whether the reader read it; ``chosen`` the ``head`` of the
+    list it took as the display's (None when it took none). The headings
+    in ``kinds`` are its header and those of the chosen list only.
     """
 
     reason: str | None
@@ -1244,6 +1283,9 @@ class Verdict:
     end: int | None = None
     accepted: frozenset[int] = frozenset()
     viewports: frozenset[int] = frozenset()
+    kinds: dict[int, str] = field(default_factory=dict)
+    reached: tuple[bool, ...] = ()
+    chosen: int | None = None
 
 
 def _spans(lines: list[str], start: int) -> tuple[ListSpan, ...]:
@@ -1282,32 +1324,56 @@ def explain_input_windows(text: str, display_id: int = 0) -> Verdict:
     first = None if isinstance(start, _Refusal) else start
     lists = () if first is None else _spans(lines, first)
     end = None if first is None else _dispatcher_end(lines, first)
-    accepted: set[int] = set()
-    used: set[int] = set()
-    read = _checked(lines, display_id, accepted, used)
-    taken, read_viewports = frozenset(accepted), frozenset(used)
-    if isinstance(read, _Refusal):
-        return Verdict(
-            read.reason,
-            read.rule,
-            read.line,
-            first,
-            lists,
-            read.head,
-            end,
-            taken,
-            read_viewports,
-        )
+    trace = _Trace()
+    read = _checked(lines, display_id, trace)
+    chosen = [span for span in lists if span.head == trace.chosen]
+    kinds = _heading_kinds(lines, first, tuple(chosen)) | trace.kinds
+    reached = tuple(span.head in trace.reached for span in lists)
+    found = (
+        (read.reason, read.rule, read.line, read.head)
+        if isinstance(read, _Refusal)
+        else (None, None, None, None)
+    )
     return Verdict(
-        None,
-        None,
-        None,
+        *found[:3],
         first,
         lists,
+        list_head=found[3],
         end=end,
-        accepted=taken,
-        viewports=read_viewports,
+        accepted=frozenset(trace.accepted),
+        viewports=frozenset(trace.viewports),
+        kinds=kinds,
+        reached=reached,
+        chosen=trace.chosen,
     )
+
+
+def _heading_kinds(
+    lines: list[str], start: int | None, lists: tuple[ListSpan, ...]
+) -> dict[int, str]:
+    """The kinds of the lines the reader matches as headings when it finds
+    the lists (`_window_list`): its header (every line equal to it), and for
+    each of `lists` its ``Display:`` section, ``Windows`` line, the line it
+    ended at (`_LIST_END`), and above it in the section the display's
+    transform lines and ``logicalSize=``."""
+    kinds = {i: "heading" for i, line in enumerate(lines) if line.strip() == _HEADER}
+    if start is None:
+        return kinds
+    for span in lists:
+        kinds[span.head] = "heading"
+        if span.section is not None:
+            kinds[span.section] = "heading"
+            section, _ = _under(lines, span.section)
+            for i in (i for i in section if i < span.head):
+                text = lines[i].strip()
+                if text.startswith("transform "):
+                    kinds[i] = "transform"
+                elif text.startswith("logicalSize="):
+                    kinds[i] = "heading"
+        listed = _listed(lines, span.head)
+        if listed.ended and listed.end is not None:
+            kinds[listed.end] = "heading"
+    return kinds
 
 
 def _dispatcher_end(lines: list[str], start: int) -> int:
@@ -1322,10 +1388,10 @@ def _dispatcher_end(lines: list[str], start: int) -> int:
 
 
 # The fields that end a window's name or its applicationInfo.name: each may
-# be in a window line once, in any spelling (``,id=``, ``,  id=``), or where
+# be in a window line once, in any spelling (``,id=``, ``,  id =``), or where
 # the name ends cannot be told.
 _ROW_MARKS: Final = tuple(
-    re.compile(rf",\s*{re.escape(key)}=")
+    re.compile(rf",\s*{re.escape(key)}\s*=")
     for key in ("id", "displayId", "applicationInfo.name", "applicationInfo.token")
 )
 # Where a field after the name begins (``1HXY=`` of the Samsung form too).
