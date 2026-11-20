@@ -29,15 +29,18 @@ Four forms of the window line were seen on emulators (API 24 to 36):
   indent).
 
 A Samsung phone on Android 16 (API 36) printed the API 35 and 36 form with
-three more fields: ``samsungFlags=`` after ``inputConfig=`` (``0x<hex>`` or
-names; seen ``0x0``, ``0x8`` and ``FORCE_TRUSTED_OVERLAY``), and
-``pTouchableRegion=`` (a region or ``<empty>``) and ``1HXY=[n, n, n]`` after
-``touchableRegion=``; its ``inputConfig=`` also named ``DO_NOT_PILFER``. The
-three fields come all together or not at all, and do not change whether a
-window takes a touch or where: ``samsungFlags=`` is read only to know its
-form, and ``pTouchableRegion=`` is never the touchable region. A field is
-found by its whole key (`_key`), so ``samsungFlags=`` is no ``flags=`` and
-``pTouchableRegion=`` no ``touchableRegion=``.
+three more fields: ``samsungFlags=`` right after ``inputConfig=``, and
+``pTouchableRegion=`` and ``1HXY=`` right after ``touchableRegion=``; its
+``inputConfig=`` also named ``DO_NOT_PILFER``. The
+three fields are read only at those places of the fields after the name (not
+in the name or ``applicationInfo.name``), come all together or not at all,
+and must have one of the values the phone printed: ``samsungFlags=`` ``0x0``,
+``0x8`` or ``FORCE_TRUSTED_OVERLAY``, ``pTouchableRegion=<empty>`` and
+``1HXY=`` ``[0, 0, 0]`` or ``[0, 0, 1]``. With those values the window took
+touches as its other fields say; what other values do to the delivery of a
+touch is not known, so a row with one is `LINE_FORMAT`. The fields are named
+by case (``samsungFlags=`` holds no ``flags=``, ``pTouchableRegion=`` no
+``touchableRegion=``).
 
 All of them have ``displayId=``, ``touchableRegion=[l,t][r,b]`` or ``<empty>``
 and ``ownerUid=``. On API 24 to 28 there is one list of every display; on API
@@ -175,9 +178,6 @@ _INPUT_CONFIG_NAMES: Final = frozenset(
         "DO_NOT_PILFER",
     }
 )
-# The names of Samsung's ``samsungFlags=`` that were seen (API 36); the field
-# does not change whether a window takes a touch.
-_SAMSUNG_FLAG_NAMES: Final = frozenset({"FORCE_TRUSTED_OVERLAY"})
 # The flag names of API 31 and 32 (WindowManager.LayoutParams.FLAG_* without
 # the prefix): those seen on the emulators (NOT_FOCUSABLE, NOT_TOUCHABLE,
 # NOT_TOUCH_MODAL, LAYOUT_IN_SCREEN, LAYOUT_NO_LIMITS, LAYOUT_INSET_DECOR,
@@ -265,8 +265,7 @@ _FORM_FIELDS: Final = (
 )
 # A field's value ends where the next field begins (or the line ends), so a
 # value is read whole: text after it that is not another field is no form.
-# ``1HXY`` is the one key seen that starts with a digit (a Samsung phone).
-_NEXT = r"(?=, (?:[A-Za-z][A-Za-z0-9_.]*|1HXY)=|$)"
+_NEXT = r"(?=, [A-Za-z][A-Za-z0-9_.]*=|$)"
 # A quoted name ends at the first quote followed by the metadata that comes
 # after every name (``, id=N`` or ``, displayId=N``), so a quote in the title
 # (``Today's Orders``) stays in it. A name that fakes that metadata inside it
@@ -287,14 +286,15 @@ _HEX_FLAGS = re.compile(rf", flags=0x(?P<hex>[0-9a-fA-F]{{1,8}}){_NEXT}")
 _NAMED_FLAGS = re.compile(rf", flags=(?P<names>[^,]*){_NEXT}")
 _VISIBLE = re.compile(rf", visible=(?P<visible>true|false){_NEXT}")
 _PORTAL = re.compile(rf", portalToDisplayId=(?P<to>-?\d{{1,10}}){_NEXT}")
+# The Samsung fields (API 36) at their places in the fields after the name
+# (`_meta`), with only the values the phone printed (see the module's text).
 _SAMSUNG_FLAGS = re.compile(
-    r", samsungFlags=(?:0x[0-9a-fA-F]{1,8}|(?P<names>[A-Z_]+(?: \| [A-Z_]+)*))" + _NEXT
+    r", inputConfig=[^,]*, samsungFlags=(?:0x0|0x8|FORCE_TRUSTED_OVERLAY)" + _NEXT
 )
-_P_REGION = re.compile(
-    rf", pTouchableRegion=(?:<empty>|\[{_NUMBER},{_NUMBER}\]"
-    rf"\[{_NUMBER},{_NUMBER}\]){_NEXT}"
+_SAMSUNG_REGION = re.compile(
+    rf", touchableRegion=(?:<empty>|\[{_NUMBER},{_NUMBER}\]\[{_NUMBER},{_NUMBER}\]), "
+    r"pTouchableRegion=<empty>, 1HXY=\[0, 0, [01]\]" + _NEXT
 )
-_HXY = re.compile(rf", 1HXY=\[-?\d{{1,10}}, -?\d{{1,10}}, -?\d{{1,10}}\]{_NEXT}")
 _LINE_ORIENTATION = re.compile(r"displayOrientation=(\d+)")
 _TRANSFORM = re.compile(r"^transform \(ROT_(?P<rot>\d+)\) \((?P<kind>[A-Z ]+)\)$")
 _MATRIX_ROW = re.compile(r"^-?\d+\.\d+(?: +-?\d+\.\d+){2}$")
@@ -369,22 +369,6 @@ class _List:
     rotated: bool  # the section's display transform is not the identity
     problem: str | None = None  # why the list cannot be read as a whole
     others: tuple[_List, ...] = ()  # the lists of the other displays
-
-
-def _key(key: str) -> re.Pattern[str]:
-    """`key` (``name=``) as a whole key: not the end of a longer key, so
-    ``samsungFlags=`` is no ``flags=`` and ``pTouchableRegion=`` no
-    ``touchableRegion=``. Text in a window name that holds the whole key
-    (after a space, a quote, ``=`` or ``, ``) still counts."""
-    return re.compile(rf"(?<![A-Za-z0-9_.]){re.escape(key)}")
-
-
-_KEYS: Final = {key: _key(key) for key in _ONCE}
-
-
-def _has(line: str, key: str) -> bool:
-    """Whether `line` names the field `key` (one of `_KEYS`) anywhere."""
-    return _KEYS[key].search(line) is not None
 
 
 def _indent(line: str) -> int:
@@ -589,9 +573,9 @@ def _touch(line: str) -> tuple[bool, bool, bool] | None:
     # A field named anywhere in the line must read as that field (text in a
     # name such as "inputConfig=0x0, x" is no field and no form).
     if (
-        _has(line, "inputConfig=") != (config is not None)
-        or _has(line, "visible=") != (visible is not None)
-        or _has(line, "flags=") != (named is not None)
+        ("inputConfig=" in line) != (config is not None)
+        or ("visible=" in line) != (visible is not None)
+        or ("flags=" in line) != (named is not None)
         or (config is None and visible is None)
     ):
         return None
@@ -616,25 +600,17 @@ def _touch(line: str) -> tuple[bool, bool, bool] | None:
 
 
 def _samsung(line: str) -> bool | None:
-    """Whether a window line has the fields of the Samsung form (API 36):
-    ``samsungFlags=`` with a hex number or known names, ``pTouchableRegion=``
-    with a region or ``<empty>`` and ``1HXY=`` with three numbers; None when
-    it has some of them but not all, or one that does not read as that field.
-    None of them changes whether or where the window takes a touch."""
-    present = [_has(line, key) for key in _SAMSUNG_KEYS]
-    if not any(present):
+    """Whether a window line has the fields of the Samsung form (API 36);
+    None when one of them is named anywhere in the line (its name and
+    ``applicationInfo.name`` included) but the fields after the name do not
+    hold ``samsungFlags=`` right after ``inputConfig=`` and
+    ``pTouchableRegion=`` and ``1HXY=`` right after ``touchableRegion=``, each
+    with a value the phone printed. They do not change whether or where the
+    window takes a touch."""
+    if not any(key in line for key in _SAMSUNG_KEYS):
         return False
-    flags = _SAMSUNG_FLAGS.search(line)
-    if (
-        not all(present)
-        or flags is None
-        or _P_REGION.search(line) is None
-        or _HXY.search(line) is None
-    ):
-        return None
-    if flags["names"] is not None and (
-        _names(flags["names"], _SAMSUNG_FLAG_NAMES) is None
-    ):
+    meta = _meta(line)
+    if _SAMSUNG_FLAGS.search(meta) is None or _SAMSUNG_REGION.search(meta) is None:
         return None
     return True
 
@@ -647,9 +623,7 @@ def _window(line: str, name: str) -> InputWindow | str:
     samsung = _samsung(line)
     if touch is None or uid is None or samsung is None:
         return LINE_FORMAT
-    if samsung and not _has(line, "inputConfig="):  # seen on API 36 only
-        return LINE_FORMAT
-    if portal is None and (_has(line, "portalToDisplayId=") or touch[2]):
+    if portal is None and ("portalToDisplayId=" in line or touch[2]):
         return LINE_FORMAT
     region = _REGION.search(line)
     if region is None:
@@ -710,7 +684,7 @@ def _row(
     match = _LINE.match(line)
     if match is None or int(match["index"]) != index:
         return LINE_FORMAT
-    if any(len(_KEYS[key].findall(line)) > 1 for key in _ONCE):
+    if any(line.count(key) > 1 for key in _ONCE):
         return LINE_FORMAT
     display = int(match["display"])
     if found.display is not None and display != found.display:
