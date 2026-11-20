@@ -16,7 +16,7 @@ from pathlib import Path
 
 import pytest
 
-from uiprobe import runlog
+from uiprobe import pngfile, runlog
 from uiprobe.crawl import Limits
 from uiprobe.errors import UiprobeError
 from uiprobe.model import Bounds, Element, Screen
@@ -182,6 +182,115 @@ def test_limits_may_be_a_plain_dict_and_the_time_defaults_to_now(tmp_path):
     assert data["limits"] == {"depth": 2, "actions": 9, "minutes": 1}
     stamp = datetime.fromisoformat(data["started_at"])
     assert stamp.utcoffset() is not None
+
+
+def _create(path) -> RunWriter:
+    writer = RunWriter.create(
+        path, package="p", limits=Limits(), deny_words=[], serial="s"
+    )
+    _WRITERS.append(writer)
+    return writer
+
+
+def test_an_existing_folder_is_named_in_the_message(tmp_path):
+    (tmp_path / "run").mkdir()
+    with pytest.raises(RunFolderError, match="already exists; give a new folder"):
+        make(tmp_path)
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["run:x", "run::$INDEX_ALLOCATION", "dir:x/run", "run:"],
+    ids=["named", "type", "parent", "trailing"],
+)
+def test_on_windows_a_stream_path_is_refused(tmp_path, monkeypatch, name):
+    monkeypatch.setattr(pngfile, "_WINDOWS", True)
+    with pytest.raises(RunFolderError, match="names a stream") as raised:
+        _create(tmp_path / name)
+    assert raised.value.details["path"] == str(tmp_path / name)
+    assert names(tmp_path) == []
+
+
+@pytest.mark.parametrize("kind", ["file", "folder"])
+def test_on_windows_a_stream_of_an_existing_entry_is_refused(
+    tmp_path, monkeypatch, kind
+):
+    target = tmp_path / "base"
+    if kind == "file":
+        target.write_bytes(b"mine")
+    else:
+        target.mkdir()
+    before = target.stat().st_mtime_ns
+    monkeypatch.setattr(pngfile, "_WINDOWS", True)
+    with pytest.raises(RunFolderError, match="names a stream"):
+        _create(f"{target}:x")
+    assert names(tmp_path) == ["base"]
+    assert target.stat().st_mtime_ns == before
+    if kind == "file":
+        assert target.read_bytes() == b"mine"
+
+
+@pytest.mark.skipif(os.name != "nt", reason="streams exist on Windows")
+@pytest.mark.parametrize("kind", ["file", "folder"])
+def test_on_this_windows_a_stream_run_folder_is_not_made(tmp_path, kind):
+    target = tmp_path / "base"
+    if kind == "file":
+        target.write_bytes(b"mine")
+    else:
+        target.mkdir()
+    stream = f"{target}:x"
+    with pytest.raises(RunFolderError, match="names a stream"):
+        _create(stream)
+    with pytest.raises(FileNotFoundError):
+        os.stat(stream)  # noqa: PTH116
+    assert names(tmp_path) == ["base"]
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Windows names a stream with a colon")
+def test_elsewhere_a_colon_is_part_of_the_folder_name(tmp_path):
+    _create(tmp_path / "run:x").close()
+    assert (tmp_path / "run:x" / "run-start.json").is_file()
+
+
+def test_a_null_character_is_refused(tmp_path):
+    with pytest.raises(RunFolderError, match="null"):
+        _create(f"{tmp_path}{os.sep}r\x00un")
+    assert names(tmp_path) == []
+
+
+def test_a_broken_link_is_refused(tmp_path):
+    link = tmp_path / "run"
+    try:
+        link.symlink_to(tmp_path / "missing", target_is_directory=True)
+    except OSError:
+        pytest.skip("this system cannot make a link here")
+    target = link.readlink()
+    with pytest.raises(RunFolderError, match="already exists"):
+        _create(link)
+    assert not (tmp_path / "missing").exists()
+    assert link.is_symlink()
+    assert link.readlink() == target
+
+
+def test_a_path_that_cannot_be_looked_up_is_not_taken_as_missing(tmp_path, monkeypatch):
+    target = tmp_path / "run"
+    real = os.lstat
+    made = []
+
+    def lstat(path, *args, **kwargs):
+        if os.fspath(path) == str(target):
+            raise PermissionError(errno.EACCES, "Permission denied", str(target))
+        return real(path, *args, **kwargs)
+
+    with monkeypatch.context() as scoped:  # os is global: keep the patch short
+        scoped.setattr(pngfile.os, "lstat", lstat)
+        scoped.setattr(runlog, "_make_dir", made.append)
+        with pytest.raises(RunFolderError, match="cannot check") as raised:
+            _create(target)
+    assert raised.value.details == {"path": str(target)}
+    assert "Permission denied" in raised.value.message
+    assert made == []
+    assert names(tmp_path) == []
 
 
 # --- transitions ---
@@ -1481,3 +1590,206 @@ def test_each_record_is_encoded_once_and_strictly(tmp_path, monkeypatch):
         ("uiprobe.screen/1", False),
         ("uiprobe.run/1", False),
     ]
+
+
+class _PathNamingAnother(Path):
+    """A path whose own parts name one place and whose fspath names another."""
+
+    other = ""
+
+    def __fspath__(self) -> str:
+        return self.other
+
+
+def test_the_fspath_of_a_path_subclass_is_what_is_checked(tmp_path):
+    existing = tmp_path / "exists"
+    existing.mkdir()
+    out = _PathNamingAnother(tmp_path / "new")
+    out.other = str(existing)
+    with pytest.raises(RunFolderError, match="already exists"):
+        _create(out)
+    assert names(tmp_path) == ["exists"]
+
+
+class _ShapeShifter(str):
+    """Text that would join, divide and convert to `elsewhere`."""
+
+    __slots__ = ()
+    elsewhere = ""
+
+    def __add__(self, other):
+        return self.elsewhere
+
+    def __truediv__(self, other):
+        return Path(self.elsewhere)
+
+    def __str__(self) -> str:
+        return self.elsewhere
+
+
+def _record_checks_and_creation(monkeypatch):
+    checked: list[object] = []
+    made: list[object] = []
+    real_check = runlog.check_new_path
+    real_make = runlog._make_dir
+
+    def check(path):
+        checked.append(path)
+        return real_check(path)
+
+    def make_dir(path):
+        made.append(path)
+        return real_make(path)
+
+    monkeypatch.setattr(runlog, "check_new_path", check)
+    monkeypatch.setattr(runlog, "_make_dir", make_dir)
+    return checked, made
+
+
+def test_one_plain_str_goes_from_the_check_to_the_creation(tmp_path, monkeypatch):
+    checked, made = _record_checks_and_creation(monkeypatch)
+    expected = str(tmp_path / "run")
+    _ShapeShifter.elsewhere = str(tmp_path / "elsewhere")
+    writer = _create(_ShapeShifter(expected))
+    assert checked == [expected]
+    assert made == [expected]
+    assert all(type(value) is str for value in [*checked, *made])
+    assert writer.path == Path(expected)
+    assert (tmp_path / "run" / "run-start.json").is_file()
+    assert names(tmp_path) == ["run", "run/run-start.json"]
+
+
+def test_a_relative_path_is_checked_as_given_and_as_joined(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    checked, made = _record_checks_and_creation(monkeypatch)
+    _create("run")
+    joined = os.path.join(os.getcwd(), "run")  # noqa: PTH109, PTH118
+    assert checked == ["run", joined]
+    assert made == [joined]
+
+
+def test_an_empty_path_is_refused_as_given(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    with pytest.raises(RunFolderError, match="must not be empty"):
+        _create("")
+    assert names(tmp_path) == []
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the limit differs on Windows")
+def test_a_path_that_passes_only_once_normalized_is_refused(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    given = "./" * 2100 + "run"  # too long as given; "run" once normalized
+    with pytest.raises(RunFolderError, match="cannot check"):
+        _create(given)
+    assert names(tmp_path) == []
+
+
+def test_an_unreadable_working_folder_is_a_run_folder_error(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+
+    def getcwd():
+        raise FileNotFoundError(errno.ENOENT, "No such file or directory")
+
+    with monkeypatch.context() as scoped:  # os is global: keep the patch short
+        scoped.setattr(runlog.os, "getcwd", getcwd)
+        with pytest.raises(RunFolderError, match="working folder") as raised:
+            _create("run")
+    assert raised.value.details == {"path": "run"}
+    assert names(tmp_path) == []
+
+
+@pytest.mark.parametrize("out", [b"run", 5, None])
+def test_out_that_is_not_text_is_refused(tmp_path, monkeypatch, out):
+    monkeypatch.chdir(tmp_path)
+    with pytest.raises(TypeError):
+        _create(out)
+    assert names(tmp_path) == []
+
+
+@pytest.mark.parametrize(
+    "path",
+    ["C:run", "c:runs/x", "\\run", "/uiprobe-no-such-run", "\\runs\\x"],
+    ids=[
+        "drive",
+        "drive-slash-inside",
+        "root",
+        "root-slash",
+        "root-deep",
+    ],
+)
+def test_on_windows_a_path_relative_to_a_drive_folder_is_refused(
+    tmp_path, monkeypatch, path
+):
+    monkeypatch.setattr(pngfile, "_WINDOWS", True)
+    monkeypatch.chdir(tmp_path)
+    checked: list[str] = []
+
+    def never_make(folder):
+        pytest.fail(f"the folder {folder!r} was about to be made")
+
+    # Nothing outside the test folder is looked up or made, whatever is there.
+    monkeypatch.setattr(runlog, "check_new_path", checked.append)
+    monkeypatch.setattr(runlog, "_make_dir", never_make)
+    with pytest.raises(
+        RunFolderError, match="give a full path with its drive"
+    ) as raised:
+        _create(path)
+    assert raised.value.details == {"path": path}
+    assert "relative to the working folder" in raised.value.message
+    assert checked == [path]  # checked as given, then refused before joining
+
+
+def test_on_windows_a_bare_drive_depends_on_its_folder(monkeypatch):
+    # The working folder of the drive exists, so create says "already exists"
+    # first on Windows; the rule itself still counts it.
+    monkeypatch.setattr(pngfile, "_WINDOWS", True)
+    assert pngfile.depends_on_a_drive_folder("C:")
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "C:\\runs\\x",
+        "c:/runs/x",
+        "\\\\server\\share\\x",
+        "//server/share/x",
+        "\\\\?\\C:\\x",
+        "runs\\x",
+        "runs/x",
+    ],
+)
+def test_on_windows_other_forms_do_not_depend_on_a_drive_folder(monkeypatch, path):
+    monkeypatch.setattr(pngfile, "_WINDOWS", True)
+    assert not pngfile.depends_on_a_drive_folder(path)
+
+
+@pytest.mark.parametrize("path", ["C:run", "\\run", "/run"])
+def test_elsewhere_no_path_depends_on_a_drive_folder(monkeypatch, path):
+    monkeypatch.setattr(pngfile, "_WINDOWS", False)
+    assert not pngfile.depends_on_a_drive_folder(path)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="drive folders exist on Windows")
+def test_on_this_windows_a_path_relative_to_a_drive_folder_is_refused(tmp_path):
+    drive = os.path.splitdrive(str(tmp_path))[0]
+    name = f"uiprobe-{tmp_path.name}"
+    for path in (f"{drive}{name}", f"\\{name}", f"/{name}"):
+        with pytest.raises(RunFolderError, match="give a full path with its drive"):
+            _create(path)
+        assert not os.path.lexists(path)
+
+
+def test_a_relative_path_is_fixed_when_the_run_starts(tmp_path, monkeypatch):
+    (tmp_path / "runs").mkdir()
+    (tmp_path / "other").mkdir()
+    monkeypatch.chdir(tmp_path)
+    writer = _create(os.path.join("runs", "x"))  # noqa: PTH118
+    monkeypatch.chdir(tmp_path / "other")
+    writer.finish("exhausted", screens=0, actions=0)
+    assert writer.path == tmp_path / "runs" / "x"
+    assert names(tmp_path / "runs" / "x") == [
+        "run-start.json",
+        "run.json",
+        "summary.txt",
+    ]
+    assert names(tmp_path / "other") == []
