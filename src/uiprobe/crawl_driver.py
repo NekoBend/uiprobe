@@ -275,6 +275,7 @@ class _Run:
         self.cover_unknown: str | None = None  # what the first cover_unknown missed
         self.last_screen_id: str | None = None  # the last screen read
         self.last_foreground: str | None = None  # the app in front at the last read
+        self.gate_screen_id: str | None = None  # the id of the gate's own dump
         self.screenshots = screenshots
         self.settle = settle
         self.deadline = deadline
@@ -452,9 +453,11 @@ class _Run:
         reason, seen = self.gate(action, observation)
         self.unsent = None
         if seen is not None and reason != NOT_SENT_RECONNECTED:
-            # A read the pin check kept: it names the last screen and app.
-            if seen.observation.screen is not None:
-                self.last_screen_id = seen.observation.screen.screen_id
+            # A read the pin check kept: it names the last screen and app
+            # (the id was computed in the gate, before its last look at the
+            # clock, so no work of this size runs after the last check).
+            if self.gate_screen_id is not None:
+                self.last_screen_id = self.gate_screen_id
             self.last_foreground = seen.observation.foreground
         if reason is not None:
             details = self.gate_details if reason in _COVER_REASONS else None
@@ -713,6 +716,7 @@ class _Run:
         # Every condition is evaluated to a reason first (the truth tests run
         # here), then nothing but one integer comparison follows.
         why = next((reason for failed, reason in checks if bool(failed)), None)
+        self.gate_screen_id = None if screen is None else screen.screen_id
         # The time again, after the reads (they can take long) and before the
         # last comparison, so that the clock, which may be the caller's code,
         # runs before it and nothing runs after it: past the limit, nothing is

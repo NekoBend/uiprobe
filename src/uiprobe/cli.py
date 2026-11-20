@@ -1253,6 +1253,11 @@ def _preview_json(result: Preview, settings_path: str) -> dict[str, object]:
 
 
 def _cmd_crawl(args: argparse.Namespace) -> int:
+    if args.press and (sys.stderr if args.json else sys.stdout) is None:
+        # Before anything else writes (a settings warning would go to stdout).
+        stream = "stderr" if args.json else "stdout"
+        msg = f"the plan cannot be shown: {stream} is closed, so nothing was pressed"
+        raise _UsageError(msg)
     policy, settings = _crawl_policy(args)
     if args.press:
         return _cmd_crawl_press(args, policy)
@@ -1340,6 +1345,9 @@ def _cmd_crawl_press(args: argparse.Namespace, policy: Policy) -> int:
         pin=True,
     )
     emulator = _press_device_check(device, allow_real_device=args.allow_real_device)
+    # The identity read through the pin must agree before anything is shown
+    # or written (with the same emulator requirement every later check has).
+    device.check_pin(emulator=not args.allow_real_device)
     plan: dict[str, object] = {
         "package": args.package,
         "device": {"serial": device.serial, "emulator": emulator},

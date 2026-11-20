@@ -418,9 +418,12 @@ def test_every_pin_check_still_requires_an_emulator(
     # says otherwise: without --allow-real-device nothing may be started.
     monkeypatch.setattr(Device, "is_emulator", lambda _self: True)
     android.props["ro.kernel.qemu"] = "0"
-    code, _text, _err = press(capsys, fake_adb, "--press", "--out", str(tmp_path / "r"))
+    out = tmp_path / "r"
+    code, text, _err = press(capsys, fake_adb, "--press", "--out", str(out))
     assert code != 0
     assert device_writes(fake_adb) == []
+    assert not out.exists()  # refused before the plan and the folder
+    assert "pressing on" not in text
 
 
 @pytest.mark.usefixtures("here", "android")
