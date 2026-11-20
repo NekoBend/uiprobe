@@ -201,6 +201,9 @@ NOT_SENT_START: Final = "start_not_sent"
 # The pinned device was away (and came back, proven the same) after the
 # observation the action was chosen on: what was read may be stale.
 NOT_SENT_RECONNECTED: Final = "device_reconnected"
+# What `_Run.relaunch` returns when it force-stopped the app and then did not
+# start it because the device had to be proven again (not an end-line reason).
+_HALF_RELAUNCH: Final = "relaunch_half_sent"
 # The stop reason of a run that ended because BACK or a relaunch was not sent.
 STOP_NOT_SENT: Final = "not_sent"
 MAX_DURATION: Final = "max_duration"  # the engine's reason for the time limit
@@ -256,9 +259,12 @@ class _Run:
         # An action whose start line is written and that is in the gate: not
         # sent yet, so a run that ends there can close it as not sent.
         self.unsent: int | None = None
-        # Device.reconnects when the current observation began its reads.
-        self.reconnects_seen = device.reconnects
-        self.gate_reconnects = device.reconnects  # after the gate's own check
+        # Device.pin_epoch when the current observation began its reads, and
+        # after the gate's own pin check: an input goes out only when nothing
+        # happened to the pin since the observation it was chosen on.
+        self.epoch_seen = device.pin_epoch
+        self.gate_epoch = device.pin_epoch
+        self.sent_epoch = device.pin_epoch  # when the last action was sent
         self.repins_before = len(device.repins)  # moves made before this run
         # Why a wait for the device was stopped (a not_sent reason), once known.
         self.wait_stop: str | None = None
@@ -306,6 +312,8 @@ class _Run:
         counted it, so rather than go on from a wrong count the run ends
         (alpha: the safe side).
         """
+        if refused == _HALF_RELAUNCH:
+            return STOP_NOT_SENT  # the summary already says what happened
         if refused in (NOT_SENT_STOPPED, NOT_SENT_TIME_LIMIT, NOT_SENT_START):
             return INTERRUPTED if self._stop_seen else MAX_DURATION
         if refused is not None and isinstance(action, Back | Relaunch):
@@ -391,12 +399,17 @@ class _Run:
                 self.record(seen)
                 # The gate's reads are the next observation: they began after
                 # its own pin check.
-                self.reconnects_seen = self.gate_reconnects
+                if self.device.pin_epoch != self.gate_epoch:
+                    # Something happened during the gate's own reads: they
+                    # are mixed, so the screen is read again from scratch.
+                    return reason, None
+                self.epoch_seen = self.gate_epoch
                 return reason, seen.observation
             return reason, None
         # Nothing runs between the gate's last read and the input: no user
         # code (stop() and the clock were asked first), no other read, no write.
         self._open = action_id
+        self.sent_epoch = self.device.pin_epoch
         if isinstance(action, Tap):
             self.device.tap(action.point)
             self.engine.tap_sent(action)
@@ -432,7 +445,7 @@ class _Run:
         self.device.check_pin(emulator=self.emulator)
         if isinstance(action, Launch):
             return None, None
-        self.gate_reconnects = self.device.reconnects
+        self.gate_epoch = self.device.pin_epoch
         # For a tap: the focused window before and after the dump must be the
         # same window of the app, so the dump shows that window (uiautomator
         # dumps the focused window: seen on API 24, 30 and 36 with the shade).
@@ -444,7 +457,7 @@ class _Run:
         seen = _Seen(Observation(screen, foreground, keyboard, now), focus)
         # The device was away since the observation the action was chosen on
         # (or during these reads): nothing read before can be trusted.
-        away = self.device.reconnects != self.reconnects_seen
+        away = self.device.pin_epoch != self.epoch_seen
         if isinstance(action, Tap):
             allowed = self.engine.recheck(action, seen.observation)
             owners = {None if f is None else f.owner for f in (before, focus)}
@@ -559,6 +572,16 @@ class _Run:
                     f"{self.package} was force-stopped but not started again ({why})"
                 )
                 raise
+            if self.device.pin_epoch != self.sent_epoch:
+                # The device had to be proven again after the force-stop: the
+                # start is not sent on the earlier decision.
+                self._open = None
+                self.writer.write_transition_end(action_id, not_sent=NOT_SENT_START)
+                self.notes.append(
+                    f"{self.package} was force-stopped but not started again"
+                    f" ({NOT_SENT_RECONNECTED})"
+                )
+                return _HALF_RELAUNCH
         if reason is not None:
             self._open = None
             self.writer.write_transition_end(action_id, not_sent=NOT_SENT_START)
@@ -589,7 +612,7 @@ class _Run:
         removes it, so even reading goes only to the device that was checked.
         """
         self.device.check_pin(emulator=self.emulator)
-        self.reconnects_seen = self.device.reconnects
+        self.epoch_seen = self.device.pin_epoch
         screen = self.dump()
         foreground = self.device.foreground()
         if self._open is not None:
@@ -827,6 +850,7 @@ def crawl(
     # stop(); the caller's own watch is put back at the end.
     caller_watch = device.pin_watch
     device.set_pin_watch(None if stop is None else (lambda: bool(stop())))
+    repins_before = len(device.repins)
     try:
         return _crawl_on(
             device,
@@ -840,6 +864,7 @@ def crawl(
             stop=stop,
             clock=clock,
             sleep=sleep,
+            repins_before=repins_before,
         )
     finally:
         device.set_pin_watch(caller_watch)
@@ -858,6 +883,7 @@ def _crawl_on(
     stop: Callable[[], bool] | None,
     clock: Callable[[], float],
     sleep: Callable[[float], None],
+    repins_before: int,
 ) -> CrawlResult:
     """`crawl` after its arguments were checked: pin, check, run."""
     device.pin_transport()
@@ -889,6 +915,7 @@ def _crawl_on(
             clock=clock,
             sleep=sleep,
         )
+        run.repins_before = repins_before  # moves made before this call
         # Asked only while the device waits for a renumbered transport.
         device.set_pin_watch(run.waiting_stopped)
         return _drive(run, writer)

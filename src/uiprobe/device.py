@@ -1262,8 +1262,13 @@ class Device:
         self._repins: list[tuple[int, int]] = []
         self._pin_watch: Callable[[], bool] | None = None
         self._repinning = False  # inside a re-pin: no second one
-        self._reconnects = 0  # waits for a renumbered or offline transport
-        self._broken: DeviceNotFoundError | None = None  # a failed pin, kept
+        self._reconnects = 0  # times the device had to be proven again
+        # Moves on every event that makes earlier reads doubtful: a failed
+        # request on the pin, a wait, a move, a failed pin. `_proven` is its
+        # value when the identity was last proven on the current number.
+        self._epoch = 0
+        self._proven = 0
+        self._broken: tuple[str, dict[str, object]] | None = None  # failed pin
         if pin:
             # Right after the listing, so the identity is the chosen device's.
             self.pin_transport()
@@ -1285,39 +1290,67 @@ class Device:
         server (``host:devices-l``) that the pinned transport id still lists
         this serial, so no request goes to a device that a restarted server
         gave the same number. The instant between that check and the request
-        itself remains.
+        itself remains. See `_check_listed` for what else holds.
         """
+        if self._broken is not None:
+            raise self._broken_error()
         if self._transport_id is None:
             return {}
         self._check_listed(strict=strict)
         return {"transport_id": self._transport_id}
 
-    def _check_listed(self, *, strict: bool = False) -> None:
-        """Raise unless the server lists the pinned transport with this serial.
+    def _call[T](self, send: Callable[[dict[str, int]], T], *, strict: bool) -> T:
+        """Send one request with the pin; note a lost transport at once.
 
-        When the pinned id is gone from the listing, or still lists this
-        serial but offline, and a re-pin is allowed (`can_repin`, not
-        `strict`), wait for the device to come back (see `_repin`) instead of
-        raising at once. `strict` is for a request that changes the device
-        (an input, a start or a stop of an app), so nothing waits between the
-        checks before it and the request itself. Once the pin has failed, every
-        later request fails the same way (see `_fail`).
+        A request on the pinned transport that fails at the adb level (the
+        device went offline or away, the server is gone, the protocol broke)
+        moves `pin_epoch` before the error leaves this method, so a caller
+        that swallows the error cannot hide it: the next read proves the
+        device again and the next input is refused.
         """
-        broken = self._broken
-        if broken is not None:
-            raise DeviceNotFoundError(str(broken), details=dict(broken.details))
+        pin = self._pin(strict=strict)
+        try:
+            return send(pin)
+        except _OPTIONAL_ERRORS:
+            if pin:
+                self._epoch += 1
+            raise
+
+    def _check_listed(self, *, strict: bool = False) -> None:
+        """Hold every request to one rule; raise when it does not hold.
+
+        The rule for a request that changes the device (`strict`: an input,
+        a start or a stop of an app): it goes out only when the pinned number
+        is listed, ready, for this serial, and nothing happened since the
+        identity was last proven on that number (`pin_epoch` equals the proven
+        epoch: no request failed, no wait began, the pin did not move).
+        Otherwise it is refused with ``device_changed`` and the pin fails.
+
+        A read goes out on the same condition. When the number is gone from
+        the listing, still lists this serial but offline, or something
+        happened since the last proof, the device is proven again first: with
+        a pinned boot id by waiting for it (`_repin`), without one by reading
+        the identity again through the same number when it is listed and
+        ready. Anything else fails the pin. A request made while a wait is
+        under way (from the watch, say) fails the pin too.
+        """
         listed = [
             d for d in self._client.devices() if d.transport_id == self._transport_id
         ]
-        if len(listed) == 1 and listed[0].serial == self.serial:
-            if listed[0].state == READY_STATE:
-                return
-            waitable = listed[0].state == OFFLINE_STATE
-        else:
-            waitable = not listed
-        if strict or self._repinning or not self.can_repin or not waitable:
+        same = len(listed) == 1 and listed[0].serial == self.serial
+        ready = same and listed[0].state == READY_STATE
+        if ready and self._epoch == self._proven:
+            return
+        if strict or self._repinning:
             raise self._fail(self._changed())
-        self._repin()
+        if self.can_repin and (
+            ready or not listed or (same and listed[0].state == OFFLINE_STATE)
+        ):
+            self._repin()
+        elif ready and self._transport_id is not None:
+            self._prove_in_place(self._transport_id)
+        else:
+            raise self._fail(self._changed())
 
     def _changed(
         self, why: str = "does not lead to that device any more"
@@ -1327,15 +1360,22 @@ class Device:
         return DeviceNotFoundError(msg, details=details)
 
     def _fail(self, error: DeviceNotFoundError) -> DeviceNotFoundError:
-        """Remember a failed pin, so that no later request goes anywhere.
+        """Keep a failed pin, so that no later request goes anywhere.
 
-        A caller may swallow the error (a best-effort read does); the next
-        request then raises it again instead of reaching a device that came
-        back after the pin was given up.
+        A caller may swallow the error (a best-effort read does); every later
+        request raises it again instead of reaching a device that came back
+        after the pin was given up. Only the message and the details are
+        kept, not the exception and its frames.
         """
-        if self._pinned_identity is not None:
-            self._broken = error
+        if self._broken is None:
+            self._broken = (str(error), dict(error.details))
+            self._epoch += 1
         return error
+
+    def _broken_error(self) -> DeviceNotFoundError:
+        assert self._broken is not None  # noqa: S101 - only called when kept
+        message, details = self._broken
+        return DeviceNotFoundError(message, details=dict(details))
 
     def _same_device(self, found: DeviceIdentity | None) -> bool:
         """Whether `found` is the pinned device.
@@ -1352,43 +1392,68 @@ class Device:
 
     def _stop_if_watched(self) -> None:
         watch = self._pin_watch
-        if watch is not None and watch():
+        stopped = watch is not None and watch()
+        if self._broken is not None:
+            # A request inside the watch failed the pin (and may have been
+            # swallowed there): the wait ends with that failure.
+            raise self._broken_error()
+        if stopped:
             msg = f"the wait for {self.serial} to come back was stopped"
             details = {"serial": self.serial, "reason": PIN_WAIT_STOPPED}
             raise self._fail(DeviceNotFoundError(msg, details=details))
 
-    def _repin(self) -> None:
-        """Move the pin to the transport the same device came back on.
-
-        The adb server can renumber a device that went offline for a moment.
-        Until `REPIN_WAIT` seconds after the start (an absolute deadline), the
-        server's listing is read every `REPIN_POLL` seconds until exactly one
-        entry with this serial is ready. The identity is then read through
-        that transport (not taken from the listing) and must be the pinned
-        device's (`_same_device`); the watch and the deadline are asked once
-        more, and only then does the pin move. A move to another number counts
-        toward `MAX_REPINS`. Anything else raises ``device_changed`` (or
-        ``pin_wait_stopped``), the pin stays where it was, and the failure is
-        kept. The whole wait, the watch included, cannot start a second one.
-        """
-        old = self._transport_id
-        assert old is not None  # noqa: S101 - only called while pinned
+    def _count_reconnect(self) -> None:
         if self._reconnects >= MAX_RECONNECTS:
             raise self._fail(
                 self._changed(f"was away more than {MAX_RECONNECTS} times")
             )
-        self._repinning = True
         self._reconnects += 1
+        self._epoch += 1
+
+    def _prove_in_place(self, transport: int) -> None:
+        """Prove the device again through its own number (no boot id, so no
+        wait and no move)."""
+        self._repinning = True
         try:
+            self._count_reconnect()
+            found = self._identity_through(transport)
+            if not self._same_device(found):
+                raise self._fail(self._changed("could not be proven the same again"))
+            self._proven = self._epoch
+        finally:
+            self._repinning = False
+
+    def _repin(self) -> None:
+        """Prove the device again, following it to a new number if needed.
+
+        The adb server can renumber a device that went offline for a moment.
+        Until `REPIN_WAIT` seconds after the start (an absolute deadline,
+        asked before every listing and every probe), the server's listing is
+        read every `REPIN_POLL` seconds. An entry of this serial that is
+        neither ready nor offline fails the pin; when exactly one entry is
+        ready, the identity is read through that number (not taken from the
+        listing) and must be the pinned device's (`_same_device`). The watch
+        and the deadline are asked once more, and only then does the pin move
+        (a move to another number counts toward `MAX_REPINS`). Anything else,
+        any error on the way included, fails the pin, which stays where it
+        was. The whole wait, the watch included, cannot start a second one.
+        """
+        old = self._transport_id
+        assert old is not None  # noqa: S101 - only called while pinned
+        self._repinning = True
+        try:
+            self._count_reconnect()
             deadline = self._clock() + REPIN_WAIT
-            while True:
+            while self._clock() < deadline:
                 self._stop_if_watched()
                 entries = [d for d in self._client.devices() if d.serial == self.serial]
+                if any(d.state not in (READY_STATE, OFFLINE_STATE) for d in entries):
+                    raise self._fail(self._changed("is not usable any more"))
                 ready = [d for d in entries if d.state == READY_STATE]
                 if len(ready) > 1:
                     raise self._fail(self._changed("is listed more than once"))
                 new = ready[0].transport_id if ready else None
-                if new is not None:
+                if new is not None and self._clock() < deadline:
                     found = self._identity_through(new)
                     if found is not None:
                         if not self._same_device(found):
@@ -1398,25 +1463,32 @@ class Device:
                         self._stop_if_watched()
                         if self._clock() >= deadline:
                             break
-                        if new != old:
-                            if len(self._repins) >= MAX_REPINS:
-                                raise self._fail(
-                                    self._changed(
-                                        f"was renumbered more than {MAX_REPINS} times"
-                                    )
-                                )
-                            self._repins.append((old, new))
-                        self._transport_id = new
+                        self._move(old, new)
                         return
                 now = self._clock()
-                if now >= deadline:
-                    break
-                self._sleep(min(REPIN_POLL, deadline - now))
+                if now < deadline:
+                    self._sleep(min(REPIN_POLL, deadline - now))
             raise self._fail(
                 self._changed(f"did not come back within {REPIN_WAIT:g} s")
             )
+        except Exception as error:
+            if self._broken is None:
+                code = error.code if isinstance(error, UiprobeError) else "error"
+                self._fail(self._changed(f"could not be proven again ({code})"))
+            raise
         finally:
             self._repinning = False
+
+    def _move(self, old: int, new: int) -> None:
+        if new != old:
+            if len(self._repins) >= MAX_REPINS:
+                raise self._fail(
+                    self._changed(f"was renumbered more than {MAX_REPINS} times")
+                )
+            self._repins.append((old, new))
+            self._epoch += 1
+        self._transport_id = new
+        self._proven = self._epoch
 
     def _identity_through(self, transport: int) -> DeviceIdentity | None:
         """The identity read through `transport`, or None when that failed.
@@ -1428,12 +1500,7 @@ class Device:
             raw = self._client.shell(
                 self.serial, IDENTITY_COMMAND, transport_id=transport
             )
-        except (
-            AdbError,
-            AdbServerUnavailableError,
-            DeviceNotFoundError,
-            DeviceOfflineError,
-        ):
+        except _OPTIONAL_ERRORS:
             return None
         return _parse_identity(raw.decode("utf-8", errors="replace"))
 
@@ -1471,19 +1538,35 @@ class Device:
                 raise AdbError(msg, details={"serial": self.serial})
             self._transport_id = transport
             try:
-                self._check_listed()  # the number may already be another's
-                found = self.identity()
-            except BaseException:
-                self._transport_id = None
-                raise
-            if found is None or not found.fingerprint:
-                self._transport_id = None
-                msg = (
-                    f"the identity of {self.serial} (ro.build.fingerprint) could"
-                    " not be read, so the device cannot be told apart later"
+                listed = [
+                    d for d in self._client.devices() if d.transport_id == transport
+                ]
+                if not (
+                    len(listed) == 1
+                    and listed[0].serial == self.serial
+                    and listed[0].state == READY_STATE
+                ):
+                    raise self._changed()  # the number may already be another's
+                found = _parse_identity(
+                    self._client.shell(
+                        self.serial, IDENTITY_COMMAND, transport_id=transport
+                    ).decode("utf-8", errors="replace")
                 )
-                raise AdbError(msg, details={"serial": self.serial})
+                if found is None or not found.fingerprint:
+                    msg = (
+                        f"the identity of {self.serial} (ro.build.fingerprint)"
+                        " could not be read, so the device cannot be told apart"
+                        " later"
+                    )
+                    raise AdbError(msg, details={"serial": self.serial})
+            except UiprobeError as error:
+                # A pin that was asked for and failed is kept: no request of
+                # this Device goes out without it (not even by serial).
+                self._transport_id = None
+                self._broken = (str(error), dict(error.details))
+                raise
             self._pinned_identity = found
+            self._proven = self._epoch
         return self._transport_id
 
     @property
@@ -1509,11 +1592,18 @@ class Device:
 
     @property
     def reconnects(self) -> int:
-        """How many times a request waited for the pinned device to come
-        back, whether it came back on the same number or a new one. A reader
-        that compares it before and after its reads can tell that the device
-        was away in between."""
+        """How many times the pinned device had to be proven again (a wait,
+        or a new identity read after a failed request); at most
+        `MAX_RECONNECTS`."""
         return self._reconnects
+
+    @property
+    def pin_epoch(self) -> int:
+        """A number that moves on every event that makes earlier reads of
+        the pinned device doubtful: a failed request, a wait, a move of the
+        pin, a failed pin. A reader that sees the same value before and after
+        its reads knows none of these happened in between."""
+        return self._epoch
 
     @property
     def pin_watch(self) -> Callable[[], bool] | None:
@@ -1542,8 +1632,11 @@ class Device:
 
     def _shell_text(self, command: str, *, timeout: float | None = None) -> str:
         strict = command.startswith(_CHANGING_COMMANDS)
-        raw = self._client.shell(
-            self.serial, command, timeout=timeout, **self._pin(strict=strict)
+        raw = self._call(
+            lambda pin: self._client.shell(
+                self.serial, command, timeout=timeout, **pin
+            ),
+            strict=strict,
         )
         return raw.decode("utf-8", errors="replace")
 
@@ -2222,6 +2315,7 @@ class Device:
             )
             details = {"serial": self.serial, "reason": "device_changed"}
             raise self._fail(DeviceNotFoundError(msg, details=details))
+        self._proven = self._epoch
 
     def keyboard_shown(self) -> bool | None:
         """Return whether the soft keyboard is shown, or None when unknown.
@@ -2307,11 +2401,14 @@ class Device:
             ScreenshotFailedError: The output is empty or is not a complete
                 PNG image.
         """
-        data = self._client.exec_out(
-            self.serial,
-            quote_args("screencap", "-p"),
-            timeout=SCREENSHOT_TIMEOUT,
-            **self._pin(),
+        data = self._call(
+            lambda pin: self._client.exec_out(
+                self.serial,
+                quote_args("screencap", "-p"),
+                timeout=SCREENSHOT_TIMEOUT,
+                **pin,
+            ),
+            strict=False,
         )
         try:
             check_png(data)
@@ -2349,8 +2446,11 @@ class Device:
                     "uiautomator dump failed",
                     details={"output": output.strip()[:DUMP_MESSAGE_LIMIT]},
                 )
-            return self._client.exec_out(
-                self.serial, quote_args("cat", path), **self._pin()
+            return self._call(
+                lambda pin: self._client.exec_out(
+                    self.serial, quote_args("cat", path), **pin
+                ),
+                strict=False,
             )
         finally:
             with contextlib.suppress(UiprobeError):

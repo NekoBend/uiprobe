@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 from typing import TYPE_CHECKING, Any
 
@@ -27,7 +28,12 @@ from uiprobe.device import (
     REPIN_WAIT,
     Device,
 )
-from uiprobe.errors import AdbError, DeviceNotFoundError
+from uiprobe.errors import (
+    AdbError,
+    AdbServerUnavailableError,
+    DeviceNotFoundError,
+    DeviceOfflineError,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -626,62 +632,325 @@ def test_the_check_before_the_run_asks_stop_and_restores_the_watch(
     assert android.inputs == []
 
 
-def test_a_stop_between_force_stop_and_start_is_recorded(
-    tmp_path: Path, fake_adb, android, clock, monkeypatch
-):
-    # A permission-like screen of another app gets a relaunch; the device
-    # drops out right after the force-stop and the caller stops the wait.
-    device = pinned(fake_adb)
+def _covered_after_launch(monkeypatch, device, android) -> None:
+    """Every launch ends with a screen of another app in front (a relaunch
+    follows by default)."""
     original_launch = device.launch
 
     def launch_under(*args: object, **kwargs: object) -> object:
-        result = original_launch(*args, **kwargs)  # ty: ignore[invalid-argument-type]
+        result = original_launch(*args, **kwargs)
         android.show("ext1")
         return result
 
     monkeypatch.setattr(device, "launch", launch_under)
-    stopping: list[bool] = []
+
+
+def test_a_stop_inside_the_wait_after_force_stop_is_recorded(
+    tmp_path: Path, fake_adb, android, clock, monkeypatch
+):
+    # The device drops out right after the force-stop; the wait before the
+    # start asks stop(), which says so only once the wait has begun.
+    device = pinned(fake_adb)
+    _covered_after_launch(monkeypatch, device, android)
+    waiting: list[bool] = []
     original_stop = device.stop_app
 
     def stop_then_drop(package: str) -> None:
         original_stop(package)
         listing(fake_adb)
-        stopping.append(True)
+        waiting.append(True)
 
     monkeypatch.setattr(device, "stop_app", stop_then_drop)
+    asked_in_wait: list[bool] = []
+
+    def stop() -> bool:
+        if waiting and device.reconnects:  # inside the wait, not in halt()
+            asked_in_wait.append(True)
+            return True
+        return False
+
     out = tmp_path / "run"
-    result = run(device, clock, out, stop=lambda: bool(stopping))
+    result = run(device, clock, out, stop=stop)
+    assert asked_in_wait
     assert result.stop_reason == "interrupted"
     assert android.stopped == [SHOP]
+    starts = [c for _, _, c in fake_adb.commands if c.startswith("monkey")]
+    assert len(starts) == 1  # the first launch only
     records = lines(out / "transitions.jsonl")
-    ends = [r for r in records if r.get("not_sent")]
-    assert [r["reason"] for r in ends] == ["start_not_sent"]
+    assert [r["reason"] for r in records if r.get("not_sent")] == ["start_not_sent"]
     summary = (out / "summary.txt").read_text(encoding="utf-8")
     assert "force-stopped but not started again (stopped)" in summary
+
+
+def test_a_device_proven_again_after_force_stop_gets_no_start(
+    tmp_path: Path, fake_adb, android, clock, monkeypatch
+):
+    # The device comes back on a new number right after the force-stop and
+    # is proven the same; the start is still not sent on the old decision.
+    device = pinned(fake_adb)
+    _covered_after_launch(monkeypatch, device, android)
+    original_stop = device.stop_app
+
+    def stop_then_renumber(package: str) -> None:
+        original_stop(package)
+        listing(fake_adb, (TRANSPORT + 1, "device"))
+
+    monkeypatch.setattr(device, "stop_app", stop_then_renumber)
+    out = tmp_path / "run"
+    result = run(device, clock, out)
+    assert result.stop_reason == "not_sent"
+    assert device.repins == ((TRANSPORT, TRANSPORT + 1),)
+    starts = [c for _, _, c in fake_adb.commands if c.startswith("monkey")]
+    assert len(starts) == 1
+    records = lines(out / "transitions.jsonl")
+    assert [r["reason"] for r in records if r.get("not_sent")] == ["start_not_sent"]
+    summary = (out / "summary.txt").read_text(encoding="utf-8")
+    assert "not started again (device_reconnected)" in summary
 
 
 def test_a_back_chosen_before_the_device_was_away_is_not_sent(
     tmp_path: Path, fake_adb, android, clock, monkeypatch
 ):
-    # A navigation BACK is chosen; the device is away and comes back during
-    # the gate's reads. 1a: the BACK is not sent and the run ends.
+    # On the detail screen the engine chooses a navigation BACK; the device
+    # drops out once, during that BACK's gate (its keyboard read), and comes
+    # back on its number. 1a: the BACK is not sent and the run ends.
     device = pinned(fake_adb)
     original = device.keyboard_shown
-    count = [0]
+    reads = {"detail": 0}
 
     def away_once() -> object:
-        count[0] += 1
-        if android.screen.name == "detail" and count[0] > 0 and not android.stopped:
-            Waits(device, [renumber(fake_adb, TRANSPORT + 1)])
-            listing(fake_adb)
-            android.screen_name_seen = True
+        if android.screen.name == "detail":
+            reads["detail"] += 1
+            if reads["detail"] == 2:  # 1: the observation; 2: the BACK's gate
+                Waits(device, [renumber(fake_adb, TRANSPORT)])
+                listing(fake_adb, (TRANSPORT, "offline"))
         return original()
 
     monkeypatch.setattr(device, "keyboard_shown", away_once)
     out = tmp_path / "run"
     result = run(device, clock, out)
     assert result.stop_reason == "not_sent"
+    assert device.reconnects == 1  # the wait happened
+    records = lines(out / "transitions.jsonl")
+    refused = [r for r in records if r.get("not_sent")]
+    assert [r["reason"] for r in refused] == ["device_reconnected"]
+    assert all(i.screen != "detail" for i in android.inputs if i.kind == "key")
+
+
+# --- a failed request, the watch, the server, the first pin ---
+
+
+def test_a_failed_request_swallowed_by_the_dump_is_proven_before_a_tap(
+    tmp_path: Path, fake_adb, android, clock, monkeypatch
+):
+    # The dump's cleanup fails with "offline" after a ready listing (the dump
+    # swallows it), and the same number then leads to another boot id. The
+    # next read proves the device again and fails; no tap goes out.
+    device = pinned(fake_adb)
+    original = device._client.shell
+    removes = [0]
+
+    def shell(serial: str, command: str, **kwargs: object) -> bytes:
+        if command.startswith("rm -f "):
+            removes[0] += 1
+            if removes[0] == 2:  # 1: the observation; 2: the tap's gate
+                android.boot_id = OTHER_BOOT
+                raise DeviceOfflineError("device offline", details={"serial": serial})
+        return original(serial, command, **kwargs)  # ty: ignore[invalid-argument-type]
+
+    monkeypatch.setattr(device._client, "shell", shell)
+    out = tmp_path / "run"
+    with pytest.raises(DeviceNotFoundError) as caught:
+        run(device, clock, out)
+    assert caught.value.details["reason"] == "device_changed"
+    assert not [c for _, _, c in fake_adb.commands if c.startswith("input")]
+    assert android.inputs == []
+
+
+def test_a_failed_request_with_the_same_device_refuses_only_that_action(
+    tmp_path: Path, fake_adb, android, clock, monkeypatch
+):
+    # The same failure, but the device is still the same: it is proven again,
+    # the tap chosen before is refused, and the crawl goes on.
+    device = pinned(fake_adb)
+    original = device._client.shell
+    removes = [0]
+
+    def shell(serial: str, command: str, **kwargs: object) -> bytes:
+        if command.startswith("rm -f "):
+            removes[0] += 1
+            if removes[0] == 2:
+                raise DeviceOfflineError("device offline", details={"serial": serial})
+        return original(serial, command, **kwargs)  # ty: ignore[invalid-argument-type]
+
+    monkeypatch.setattr(device._client, "shell", shell)
+    out = tmp_path / "run"
+    result = run(device, clock, out, limits=Limits(actions=4))
+    assert result.stop_reason in {"max_actions", "exhausted"}
     records = lines(out / "transitions.jsonl")
     assert [r["reason"] for r in records if r.get("not_sent")] == ["device_reconnected"]
-    keys = [i for i in android.inputs if i.kind == "key"]
-    assert all(i.screen != "detail" for i in keys)
+    assert [i for i in android.inputs if i.kind == "tap"]  # the crawl went on
+
+
+@pytest.mark.usefixtures("android")
+def test_a_watch_that_sends_an_input_sends_nothing(fake_adb, android):
+    device = pinned(fake_adb)
+    Waits(device, [])
+
+    def watch() -> bool:
+        with contextlib.suppress(DeviceNotFoundError):
+            device.key("back")  # swallowed on purpose
+        return False
+
+    device.set_pin_watch(watch)
+    listing(fake_adb, (TRANSPORT, "offline"))
+    with pytest.raises(DeviceNotFoundError):
+        device.foreground()
+    assert android.inputs == []
+    assert device.transport_id == TRANSPORT
+    with pytest.raises(DeviceNotFoundError):
+        device.key("back")
+    assert android.inputs == []
+
+
+@pytest.mark.usefixtures("android")
+def test_a_server_error_while_waiting_fails_the_pin(fake_adb, monkeypatch, android):
+    device = pinned(fake_adb)
+    Waits(device, [])
+    listing(fake_adb)
+    original = device._client.devices
+    calls = [0]
+
+    def devices() -> object:
+        calls[0] += 1
+        if calls[0] >= 2:  # the first listing inside the wait
+            raise AdbServerUnavailableError("gone", details={})
+        return original()
+
+    monkeypatch.setattr(device._client, "devices", devices)
+    with contextlib.suppress(AdbServerUnavailableError):
+        device.api_level()  # a reader that swallows errors
+    monkeypatch.setattr(device._client, "devices", original)
+    listing(fake_adb, (TRANSPORT, "device"))
+    with pytest.raises(DeviceNotFoundError):
+        device.key("back")
+    assert android.inputs == []
+
+
+def test_a_failed_first_pin_keeps_every_request_off_the_device(fake_adb, android):
+    device = Device(adb_server=fake_adb.address)
+    listing(fake_adb, (TRANSPORT, "offline"))
+    with pytest.raises(DeviceNotFoundError):
+        device.pin_transport()
+    listing(fake_adb, (TRANSPORT, "device"))
+    since = len(fake_adb.requests)
+    with pytest.raises(DeviceNotFoundError):
+        device.key("back")
+    assert fake_adb.requests[since:] == []
+    assert android.inputs == []
+
+
+@pytest.mark.usefixtures("android")
+def test_an_unauthorized_entry_during_the_wait_fails_the_pin(fake_adb):
+    device = pinned(fake_adb)
+    Waits(
+        device,
+        [
+            lambda: listing(fake_adb, (TRANSPORT, "unauthorized")),
+            renumber(fake_adb, TRANSPORT),
+        ],
+    )
+    listing(fake_adb, (TRANSPORT, "offline"))
+    with pytest.raises(DeviceNotFoundError, match="not usable"):
+        device.foreground()
+
+
+def test_no_probe_starts_at_the_deadline(fake_adb, android, monkeypatch):
+    device = pinned(fake_adb)
+    waits = Waits(device, [])
+    listing(fake_adb, (TRANSPORT, "offline"))
+    original = device._client.devices
+
+    def late_listing() -> object:
+        found = original()
+        waits.now += REPIN_WAIT  # the listing itself took the whole budget
+        listing(fake_adb, (TRANSPORT + 1, "device"))
+        return found
+
+    monkeypatch.setattr(device._client, "devices", late_listing)
+    since = len(fake_adb.requests)
+    with pytest.raises(DeviceNotFoundError, match="did not come back"):
+        device.foreground()
+    assert through(fake_adb, TRANSPORT + 1, since) == []
+    assert android.inputs == []
+
+
+@pytest.mark.usefixtures("android")
+def test_the_kept_failure_holds_no_exception(fake_adb):
+    device = pinned(fake_adb)
+    listing(fake_adb, (TRANSPORT, "unauthorized"))
+    with pytest.raises(DeviceNotFoundError):
+        device.foreground()
+    kept = device._broken
+    assert isinstance(kept, tuple)
+    assert not any(isinstance(part, BaseException) for part in kept)
+
+
+def test_without_a_boot_id_a_failed_request_is_proven_in_place(
+    fake_adb, android, monkeypatch
+):
+    android.boot_id = None
+    device = pinned(fake_adb)
+    original = device._client.shell
+    failed = [False]
+
+    def shell(serial: str, command: str, **kwargs: object) -> bytes:
+        if command == "wm size" and not failed[0]:
+            failed[0] = True
+            raise DeviceOfflineError("device offline", details={"serial": serial})
+        return original(serial, command, **kwargs)  # ty: ignore[invalid-argument-type]
+
+    monkeypatch.setattr(device._client, "shell", shell)
+    with contextlib.suppress(DeviceOfflineError):
+        device._shell("wm size")
+    with pytest.raises(DeviceNotFoundError):
+        device.key("back")  # an input right after a failure is refused
+    assert android.inputs == []
+
+
+def test_without_a_boot_id_a_read_after_a_failure_proves_the_device(
+    fake_adb, android, monkeypatch
+):
+    android.boot_id = None
+    device = pinned(fake_adb)
+    epoch = device.pin_epoch
+    original = device._client.shell
+    failed = [False]
+
+    def shell(serial: str, command: str, **kwargs: object) -> bytes:
+        if command == "wm size" and not failed[0]:
+            failed[0] = True
+            raise DeviceOfflineError("device offline", details={"serial": serial})
+        return original(serial, command, **kwargs)  # ty: ignore[invalid-argument-type]
+
+    monkeypatch.setattr(device._client, "shell", shell)
+    with contextlib.suppress(DeviceOfflineError):
+        device._shell("wm size")
+    since = len(fake_adb.requests)
+    assert device.foreground() is not None  # proven again, then read
+    assert through(fake_adb, TRANSPORT, since)[0] == f"shell:{IDENTITY_COMMAND}"
+    assert device.pin_epoch > epoch
+    device.key("back")  # proven: inputs go out again
+    assert [i.kind for i in android.inputs] == ["key"]
+
+
+@pytest.mark.usefixtures("android")
+def test_a_move_during_the_check_before_the_run_is_counted(
+    tmp_path: Path, fake_adb, clock
+):
+    device = pinned(fake_adb)
+    Waits(device, [])
+    listing(fake_adb, (TRANSPORT + 1, "device"))  # moves at the emulator check
+    out = tmp_path / "run"
+    run(device, clock, out, limits=Limits(actions=1))
+    assert json.loads((out / "run.json").read_bytes())["repins"] == 1
