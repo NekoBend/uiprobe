@@ -6,6 +6,7 @@ import contextlib
 import os
 import re
 import secrets
+import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Final, NamedTuple
@@ -19,6 +20,7 @@ from uiprobe.adb import (
     resolve_server_address,
     start_blocked_by_environment,
 )
+from uiprobe.crawl_preview import check_package
 from uiprobe.errors import (
     AdbError,
     AdbServerUnavailableError,
@@ -27,6 +29,7 @@ from uiprobe.errors import (
     DeviceUnauthorizedError,
     DumpError,
     InputFailedError,
+    LaunchFailedError,
     MultipleDevicesError,
     ScreenshotFailedError,
     UiprobeError,
@@ -41,7 +44,7 @@ from uiprobe.model import (
 from uiprobe.pngfile import check_png
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping, Sequence
+    from collections.abc import Callable, Mapping, Sequence
 
 __all__ = [
     "DEVICE_WIDE_KEYS",
@@ -57,6 +60,12 @@ __all__ = [
 ]
 
 READY_STATE: Final = "device"
+DEFAULT_LAUNCH_TIMEOUT: Final = 10.0
+LAUNCH_POLL_INTERVAL: Final = 0.5
+MAX_LAUNCH_TIMEOUT: Final = 600.0
+_EVENTS_INJECTED = re.compile(r"Events injected: ([0-9]+)")
+_NO_ACTIVITIES: Final = "** No activities found"
+_FOREGROUND_LIMIT: Final = 1000
 DUMP_DIRECTORY: Final = "/data/local/tmp"
 DUMP_MESSAGE_LIMIT: Final = 500
 # `uiautomator dump` prints nothing until it finishes, and on an animating
@@ -509,6 +518,62 @@ def _key_code(name: object, refused: RefusedKeys | None = None) -> str:
     raise ValueError(msg)
 
 
+def _check_launch_timeout(timeout: object) -> float:
+    """Return `timeout` as a float, read through the base type's own method.
+
+    An int or float subclass cannot change the value checked here: the
+    number is converted first, with ``int.__float__`` or ``float.__float__``,
+    and the converted value is the one checked and used.
+    """
+    if isinstance(timeout, bool) or not isinstance(timeout, int | float):
+        msg = f"timeout must be a number, not {type(timeout).__name__}"
+        raise TypeError(msg)
+    # The real type decides, not a `__class__` that claims another one.
+    try:
+        if isinstance(timeout, int) and not issubclass(type(timeout), float):
+            value = int.__float__(timeout)
+        elif isinstance(timeout, float):
+            value = float.__float__(timeout)
+        else:  # an int that is also a float cannot be made; kept for the types
+            value = float("nan")
+    except OverflowError:
+        value = float("inf")
+    if not 0 <= value <= MAX_LAUNCH_TIMEOUT:  # also false for NaN
+        msg = f"timeout must be from 0 to {MAX_LAUNCH_TIMEOUT:g} seconds, not {value!r}"
+        raise ValueError(msg)
+    return value
+
+
+def _escaped(text: str, limit: int = 200) -> str:
+    """Return `text` cut to `limit` characters and escaped to printable ASCII."""
+    return ascii(text[:limit])[1:-1]
+
+
+def _shown_foreground(name: str) -> str:
+    """Return `name` escaped; past 1000 characters it is cut and ends in ``...``.
+
+    A name cut this way is never equal to a package name, which has at most
+    255 characters.
+    """
+    if len(name) <= _FOREGROUND_LIMIT:
+        return _escaped(name, _FOREGROUND_LIMIT)
+    return _escaped(name, _FOREGROUND_LIMIT) + "..."
+
+
+def _lines(text: str) -> list[str]:
+    """Split shell output at line feeds only, dropping one CR at each line end."""
+    return [line.removesuffix("\r") for line in text.split("\n")]
+
+
+def _escaped_line(text: str) -> str:
+    """Return the first line of `text` that is not blank, cut and escaped.
+
+    Spaces and tabs around it are removed; a line made only of them is blank.
+    """
+    lines = (line.strip(" \t") for line in _lines(text))
+    return _escaped(next((line for line in lines if line), ""))
+
+
 def _input_failure(
     command: str, where: Mapping[str, object], text: str
 ) -> InputFailedError | None:
@@ -906,6 +971,9 @@ class Device:
         # True when the latest screen's display came from `wm size`, False when
         # it is the extent of the dumped windows; always set with the screen.
         self._latest_display_measured = False
+        # The clock and the pause of `launch`; tests replace them.
+        self._clock: Callable[[], float] = time.monotonic
+        self._sleep: Callable[[float], None] = time.sleep
 
     @property
     def serial(self) -> str:
@@ -1254,6 +1322,123 @@ class Device:
         if failure is not None:
             raise failure
         return code
+
+    def launch(
+        self,
+        package: str,
+        *,
+        restart: bool = False,
+        timeout: float = DEFAULT_LAUNCH_TIMEOUT,
+    ) -> None:
+        """Start the app `package` and wait until it is in front.
+
+        With ``restart=True`` the command ``am force-stop PACKAGE; echo
+        uiprobe-exit:$?`` is sent first. It stops the app, so the next launch
+        starts a fresh task; state the app has not saved is lost. It must
+        report exit status 0 and print nothing else (empty lines are ignored),
+        or nothing more is sent.
+        Then exactly ``monkey -p PACKAGE -c android.intent.category.LAUNCHER
+        1`` is sent (no other monkey option, and always a count of 1). Monkey
+        must print the line ``Events injected: 1`` exactly once. Each command
+        is sent once and never resent, not even after a connection error.
+
+        Then `foreground` is read about every 0.5 seconds until it equals
+        `package`. It is read at least once, and no read starts after
+        `timeout` seconds have passed: the timeout bounds when the last read
+        may start, not the whole wait. A read that started in time still
+        counts, so the wait can run past the timeout by the time of that read,
+        and by how late a pause ends when the system wakes it late.
+
+        A str subclass is used as a plain str with the same text.
+
+        Raises:
+            TypeError: `package` is not a str, `restart` is not a bool, or
+                `timeout` is not a number (a bool is not).
+            ValueError: `package` does not follow the Android package rule
+                (see `uiprobe.crawl_preview.PACKAGE_PATTERN`), or `timeout` is
+                not from 0 to 600 seconds. Both are raised before the adb
+                server is contacted.
+            LaunchFailedError: ``details`` hold ``package`` and ``reason``:
+                ``stop_failed`` (``am force-stop`` did not report success;
+                ``exit_status`` when it reported a status other than 0,
+                ``output`` when it printed something else, escaped; with no
+                status and no output neither is set; monkey was not sent),
+                ``not_installed_or_no_launcher`` (monkey found no launcher
+                activity), ``unexpected_output`` (monkey did not report exactly
+                one injected event; ``output`` is its first line that is not
+                blank, stripped, cut to 200 characters and escaped) or
+                ``not_in_front`` (the app was not the foreground app in time;
+                ``foreground`` is the last package seen (escaped; past 1000
+                characters cut and ended with ``...``), or None, and ``timeout``
+                the limit). The app may still have started.
+            AdbError: The adb protocol or the command failed.
+            AdbServerUnavailableError: The adb server cannot be reached.
+            DeviceNotFoundError: The device is gone.
+            DeviceOfflineError: The device is offline.
+            DeviceUnauthorizedError: The device has not authorized this host.
+        """
+        if isinstance(package, str):
+            package = str.__str__(package)  # a plain str, whatever the subclass
+        package = check_package(package)
+        if not isinstance(restart, bool):
+            msg = f"restart must be a bool, not {type(restart).__name__}"
+            raise TypeError(msg)
+        limit = _check_launch_timeout(timeout)
+        details: dict[str, object] = {"package": package}
+        if restart:
+            stop = self._shell(quote_args("am", "force-stop", package) + _EXIT_SUFFIX)
+            failure = _input_failure("force-stop", {}, stop)
+            if failure is not None:
+                details["reason"] = "stop_failed"
+                if "exit_status" in failure.details:
+                    details["exit_status"] = failure.details["exit_status"]
+                output = failure.details.get("output")
+                if isinstance(output, str):
+                    details["output"] = _escaped(output)
+                msg = (
+                    f"am force-stop {package} did not report success, so the app"
+                    " was not launched"
+                )
+                raise LaunchFailedError(msg, details=details)
+        output = self._shell(
+            quote_args(
+                "monkey", "-p", package, "-c", "android.intent.category.LAUNCHER", "1"
+            )
+        )
+        lines = [line.strip(" \t") for line in _lines(output)]
+        counts = [
+            m.group(1) for line in lines if (m := _EVENTS_INJECTED.fullmatch(line))
+        ]
+        if counts != ["1"]:
+            if any(line.startswith(_NO_ACTIVITIES) for line in lines):
+                details["reason"] = "not_installed_or_no_launcher"
+                msg = (
+                    f"{package} has no launcher activity (not installed, or it has"
+                    " none)"
+                )
+                raise LaunchFailedError(msg, details=details)
+            first = _escaped_line(output)
+            details["reason"] = "unexpected_output"
+            details["output"] = first
+            msg = (
+                f"monkey did not report one injected event; its output began '{first}'"
+            )
+            raise LaunchFailedError(msg, details=details)
+        deadline = self._clock() + limit
+        while True:
+            seen = self.foreground()
+            if seen == package:
+                return
+            if self._clock() >= deadline:
+                break
+            self._sleep(max(0.0, min(LAUNCH_POLL_INTERVAL, deadline - self._clock())))
+            if self._clock() > deadline:
+                break  # no read starts after the deadline
+        shown = None if seen is None else _shown_foreground(seen)
+        details.update(reason="not_in_front", foreground=shown, timeout=limit)
+        last = "unknown" if shown is None else shown
+        msg = f"{package} was not in front after {limit:g} seconds (foreground: {last})"
+        raise LaunchFailedError(msg, details=details)
 
     def api_level(self) -> int | None:
         """Return the Android API level, or None when it cannot be read.

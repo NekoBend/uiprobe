@@ -8,7 +8,7 @@ uiprobe saves the screen structure of an Android app and sends taps, swipes and 
 
 uiprobe is alpha software: the command line, the JSON formats and the Python API may change in any later version. This is a development snapshot, version 0.1.0a1.dev0; no alpha is tagged yet.
 
-Nine commands exist: `devices`, `dump`, `screenshot`, `find`, `tap`, `swipe`, `key`, `crawl` and `init`. Of `crawl` only the preview exists: it shows what a crawl would press on the screen showing now and presses nothing, and it is what `crawl` does by default. The pressing crawl is planned, not implemented, and a run that asks for pressing (`--press` or `press = true` in the settings file) is refused. Typing and other ways of operating the app are planned too. The guards have been checked only on Android emulators; real devices and other Android versions may behave differently.
+Ten commands exist: `devices`, `dump`, `screenshot`, `find`, `tap`, `swipe`, `key`, `launch`, `crawl` and `init`. Of `crawl` only the preview exists: it shows what a crawl would press on the screen showing now and presses nothing, and it is what `crawl` does by default. The pressing crawl is planned, not implemented, and a run that asks for pressing (`--press` or `press = true` in the settings file) is refused. Typing and other ways of operating the app are planned too. The guards have been checked only on Android emulators; real devices and other Android versions may behave differently.
 
 ## Safety
 
@@ -77,6 +77,7 @@ Add `--json` to get JSON instead of text (`uiprobe dump --json`), or `--brief` f
 | `tap` | Taps or long-presses an element or a point. | [Tapping](docs/commands.md#tapping) |
 | `swipe` | Drags one finger, or scrolls in a direction. | [Swiping and scrolling](docs/commands.md#swiping-and-scrolling) |
 | `key` | Presses one key. | [Pressing keys](docs/commands.md#pressing-keys) |
+| `launch` | Starts an app and waits until it is in front. | [Launching an app](docs/commands.md#launching-an-app) |
 | `crawl` | Previews what a crawl would press, using the settings file; pressing is not available yet. | [Previewing a crawl](docs/crawl.md) |
 | `init` | Creates the settings file `uiprobe.toml`; no device needed. | [Settings file](docs/settings.md) |
 

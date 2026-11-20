@@ -8,6 +8,7 @@ uiprobe is alpha software, and `tap`, `swipe` and `key` send real input to a dev
 - They act on the screen showing now. The foreground app is not checked, and there is no deny-word guard. A swipe that starts at a screen edge can trigger a system gesture.
 - With `tap --xy` and with `swipe --from ... --to ...` there is no dump and no check: the point is pressed, or the swipe sent, as given, because you named the points.
 - Each press is sent once and never resent, not even after a lost connection, because a resend could press twice. Exit 14 (`input_failed`) does not prove that nothing was pressed: `input` may have acted before it failed. Look at the screen before you repeat the command.
+- `launch` starts the app on whatever device is selected; `--restart` stops it first (`am force-stop`), which can lose unsaved state in that app.
 - Only the crawl preview (what `crawl` does by default) uses deny words, and it presses nothing. It also refuses every element of a screen that says it cannot be undone, buttons such as "Cancel" included. It recognizes the configured irreversibility phrases (for example "You can't undo this" or 元に戻せません, see [Previewing a crawl](crawl.md)), not every possible wording: a warning phrased in another way is not caught, so the screen is then judged like any other.
 
 Details: [Commands](commands.md).
