@@ -6,6 +6,8 @@ lines left out but none changed or renumbered:
 * api24.txt and api36.txt: excerpts of a whole ``dumpsys input`` (the reader's
   ``Viewport`` lines of display 0 and the dispatcher's part down to the end
   of the window list).
+* samsung36.txt: lines of a Samsung phone (Android 16, API 36) with every
+  device-identifying value replaced; its first lines say which.
 * api30.txt to api35.txt: the window list (``Windows:`` and its lines) of one
   capture, with the ``Input Dispatcher State:`` and ``Display: 0`` lines added
   above it (an emulator of the same image printed them there right above
@@ -56,6 +58,7 @@ API33 = _capture("api33")
 API34 = _capture("api34")
 API35 = _capture("api35")
 API36 = _capture("api36")
+SAMSUNG36 = _capture("samsung36")
 
 LAUNCHER = (
     "com.google.android.apps.nexuslauncher/"
@@ -1123,3 +1126,233 @@ def test_an_apostrophe_name_that_fakes_the_owner_is_still_line_format(
     fake = f"{old[:-1]}'s, ownerUid={uid}, {COVER_ALL}{old[-1]}"
     edited = _edit(text, marker, old, fake)
     assert read_window_at(edited, point) == LINE_FORMAT
+
+
+# --- a Samsung phone (API 36): samsungFlags=, pTouchableRegion=, 1HXY= ---
+
+HOME = "com.example.launcher/com.example.launcher.HomeActivity"
+STATUS = "abcdef3 StatusBar"  # system UI (10001) above the launcher (10002)
+
+
+@pytest.mark.parametrize("crlf", [False, True])
+@pytest.mark.parametrize(
+    ("point", "title", "uid"),
+    [
+        ((540, 1170), HOME, 10002),
+        ((540, 200), HOME, 10002),
+        ((540, 2300), "NavigationBar0", 10001),
+        ((540, 50), "StatusBar", 10001),
+        (
+            (1050, 500),
+            "com.example.launcher/com.example.launcher.EdgePanelService",
+            10002,
+        ),
+    ],
+)
+def test_the_samsung_window_list_is_read(point, title, uid, crlf):
+    text = SAMSUNG36.replace("\n", "\r\n") if crlf else SAMSUNG36
+    windows = parse_input_windows(text)
+    assert not isinstance(windows, str), windows
+    assert len(windows) == 15
+    found = read_window_at(text, point)
+    assert isinstance(found, InputWindow), found
+    assert (found.title, found.owner_uid) == (title, uid)
+
+
+def test_the_samsung_viewport_line_with_density_is_read():
+    assert display_orientation(SAMSUNG36) == 0
+    turned = SAMSUNG36.replace("orientation=0, densityDpi", "orientation=1, densityDpi")
+    assert display_orientation(turned) == 1
+    assert read_window_at(turned, (540, 1170)) == ROTATION
+    odd = SAMSUNG36.replace("densityDpi=480 xDpi", "densityDpi=480, xDpi")
+    assert display_orientation(odd) is None
+
+
+@pytest.mark.parametrize("value", ["0x0", "0x8", "FORCE_TRUSTED_OVERLAY"])
+def test_samsung_flags_do_not_change_the_touch(value):
+    edited = _edit(SAMSUNG36, STATUS, "samsungFlags=0x0", f"samsungFlags={value}")
+    found = read_window_at(edited, (540, 50))
+    assert isinstance(found, InputWindow)
+    assert (found.title, found.owner_uid) == ("StatusBar", 10001)
+
+
+@pytest.mark.parametrize("hxy", ["[0, 0, 0]", "[0, 0, 1]"])
+def test_the_seen_1hxy_values_do_not_change_the_touch(hxy):
+    edited = _edit(SAMSUNG36, STATUS, "1HXY=[0, 0, 1]", f"1HXY={hxy}")
+    found = read_window_at(edited, (540, 50))
+    assert isinstance(found, InputWindow)
+    assert (found.title, found.owner_uid) == ("StatusBar", 10001)
+
+
+# Values the phone did not print: what they do to a touch is not known.
+@pytest.mark.parametrize(
+    "value",
+    [
+        "0x80000000",
+        "0x1",
+        "0x00",
+        "0x8 | FORCE_TRUSTED_OVERLAY",
+        "NOT_KNOWN",
+        "FORCE_TRUSTED_OVERLAY | NOT_KNOWN",
+        "0x0 x",
+        "0xg",
+        "",
+        "force_trusted_overlay",
+    ],
+)
+def test_an_unseen_samsung_flags_value_is_line_format(value):
+    edited = _edit(SAMSUNG36, STATUS, "samsungFlags=0x0", f"samsungFlags={value}")
+    assert read_window_at(edited, (540, 1170)) == LINE_FORMAT
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "[0,0][1080,2340]",
+        "[0,0][0,0]",
+        "[0,0][1080]",
+        "<empty> x",
+        "",
+        "[0, 0][1, 1]",
+    ],
+)
+def test_an_unseen_p_touchable_region_is_line_format(value):
+    edited = _edit(
+        SAMSUNG36, STATUS, "pTouchableRegion=<empty>", f"pTouchableRegion={value}"
+    )
+    assert read_window_at(edited, (540, 1170)) == LINE_FORMAT
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "[12, 34, 2]",
+        "[0, 0, 2]",
+        "[1, 0, 0]",
+        "[0, 1, 1]",
+        "[0, 0]",
+        "[0, 0, 0, 0]",
+        "[0,0,1]",
+        "[0, 0, x]",
+        "[0, 0, 1] x",
+    ],
+)
+def test_an_unseen_1hxy_is_line_format(value):
+    edited = _edit(SAMSUNG36, STATUS, "1HXY=[0, 0, 1]", f"1HXY={value}")
+    assert read_window_at(edited, (540, 1170)) == LINE_FORMAT
+
+
+@pytest.mark.parametrize(
+    "field", ["samsungFlags=0x0, ", "pTouchableRegion=<empty>, ", "1HXY=[0, 0, 1], "]
+)
+def test_a_row_without_one_samsung_field_is_line_format(field):
+    assert read_window_at(_edit(SAMSUNG36, STATUS, field, ""), (540, 1170)) == (
+        LINE_FORMAT
+    )
+
+
+@pytest.mark.parametrize(
+    ("old", "new"),
+    [
+        # samsungFlags= away from right after inputConfig=
+        (
+            "samsungFlags=0x0, alpha=1",
+            "alpha=1, samsungFlags=0x0",
+        ),
+        # pTouchableRegion= and 1HXY= away from right after touchableRegion=
+        (
+            "pTouchableRegion=<empty>, 1HXY=[0, 0, 1], ownerPid=20002",
+            "ownerPid=20002, pTouchableRegion=<empty>, 1HXY=[0, 0, 1]",
+        ),
+        (
+            "pTouchableRegion=<empty>, 1HXY=[0, 0, 1]",
+            "1HXY=[0, 0, 1], pTouchableRegion=<empty>",
+        ),
+    ],
+)
+def test_a_samsung_field_out_of_its_place_is_line_format(old, new):
+    edited = _edit(SAMSUNG36, STATUS, old, new)
+    assert read_window_at(edited, (540, 1170)) == LINE_FORMAT
+
+
+SAMSUNG_TEXT = "samsungFlags=0x0, pTouchableRegion=<empty>, 1HXY=[0, 0, 0]"
+
+
+@pytest.mark.parametrize(
+    ("old", "new"),
+    [
+        ("applicationInfo.name=,", f"applicationInfo.name=Label, {SAMSUNG_TEXT},"),
+        ("FloatingMenu,", f"FloatingMenu, {SAMSUNG_TEXT},"),
+        ("FloatingMenu,", "FloatingMenu 1HXY=[0, 0, 0],"),
+    ],
+)
+def test_samsung_field_text_on_an_emulator_row_is_line_format(old, new):
+    # The fields written by an app in its title or label do not make an
+    # ordinary API 36 row one of the Samsung form.
+    edited = _edit(API36, "5ebeeda FloatingMenu", old, new)
+    assert read_window_at(edited, (296, 458)) == LINE_FORMAT
+
+
+def test_samsung_field_text_in_a_label_on_the_samsung_form_is_line_format():
+    edited = _edit(
+        SAMSUNG36,
+        "abcdef0 com.example",
+        "applicationInfo.name=ActivityRecord{",
+        f"applicationInfo.name=Label, {SAMSUNG_TEXT}, ActivityRecord{{",
+    )
+    assert read_window_at(edited, (540, 1170)) == LINE_FORMAT
+
+
+def test_a_field_name_glued_to_a_title_is_still_line_format():
+    # Text in a title that ends in a field's name is refused, as before.
+    edited = _edit(
+        API36, "5ebeeda FloatingMenu", "FloatingMenu,", "FloatingMenu.auditownerUid=7,"
+    )
+    assert read_window_at(edited, (296, 458)) == LINE_FORMAT
+
+
+def test_an_unknown_input_config_name_is_still_line_format():
+    edited = _edit(SAMSUNG36, STATUS, "TRUSTED_OVERLAY,", "TRUSTED_OVERLAY | NEW,")
+    assert read_window_at(edited, (540, 1170)) == LINE_FORMAT
+
+
+def test_samsung_fields_on_an_older_form_are_line_format():
+    # The named flags form (API 31) with the three fields on every row.
+    edited = "\n".join(
+        line.replace(
+            ", ownerUid=",
+            ", samsungFlags=0x0, pTouchableRegion=<empty>, 1HXY=[0, 0, 0], ownerUid=",
+        )
+        for line in API31.split("\n")
+    )
+    assert read_window_at(edited, (160, 10)) == LINE_FORMAT
+
+
+SAMSUNG_FAKES = (
+    *FAKES,
+    "samsungFlags=0x0, touchableRegion=[0,0][1080,2340]",
+    "pTouchableRegion=<empty>, 1HXY=[0, 0, 0], ownerUid={uid}",
+    SAMSUNG_TEXT,
+)
+
+
+@pytest.mark.parametrize("fake", SAMSUNG_FAKES)
+def test_each_same_line_fake_is_line_format_on_the_samsung_form(fake):
+    written = fake.format(uid=10002)
+    edited = _edit(SAMSUNG36, STATUS, "StatusBar,", f"StatusBar, {written}, x,")
+    assert read_window_at(edited, (540, 50)) == LINE_FORMAT
+
+
+@pytest.mark.parametrize(
+    "fake",
+    [
+        " samsungFlags=0x0",
+        "=samsungFlags=0x0",
+        "xsamsungFlags=0x0",
+        " touchableRegion=<empty>",
+        ".1HXY=[0, 0, 0]",
+    ],
+)
+def test_a_field_name_in_a_name_counts_on_the_samsung_form(fake):
+    edited = _edit(SAMSUNG36, STATUS, "StatusBar,", f"StatusBar{fake},")
+    assert read_window_at(edited, (540, 50)) == LINE_FORMAT

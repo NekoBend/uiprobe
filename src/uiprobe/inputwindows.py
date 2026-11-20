@@ -28,7 +28,21 @@ Four forms of the window line were seen on emulators (API 24 to 36):
   the indent of ``Windows:``, so they are taken as part of the list at any
   indent).
 
-All four have ``displayId=``, ``touchableRegion=[l,t][r,b]`` or ``<empty>``
+A Samsung phone on Android 16 (API 36) printed the API 35 and 36 form with
+three more fields: ``samsungFlags=`` right after ``inputConfig=``, and
+``pTouchableRegion=`` and ``1HXY=`` right after ``touchableRegion=``; its
+``inputConfig=`` also named ``DO_NOT_PILFER``. The
+three fields are read only at those places of the fields after the name (not
+in the name or ``applicationInfo.name``), come all together or not at all,
+and must have one of the values the phone printed: ``samsungFlags=`` ``0x0``,
+``0x8`` or ``FORCE_TRUSTED_OVERLAY``, ``pTouchableRegion=<empty>`` and
+``1HXY=`` ``[0, 0, 0]`` or ``[0, 0, 1]``. With those values the window took
+touches as its other fields say; what other values do to the delivery of a
+touch is not known, so a row with one is `LINE_FORMAT`. The fields are named
+by case (``samsungFlags=`` holds no ``flags=``, ``pTouchableRegion=`` no
+``touchableRegion=``).
+
+All of them have ``displayId=``, ``touchableRegion=[l,t][r,b]`` or ``<empty>``
 and ``ownerUid=``. On API 24 to 28 there is one list of every display; on API
 29 to 36 the windows are listed per display (``Display: <id>``, right above
 ``Windows:`` on API 29 to 32; on API 33 to 36 with ``logicalSize=`` and the
@@ -159,6 +173,9 @@ _INPUT_CONFIG_NAMES: Final = frozenset(
         "INTERCEPTS_STYLUS",
         "GLOBAL_STYLUS_BLOCKS_TOUCH",
         "SENSITIVE_FOR_PRIVACY",
+        # Printed by a Samsung phone (API 36) on spy windows, which do not take
+        # a touch anyway; it does not change whether a window takes one.
+        "DO_NOT_PILFER",
     }
 )
 # The flag names of API 31 and 32 (WindowManager.LayoutParams.FLAG_* without
@@ -212,7 +229,12 @@ _ONCE: Final = (
     "visible=",
     "displayId=",
     "portalToDisplayId=",
+    "samsungFlags=",
+    "pTouchableRegion=",
+    "1HXY=",
 )
+# The fields of the Samsung form (API 36): all of them or none.
+_SAMSUNG_KEYS: Final = ("samsungFlags=", "pTouchableRegion=", "1HXY=")
 _HEADER: Final = "Input Dispatcher State:"
 # Fields every row of one version printed: which of them a row has tells its
 # form, and all rows of a list must have the same (`_form`).
@@ -237,6 +259,9 @@ _FORM_FIELDS: Final = (
     "applicationInfo.name",
     "inputFeatures",
     "ownerPid",
+    "samsungFlags",
+    "pTouchableRegion",
+    "1HXY",
 )
 # A field's value ends where the next field begins (or the line ends), so a
 # value is read whole: text after it that is not another field is no form.
@@ -261,6 +286,15 @@ _HEX_FLAGS = re.compile(rf", flags=0x(?P<hex>[0-9a-fA-F]{{1,8}}){_NEXT}")
 _NAMED_FLAGS = re.compile(rf", flags=(?P<names>[^,]*){_NEXT}")
 _VISIBLE = re.compile(rf", visible=(?P<visible>true|false){_NEXT}")
 _PORTAL = re.compile(rf", portalToDisplayId=(?P<to>-?\d{{1,10}}){_NEXT}")
+# The Samsung fields (API 36) at their places in the fields after the name
+# (`_meta`), with only the values the phone printed (see the module's text).
+_SAMSUNG_FLAGS = re.compile(
+    r", inputConfig=[^,]*, samsungFlags=(?:0x0|0x8|FORCE_TRUSTED_OVERLAY)" + _NEXT
+)
+_SAMSUNG_REGION = re.compile(
+    rf", touchableRegion=(?:<empty>|\[{_NUMBER},{_NUMBER}\]\[{_NUMBER},{_NUMBER}\]), "
+    r"pTouchableRegion=<empty>, 1HXY=\[0, 0, [01]\]" + _NEXT
+)
 _LINE_ORIENTATION = re.compile(r"displayOrientation=(\d+)")
 _TRANSFORM = re.compile(r"^transform \(ROT_(?P<rot>\d+)\) \((?P<kind>[A-Z ]+)\)$")
 _MATRIX_ROW = re.compile(r"^-?\d+\.\d+(?: +-?\d+\.\d+){2}$")
@@ -274,7 +308,10 @@ _VIEWPORT_CLAIM = re.compile(r"^\s*Viewport\b.*?\bdisplayId=(?P<display>-?\d+)\b
 _VIEWPORT = re.compile(
     r"\s*Viewport(?: [A-Z]+)?: displayId=(?P<display>-?\d{1,10}), "
     r"(?:uniqueId=[^,\s]*, port=(?:\d{1,10}|<none>), )?"
-    r"orientation=(?P<orientation>[0-3]), (?:uniqueId='[^']*', )?"
+    r"orientation=(?P<orientation>[0-3]), "
+    # A Samsung phone (API 36) printed the display's density here.
+    r"(?:densityDpi=\d{1,5} xDpi=\d{1,5}\.\d{1,6}, yDpi=\d{1,5}\.\d{1,6}, )?"
+    r"(?:uniqueId='[^']*', )?"
     rf"logicalFrame=\[(?P<logical>{_RECT})\], "
     rf"physicalFrame=\[(?P<physical>{_RECT})\], deviceSize=\[\d{{1,7}}, \d{{1,7}}\]"
     r"(?:, isActive=\[[01]\])?"
@@ -562,12 +599,29 @@ def _touch(line: str) -> tuple[bool, bool, bool] | None:
     return takes, takes and not names & {"NOT_FOCUSABLE", "NOT_TOUCH_MODAL"}, True
 
 
+def _samsung(line: str) -> bool | None:
+    """Whether a window line has the fields of the Samsung form (API 36);
+    None when one of them is named anywhere in the line (its name and
+    ``applicationInfo.name`` included) but the fields after the name do not
+    hold ``samsungFlags=`` right after ``inputConfig=`` and
+    ``pTouchableRegion=`` and ``1HXY=`` right after ``touchableRegion=``, each
+    with a value the phone printed. They do not change whether or where the
+    window takes a touch."""
+    if not any(key in line for key in _SAMSUNG_KEYS):
+        return False
+    meta = _meta(line)
+    if _SAMSUNG_FLAGS.search(meta) is None or _SAMSUNG_REGION.search(meta) is None:
+        return None
+    return True
+
+
 def _window(line: str, name: str) -> InputWindow | str:
     """Read one window line (stripped) whose name field is `name`."""
     touch = _touch(line)
     uid = _UID.search(line)
     portal = _PORTAL.search(line)
-    if touch is None or uid is None:
+    samsung = _samsung(line)
+    if touch is None or uid is None or samsung is None:
         return LINE_FORMAT
     if portal is None and ("portalToDisplayId=" in line or touch[2]):
         return LINE_FORMAT
