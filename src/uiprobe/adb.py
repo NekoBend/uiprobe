@@ -81,9 +81,9 @@ _ADDRESS_FORMAT = "expected tcp:HOST:PORT"
 # Why the server was not started, for the message of AdbServerUnavailableError.
 _START_HINTS: Final = {
     "disabled": "starting the server is disabled",
-    "mid_launch": (
-        "the launch already sent its first request; a server that went away"
-        " is not started again in the middle of it"
+    "in_launch": (
+        "a launch never starts an adb server; start it (adb start-server) and"
+        " launch again"
     ),
     "address_not_default": "adb start-server is not run for an address you chose",
     "adb_not_found": "adb was not found; install platform-tools or set UIPROBE_ADB",
@@ -660,7 +660,7 @@ class AdbClient:
         called on the connection after the transport was selected, right
         before the service request is written, and stops the request by
         raising. `_no_start`, also uiprobe's own, refuses to start an adb
-        server for this request (``start_skipped`` ``mid_launch``).
+        server for this request (``start_skipped`` ``in_launch``).
         """
         return self._device_service(
             serial,
@@ -678,22 +678,12 @@ class AdbClient:
         *,
         timeout: float | None = None,
         transport_id: int | None = None,
-        _before_send: Callable[[], None] | None = None,
-        _no_start: bool = False,
     ) -> bytes:
         """Run `command` with the binary-safe ``exec:`` service.
 
-        `timeout`, `transport_id`, `_before_send` and `_no_start` are as for
-        `shell`.
+        `timeout` and `transport_id` are as for `shell`.
         """
-        return self._device_service(
-            serial,
-            f"exec:{command}",
-            timeout,
-            transport_id,
-            _before_send,
-            no_start=_no_start,
-        )
+        return self._device_service(serial, f"exec:{command}", timeout, transport_id)
 
     def _host_query(self, request: str) -> bytes:
         with self._connect() as sock:
@@ -761,7 +751,7 @@ class AdbClient:
             return self._open()
         except OSError as exc:
             reason = f"cannot connect to the adb server: {exc}"
-        skipped = "mid_launch" if no_start else self._start_blocker()
+        skipped = "in_launch" if no_start else self._start_blocker()
         if skipped is None:
             start_reason = self._run_start_server()
             if start_reason is None:

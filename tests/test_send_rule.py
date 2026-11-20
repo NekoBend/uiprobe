@@ -44,7 +44,7 @@ import pytest
 from tests.fake_device import FakeAndroid
 from tests.test_crawl_driver import SCREENS, SERIAL, SHOP, TRANSPORT, Clock
 from uiprobe import crawl_driver
-from uiprobe.crawl import Limits
+from uiprobe.crawl import Limits, Tap
 from uiprobe.crawl_driver import crawl
 from uiprobe.device import _CHANGING_COMMANDS, Device
 from uiprobe.guards import Policy
@@ -306,42 +306,41 @@ def instrumented_run(
     return log.events
 
 
-def check_rule(events: list[Event], path: str) -> int:
-    """Assert the rule for every send of `path`; return how many were checked.
+def check_rule(events: list[Event]) -> dict[str, int]:
+    """Assert the rule for every send of the run; return the sends per path.
 
     Every send must follow its own decision directly (no other decision or
-    send between), of the path whose command family it is; for the sends of
-    `path`, no caller event may lie between the decision and the send. For a
+    send between), of the path whose command family it is, and no caller
+    event may lie between the decision and the send, whatever the path. For a
     tap and BACK, whose gate reads the screen, none may lie between the last
     of those reads and the send either (the caller's clock and `stop` come
     before the reads; the policy is a plain copy).
     """
-    checked = 0
+    sends: dict[str, int] = {}
     last: tuple[int, str] | None = None  # the open decision: index, path
     for index, (kind, what) in enumerate(events):
         if kind == "decided":
             last = (index, what)
         elif kind == "send":
             assert last is not None, f"{what!r} was sent without its own decision"
-            decided_at, decided_path = last
-            assert family(what) == FAMILY[decided_path], (
-                f"{what!r} was sent on a decision for {decided_path}"
+            decided_at, path = last
+            assert family(what) == FAMILY[path], (
+                f"{what!r} was sent on a decision for {path}"
             )
-            if decided_path == path:
-                window = events[decided_at + 1 : index]
+            window = events[decided_at + 1 : index]
+            callers = [w for k, w in window if k == "caller"]
+            assert callers == [], f"{path}: {callers} ran before {what!r}"
+            if path in UI_READ_PATHS:
+                reads = [i for i in range(decided_at) if events[i][0] == "read"]
+                assert reads, f"{path}: no screen read before {what!r}"
+                window = events[reads[-1] + 1 : index]
                 callers = [w for k, w in window if k == "caller"]
-                assert callers == [], f"{path}: {callers} ran before {what!r}"
-                if path in UI_READ_PATHS:
-                    reads = [i for i in range(decided_at) if events[i][0] == "read"]
-                    assert reads, f"{path}: no screen read before {what!r}"
-                    window = events[reads[-1] + 1 : index]
-                    callers = [w for k, w in window if k == "caller"]
-                    assert callers == [], (
-                        f"{path}: {callers} ran after the last read before {what!r}"
-                    )
-                checked += 1
+                assert callers == [], (
+                    f"{path}: {callers} ran after the last read before {what!r}"
+                )
+            sends[path] = sends.get(path, 0) + 1
             last = None  # one decision, one send
-    return checked
+    return sends
 
 
 def check_complete(rows: dict[str, Callable[..., None]]) -> None:
@@ -391,7 +390,8 @@ def test_no_caller_code_runs_between_the_final_comparison_and_the_send(
     assert not any(what.startswith("word.") for _, what in events)
     assert any(kind == "caller" and what == "clock.__float__" for kind, what in events)
     assert any(kind == "caller" and what.endswith("__del__") for kind, what in events)
-    assert check_rule(events, path) > 0, f"the scenario sent no {path}"
+    sends = check_rule(events)  # every send of the run, whatever its path
+    assert sends.get(path, 0) > 0, f"the scenario sent no {path}"  # the row's own
 
 
 # --- tests of the test ---
@@ -432,7 +432,7 @@ def test_the_rule_test_fails_on_a_clock_call_inside_epoch_is(
     clock_after_the_equality(monkeypatch)
     events = instrumented_run(tmp_path, fake_adb, monkeypatch, ROWS[path])
     with pytest.raises(AssertionError, match="ran before"):
-        check_rule(events, path)
+        check_rule(events)
 
 
 @pytest.mark.parametrize("path", list(ROWS))
@@ -442,7 +442,37 @@ def test_the_rule_test_fails_on_a_clock_call_inside_final_check(
     clock_after_the_comparison(monkeypatch)
     events = instrumented_run(tmp_path, fake_adb, monkeypatch, ROWS[path])
     with pytest.raises(AssertionError, match="ran before"):
-        check_rule(events, path)
+        check_rule(events)
+
+
+def test_the_rule_test_fails_on_a_clock_call_before_the_tap_after_a_relaunch(
+    tmp_path, fake_adb, monkeypatch
+):
+    # The relaunch rows also check the taps their scenario sends: a caller
+    # clock read put right before the first tap after a relaunch (after its
+    # gate decided) is caught there.
+    relaunched = [False]
+    injected: list[bool] = []
+    relaunch = crawl_driver._Run.relaunch
+    send_input = crawl_driver._Run.send_input
+
+    def mark(self, action_id, action):
+        result = relaunch(self, action_id, action)
+        relaunched[0] = True
+        return result
+
+    def clock_then_send(self, action, action_id):
+        if isinstance(action, Tap) and relaunched[0] and not injected:
+            injected.append(True)
+            self.clock()  # inside the window: after the decision, before the tap
+        return send_input(self, action, action_id)
+
+    monkeypatch.setattr(crawl_driver._Run, "relaunch", mark)
+    monkeypatch.setattr(crawl_driver._Run, "send_input", clock_then_send)
+    events = instrumented_run(tmp_path, fake_adb, monkeypatch, ROWS["start"])
+    assert injected
+    with pytest.raises(AssertionError, match=r"tap: .* ran before"):
+        check_rule(events)
 
 
 def test_the_completeness_test_fails_without_the_relaunch_start_row():

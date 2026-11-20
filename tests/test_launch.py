@@ -1467,51 +1467,6 @@ def test_an_unpinned_launch_selects_the_device_by_serial_for_every_request(
     assert not [r for r in requests if r.startswith("host:transport-id:")]
 
 
-@pytest.mark.usefixtures("android")
-def test_launch_asks_the_stop_hook_before_each_foreground_read(device, fake_adb):
-    asked: list[int] = []
-
-    def stop() -> bool:
-        asked.append(len(fake_adb.commands))
-        return True
-
-    device.launch(SHOP, _stop=stop)
-    assert len(asked) == 1
-    # Nothing was read after the start: the hook ended the launch first.
-    assert fake_adb.commands[-1][2] == START
-
-
-def test_the_launch_waits_against_the_crawl_end_as_it_is_now(
-    device, android, monkeypatch, clock
-):
-    # The crawl's end comes earlier while the launch waits for the app: the
-    # wait ends at once, without another read, and the launch returns.
-    from uiprobe import device as device_module
-
-    trusted = [1000.0]
-    monkeypatch.setattr(
-        device_module,
-        "time",
-        SimpleNamespace(monotonic=lambda: trusted[0], sleep=clock.sleep),
-    )
-    end = [1060.0]
-    device._limit_requests(lambda: end[0])
-    android.launch_in_front = False
-    original = device.foreground
-    reads: list[int] = []
-
-    def read_then_earlier() -> str | None:
-        reads.append(1)
-        seen = original()
-        end[0] = trusted[0]  # the end is now
-        return seen
-
-    monkeypatch.setattr(device, "foreground", read_then_earlier)
-    assert device.launch(SHOP, activity=f"{SHOP}/.Main", _send_by=1060.0) is None
-    assert reads == [1]
-    assert clock.pauses == []
-
-
 def test_there_is_no_public_send_check():
     assert not hasattr(Device, "set_send_check")
     assert not hasattr(Device, "send_check")
@@ -1566,7 +1521,7 @@ def test_a_launch_never_goes_on_through_a_server_started_again(
         monkeypatch.setattr(device, "_launcher_activity", read_then_lose)
         with pytest.raises(AdbServerUnavailableError) as info:
             device.launch(SHOP, restart=True)
-        assert info.value.details["start_skipped"] == "mid_launch"
+        assert info.value.details["start_skipped"] == "in_launch"
         assert started == []
         assert second.requests == []
         assert replacement.stopped == []
@@ -1602,8 +1557,8 @@ def test_a_launch_ends_when_a_read_swallows_a_failure(
 def test_a_launch_with_a_given_activity_on_a_stopped_server_says_what_happened(
     fake_adb,
 ):
-    # The start is this launch's first request: a server that is down is
-    # reported as for any first request, not as a stop in the middle.
+    # No request of a launch starts a server; the refusal says so (it does
+    # not claim that the launch already sent a request).
     from uiprobe.errors import AdbServerUnavailableError
 
     FakeAndroid(fake_adb, SERIAL, SCREENS, start="launcher")
@@ -1611,4 +1566,57 @@ def test_a_launch_with_a_given_activity_on_a_stopped_server_says_what_happened(
     fake_adb.stop()
     with pytest.raises(AdbServerUnavailableError) as info:
         device.launch(SHOP, activity=f"{SHOP}/.Main")
-    assert info.value.details.get("start_skipped") != "mid_launch"
+    assert info.value.details["start_skipped"] == "in_launch"
+    assert "a launch never starts an adb server" in info.value.message
+    assert "already sent" not in info.value.message
+
+
+def test_a_launch_with_a_given_activity_never_reaches_a_server_started_for_it(
+    tmp_path, monkeypatch, clock
+):
+    # The Device chose its device on server 1, which then stops. A launch
+    # with the activity given and restart=True would make the client start a
+    # server (here server 2, the same serial on transport 8 with another
+    # boot id): no request of the launch starts one, so neither the stop nor
+    # the start reaches server 2.
+    from tests.helpers import recording_adb, unused_port
+    from uiprobe import adb as adb_module
+    from uiprobe.adb import AdbClient, ServerAddress
+    from uiprobe.errors import AdbServerUnavailableError
+
+    assert clock.now == 1000.0
+    port = unused_port()
+    first = FakeAdbServer(port=port)
+    first.start()
+    FakeAndroid(first, SERIAL, SCREENS, start="launcher", transport_id=7)
+    second = FakeAdbServer(port=port)
+    replacement = FakeAndroid(second, SERIAL, SCREENS, start="launcher", transport_id=8)
+    replacement.boot_id = "0f0f0f0f-0000-4000-8000-000000000000"
+    monkeypatch.setattr(
+        adb_module, "DEFAULT_SERVER", ServerAddress("127.0.0.1", port, is_default=True)
+    )
+    monkeypatch.delenv("ANDROID_ADB_SERVER_ADDRESS", raising=False)
+    monkeypatch.delenv("ADB_SERVER_SOCKET", raising=False)
+    started: list[bool] = []
+
+    def start_server(client: AdbClient) -> str | None:
+        assert isinstance(client, AdbClient)
+        started.append(True)
+        second.start()
+        return None
+
+    monkeypatch.setattr(AdbClient, "_run_start_server", start_server)
+    script, _ = recording_adb(tmp_path)
+    try:
+        device = Device(adb=script)
+        activity = device.launcher_activity(SHOP)
+        first.stop()
+        with pytest.raises(AdbServerUnavailableError) as info:
+            device.launch(SHOP, activity=activity, restart=True)
+        assert info.value.details["start_skipped"] == "in_launch"
+        assert started == []
+        assert second.requests == []
+        assert replacement.stopped == []
+    finally:
+        first.stop()
+        second.stop()
