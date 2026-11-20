@@ -81,6 +81,10 @@ _ADDRESS_FORMAT = "expected tcp:HOST:PORT"
 # Why the server was not started, for the message of AdbServerUnavailableError.
 _START_HINTS: Final = {
     "disabled": "starting the server is disabled",
+    "mid_launch": (
+        "a launch already sent a request; a server that went away is not"
+        " started again in the middle of it"
+    ),
     "address_not_default": "adb start-server is not run for an address you chose",
     "adb_not_found": "adb was not found; install platform-tools or set UIPROBE_ADB",
     "android_adb_server_address_set": (
@@ -643,6 +647,7 @@ class AdbClient:
         timeout: float | None = None,
         transport_id: int | None = None,
         _before_send: Callable[[], None] | None = None,
+        _no_start: bool = False,
     ) -> bytes:
         """Run `command` on the device with the ``shell:`` service.
 
@@ -654,10 +659,16 @@ class AdbClient:
         errors. `_before_send` is uiprobe's own check (not for callers): it is
         called on the connection after the transport was selected, right
         before the service request is written, and stops the request by
-        raising.
+        raising. `_no_start`, also uiprobe's own, refuses to start an adb
+        server for this request (``start_skipped`` ``mid_launch``).
         """
         return self._device_service(
-            serial, f"shell:{command}", timeout, transport_id, _before_send
+            serial,
+            f"shell:{command}",
+            timeout,
+            transport_id,
+            _before_send,
+            no_start=_no_start,
         )
 
     def exec_out(
@@ -688,6 +699,8 @@ class AdbClient:
         read_timeout: float | None,
         transport_id: int | None = None,
         before_send: Callable[[], None] | None = None,
+        *,
+        no_start: bool = False,
     ) -> bytes:
         if transport_id is None:
             selector = f"host:transport:{serial}"
@@ -696,7 +709,7 @@ class AdbClient:
             raise TypeError(msg)
         else:
             selector = f"host:transport-id:{transport_id:d}"
-        with self._connect() as sock:
+        with self._connect(no_start=no_start) as sock:
             message = _send_request(sock, selector)
             if message is not None:
                 raise _transport_error(serial, message)
@@ -732,13 +745,13 @@ class AdbClient:
             raise
         return sock
 
-    def _connect(self) -> socket.socket:
+    def _connect(self, *, no_start: bool = False) -> socket.socket:
         """Connect to the server, starting it first when allowed."""
         try:
             return self._open()
         except OSError as exc:
             reason = f"cannot connect to the adb server: {exc}"
-        skipped = self._start_blocker()
+        skipped = "mid_launch" if no_start else self._start_blocker()
         if skipped is None:
             start_reason = self._run_start_server()
             if start_reason is None:

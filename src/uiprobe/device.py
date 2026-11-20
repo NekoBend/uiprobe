@@ -1573,6 +1573,10 @@ class Device:
         self._epoch = 0
         self._proven = 0
         self._broken: tuple[str, dict[str, object]] | None = None  # failed pin
+        # Requests that did not succeed, pinned or not; and how many launches
+        # are past their first request (no adb server is started for them).
+        self._failed_requests = 0
+        self._launch_holds = 0
         if pin:
             # Right after the listing, so the identity is the chosen device's.
             self.pin_transport()
@@ -1652,8 +1656,10 @@ class Device:
                 self._interrupted(error)
             raise
         finally:
-            if pin and not succeeded:
-                self._epoch += 1  # any way out but success, whatever the error
+            if not succeeded:
+                self._failed_requests += 1  # a launch in progress stops on it
+                if pin:
+                    self._epoch += 1  # any way out but success, whatever the error
         return result
 
     def _dispatch_guard(
@@ -2087,6 +2093,16 @@ class Device:
         """Run `command` on the device and return its output as text."""
         return self._shell_text(command)
 
+    def _extras(self, guard: Callable[[], None] | None) -> dict[str, object]:
+        """uiprobe's own options of one shell request: the last check of a
+        request that changes the device, and no server start mid-launch."""
+        extras: dict[str, object] = {}
+        if guard is not None:
+            extras["_before_send"] = guard
+        if self._launch_holds:
+            extras["_no_start"] = True
+        return extras
+
     def _shell_text(
         self,
         command: str,
@@ -2098,12 +2114,8 @@ class Device:
         changing = command.startswith(_CHANGING_COMMANDS)
         strict = strict or changing
         raw = self._call(
-            lambda pin, guard=None: (
-                self._client.shell(self.serial, command, timeout=timeout, **pin)
-                if guard is None
-                else self._client.shell(
-                    self.serial, command, timeout=timeout, _before_send=guard, **pin
-                )
+            lambda pin, guard=None: self._client.shell(
+                self.serial, command, timeout=timeout, **pin, **self._extras(guard)
             ),
             strict=strict,
             changing=changing,
@@ -2600,7 +2612,12 @@ class Device:
         per run). A str subclass is used as a plain str with the same text.
 
         On a device that is not pinned (as ``uiprobe launch`` uses), each
-        request selects the device by its serial. Accepted limit: when the
+        request selects the device by its serial. After the first request a
+        launch never goes on after a failure: a request that fails (also one
+        a read swallows) ends it (`AdbError` with ``launch_interrupted`` when
+        the error itself was swallowed), and no adb server is started for it
+        (`AdbServerUnavailableError`, ``start_skipped`` ``mid_launch``).
+        Accepted limit: when the
         device behind the serial is replaced between the launcher read and
         the start, the start uses the component read just before (it fails,
         or opens that component of the same package on the new device). A
@@ -2696,13 +2713,49 @@ class Device:
                 )
                 details = {"serial": self.serial, "reason": PIN_NOT_PROVEN}
                 raise DeviceNotFoundError(msg, details=details)
+        # After the first request, a request that fails (also one a read
+        # swallows) ends the launch, and no adb server is started for it: a
+        # launch never goes on after an observed failure.
+        failed = self._failed_requests
+        self._launch_holds += 1
+        try:
+            self._launch_rest(
+                package, activity, limit, restart=restart, stop=stop, dispatch=dispatch
+            )
+        finally:
+            self._launch_holds -= 1
+        self._check_no_failure(failed)
+
+    def _check_no_failure(self, failed: int) -> None:
+        """Raise when a request failed since `failed` was taken in a launch."""
+        if self._failed_requests != failed:
+            msg = (
+                f"a request to {self.serial} failed during the launch; nothing"
+                " more was sent"
+            )
+            raise AdbError(msg, details={"reason": "launch_interrupted"})
+
+    def _launch_rest(
+        self,
+        package: str,
+        activity: str,
+        limit: float,
+        *,
+        restart: bool,
+        stop: Callable[[], bool] | None,
+        dispatch: _Dispatch | None,
+    ) -> None:
+        """The launch after its launcher read: stop, start, foreground."""
+        failed = self._failed_requests
         if restart:
             self._force_stop(package, dispatch)
+        self._check_no_failure(failed)
         self._start(package, activity, limit, force_stopped=restart, dispatch=dispatch)
         details: dict[str, object] = {"package": package}
         deadline = self._clock() + limit
         send_by = None if dispatch is None else dispatch.send_by
         while True:
+            self._check_no_failure(failed)
             if stop is not None and stop():
                 return  # the caller (the crawl) asked to stop: no more reads
             if send_by is not None and _monotonic() >= send_by:

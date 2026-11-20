@@ -1484,3 +1484,81 @@ def test_launch_asks_the_stop_hook_before_each_foreground_read(device, fake_adb)
 def test_there_is_no_public_send_check():
     assert not hasattr(Device, "set_send_check")
     assert not hasattr(Device, "send_check")
+
+
+# --- a launch never goes on after an observed failure ---
+
+
+def test_a_launch_never_goes_on_through_a_server_started_again(
+    tmp_path, monkeypatch, clock
+):
+    # The launcher read goes to the first server. Then that server is gone:
+    # the next connection is refused, and the client would start a server
+    # (here a second fake with the same serial on transport 8). The launch
+    # ends instead, and neither the stop nor the start reaches the second.
+    from tests.helpers import recording_adb, unused_port
+    from uiprobe import adb as adb_module
+    from uiprobe.adb import AdbClient, ServerAddress
+    from uiprobe.errors import AdbServerUnavailableError
+
+    assert clock.now == 1000.0
+    port = unused_port()
+    first = FakeAdbServer(port=port)
+    first.start()
+    FakeAndroid(first, SERIAL, SCREENS, start="launcher", transport_id=7)
+    second = FakeAdbServer(port=port)
+    replacement = FakeAndroid(second, SERIAL, SCREENS, start="launcher", transport_id=8)
+    monkeypatch.setattr(
+        adb_module, "DEFAULT_SERVER", ServerAddress("127.0.0.1", port, is_default=True)
+    )
+    monkeypatch.delenv("ANDROID_ADB_SERVER_ADDRESS", raising=False)
+    monkeypatch.delenv("ADB_SERVER_SOCKET", raising=False)
+    started: list[bool] = []
+
+    def start_server(client: AdbClient) -> str | None:
+        assert isinstance(client, AdbClient)
+        started.append(True)
+        second.start()
+        return None
+
+    monkeypatch.setattr(AdbClient, "_run_start_server", start_server)
+    script, _ = recording_adb(tmp_path)
+    try:
+        device = Device(adb=script)
+        original = device._launcher_activity
+
+        def read_then_lose(package: str, **kwargs: bool) -> str:
+            component = original(package, **kwargs)
+            first.stop()  # the next connection is refused
+            return component
+
+        monkeypatch.setattr(device, "_launcher_activity", read_then_lose)
+        with pytest.raises(AdbServerUnavailableError) as info:
+            device.launch(SHOP, restart=True)
+        assert info.value.details["start_skipped"] == "mid_launch"
+        assert started == []
+        assert second.requests == []
+        assert replacement.stopped == []
+        assert not [c for _, _, c in first.commands if c.startswith("am ")]
+    finally:
+        first.stop()
+        second.stop()
+
+
+def test_a_launch_ends_when_a_read_swallows_a_failure(device, android, monkeypatch):
+    # A foreground read that hides a failed request still ends the launch:
+    # nothing more is read or sent after it.
+    android.launch_in_front = False
+    original = device.foreground
+    calls: list[int] = []
+
+    def failing_read() -> str | None:
+        calls.append(1)
+        device._failed_requests += 1  # as a read that swallowed an error
+        return original()
+
+    monkeypatch.setattr(device, "foreground", failing_read)
+    with pytest.raises(AdbError) as info:
+        device.launch(SHOP)
+    assert info.value.details["reason"] == "launch_interrupted"
+    assert calls == [1]

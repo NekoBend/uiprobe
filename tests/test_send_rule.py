@@ -13,8 +13,8 @@ The test logs one ordered list of events:
   ``__del__``), every field read of a `Policy` subclass, every method of the
   words in it, and every write of the run writer;
 * ``decided``: the final comparison itself, logged by a wrapper around
-  `_Run.final_check` (which holds only that comparison) when it approves,
-  with the sending path it was made for;
+  `_Run.epoch_is`, the comparison `_Run.final_check` makes, when it holds,
+  with the sending path `final_check` was asked for;
 * ``send``: every request that changes the device, as the fake device
   receives it.
 
@@ -24,13 +24,16 @@ kind before it is that decision, of the path whose command it is), and no
 checked on its own; the set of rows must equal the paths the crawl declares
 (`crawl_driver._SEND_PATHS`), and a send without a decision fails, so a new
 sending path cannot be added without a row. Two meta-tests show that the
-test fails when a clock call is inserted right after the comparison and when
-the row of a path is removed.
+test fails when a clock call is inserted into the production
+`_Run.final_check` right after its comparison (for every path), and when the
+row of a path is removed.
 """
 
 from __future__ import annotations
 
+import inspect
 import re
+import textwrap
 from typing import TYPE_CHECKING
 
 import pytest
@@ -186,14 +189,8 @@ def instrumented_run(
     fake_adb: FakeAdbServer,
     monkeypatch: pytest.MonkeyPatch,
     scenario: Callable[..., None],
-    *,
-    after_comparison: Callable[[object], object] | None = None,
 ) -> list[Event]:
-    """Run a crawl with caller code, decisions and sends logged in order.
-
-    `after_comparison`, for the meta-test, runs right after an approving
-    final comparison (inside the window the rule protects).
-    """
+    """Run a crawl with caller code, decisions and sends logged in order."""
     log = _Log()
     android = FakeAndroid(
         fake_adb, SERIAL, SCREENS, start="home", transport_id=TRANSPORT
@@ -214,16 +211,24 @@ def instrumented_run(
     android.override(re.compile(r"^(?:dumpsys |uiautomator |cat )"), read)
 
     final_check = crawl_driver._Run.final_check
+    epoch_is = crawl_driver._Run.epoch_is
+    asked: list[str] = []  # the path final_check is deciding for
 
-    def logged_check(self, path: str, approved: int) -> bool:
-        approves = final_check(self, path, approved)
-        if approves:
-            log.events.append(("decided", path))
-            if after_comparison is not None:
-                after_comparison(self)
-        return approves
+    def with_path(self, path: str, approved: int) -> bool:
+        asked.append(path)
+        try:
+            return final_check(self, path, approved)
+        finally:
+            asked.pop()
 
-    monkeypatch.setattr(crawl_driver._Run, "final_check", logged_check)
+    def compared(self, approved: int) -> bool:
+        holds = epoch_is(self, approved)
+        if holds and asked:
+            log.events.append(("decided", asked[-1]))  # at the comparison
+        return holds
+
+    monkeypatch.setattr(crawl_driver._Run, "final_check", with_path)
+    monkeypatch.setattr(crawl_driver._Run, "epoch_is", compared)
 
     for name in [n for n in vars(RunWriter) if n.startswith("write_")] + [
         "finish",
@@ -351,17 +356,24 @@ def test_no_caller_code_runs_between_the_final_comparison_and_the_send(
 # --- tests of the test ---
 
 
+def clock_after_the_comparison(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Put ``self.clock()`` into the production `_Run.final_check`, as its
+    first statement after the comparison (a violation of the rule)."""
+    source = textwrap.dedent(inspect.getsource(crawl_driver._Run.final_check))
+    anchor = "    if not self.epoch_is(approved):\n        return False\n"
+    assert source.count(anchor) == 1, "the comparison in final_check moved"
+    source = source.replace(anchor, anchor + "    self.clock()\n")
+    namespace: dict[str, object] = {}
+    exec(source, vars(crawl_driver), namespace)  # noqa: S102 - the meta-test edits the method
+    monkeypatch.setattr(crawl_driver._Run, "final_check", namespace["final_check"])
+
+
 @pytest.mark.parametrize("path", list(ROWS))
-def test_the_rule_test_fails_on_a_clock_call_right_after_the_comparison(
+def test_the_rule_test_fails_on_a_clock_call_inside_final_check(
     tmp_path, fake_adb, monkeypatch, path
 ):
-    events = instrumented_run(
-        tmp_path,
-        fake_adb,
-        monkeypatch,
-        ROWS[path],
-        after_comparison=lambda run: run.clock(),  # ty: ignore[missing-attribute]
-    )
+    clock_after_the_comparison(monkeypatch)
+    events = instrumented_run(tmp_path, fake_adb, monkeypatch, ROWS[path])
     with pytest.raises(AssertionError, match="ran before"):
         check_rule(events, path)
 

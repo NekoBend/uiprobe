@@ -986,6 +986,210 @@ def test_nothing_is_read_after_a_start_that_ends_past_the_deadline(
     assert device_requests_after(fake_adb, start_requests(fake_adb)[0]) == []
 
 
+@pytest.mark.usefixtures("android")
+def test_the_deadline_is_taken_before_the_first_caller_clock_value(
+    tmp_path, device, monkeypatch, fake_adb
+):
+    # The caller's first clock value took 2 s to come (uiprobe's clock went
+    # from 1000 to 1002), and the caller's clock stands still after it: the
+    # run's end by uiprobe's clock is 1060, read before that first value,
+    # not 1062. At 1061 the first launch is not sent.
+    trusted = Trusted(monkeypatch)
+    calls: list[float] = []
+
+    def caller_clock() -> float:
+        calls.append(trusted.now)
+        if len(calls) == 1:
+            trusted.now = 1002.0
+        return 1000.0
+
+    gate = crawl_driver._Run.launch_gate
+
+    def late_gate(self):
+        trusted.now = 1061.0
+        return gate(self)
+
+    monkeypatch.setattr(crawl_driver._Run, "launch_gate", late_gate)
+    result = crawl(
+        device,
+        SHOP,
+        tmp_path / "run",
+        policy=Policy(),
+        limits=Limits(minutes=1),
+        settle=0.0,
+        clock=caller_clock,
+        sleep=lambda _s: None,
+    )
+    assert result.stop_reason == "max_duration"
+    assert start_requests(fake_adb) == []
+
+
+def test_each_clock_value_can_only_bring_the_end_earlier(
+    tmp_path, device, monkeypatch, clock
+):
+    trusted = Trusted(monkeypatch)
+    engine = CrawlEngine(SHOP, Policy(), Limits(minutes=1), started_at=1000.0)
+    writer = RunWriter.create(
+        tmp_path / "run", package=SHOP, limits=Limits(), deny_words=[], serial=SERIAL
+    )
+    _WRITERS.append(writer)
+    readings = iter([1059.0, 1059.0, 1001.0])
+    driver = crawl_driver._Run(
+        device,
+        SHOP,
+        writer,
+        engine,
+        Policy(),
+        emulator=True,
+        launcher=f"{SHOP}/.Main",
+        screenshots=False,
+        settle=0.0,
+        deadline=1060.0,
+        stop=None,
+        clock=lambda: next(readings),
+        sleep=clock.sleep,
+        send_limit=1060.0,
+    )
+    driver.now()  # 59 s by the caller's clock at 1000: the end comes to 1001
+    assert driver.send_by == 1001.0
+    trusted.now = 1002.0
+    driver.now()  # still 59 s at 1002 would say 1003: the end stays at 1001
+    assert driver.send_by == 1001.0
+    driver.now()  # an earlier caller value cannot move it later either
+    assert driver.send_by == 1001.0
+    assert driver.past()
+
+
+def test_the_deadline_never_moves_later(
+    tmp_path, device, android, monkeypatch, fake_adb
+):
+    # The caller's clock stands at 59 s from the launch on: the run's end by
+    # uiprobe's clock comes down to 1001. The start goes out at 1000 and its
+    # reply comes at 1002; later caller values (still 59 s) would put the end
+    # at 1003, but it stays at 1001: nothing more is sent or read.
+    trusted = Trusted(monkeypatch)
+    readings = iter([1000.0])
+
+    def caller_clock() -> float:
+        return next(readings, 1059.0)
+
+    def slow_start(command: str):
+        reply = android._shell(command)
+        trusted.now = 1002.0
+        return reply
+
+    android.override(re.compile(r"^am start"), slow_start)
+    result = crawl(
+        device,
+        SHOP,
+        tmp_path / "run",
+        policy=Policy(),
+        limits=Limits(minutes=1),
+        settle=0.0,
+        clock=caller_clock,
+        sleep=lambda _s: None,
+    )
+    assert result.stop_reason == "max_duration"
+    assert len(start_requests(fake_adb)) == 1
+    assert device_requests_after(fake_adb, start_requests(fake_adb)[0]) == []
+    assert not [i for i in android.inputs if i.kind in ("tap", "key")]
+
+
+def test_no_read_follows_a_gate_pin_check_that_ends_past_the_deadline(
+    tmp_path, device, android, monkeypatch, clock, fake_adb
+):
+    trusted = Trusted(monkeypatch)
+    in_tap_gate: list[bool] = []
+    gate = crawl_driver._Run.gate
+
+    def marked_gate(self, action, observation):
+        in_tap_gate.append(isinstance(action, Tap))
+        try:
+            return gate(self, action, observation)
+        finally:
+            in_tap_gate.pop()
+
+    original = Device.check_pin
+    moments: list[int] = []
+
+    def slow_check(self: Device, **kwargs: object) -> None:
+        original(self, **kwargs)  # ty: ignore[invalid-argument-type]
+        if in_tap_gate and in_tap_gate[-1] and not moments:
+            trusted.now = 1061.0  # the pin check returned at 61 s of 60
+            moments.append(len(fake_adb.requests))
+
+    monkeypatch.setattr(crawl_driver._Run, "gate", marked_gate)
+    monkeypatch.setattr(Device, "check_pin", slow_check)
+    out = tmp_path / "run"
+    result = run(device, clock, out, limits=Limits(minutes=1))
+    assert moments
+    assert result.stop_reason == "max_duration"
+    assert device_requests_after(fake_adb, moments[0] - 1) == []
+    assert not [i for i in android.inputs if i.kind == "tap"]
+    records = lines(out / "transitions.jsonl")
+    assert (records[-1]["not_sent"], records[-1]["reason"]) == (True, "time_limit")
+
+
+@pytest.mark.usefixtures("android")
+def test_the_settle_pause_ends_at_the_deadline(tmp_path, device, monkeypatch, fake_adb):
+    # A stationary caller clock and a long settle: once uiprobe's clock has
+    # passed the run's end after the first tap, no more sleeps, no reads.
+    trusted = Trusted(monkeypatch)
+    sleeps: list[float] = []
+    original = device.tap
+
+    def tap_then_late(point, _send_by=None, _epoch=None):
+        result = original(point, _send_by=_send_by, _epoch=_epoch)
+        trusted.now = 1061.0
+        return result
+
+    monkeypatch.setattr(device, "tap", tap_then_late)
+    result = crawl(
+        device,
+        SHOP,
+        tmp_path / "run",
+        policy=Policy(),
+        limits=Limits(minutes=1),
+        settle=120.0,
+        clock=lambda: 1000.0,
+        sleep=sleeps.append,
+    )
+    assert result.stop_reason == "max_duration"
+    assert sleeps == []
+    taps = [i for i, (_, _, c) in enumerate(fake_adb.commands) if c.startswith("input")]
+    assert len(taps) == 1
+    assert fake_adb.commands[taps[0] + 1 :] == []
+
+
+def test_a_clock_value_too_large_for_a_float_is_a_range_error(tmp_path, device):
+    with pytest.raises(ValueError, match="below 2\\*\\*40"):
+        crawl(
+            device,
+            SHOP,
+            tmp_path / "run",
+            policy=Policy(),
+            limits=Limits(),
+            clock=lambda: 10**400,
+        )
+    assert not (tmp_path / "run").exists()
+
+
+def test_a_policy_with_avoided_areas_crawls_as_before(tmp_path, device, android, clock):
+    from uiprobe.model import Bounds
+
+    policy = Policy(avoid=(Bounds(0, 0, 10, 10),))
+    result = run(device, clock, tmp_path / "run", policy=policy)
+    assert result.stop_reason == "exhausted"
+    assert (result.screens, result.actions) == (4, 7)
+    kinds = [
+        r["action"]["kind"]
+        for r in lines(tmp_path / "run" / "transitions.jsonl")
+        if "action" in r
+    ]
+    assert kinds == ["launch", "tap", "tap", "back", "back", "tap", "back"]
+    assert android.stopped == []
+
+
 # --- stop and the time limit right before a request ---
 
 

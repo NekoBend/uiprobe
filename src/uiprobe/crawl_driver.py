@@ -44,7 +44,7 @@ followed only as `Device.can_repin` allows, else an error); `stop` again;
 then fresh reads, for a tap the dump first; last the comparison of the pin.
 No code of the caller runs after the reads: `stop`, `clock`, `sleep` and the
 run folder writes all come before them or after the input. The time limit is
-turned into a value of uiprobe's own clock (`_Run.note_time`) and checked by
+turned into a value of uiprobe's own clock (`_Run.now`) and checked by
 the device, with the pin, on the request's own connection right before it is
 written. It refuses, with a ``not_sent`` end line and nothing
 sent, when anything it needs cannot be read or has changed: for a tap the
@@ -117,6 +117,7 @@ from uiprobe.errors import (
 )
 from uiprobe.guards import _WORD_REASONS, Policy, judge
 from uiprobe.inputwindows import ROTATION, Unreadable
+from uiprobe.model import Bounds
 from uiprobe.runlog import RunFolderError, RunWriter
 
 if TYPE_CHECKING:
@@ -270,7 +271,10 @@ def _seconds(value: object) -> float:
     if isinstance(value, bool) or not isinstance(value, int | float):
         msg = f"clock() must return a number of seconds, not {type(value).__name__}"
         raise TypeError(msg)
-    seconds = float(value)
+    try:
+        seconds = float(value)
+    except OverflowError:
+        seconds = float("inf")  # refused below, as any value out of range
     if type(seconds) is not float:
         msg = "clock() must return a number of seconds"
         raise TypeError(msg)
@@ -304,6 +308,15 @@ def _ints(name: str, value: object) -> tuple[int, ...]:
     return tuple(int.__int__(n) for n in numbers)
 
 
+def _bounds(value: object) -> Bounds:
+    """A fresh `Bounds` of built-in ints, its four sides read once."""
+    if not isinstance(value, Bounds):
+        msg = f"policy.avoid must hold Bounds, not {type(value).__name__}"
+        raise TypeError(msg)
+    sides = _ints("avoid", (value.left, value.top, value.right, value.bottom))
+    return Bounds(*sides)
+
+
 def _flag(name: str, value: object) -> bool:
     if not isinstance(value, bool):  # bool cannot be subclassed
         msg = f"policy.{name} must be a bool"
@@ -326,12 +339,12 @@ def _plain_policy(policy: Policy) -> Policy:
     if avoid is not None and not isinstance(avoid, tuple | list):
         msg = "policy.avoid must be a tuple of bounds or None"
         raise TypeError(msg)
-    bounds = None if avoid is None else tuple(_ints("avoid", b) for b in tuple(avoid))
+    bounds = None if avoid is None else tuple(_bounds(b) for b in tuple(avoid))
     return Policy(
         deny_words=_words("deny_words", policy.deny_words),
         confirm_words=_words("confirm_words", policy.confirm_words),
         tap_unlabeled=_flag("tap_unlabeled", policy.tap_unlabeled),
-        avoid=bounds,  # ty: ignore[invalid-argument-type]
+        avoid=bounds,
         skip_number_only=_flag("skip_number_only", policy.skip_number_only),
         skip_toggles=_flag("skip_toggles", policy.skip_toggles),
         refuse_dialog_confirm=_flag(
@@ -422,11 +435,11 @@ class _Run:
         self.gate_epoch = device.pin_epoch
         self.sent_epoch = device.pin_epoch  # when the last action was sent
         # The run's end as a value of uiprobe's own clock, set once at the
-        # start; later values can only come earlier (`note_time`).
+        # start; later values can only come earlier (`now`).
         self.send_limit = (
             _monotonic() + 3600.0 * 24 if send_limit is None else send_limit
         )
-        # The time limit as a value of uiprobe's own clock (`note_time`), by
+        # The time limit as a value of uiprobe's own clock (`now`), by
         # which the next input, stop or start must go out.
         self.send_by: float = self.send_limit
         # The pin epoch the last `final_check` approved; the device compares
@@ -444,6 +457,14 @@ class _Run:
         try:
             return self.run_loop()
         except _Ended as ended:
+            if self.unsent is not None:  # in the gate: not sent
+                why = (
+                    NOT_SENT_TIME_LIMIT
+                    if ended.reason == MAX_DURATION
+                    else NOT_SENT_STOPPED
+                )
+                self.end_not_sent(self.unsent, why)
+                self.unsent = None
             return ended.reason
 
     def run_loop(self) -> str:
@@ -505,7 +526,7 @@ class _Run:
         action is closed as the gate would have closed it, and taken back
         unless it is the first launch). ``time_limit``: the time limit had
         passed when the request was about to go out (checked by the device
-        with uiprobe's own clock, see `note_time`);
+        with uiprobe's own clock, see `now`);
         the action is closed as not sent and the run ends.
         """
         try:
@@ -619,16 +640,28 @@ class _Run:
                 self.wait_stop = NOT_SENT_TIME_LIMIT
         return self.wait_stop is not None
 
-    def note_time(self, now: float) -> None:
-        """Turn the time limit into a value of uiprobe's own clock, from the
-        caller's clock read `now` (before the last reads): the device checks
-        it right before the request goes out, with no caller code. It can
-        only come earlier than the end set at the start."""
-        self.send_by = min(self.send_limit, _monotonic() + (self.deadline - now))
-
     def now(self) -> float:
-        """The caller's clock, read once and kept as a built-in float."""
-        return _seconds(self.clock())
+        """The caller's clock, read once and kept as a built-in float.
+
+        uiprobe's own clock is read first; the time the caller's clock says
+        is left, counted from that moment, can bring the run's end by
+        uiprobe's own clock (`send_by`, which the device checks right before
+        a request goes out) earlier, never later.
+        """
+        before = _monotonic()
+        now = _seconds(self.clock())
+        self.send_by = min(self.send_by, before + (self.deadline - now))
+        return now
+
+    def past(self) -> bool:
+        """Whether the run's end by uiprobe's own clock has come."""
+        return _monotonic() >= self.send_by
+
+    def check_time(self) -> None:
+        """End the run (``max_duration``) once its end has come: no device
+        read starts after it."""
+        if self.past():
+            raise _Ended(MAX_DURATION)
 
     def final_check(self, path: str, approved: int) -> bool:
         """The last comparison before a request that changes the device.
@@ -641,10 +674,15 @@ class _Run:
         if path not in _SEND_PATHS:
             msg = f"not a sending path: {path!r}"
             raise ValueError(msg)
-        if self.device.pin_epoch != approved:
+        if not self.epoch_is(approved):
             return False
         self.approved = approved
         return True
+
+    def epoch_is(self, approved: int) -> bool:
+        """The comparison of `final_check` itself: the pin epoch is still
+        `approved`."""
+        return self.device.pin_epoch == approved
 
     def stopped(self) -> bool:
         """Whether `stop` asked to end; once it did, the answer stays True."""
@@ -871,7 +909,6 @@ class _Run:
         decision nothing else runs before the input is sent.
         """
         now = self.now()  # the one time taken, before any read
-        self.note_time(now)
         reason = self.halt(now)
         if reason is not None:
             return reason, None
@@ -883,18 +920,27 @@ class _Run:
         if self.stopped():
             return NOT_SENT_STOPPED, None
         self.gate_epoch = self.device.pin_epoch
+        # No read starts once the run's end by uiprobe's own clock has come
+        # (`check_time` ends the run; the start line is closed as not sent).
+        tap = isinstance(action, Tap)
         # For a tap: the focused window before and after the dump must be the
         # same window of the app, so the dump shows that window (uiautomator
         # dumps the focused window: seen on API 24, 30 and 36 with the shade).
-        before = self.device.focused_window() if isinstance(action, Tap) else None
-        screen = self.dump() if isinstance(action, Tap) else None
+        self.check_time()
+        before = self.device.focused_window() if tap else None
+        self.check_time()
+        screen = self.dump() if tap else None
+        self.check_time()
         foreground = self.device.foreground()
+        self.check_time()
         focus = self.device.focused_window()
+        self.check_time()
         keyboard = self.device.keyboard_shown()
         seen = _Seen(Observation(screen, foreground, keyboard, now), focus)
         self.gate_details = None
         if isinstance(action, Tap):
             # The last read: the window that takes a touch at the point.
+            self.check_time()
             cover = (
                 self.cover(action.point, (before, focus), screen)
                 if self.policy.check_tap_window
@@ -959,7 +1005,7 @@ class _Run:
         self.gate_screen_id = None if screen is None else screen.screen_id
         # No caller code after the reads: the time limit is checked by the
         # device with its own clock right before the input goes out
-        # (`note_time`), and the pin last, here and there.
+        # (`now`), and the pin last, here and there.
         path = (
             "tap"
             if isinstance(action, Tap)
@@ -977,8 +1023,7 @@ class _Run:
         epoch = self.device.pin_epoch
         stopped = self.stopped()  # asked again after the pin check
         now = self.now()
-        late = now >= self.deadline
-        self.note_time(now)
+        late = now >= self.deadline or self.past()
         if not self.final_check("launch", epoch):
             return NOT_SENT_RECONNECTED
         if stopped:
@@ -1004,7 +1049,7 @@ class _Run:
         end = min(self.now() + self.settle, self.deadline)
         for _ in range(int(self.settle / PAUSE_STEP) + 2):
             left = end - self.now()
-            if left <= 0 or self.stopped():
+            if left <= 0 or self.past() or self.stopped():
                 return
             self.sleep(min(PAUSE_STEP, left))
 
@@ -1111,11 +1156,8 @@ class _Run:
                 self.device.check_pin(emulator=self.emulator)
                 if self.stopped():
                     reason = NOT_SENT_STOPPED
-                else:
-                    now = self.now()
-                    self.note_time(now)
-                    if now >= self.deadline:
-                        reason = NOT_SENT_TIME_LIMIT
+                elif self.now() >= self.deadline or self.past():
+                    reason = NOT_SENT_TIME_LIMIT
         except DeviceNotFoundError as error:
             if error.details.get("reason") != PIN_WAIT_STOPPED:
                 raise
@@ -1161,21 +1203,22 @@ class _Run:
         on as it is, and `stop` or the time limit end the rereading.
         """
         while True:
-            if _monotonic() >= self.send_limit:
-                raise _Ended(MAX_DURATION)  # by uiprobe's own clock: no read
+            self.check_time()  # by uiprobe's own clock: no read after the end
             self.device.check_pin(emulator=self.emulator)
             # Asked again after the pin check (which can wait for the device)
             # and before the dump and the other reads.
             if self.stopped():
                 raise _Ended(INTERRUPTED)
-            if _monotonic() >= self.send_limit:
-                raise _Ended(MAX_DURATION)  # by uiprobe's own clock
+            self.check_time()
             self.epoch_seen = self.device.pin_epoch
             screen = self.dump()
+            self.check_time()
             foreground = self.device.foreground()
             if screen is None or self.device.pin_epoch == self.epoch_seen:
                 self.close_transition(screen, foreground)
+            self.check_time()
             keyboard = self.device.keyboard_shown()
+            self.check_time()
             focus = self.device.focused_window()
             if (
                 screen is None
@@ -1217,6 +1260,7 @@ class _Run:
         if not self.writer.write_screen(screen) or not self.screenshots:
             return
         try:
+            self.check_time()
             png = self.device.screenshot()
             after = self.device.foreground()
         except ScreenshotFailedError as error:
@@ -1510,10 +1554,11 @@ def _crawl_on(
     # be read is not crawled, and no launch or relaunch reads it again, so
     # nothing but the start follows the last pin comparison.
     launcher = device.launcher_activity(package)
-    started_at = _seconds(clock())
-    # The run's end by uiprobe's own clock, set once: a later clock value can
-    # bring a request's limit earlier, never later.
+    # The run's end by uiprobe's own clock, read before the caller's first
+    # clock value and set once: a later clock value can bring it earlier,
+    # never later.
     send_limit = _monotonic() + limits.minutes * 60
+    started_at = _seconds(clock())
     engine = CrawlEngine(package, policy, limits, started_at=started_at)
     writer = RunWriter.create(
         out,
