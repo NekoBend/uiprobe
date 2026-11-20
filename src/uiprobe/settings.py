@@ -32,20 +32,27 @@ A file written at an older defaults version may leave out the tables and
 rules that a later version added (`_LATER_TABLES`, `_LATER_RULES`): a missing
 table counts as empty, so all of its defaults apply, and a missing rule takes
 its default. Version 2 added the ``[irreversible]`` table, the rule
-``refuse_irreversible_screens`` and four deny words. Version 3 added the
-``[deny] except`` list (exception words, see `uiprobe.guards.word_matches`)
-with all of its words, and four deny words (``redial``, ``charge``, ``top
-up``, ``renew``). ``[deny] remove`` takes words out of both ``words`` and
-``except``. The built-in exception words excuse only built-in deny words
-(equal to a default after normalization); any other exception word, written
-in ``except``, excuses every deny word.
+``refuse_irreversible_screens`` and four deny words.
 
-An exception word must be one word of letters and digits. One that equals a
-deny word in use (any form of it, see `uiprobe.guards._forms`) would excuse that
-word wherever it stands alone, so listing it under ``except`` is refused with a
-message saying to remove the deny word instead. A default exception that a file
-written before version 3 receives automatically is dropped instead when it
-equals a deny word of that file, with a warning (the deny word wins).
+``[deny] except`` holds exception words (see `uiprobe.guards.word_matches`): a
+deny-word hit that lies completely inside one of them, where it stands as a
+whole word of a text, description or hint, does not count. The list is
+optional in every file, like ``remove``, and has no default words, so it adds
+no defaults and did not need a new defaults version: a file without it
+decides exactly as before. An exception word written there excuses every deny
+word, the built-in ones and the ones the file or ``--deny`` adds. Built-in
+exception words (none at present) would excuse only built-in deny words; one
+added in a later version would come with a new defaults version, tagged in
+`_LATER_EXCEPT` from `_FIRST_EXCEPT` on. ``[deny] remove`` takes words out of
+both ``words`` and ``except``.
+
+An exception word must be one word of letters and digits without invisible
+characters. One that equals a deny word in use (any form of it, see
+`uiprobe.guards._forms`) would excuse that word wherever it stands alone, so
+listing it under ``except`` is refused with a message saying to remove the
+deny word instead. A built-in exception that a file receives automatically is
+dropped instead when it equals a deny word of that file, with a warning (the
+deny word wins).
 
 A deny word is compared with the ``remove`` list after the normalization the
 deny matching uses (`uiprobe.guards.normalize`: NFKC, case-folded, whitespace
@@ -125,7 +132,7 @@ __all__ = [
 
 SETTINGS_FILE: Final = "uiprobe.toml"
 FORMAT_VERSION: Final = 1
-DEFAULTS_VERSION: Final = 3
+DEFAULTS_VERSION: Final = 2
 MAX_SETTINGS_BYTES: Final = 1024 * 1024
 
 # Every default list item with the defaults version that introduced it. Each
@@ -141,20 +148,16 @@ MAX_SETTINGS_BYTES: Final = 1024 * 1024
 # or rule also goes into `_LATER_TABLES` or `_LATER_RULES` (with the value of a
 # missing rule in `_LATER_RULE_VALUES`), so that older files still load.
 # Version 2 added the start-over deny words, the [irreversible] table with all
-# of its phrases and the rule refuse_irreversible_screens. Version 3 added the
-# [deny] except list with all of its words, and the deny words for redialling
-# and for paying by charge, top-up or renewal.
+# of its phrases and the rule refuse_irreversible_screens.
 _LATER_DENY: Final[dict[str, int]] = {
     "やり直": 2,
     "元に戻": 2,
     "restart": 2,
     "undo": 2,
-    "redial": 3,
-    "charge": 3,
-    "top up": 3,
-    "renew": 3,
 }
-# The [deny] except list came with version 3, so its items start there.
+# The [deny] except list has no built-in words. One added later starts at the
+# next defaults version (raise DEFAULTS_VERSION with it); before that, the
+# test that no default is tagged beyond the current version fails.
 _FIRST_EXCEPT: Final = 3
 _LATER_EXCEPT: Final[dict[str, int]] = {}
 _LATER_CONFIRM: Final[dict[str, int]] = {}
@@ -222,9 +225,6 @@ _INT_RANGES: Final[dict[str, dict[str, tuple[int, int]]]] = {
 _LATER_TABLES: Final[dict[str, int]] = {"irreversible": 2}
 _LATER_RULES: Final[dict[str, int]] = {"refuse_irreversible_screens": 2}
 _LATER_RULE_VALUES: Final[dict[str, bool]] = {"refuse_irreversible_screens": True}
-# Lists that a later defaults version added to an existing table, as
-# (table, key), with that version: a missing list reads as empty.
-_LATER_LISTS: Final[dict[tuple[str, str], int]] = {("deny", "except"): 3}
 _TABLE_KEYS: Final[dict[str, frozenset[str]]] = {
     "deny": frozenset({"words", "except", "remove"}),
     "confirm": frozenset({"words", "remove"}),
@@ -387,12 +387,14 @@ def render_default_settings() -> str:
         "[deny]",
         "# Never press an element that contains one of these words.",
         *_toml_list("words", _current(_DENY_WORDS)),
-        "# A deny word found inside one of these words does not count where the",
-        '# word stands whole in a text ("call" in "Automatically"). Any other word',
-        '# that holds a deny word is still refused. "remove" also takes words out',
-        "# of this list. The words uiprobe lists here excuse only uiprobe's own",
-        "# deny words, not the ones you add; a word you add here excuses every",
-        "# deny word.",
+        "# Exception words, none by default. A deny word found inside one of these",
+        "# words does not count where the word stands whole in a text: with",
+        '# "automatically" here, "call" no longer refuses "Automatically". An',
+        "# element holding the word is then pressed unless another deny word",
+        '# matches, also "Bill my card automatically"; that is your',
+        "# responsibility. A word here excuses every deny word, also the ones you",
+        '# add. Any other word that holds a deny word is still refused. "remove"',
+        "# also takes words out of this list.",
         *_toml_list("except", _current(_DENY_EXCEPTIONS)),
         "remove = []",
         "",
@@ -899,9 +901,9 @@ def load_settings(path: str | os.PathLike[str]) -> Settings:
     The file must be a regular file of at most 1 MiB, strict UTF-8 (a UTF-8 BOM
     is accepted, UTF-16 is refused) and valid TOML. ``format_version`` and
     ``defaults_version`` and every table and key that `render_default_settings`
-    writes must be present; only the ``remove`` lists may be left out, and a
-    file written at an older defaults version may leave out what a later
-    version added (`_LATER_TABLES`, `_LATER_RULES`, `_LATER_LISTS`): the
+    writes must be present; only the ``remove`` lists and ``[deny] except``
+    may be left out, and a file written at an older defaults version may leave
+    out what a later version added (`_LATER_TABLES`, `_LATER_RULES`): the
     missing rule takes its default and the missing list its defaults. A
     listed exception word equal to a deny word in use is refused. Unknown
     tables or keys, wrong types, numbers out of range, words that deny matching
@@ -951,7 +953,7 @@ def load_settings(path: str | os.PathLike[str]) -> Settings:
         "deny",
         "except",
         _exception_identity,
-        optional=defaults_version < _LATER_LISTS["deny", "except"],
+        optional=True,
     )
     deny_removed = reader.strings(deny, "deny", "remove", _word_identity, optional=True)
     deny_words = _merge(

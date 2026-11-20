@@ -16,53 +16,55 @@ normalized form of each field (see `normalize`), also with camelCase and the
 separators ``_ - . / :`` read as spaces, and also with all spaces removed. So
 ``signUp``, ``sign-up`` and ``SIGN UP`` all match the word ``sign up``.
 
-Exception words (``Policy.deny_exceptions``, default `DEFAULT_DENY_EXCEPTIONS`:
-``automatically``, ``posture``, ``recorder``, ``border``, ``descartes``,
-``designing``) stop some known over-blocks. In the text, content description
-and hint, and in the joined texts built from them, an occurrence of a deny
-word is not counted when it lies completely inside an exception word that
-stands as one whole word of the field: a word run (a maximal run of letters
-and digits, `str.isalnum`, with the combining marks that follow them) of the
-field after NFKC, with invisible characters still in place (they end a run),
-whose case-folded text equals the exception after NFKC and case folding, and
-whose characters NFKC left unchanged. So ``call`` in ``Automatically`` does
-not count. The deny words are still found on the normalized forms; each
-occurrence is traced back to the characters of the field it comes from and
-checked on its own: one occurrence outside every exception run, or one that
-only overlaps a run, counts (``Automatically pay``, ``Recorder order``). A run
-joined across a space or a separator does not count (``Job order`` holds
-``border`` only once spaces are removed), nor does an inflected form
-(``Borders``), a run with an invisible character, a combining mark or a
-full-width or circled letter in it. When the trace is not certain (NFKC of the
-characters one by one differs from NFKC of the field, or a traced form differs
-from the real one), every occurrence counts. Resource ids and the
-irreversibility phrases do not use exception words. Only the listed exception
-words are let through; every other word that holds a deny word is refused as
-before. An exception word must be one word run and must not equal a deny word
-(any of its forms); `Policy.with_deny_words` drops an exception equal to an
-added word.
+Exception words (``Policy.deny_exceptions``; the settings file's ``[deny]
+except``) are empty by default (`DEFAULT_DENY_EXCEPTIONS` is ``()``), so the
+defaults decide exactly as substring matching alone. With exception words, in
+the text, content description and hint, and in the joined texts built from
+them, an occurrence of a deny word is not counted when it lies completely
+inside an exception word that stands as one whole word of the field: a word
+run (a maximal run of letters and digits, `str.isalnum`, with the combining
+marks that follow them) of the field after NFKC, with invisible characters
+still in place (they end a run), whose case-folded text equals the exception
+after NFKC and case folding, whose characters NFKC left unchanged, and next to
+which no invisible character hides a longer word. With ``automatically``
+listed, ``call`` in ``Automatically`` does not count, and an element holding
+the word is pressed unless another deny word or reason refuses it, also
+"Bill my card automatically": whoever lists the word takes that on. The deny
+words are still found on the normalized forms; each occurrence is traced back
+to the characters of the field it comes from and checked on its own: one
+occurrence outside every exception run, or one that only overlaps a run,
+counts (``Automatically pay``, ``Recorder order``). A run joined across a
+space or a separator does not count (``Job order`` holds ``border`` only once
+spaces are removed), nor does an inflected form (``Borders``), a run with an
+invisible character, a combining mark or a full-width or circled letter in it.
+When the trace is not certain (NFKC of the characters one by one differs from
+NFKC of the field, or a traced form differs from the real one), every
+occurrence counts. Resource ids, the irreversibility phrases and the
+screen-wide deny search behind ``confirm_button`` never use exception words.
+An exception word must be one word run without invisible characters and must
+not equal a deny word (any of its forms); `Policy.with_deny_words` drops an
+exception equal to an added word.
 
-Which words an exception weakens: a built-in exception word (equal to one of
-`DEFAULT_DENY_EXCEPTIONS`) excuses only hits of a built-in deny word, one equal
-to an item of `DEFAULT_DENY_WORDS` after `normalize`; a deny word added by the
-caller (``--deny``, a settings file's own words, `Policy.with_deny_words`) is
-not weakened by it, so ``matic`` still matches ``Automatically``. Any other
-exception word (one a user wrote) excuses hits of every deny word, built-in or
-added. Both are decided by equality, not by where a word came from: a
-settings file lists the built-in words and exceptions itself, and an added
-word equal to a built-in one is that built-in word.
+Which words an exception excuses: an exception word the caller gives excuses
+hits of every deny word, built-in or added. A built-in exception word (there
+are none at present) would excuse only hits of a built-in deny word, one
+equal to an item of `DEFAULT_DENY_WORDS` after `normalize`, so that a word
+added with ``--deny`` or in a settings file is never weakened by uiprobe's own
+choice. Both are decided by equality, not by where a word came from: a
+settings file lists the built-in words itself, and an added word equal to a
+built-in one is that built-in word.
 
 The default deny words come from four lists: the base list (purchases,
-payments, sending, deleting, signing out, calling and redialling, charging,
-topping up, renewing and similar), a list of further
+payments, sending, deleting, signing out and similar), a list of further
 actions such as subscriptions and starting over, the nine words for
 disabling, force-stopping and signing in (``_SETTINGS_DENY_WORDS``), and the
 four words for carts and accounts (``_SHOP_DENY_WORDS``).
 
-Known and accepted over-block: because words are substrings, a word that holds
-a deny word and is not an exception word is not pressed (``Postures`` matches
-``post``, ``Recorders`` matches ``order``). The package part of a resource id
-is not looked at, so ``com.example.pay:id/next`` does not match ``pay``.
+Known and accepted over-block: because words are substrings, ``Posture``
+matches ``post`` and ``Recorder`` matches ``order``. They are not pressed
+(unless the caller lists them as exception words). The package part of a
+resource id is not looked at, so ``com.example.pay:id/next`` does not match
+``pay``.
 
 Characters that carry no readable label (every Unicode
 Default_Ignorable_Code_Point from a hard-coded range table, such as soft
@@ -238,25 +240,17 @@ Known limits:
   a miss is worse than an over-block.
 * Half-width or full-width katakana ``ハイ`` (``ﾊｲ``) is not a confirm word,
   because the confirm list has only ``はい``.
-* Substring matching over-blocks: ``Postures`` contains ``post`` and
-  ``Recorders`` contains ``order`` (the exception words are whole words
-  only).
-* The words for redialling and payments added with the exception words
-  (``redial``, ``charge``, ``top up``, ``renew``) over-block as substrings:
-  ``charge`` matches ``Charger``, ``Fully charged`` and ``Battery charge``
-  (not ``Charging``); ``top up`` matches ``Stop updates`` and ``Desktop
-  updates``; ``renew`` matches ``Renewal``. They are there so that
-  ``Redial automatically``, ``Charge automatically`` and similar labels stay
-  refused.
-* Exception words let through a label that names an action without a deny
-  word of its own: ``Dial automatically``, ``Answer automatically`` and
-  ``Forward automatically`` are pressable, because ``dial``, ``answer`` and
-  ``forward`` are not deny words.
+* Substring matching over-blocks: ``Posture`` contains ``post`` and
+  ``Recorder`` contains ``order``.
+* An exception word lets through every label in which it stands whole and no
+  other deny word matches, including labels that name an action: with
+  ``automatically`` listed, ``Bill my card automatically``, ``Dial
+  automatically`` and ``Redial automatically`` are pressable.
 * The nine words for disabling, force-stopping and signing in (``disable``,
   ``force stop``, ``sign in``, ``log in``, ``login``, 無効, 強制停止, ログイン,
   サインイン)
-  over-block too: ``sign in`` matches ``Signing out`` once spaces are
-  removed (``Designing`` is an exception word), and ``log in`` and
+  over-block too: ``sign in`` matches ``Designing`` and ``Signing out`` once
+  spaces are removed, and ``log in`` and
   ``sign in`` match any word ending in ``log`` or ``sign`` followed by a word
   starting with ``in`` the same way
   (``Log info``, ``Dialog input``, ``Catalog in stock``, ``Design info``,
@@ -267,8 +261,8 @@ Known limits:
   over-block.
 * The four words for carts and accounts (``カート``, ``アカウント``,
   ``cart``, ``account``) over-block too: ``account`` matches ``Accounts`` in
-  Settings and ``Accounting``; ``cart`` matches ``Cartoon`` and ``Cartridge``
-  (``Descartes`` is an exception word); カート matches ``カートゥーン``;
+  Settings and ``Accounting``; ``cart`` matches ``Cartoon``, ``Cartridge`` and
+  ``Descartes``; カート matches ``カートゥーン``;
   アカウント matches ``アカウント情報``. With spaces removed, ``cart`` also
   matches a word ending in ``c`` followed by a word starting with ``art``
   (``Music artists``, ``Comic art``) and ``account`` matches ``Ac count``.
@@ -387,11 +381,12 @@ _BASE_DENY_WORDS: Final[tuple[str, ...]] = (
     "report",
     "block",
     "call",
-    "redial",
-    "charge",
-    "top up",
-    "renew",
 )
+# Not deny words: "redial", "charge", "top up" and "renew" were considered as
+# defaults that would keep labels such as "Redial automatically" or "Charge
+# automatically" refused next to an exception word. They over-block
+# ("Charger", "Stop updates", "Renewal") and are left for a later, more
+# careful change; add them in a settings file to use them now.
 
 # Further deny words: subscriptions, sign-off and similar (Japanese, then English).
 _EXTRA_DENY_WORDS: Final[tuple[str, ...]] = (
@@ -474,17 +469,14 @@ DEFAULT_DENY_WORDS: Final[tuple[str, ...]] = (
     _BASE_DENY_WORDS + _EXTRA_DENY_WORDS + _SETTINGS_DENY_WORDS + _SHOP_DENY_WORDS
 )
 
-# Words that excuse a deny word found inside them (see `word_matches`): a hit
-# of ``call`` that lies inside the whole word ``Automatically`` of a text does
-# not count. Each one is a word that holds a deny word but names no action.
-DEFAULT_DENY_EXCEPTIONS: Final[tuple[str, ...]] = (
-    "automatically",
-    "posture",
-    "recorder",
-    "border",
-    "descartes",
-    "designing",
-)
+# Built-in exception words (see `word_matches`): none, so the defaults decide
+# exactly as substring matching alone. A built-in exception would excuse only
+# the built-in deny words; exception words come from the settings file's
+# ``[deny] except`` or ``Policy.deny_exceptions``. A word such as
+# ``automatically`` (holds ``call``) is a candidate, but it also lets through
+# labels such as "Bill my card automatically", so the choice is left to the
+# person who writes the settings file.
+DEFAULT_DENY_EXCEPTIONS: Final[tuple[str, ...]] = ()
 
 # Phrases that say a screen's action cannot be taken back (English, then
 # Japanese). A screen whose text holds one refuses every element
@@ -725,18 +717,17 @@ def word_matches(value: str, word: str, *, exceptions: Iterable[str] = ()) -> bo
     """Return True if the deny `word` matches the field `value`.
 
     The word matches when one of its forms is a substring of a form of the
-    value (see the module docstring). With `exceptions` (exception words, for
-    example `DEFAULT_DENY_EXCEPTIONS`), an occurrence of the word that lies
+    value (see the module docstring). With `exceptions` (exception words such
+    as ``("automatically",)``), an occurrence of the word that lies
     completely inside a whole word of `value` equal to an exception word does
     not count; every other occurrence still does (see `_Excuser`). This is
     the rule of the text, content description and hint fields and of the
     joined texts; a resource id is matched without exceptions.
 
-    A built-in exception word (equal to one of `DEFAULT_DENY_EXCEPTIONS`)
-    applies only when `word` is a built-in deny word (equal to one of
-    `DEFAULT_DENY_WORDS` after `normalize`); any other exception word applies
-    to every deny word. So ``matic`` matches ``Automatically`` even with the
-    default exceptions.
+    A built-in exception word (equal to one of `DEFAULT_DENY_EXCEPTIONS`,
+    which is empty) would apply only when `word` is a built-in deny word
+    (equal to one of `DEFAULT_DENY_WORDS` after `normalize`); any other
+    exception word applies to every deny word.
 
     Raises:
         TypeError: `exceptions` is one string, not a collection of words.
@@ -1246,14 +1237,15 @@ class Policy:
     ``skip_irreversible`` (default True) applies the ``irreversible_screen``
     reason with the phrases of ``irreversible_phrases``; False turns it off.
 
-    ``deny_exceptions`` (default `DEFAULT_DENY_EXCEPTIONS`) are the exception
-    words: a deny-word hit in a text, content description or hint (or in a
-    joined text) that lies completely inside a whole word equal to one of
-    them does not count (see `word_matches`). A built-in exception word
-    (equal to one of `DEFAULT_DENY_EXCEPTIONS`) excuses only a built-in deny
-    word (equal to one of `DEFAULT_DENY_WORDS` after `normalize`); any other
-    exception word excuses every deny word. ``()`` turns this off. An
-    exception word must not equal a deny word (any of its forms).
+    ``deny_exceptions`` (default `DEFAULT_DENY_EXCEPTIONS`, which is ``()``)
+    are the exception words: a deny-word hit in a text, content description
+    or hint (or in a joined text) that lies completely inside a whole word
+    equal to one of them does not count (see `word_matches`), so an element
+    holding the word is pressed unless something else refuses it. They
+    excuse every deny word (a built-in exception word, of which there are
+    none, would excuse only built-in deny words). The screen-wide search
+    behind ``confirm_button`` never uses them. An exception word must not
+    equal a deny word (any of its forms).
 
     ``back_on_other_screens`` (default False) is read by the pressing crawl
     only, not by `judge`. True lets the crawl press BACK while a screen of

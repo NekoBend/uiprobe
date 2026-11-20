@@ -1166,42 +1166,68 @@ AUTO = Screen(
     (
         El((40, 100, 280, 150), text="Automatically", go="auto"),
         El((40, 160, 280, 210), text="Automatically pay", go="auto"),
-        El((40, 220, 280, 270), text="Redial automatically", go="auto"),
+        El((40, 220, 280, 270), text="Bill my card automatically", go="auto"),
         El((40, 280, 280, 330), text="Voice Recorder", go="auto"),
         El((40, 340, 280, 390), text="Job order", go="auto"),
     ),
 )
 
 
-def test_the_preview_lets_an_exception_word_through(fake_adb, capsys):
+def _with_except(folder: Path, items: str) -> None:
+    text = render_default_settings()
+    assert text.count("except = []\n") == 1
+    path = folder / SETTINGS_FILE
+    path.write_text(text.replace("except = []\n", f"except = {items}\n"), "utf-8")
+
+
+def _words(payload: dict[str, Any]) -> dict[str, str]:
+    skip = skipped_by_text(payload)
+    return {text: entry["details"][0]["word"] for text, entry in skip.items()}
+
+
+def test_the_default_preview_has_no_exceptions(fake_adb, capsys):
     android = FakeAndroid(fake_adb, SERIAL, (AUTO,), start="auto")
     payload = crawl_json(capsys, fake_adb)
-    assert [e["text"] for e in payload["press"]] == ["Automatically", "Voice Recorder"]
-    skip = skipped_by_text(payload)
-    words = {text: entry["details"][0]["word"] for text, entry in skip.items()}
-    assert words == {
+    assert payload["press"] == []
+    assert _words(payload) == {
+        "Automatically": "call",
         "Automatically pay": "pay",
-        "Redial automatically": "redial",
+        "Bill my card automatically": "call",
+        "Voice Recorder": "order",
         "Job order": "order",
     }
     assert_read_only(fake_adb, android)
 
 
-def test_deny_blocks_a_word_that_is_also_an_exception(fake_adb, capsys):
+def test_the_preview_lets_an_exception_word_through(fake_adb, capsys, settings_dir):
+    _with_except(settings_dir, '["automatically", "recorder"]')
+    android = FakeAndroid(fake_adb, SERIAL, (AUTO,), start="auto")
+    payload = crawl_json(capsys, fake_adb)
+    assert [e["text"] for e in payload["press"]] == [
+        "Automatically",
+        "Bill my card automatically",
+        "Voice Recorder",
+    ]
+    assert _words(payload) == {"Automatically pay": "pay", "Job order": "order"}
+    assert_read_only(fake_adb, android)
+
+
+def test_deny_blocks_a_word_that_is_also_an_exception(fake_adb, capsys, settings_dir):
+    _with_except(settings_dir, '["automatically", "recorder"]')
     FakeAndroid(fake_adb, SERIAL, (AUTO,), start="auto")
     payload = crawl_json(capsys, fake_adb, "--deny", "automatically")
     assert [e["text"] for e in payload["press"]] == ["Voice Recorder"]
     entry = skipped_by_text(payload)["Automatically"]
     assert entry["reasons"] == ["deny_word"]
     # The exception equal to the added word is dropped, so the first default
-    # word found ("call") refuses it again, as it did before exceptions.
+    # word found ("call") refuses it again, as it does without exceptions.
     assert entry["details"][0]["word"] == "call"
 
 
-def test_deny_is_not_weakened_by_the_builtin_exceptions(fake_adb, capsys):
+def test_an_exception_also_excuses_a_deny_word(fake_adb, capsys, settings_dir):
+    # A user exception excuses every deny word, the added ones too.
+    _with_except(settings_dir, '["automatically"]')
     FakeAndroid(fake_adb, SERIAL, (AUTO,), start="auto")
     payload = crawl_json(capsys, fake_adb, "--deny", "matic")
-    entry = skipped_by_text(payload)["Automatically"]
-    assert entry["reasons"] == ["deny_word"]
-    assert entry["details"][0]["word"] == "matic"
-    assert [e["text"] for e in payload["press"]] == ["Voice Recorder"]
+    assert "Automatically" in [e["text"] for e in payload["press"]]
+    assert _words(payload)["Automatically pay"] == "pay"

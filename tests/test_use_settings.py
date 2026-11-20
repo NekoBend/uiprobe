@@ -1259,7 +1259,7 @@ def test_a_version_1_file_refuses_warned_screens_and_start_over_words(
         assert reasons(run([item], policy=policy), "e2") == ("deny_word",)
 
 
-# -- exception words (defaults version 3) --------------------------------------
+# -- exception words ([deny] except, none built in) ------------------------------
 
 
 def _v2_text() -> str:
@@ -1270,37 +1270,72 @@ def _v2_text() -> str:
     return text
 
 
+def with_except(items: str, text: str | None = None) -> str:
+    text = render_default_settings() if text is None else text
+    if "except = []\n" in text:
+        return text.replace("except = []\n", f"except = {items}\n")
+    return text.replace("remove = []", f"except = {items}\nremove = []", 1)
+
+
 AUTO_SCREEN = Screen(
     "auto",
     f"{SHOP}/.Auto",
     (
         El((40, 100, 280, 150), text="Automatically", go="auto"),
         El((40, 160, 280, 210), text="Border", go="auto"),
-        El((40, 220, 280, 270), text="Redial automatically", go="auto"),
+        El((40, 220, 280, 270), text="Automatically pay", go="auto"),
+        El((40, 280, 280, 330), text="Bill my card automatically", go="auto"),
     ),
 )
+ALL_REFUSED = {
+    "Automatically": ["deny_word"],
+    "Border": ["deny_word"],
+    "Automatically pay": ["deny_word"],
+    "Bill my card automatically": ["deny_word"],
+}
 
 
-@pytest.mark.parametrize("version", [1, 2])
-def test_an_older_file_lets_the_default_exceptions_through(
+@pytest.mark.parametrize("version", [1, 2, 0])
+def test_without_exceptions_the_crawl_decides_as_before(
     capsys, fake_adb, folder, version
 ) -> None:
-    write(folder, _v1_text() if version == 1 else _v2_text())
+    text = {1: _v1_text, 2: _v2_text, 0: render_default_settings}[version]()
+    write(folder, text)
     FakeAndroid(fake_adb, SERIAL, (AUTO_SCREEN,), start="auto")
     payload = crawl_json(capsys, fake_adb)
-    assert pressed(payload) == ["Automatically", "Border"]
-    assert skipped(payload) == {"Redial automatically": ["deny_word"]}
+    assert pressed(payload) == []
+    assert skipped(payload) == ALL_REFUSED
 
 
-def test_an_older_file_can_remove_an_exception(capsys, fake_adb, folder) -> None:
-    write(folder, _v2_text().replace("remove = []", 'remove = ["automatically"]', 1))
+@pytest.mark.parametrize("version", [1, 2, 0])
+def test_an_exception_in_the_file_lets_its_word_through(
+    capsys, fake_adb, folder, version
+) -> None:
+    text = {1: _v1_text, 2: _v2_text, 0: render_default_settings}[version]()
+    write(folder, with_except('["automatically", "border"]', text))
+    FakeAndroid(fake_adb, SERIAL, (AUTO_SCREEN,), start="auto")
+    payload = crawl_json(capsys, fake_adb)
+    # The risk the person who adds the word takes on: "Bill my card
+    # automatically" has no deny word of its own and is pressed too.
+    assert pressed(payload) == ["Automatically", "Border", "Bill my card automatically"]
+    assert skipped(payload) == {"Automatically pay": ["deny_word"]}
+
+
+def test_remove_takes_an_exception_out_again(capsys, fake_adb, folder) -> None:
+    text = with_except('["automatically", "border"]', _v2_text())
+    write(folder, text.replace("remove = []", 'remove = ["Automatically"]', 1))
     FakeAndroid(fake_adb, SERIAL, (AUTO_SCREEN,), start="auto")
     payload = crawl_json(capsys, fake_adb)
     assert pressed(payload) == ["Border"]
-    assert skipped(payload)["Automatically"] == ["deny_word"]
 
 
-def test_a_dropped_default_exception_warns(capsys, fake_adb, folder) -> None:
+def test_a_dropped_builtin_exception_warns(
+    capsys, fake_adb, folder, monkeypatch
+) -> None:
+    # Only a later version could add a built-in exception; simulate one.
+    later = settings.DEFAULTS_VERSION + 1
+    monkeypatch.setattr(settings, "DEFAULTS_VERSION", later)
+    monkeypatch.setattr(settings, "_DENY_EXCEPTIONS", ((later, "border"),))
     write(folder, _v2_text().replace("words = [\n", 'words = [\n    "border",\n', 1))
     FakeAndroid(fake_adb, SERIAL, (AUTO_SCREEN,), start="auto")
     code, out, err = invoke(capsys, fake_adb, "crawl", SHOP, "--dry-run", "--json")
@@ -1309,13 +1344,13 @@ def test_a_dropped_default_exception_warns(capsys, fake_adb, folder) -> None:
         "uiprobe: warning: [deny] the default exception 'border' is not applied"
         " because it equals the deny word 'border'\n"
     )
-    assert pressed(json.loads(out)) == ["Automatically"]
+    assert pressed(json.loads(out)) == []
 
 
 def test_a_listed_exception_equal_to_a_deny_word_stops_the_crawl(
     capsys, fake_adb, folder
 ) -> None:
-    write(folder, edited('    "border",\n', '    "border",\n    "pay",\n'))
+    write(folder, with_except('["border", "pay"]'))
     code, out, err = invoke(capsys, fake_adb, "crawl", SHOP, "--dry-run")
     assert (code, out) == (2, "")
     assert "[deny] except" in err
@@ -1324,12 +1359,11 @@ def test_a_listed_exception_equal_to_a_deny_word_stops_the_crawl(
 
 
 def test_exceptions_come_from_the_file(tmp_path) -> None:
-    text = edited('    "border",\n', "")
-    policy = policy_from_settings(loaded(tmp_path, text))
-    assert "border" not in policy.deny_exceptions
+    policy = policy_from_settings(loaded(tmp_path, with_except('["border"]')))
+    assert policy.deny_exceptions == ("border",)
     item = el("e2", text="Border", bounds=(50, 100, 250, 150))
-    assert reasons(run([item]), "e2") == ()
-    assert reasons(run([item], policy=policy), "e2") == ("deny_word",)
+    assert reasons(run([item]), "e2") == ("deny_word",)
+    assert reasons(run([item], policy=policy), "e2") == ()
 
 
 DRAMA_SCREEN = Screen(
@@ -1343,7 +1377,9 @@ DRAMA_SCREEN = Screen(
 )
 
 
-def test_a_word_added_in_the_file_is_not_weakened(capsys, fake_adb, folder) -> None:
+def test_a_word_added_in_the_file_refuses_without_exceptions(
+    capsys, fake_adb, folder
+) -> None:
     write(folder, edited('    "call",\n', '    "call",\n    "matic",\n'))
     FakeAndroid(fake_adb, SERIAL, (DRAMA_SCREEN,), start="drama")
     payload = crawl_json(capsys, fake_adb)
@@ -1354,30 +1390,33 @@ def test_a_word_added_in_the_file_is_not_weakened(capsys, fake_adb, folder) -> N
     }
 
 
-def test_a_user_exception_in_the_file_applies_to_every_word(
-    capsys, fake_adb, folder
-) -> None:
-    text = edited('    "designing",\n', '    "designing",\n    "dramatic",\n')
-    text = text.replace('    "designing",\n', '    "designing",\n    "postal",\n', 1)
-    write(folder, text)
+def test_an_exception_in_the_file_excuses_every_word(capsys, fake_adb, folder) -> None:
+    # A word written under except excuses the built-in words ("post" in
+    # "Postal") and the words the file or --deny adds ("matic" in
+    # "Dramatic") alike.
+    text = edited('    "call",\n', '    "call",\n    "matic",\n')
+    write(folder, with_except('["dramatic", "postal"]', text))
     FakeAndroid(fake_adb, SERIAL, (DRAMA_SCREEN,), start="drama")
-    payload = crawl_json(capsys, fake_adb, "--deny", "matic")
-    # "dramatic" (user) excuses the --deny word, "postal" (user) the built-in
-    # "post"; the built-in "automatically" does not excuse "matic".
+    payload = crawl_json(capsys, fake_adb, "--deny", "drama")
     assert pressed(payload) == ["Dramatic", "Postal"]
     assert skipped(payload) == {"Automatically": ["deny_word"]}
 
 
-def test_an_older_file_with_its_own_word_is_not_weakened(tmp_path) -> None:
-    # A version 2 file whose only deny word is "record": the inherited
-    # exception "recorder" excuses built-in words only.
-    text = _v2_text()
-    start = text.index("words = [")
-    end = text.index("]", start) + 1
-    text = text[:start] + 'words = ["record"]' + text[end:]
-    policy = policy_from_settings(loaded(tmp_path, text))
-    assert "recorder" in policy.deny_exceptions
-    item = el("e2", text="Start microphone recorder", bounds=(50, 100, 250, 150))
-    found = run([item], policy=policy)
-    assert reasons(found, "e2") == ("deny_word",)
-    assert found.decisions[0].details[0].word == "record"
+CONFIRM_SCREEN = Screen(
+    "confirm",
+    f"{SHOP}/.Confirm",
+    (
+        El((40, 100, 280, 150), text="Debit $50 automatically?"),
+        El((40, 300, 280, 350), text="Continue", go="confirm"),
+    ),
+)
+
+
+def test_an_exception_in_the_file_does_not_weaken_the_confirm_check(
+    capsys, fake_adb, folder
+) -> None:
+    write(folder, with_except('["automatically"]'))
+    FakeAndroid(fake_adb, SERIAL, (CONFIRM_SCREEN,), start="confirm")
+    payload = crawl_json(capsys, fake_adb)
+    assert pressed(payload) == []
+    assert skipped(payload) == {"Continue": ["confirm_button"]}
