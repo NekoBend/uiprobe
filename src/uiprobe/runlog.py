@@ -472,6 +472,7 @@ class RunWriter:
         *,
         off_target_package: str | None = None,
         off_target_foreground: str | None = None,
+        off_target_focus: str | None = None,
     ) -> None:
         """Write the line that says an action is about to be sent.
 
@@ -482,11 +483,13 @@ class RunWriter:
         `off_target_package` is given when the action was decided on a screen
         of another app: the package of that screen's dump. It is written as
         ``off_target`` with ``package`` and, when given,
-        `off_target_foreground` (the package in front) as ``foreground``.
+        `off_target_foreground` (the package in front) as ``foreground`` and
+        `off_target_focus` (the owner of the window with input focus, where a
+        BACK goes) as ``focus``.
 
         Raises:
-            ValueError: `off_target_foreground` is given without
-                `off_target_package`.
+            ValueError: `off_target_foreground` or `off_target_focus` is given
+                without `off_target_package`.
         """
         line: dict[str, object] = {
             "schema": TRANSITION_START_SCHEMA,
@@ -510,9 +513,11 @@ class RunWriter:
                 other["foreground"] = _check_text(
                     "off_target_foreground", off_target_foreground
                 )
+            if off_target_focus is not None:
+                other["focus"] = _check_text("off_target_focus", off_target_focus)
             line["off_target"] = other
-        elif off_target_foreground is not None:
-            msg = "off_target_foreground needs off_target_package"
+        elif off_target_foreground is not None or off_target_focus is not None:
+            msg = "off_target_foreground and off_target_focus need off_target_package"
             raise ValueError(msg)
         self._append("transitions.jsonl", _json_text(line) + "\n", start=True)
 

@@ -1015,10 +1015,12 @@ def _gate_run(
     clock: Clock,
     *,
     stop: Callable[[], bool] | None = None,
+    policy: Policy | None = None,
 ) -> tuple[crawl_driver._Run, CrawlEngine, Observation]:
     """A run after its launch, with the first observation, for direct sends."""
+    policy = policy or Policy()
     device.pin_transport()
-    engine = CrawlEngine(SHOP, Policy(), Limits(minutes=1), started_at=clock.now)
+    engine = CrawlEngine(SHOP, policy, Limits(minutes=1), started_at=clock.now)
     writer = RunWriter.create(
         tmp_path / "run", package=SHOP, limits=Limits(), deny_words=[], serial=SERIAL
     )
@@ -1028,7 +1030,7 @@ def _gate_run(
         SHOP,
         writer,
         engine,
-        Policy(),
+        policy,
         identity=_identity(device),
         emulator=True,
         screenshots=False,
@@ -1098,7 +1100,7 @@ _CASES = [
     ("back", "time_limit", "time_limit"),
     ("back", "foreground_unknown", "foreground_unknown"),
     ("back", "focus_unknown", "focus_unknown"),
-    ("back", "focus_other", "changed_before_send"),
+    ("back", "focus_other", "focus_other"),
     ("back", "keyboard_unknown", "keyboard_unknown"),
     ("back", "keyboard_shown", "changed_before_send"),
     ("back", "focus_title", "changed_before_send"),
@@ -1716,7 +1718,11 @@ def test_by_default_a_screen_of_another_app_gets_no_input(
     ]
     assert "off_target" not in starts[0]
     for start in starts[1:]:
-        assert start["off_target"] == {"package": OTHER, "foreground": OTHER}
+        assert start["off_target"] == {
+            "package": OTHER,
+            "foreground": OTHER,
+            "focus": OTHER,
+        }
     begin = json.loads((out / "run-start.json").read_bytes())
     assert begin["back_on_other_screens"] is False
 
@@ -1744,7 +1750,11 @@ def test_with_back_on_other_screens_back_goes_to_the_other_app(
         "back",
     ]
     for start in starts[1:]:
-        assert start["off_target"] == {"package": OTHER, "foreground": OTHER}
+        assert start["off_target"] == {
+            "package": OTHER,
+            "foreground": OTHER,
+            "focus": OTHER,
+        }
     begin = json.loads((out / "run-start.json").read_bytes())
     assert begin["back_on_other_screens"] is True
 
@@ -1778,8 +1788,89 @@ def test_a_back_that_leaves_the_app_is_followed_by_a_relaunch(
         assert starts[i]["off_target"] == {
             "package": "com.example.launcher",
             "foreground": "com.example.launcher",
+            "focus": "com.example.launcher",
         }
     # every key went to a screen of the shop, none to the launcher
     keys = [i for i in android.inputs if i.kind == "key"]
     assert keys
     assert all(i.screen in {"main", "browse", "detail", "cart"} for i in keys)
+
+
+def _start_lines(tmp_path: Path) -> list[dict[str, object]]:
+    return [r for r in lines(tmp_path / "run" / "transitions.jsonl") if "action" in r]
+
+
+def test_a_back_on_the_apps_screen_is_not_sent_while_another_window_has_focus(
+    tmp_path, device, android, clock, monkeypatch
+):
+    # The dump and the foreground name the app, but a window of System UI has
+    # held the input focus since before the BACK was chosen: the BACK would go
+    # to that window, so it is not sent.
+    monkeypatch.setattr(device, "focused_window", lambda: SHADE)
+    driver, _, observation = _gate_run(tmp_path, device, clock)
+    assert observation.foreground == SHOP
+    inputs = len(android.inputs)
+    driver.send(Back(), observation)
+    assert len(android.inputs) == inputs
+    assert _not_sent_reason(tmp_path) == "focus_other"
+    assert "off_target" not in _start_lines(tmp_path)[-1]
+
+
+def test_an_opted_in_back_on_another_apps_screen_needs_no_app_focus(
+    tmp_path, device, android, clock
+):
+    driver, _, _ = _gate_run(tmp_path, device, clock, policy=BACK_POLICY)
+    android.show("ext1")
+    observation = driver.observe()
+    keys = len([i for i in android.inputs if i.kind == "key"])
+    driver.send(Back(), observation)
+    assert len([i for i in android.inputs if i.kind == "key"]) == keys + 1
+    # the line says where the BACK went: the owner of the focused window
+    assert _start_lines(tmp_path)[-1]["off_target"] == {
+        "package": OTHER,
+        "foreground": OTHER,
+        "focus": OTHER,
+    }
+
+
+def test_off_target_names_the_dump_and_the_foreground_apart(
+    tmp_path, device, android, clock, monkeypatch
+):
+    # The dump shows the shop while another app is said to be in front.
+    driver, _, _ = _gate_run(tmp_path, device, clock)
+    monkeypatch.setattr(device, "foreground", lambda: OTHER)
+    observation = driver.observe()
+    assert observation.screen is not None
+    assert observation.screen.package == SHOP
+    driver.send(Relaunch(), observation)
+    assert _start_lines(tmp_path)[-1]["off_target"] == {
+        "package": SHOP,
+        "foreground": OTHER,
+        "focus": SHOP,
+    }
+    assert android.stopped == [SHOP]
+
+
+def test_off_target_with_an_unknown_foreground_has_no_foreground(
+    tmp_path, device, android, clock, monkeypatch
+):
+    driver, _, _ = _gate_run(tmp_path, device, clock)
+    monkeypatch.setattr(device, "foreground", lambda: None)
+    observation = driver.observe()
+    driver.send(Relaunch(), observation)
+    assert _start_lines(tmp_path)[-1]["off_target"] == {
+        "package": SHOP,
+        "focus": SHOP,
+    }
+    # the gate cannot read the foreground, so nothing was force-stopped
+    assert _not_sent_reason(tmp_path) == "foreground_unknown"
+    assert android.stopped == []
+
+
+def test_a_relaunch_decided_on_the_apps_screen_has_no_off_target(
+    tmp_path, device, android, clock
+):
+    driver, _, observation = _gate_run(tmp_path, device, clock)
+    driver.send(Relaunch(), observation)
+    assert "off_target" not in _start_lines(tmp_path)[-1]
+    assert android.stopped == [SHOP]

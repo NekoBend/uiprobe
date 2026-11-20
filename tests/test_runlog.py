@@ -996,6 +996,7 @@ def test_a_start_line_names_the_screen_of_another_app(tmp_path):
         ID_A,
         off_target_package="com.example.launcher",
         off_target_foreground="com.example.launcher",
+        off_target_focus="com.android.systemui",
     )
     writer.write_transition_start(2, "back", ID_B, off_target_package="com.example.app")
     writer.write_transition_start(3, "back", ID_B)
@@ -1003,14 +1004,15 @@ def test_a_start_line_names_the_screen_of_another_app(tmp_path):
     assert first["off_target"] == {
         "package": "com.example.launcher",
         "foreground": "com.example.launcher",
+        "focus": "com.android.systemui",
     }
     assert list(first)[-1] == "off_target"
     assert second["off_target"] == {"package": "com.example.app"}
     assert "off_target" not in third
-    with pytest.raises(ValueError, match="needs off_target_package"):
-        writer.write_transition_start(
-            4, "back", ID_B, off_target_foreground="com.example.app"
-        )
+    with pytest.raises(ValueError, match="need off_target_package"):
+        writer.write_transition_start(4, "back", ID_B, off_target_foreground="x.y")
+    with pytest.raises(ValueError, match="need off_target_package"):
+        writer.write_transition_start(4, "back", ID_B, off_target_focus="x.y")
     assert len(lines_of(tmp_path / "run" / "transitions.jsonl")) == 3
 
 
