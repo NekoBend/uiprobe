@@ -249,13 +249,18 @@ How a driver uses it::
                 engine.tap_sent(action)          # only once it was really sent
         observation = observe()
 
+An action that the driver did not send for a reason that says nothing about
+the screen (the device had to be proven again) is given back with
+`CrawlEngine.withdraw`, which restores the engine's whole state from before
+the `next` call that chose it.
+
 Everything the driver may want to write down is in `CrawlEngine.records`.
 """
 
 from __future__ import annotations
 
 import hashlib
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Final
 
 from uiprobe.guards import MAX_ELEMENTS, judge
@@ -661,6 +666,42 @@ class _Plan:
     labels: tuple[tuple[str, str, str], ...]
 
 
+@dataclass(frozen=True, slots=True)
+class _State:
+    """Every field of `CrawlEngine` that a decision can change, copied.
+
+    `CrawlEngine.withdraw` puts all of them back; a test checks that no
+    field of the engine is missing here.
+    """
+
+    started: bool
+    stop: Stop | None
+    sent: int
+    backs: int
+    relaunches: int
+    failures: int
+    start_id: str | None
+    root: str | None
+    depths: dict[str, int]
+    tried: set[tuple[str, str]]
+    skipped: dict[tuple[str, str, tuple[str, ...]], SkippedElement]
+    transitions: list[Transition]
+    seen: set[str]
+    pending: _Pending | None
+    planned: _Plan | None
+    approved: Tap | None
+    volatile: set[tuple[str, tuple[object, ...]]]
+    expired: bool
+    keyboard_back: bool
+    path: list[str]
+    refused: int
+    landed: set[str]
+    relaunch_due: bool
+    deferred: str | None
+    volatile_count: dict[str, int]
+    label_run: int
+
+
 class CrawlEngine:
     """Decides the next action of a pressing crawl from observations.
 
@@ -721,6 +762,9 @@ class CrawlEngine:
         self._deferred: str | None = None
         self._volatile_count: dict[str, int] = {}
         self._label_run = 0
+        # The action `next` returned last, with the state from before that
+        # call, while it can still be withdrawn.
+        self._returned: tuple[Action, _State] | None = None
 
     # -- what the driver can read ------------------------------------------------
 
@@ -772,6 +816,10 @@ class CrawlEngine:
     def next(self, observation: Observation) -> Action:
         """Return the next action for what was just seen.
 
+        The engine's whole state from before this call is kept with a
+        returned `Tap`, `Back` or `Relaunch`, so that `withdraw` can undo the
+        call when the action was not sent.
+
         Raises:
             RuntimeError: `start` was not called.
         """
@@ -780,6 +828,96 @@ class CrawlEngine:
             raise RuntimeError(msg)
         if self._stop is not None:
             return self._stop
+        before = self._snapshot()
+        action = self._decide(observation)
+        withdrawable = isinstance(action, Tap | Back | Relaunch)
+        self._returned = (action, before) if withdrawable else None
+        return action
+
+    def withdraw(self, action: Action) -> None:
+        """Undo the `next` call that returned `action`, which was not sent.
+
+        Call it when the driver did not send `action` for a reason that
+        says nothing about the screen (the device had to be proven again),
+        passing the very instance `next` returned, before any other call of
+        `next`. The engine goes back to its whole state from before that
+        `next` call: nothing is counted, recorded, marked tried or skipped
+        for it, and `next` with the same observation returns an equal
+        action. A tap reported with `tap_sent` was sent and cannot be
+        withdrawn.
+
+        Raises:
+            ValueError: `action` is not the action `next` returned last, or it
+                was reported as sent, or `next` was called since.
+        """
+        returned = self._returned
+        if returned is None or returned[0] is not action:
+            msg = "action is not the unsent action that next() returned last"
+            raise ValueError(msg)
+        self._restore(returned[1])
+        self._returned = None
+
+    def _snapshot(self) -> _State:
+        """Every field a decision can change, each container copied."""
+        return _State(
+            started=self._started,
+            stop=self._stop,
+            sent=self._sent,
+            backs=self._backs,
+            relaunches=self._relaunches,
+            failures=self._failures,
+            start_id=self._start_id,
+            root=self._root,
+            depths=dict(self._depths),
+            tried=set(self._tried),
+            skipped=dict(self._skipped),
+            transitions=list(self._transitions),
+            seen=set(self._seen),
+            pending=None if self._pending is None else replace(self._pending),
+            planned=self._planned,
+            approved=self._approved,
+            volatile=set(self._volatile),
+            expired=self._expired,
+            keyboard_back=self._keyboard_back,
+            path=list(self._path),
+            refused=self._refused,
+            landed=set(self._landed),
+            relaunch_due=self._relaunch_due,
+            deferred=self._deferred,
+            volatile_count=dict(self._volatile_count),
+            label_run=self._label_run,
+        )
+
+    def _restore(self, state: _State) -> None:
+        self._started = state.started
+        self._stop = state.stop
+        self._sent = state.sent
+        self._backs = state.backs
+        self._relaunches = state.relaunches
+        self._failures = state.failures
+        self._start_id = state.start_id
+        self._root = state.root
+        self._depths = dict(state.depths)
+        self._tried = set(state.tried)
+        self._skipped = dict(state.skipped)
+        self._transitions = list(state.transitions)
+        self._seen = set(state.seen)
+        self._pending = None if state.pending is None else replace(state.pending)
+        self._planned = state.planned
+        self._approved = state.approved
+        self._volatile = set(state.volatile)
+        self._expired = state.expired
+        self._keyboard_back = state.keyboard_back
+        self._path = list(state.path)
+        self._refused = state.refused
+        self._landed = set(state.landed)
+        self._relaunch_due = state.relaunch_due
+        self._deferred = state.deferred
+        self._volatile_count = dict(state.volatile_count)
+        self._label_run = state.label_run
+
+    def _decide(self, observation: Observation) -> Action:
+        """The body of `next`, after its checks."""
         self._drop_unsent_tap()
         was_keyboard_back = self._keyboard_back
         screen = observation.screen
@@ -878,6 +1016,7 @@ class CrawlEngine:
             msg = "tap is not the tap that recheck() allowed last"
             raise ValueError(msg)
         self._approved = None
+        self._returned = None  # sent: it can no longer be withdrawn
         self._sent += 1
         self._pending = _Pending(
             self._sent, "tap", tap.screen_id, tap.fingerprint, tap.point

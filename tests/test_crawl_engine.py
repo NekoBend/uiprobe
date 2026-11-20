@@ -2083,6 +2083,7 @@ def test_only_the_listed_action_types_exist() -> None:
         "Records",
         "_Pending",
         "_Plan",
+        "_State",
     }
     words = ("text", "key", "swipe", "long", "press", "input", "scroll")
     for name in defined:
@@ -2968,3 +2969,110 @@ def test_a_root_replaced_by_the_keyboard_back_stays_the_root() -> None:
     eng = started()
     assert eng.next(on_screen(["r1", "r2"], name="R", keyboard=True)) == Back()
     _root_replaced_then_unpredicted_landing(eng, on_screen(["r1", "r2"], name="R2"))
+
+
+# -- withdraw ------------------------------------------------------------------
+
+
+def _state(eng):
+    records = eng.records
+    return (records, eng.actions_sent, eng.start_screen_id, list(eng._path))
+
+
+def test_a_withdrawn_back_or_relaunch_is_chosen_again_on_the_same_frame() -> None:
+    for observation, kind in (
+        (on_screen([], name="B"), Back),
+        (off_screen(), Relaunch),
+    ):
+        eng = started()
+        press(eng, on_screen(["Go"], name="A"))
+        before = _state(eng)
+        action = eng.next(observation)
+        assert isinstance(action, kind)
+        eng.withdraw(action)
+        assert _state(eng) == before
+        assert eng.next(observation) == action
+
+
+def test_a_withdrawn_tap_is_not_tried_and_is_chosen_again() -> None:
+    eng = started()
+    screen = on_screen(["Item a", "Item b"])
+    before = _state(eng)
+    tap = eng.next(screen)
+    assert isinstance(tap, Tap)
+    assert eng.recheck(tap, screen)
+    eng.withdraw(tap)
+    assert _state(eng) == before
+    again = eng.next(screen)
+    assert again == tap
+    assert not [s for s in eng.records.skipped if "tap_not_sent" in s.reasons]
+
+
+def test_only_the_last_unsent_action_can_be_withdrawn() -> None:
+    eng = started()
+    screen = on_screen(["Item a", "Item b"])
+    tap = eng.next(screen)
+    assert isinstance(tap, Tap)
+    with pytest.raises(ValueError, match="not the unsent action"):
+        eng.withdraw(Tap(tap.screen_id, tap.element_id, tap.fingerprint, tap.point))
+    assert eng.recheck(tap, screen)
+    eng.tap_sent(tap)
+    with pytest.raises(ValueError, match="not the unsent action"):
+        eng.withdraw(tap)  # it was sent
+    back = eng.next(on_screen([], name="X"))
+    assert back == Back()
+    eng.withdraw(back)
+    with pytest.raises(ValueError, match="not the unsent action"):
+        eng.withdraw(back)  # once only
+    stop = eng.next(seen(make_screen(["Item a"]), now=10**6))
+    assert isinstance(stop, Stop)
+    with pytest.raises(ValueError, match="not the unsent action"):
+        eng.withdraw(stop)
+
+
+def test_withdrawing_every_action_once_changes_nothing() -> None:
+    # Driving with each action withdrawn once and decided again on the same
+    # frame gives the same crawl as driving without withdraws.
+    rng = random.Random(4242)  # noqa: S311
+    for _ in range(150):
+        nodes = random_graph(rng)
+        limits = Limits(depth=rng.randint(1, 6), actions=60, minutes=30)
+        plain = drive(engine(limits), Phone(nodes))
+
+        eng = engine(limits)
+        phone = Phone(nodes)
+        log = [eng.start()]
+        phone.send(log[0])
+        for _ in range(3000):
+            observation = phone.observe()
+            action = eng.next(observation)
+            if isinstance(action, Tap | Back | Relaunch):
+                eng.withdraw(action)
+                again = eng.next(observation)
+                assert again == action
+                action = again  # the instance the engine now expects
+            log.append(action)
+            if isinstance(action, Stop):
+                break
+            if isinstance(action, Tap):
+                assert eng.recheck(action, phone.observe())
+            phone.send(action)
+            if isinstance(action, Tap):
+                eng.tap_sent(action)
+        assert log == plain
+
+
+def test_the_snapshot_holds_every_field_a_decision_can_change() -> None:
+    # withdraw restores every field listed in _State; a field added to the
+    # engine and not to _State would survive a withdraw.
+    eng = engine()
+    drive(eng, Phone(small_graph()))
+    fixed = {"_package", "_policy", "_limits", "_started_at", "_returned"}
+    held = {f"_{f.name}" for f in fields(crawl._State)}
+    assert set(vars(eng)) - fixed == held
+    # and the values a snapshot keeps are copies, not the engine's own
+    state = eng._snapshot()
+    for f in fields(crawl._State):
+        value = getattr(state, f.name)
+        if isinstance(value, list | set | dict) or type(value).__name__ == "_Pending":
+            assert value is not getattr(eng, f"_{f.name}"), f.name
