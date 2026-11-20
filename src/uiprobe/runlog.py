@@ -352,6 +352,7 @@ class RunWriter:
         serial: str,
         started_at: datetime | None = None,
         back_on_other_screens: bool = False,
+        repin: bool | None = None,
     ) -> RunWriter:
         """Make the run folder `out` and write ``run-start.json`` into it.
 
@@ -359,7 +360,9 @@ class RunWriter:
         and ``minutes``. `deny_words` are the words in use, written in the
         given order. `started_at` must carry a time zone (default: now).
         `back_on_other_screens` is written as given (the crawl's
-        ``Policy.back_on_other_screens``).
+        ``Policy.back_on_other_screens``). `repin`, when given, is written as
+        ``repin``: whether a renumbered transport may be followed in this run
+        (the device's boot id could be read).
 
         Before anything is made, `out` gets the checks of
         `uiprobe.pngfile.check_new_path`: it must not be empty, hold a null
@@ -391,6 +394,9 @@ class RunWriter:
         if not isinstance(back_on_other_screens, bool):
             msg = "back_on_other_screens must be a bool"
             raise TypeError(msg)
+        if repin is not None and not isinstance(repin, bool):
+            msg = "repin must be a bool or None"
+            raise TypeError(msg)
         words = _check_texts("deny_words", deny_words)
         limit_values = _limits_dict(limits)
         when = _check_moment("started_at", _now() if started_at is None else started_at)
@@ -404,6 +410,8 @@ class RunWriter:
             "back_on_other_screens": back_on_other_screens,
             "device": {"serial": serial},
         }
+        if repin is not None:
+            record["repin"] = repin
         text = _json_text(record, indent=2) + "\n"
         try:
             _make_dir(folder)  # the very str that was checked
@@ -651,6 +659,7 @@ class RunWriter:
         actions: int,
         ended_at: datetime | None = None,
         notes: Sequence[str] = (),
+        repins: int | None = None,
     ) -> None:
         """End the run once: close the line files, write ``summary.txt``,
         then ``run.json``.
@@ -663,11 +672,14 @@ class RunWriter:
         call raises `RunFolderError`.
         `notes` are extra lines for ``summary.txt``, written after the
         counts (for an error code or a screenshot that could not be
-        taken); they are escaped like labels.
+        taken); they are escaped like labels. `repins`, when given, is
+        written to ``run.json`` as ``repins`` (how many times the pinned
+        transport was followed to a new number).
         """
         _check_text("stop_reason", stop_reason)
         screen_count = _check_number("screens", screens)
         action_count = _check_number("actions", actions)
+        repin_count = None if repins is None else _check_number("repins", repins)
         when = _check_moment("ended_at", _now() if ended_at is None else ended_at)
         self._check_usable()
         note_lines = _check_texts("notes", notes)
@@ -681,6 +693,8 @@ class RunWriter:
             "screens": screen_count,
             "actions": action_count,
         }
+        if repin_count is not None:
+            record["repins"] = repin_count
         text = _json_text(record, indent=2) + "\n"
         with self.critical():
             self._check_usable()

@@ -234,8 +234,16 @@ class _Handler(socketserver.BaseRequestHandler):
         # before the close, and the client would see an orderly EOF.
         self.request.close()
 
-    def _answer_transport(self, fake: FakeAdbServer, serial: str) -> bool:
-        match = next((d for d in fake.devices if d["serial"] == serial), None)
+    def _answer_transport(
+        self,
+        fake: FakeAdbServer,
+        serial: str,
+        entry: dict[str, object] | None = None,
+    ) -> bool:
+        """Answer OKAY or FAIL for `serial`; `entry` is the listing entry that
+        a transport id selected (its own state counts, not the first entry
+        with that serial)."""
+        match = entry or next((d for d in fake.devices if d["serial"] == serial), None)
         message = None
         if match is None:
             message = f"device '{serial}' not found"
@@ -272,7 +280,7 @@ class _Handler(socketserver.BaseRequestHandler):
             )
             return None
         serial = str(match["serial"])
-        return serial if self._answer_transport(fake, serial) else None
+        return serial if self._answer_transport(fake, serial, match) else None
 
     def _answer_host(self, fake: FakeAdbServer, request: str) -> None:
         if request == "host:version":

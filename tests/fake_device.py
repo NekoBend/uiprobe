@@ -43,6 +43,7 @@ from types import MappingProxyType
 from typing import TYPE_CHECKING
 
 from tests.fake_adb_server import Reset
+from uiprobe.device import IDENTITY_COMMAND
 
 if TYPE_CHECKING:
     from collections.abc import Collection, Mapping, Sequence
@@ -261,6 +262,10 @@ class FakeAndroid:
         screens: The screens by name (read-only).
     """
 
+    # What ``cat /proc/sys/kernel/random/boot_id`` prints; None: the file
+    # cannot be read (the identity command then prints an empty line).
+    boot_id: str | None = "3ea6a12b-8379-445f-852a-73a2c4c3ff17"
+
     # Every pattern is matched with `search`, so each ends in \Z (a `$` would
     # also match before a trailing newline). Tokens are spelled out; there is no
     # \S, \w or \d (they admit shell metacharacters or non-ASCII characters).
@@ -289,7 +294,8 @@ class FakeAndroid:
         re.compile(r"^dumpsys window windows\Z"),
         re.compile(
             r"^getprop ro\.kernel\.qemu; getprop ro\.serialno;"
-            r" getprop ro\.build\.fingerprint\Z"
+            r" getprop ro\.build\.fingerprint;"
+            r' echo "\$\(cat /proc/sys/kernel/random/boot_id 2>/dev/null\)"\Z'
         ),
         re.compile(r"^input tap [0-9]+ [0-9]+\Z"),
         re.compile(r"^input swipe ([0-9]+) ([0-9]+) \1 \2 800\Z"),
@@ -647,11 +653,19 @@ class FakeAndroid:
                 out += b"uiprobe-exit:%d\n" % self._input_status
         return out
 
+    def _identity(self) -> bytes:
+        """The answer to `IDENTITY_COMMAND`: three properties, the boot id."""
+        names = ("ro.kernel.qemu", "ro.serialno", "ro.build.fingerprint")
+        lines = [self.props.get(n, "") for n in names]
+        lines.append(self.boot_id or "")
+        return "".join(line + "\n" for line in lines).encode()
+
     def _run(self, command: str) -> bytes | Reset:
-        out = b""
+        identity = command == IDENTITY_COMMAND
         with self._lock:
+            out = self._identity() if identity else b""
             before = len(self.inputs)
-            words = self._words(command)
+            words = [] if identity else self._words(command)
             match words:
                 case ["uiautomator", "dump", path]:
                     out = self._dump(path)

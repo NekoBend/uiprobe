@@ -615,6 +615,12 @@ class AdbClient:
         """The adb server this client talks to."""
         return self._address
 
+    def stop_starting_server(self) -> None:
+        """Never start the adb server from now on: a request that cannot
+        connect fails with `AdbServerUnavailableError` instead of going to a
+        newly started server (which numbers its transports anew)."""
+        self._start_server = False
+
     def server_version(self) -> int:
         """Return the adb server protocol version."""
         raw = self._host_query("host:version")

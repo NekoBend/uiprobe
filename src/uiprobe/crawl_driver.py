@@ -38,18 +38,20 @@ The loop (the protocol of the `CrawlEngine` docstring)::
 
 The gate (`_Run.gate`) is the one place every action passes right before it is
 sent. In order: `stop` and the time limit; the pin (`Device.check_pin`: the
-same transport, serial and identity, else an error); then fresh reads, for a
-tap the dump first. It refuses, with a ``not_sent`` end line and nothing sent,
-when anything it needs cannot be read or has changed: for a tap the engine's
-`CrawlEngine.recheck` on the fresh dump, a keyboard known to be hidden and a
-focused window owned by the app; for BACK and relaunch the same foreground and
-focused window (and for BACK keyboard) as the observation they were chosen on,
-and for a BACK chosen on a screen of the app also a focused window owned by the
-app (a BACK goes to the focused window). The table of checks per action is in
-docs/python.md. After the decision nothing else runs before the input. A
-refused tap's fresh observation goes to `CrawlEngine.next`, which releases the
-unreported tap; a refused BACK or relaunch ends the run with ``not_sent``,
-because the engine already counted it. Every observation checks the pin too.
+same transport, serial and identity with its boot id, a renumbered transport
+followed only as `Device.can_repin` allows, else an error); then fresh reads,
+for a tap the dump first. It refuses, with a ``not_sent`` end line and nothing
+sent, when anything it needs cannot be read or has changed: for a tap the
+engine's `CrawlEngine.recheck` on the fresh dump, a keyboard known to be hidden
+and a focused window owned by the app; for BACK and relaunch the same
+foreground and focused window (and for BACK keyboard) as the observation they
+were chosen on, and for a BACK chosen on a screen of the app also a focused
+window owned by the app (a BACK goes to the focused window). The table of
+checks per action is in docs/python.md. After the decision nothing else runs
+before the input. A refused tap's fresh observation goes to `CrawlEngine.next`,
+which releases the unreported tap; a refused BACK or relaunch ends the run with
+``not_sent``, because the engine already counted it. Every observation checks
+the pin too.
 
 How a run ends. The engine's stop reason, ``not_sent``, ``interrupted`` (the ``stop``
 callable returned True between two actions, or Ctrl+C arrived while it
@@ -96,8 +98,9 @@ from uiprobe.crawl import (
     _Prints,
 )
 from uiprobe.crawl_preview import check_package
+from uiprobe.device import PIN_NOT_PROVEN, PIN_WAIT_STOPPED
 from uiprobe.errors import (
-    AdbError,
+    DeviceNotFoundError,
     DumpError,
     LaunchFailedError,
     NotEmulatorError,
@@ -112,7 +115,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from uiprobe.crawl import Action, SkippedElement
-    from uiprobe.device import Device, DeviceIdentity, FocusedWindow
+    from uiprobe.device import Device, FocusedWindow
     from uiprobe.model import Element, Screen
 
 __all__ = ["INTERRUPTED", "STOP_ERROR", "CrawlResult", "crawl"]
@@ -159,6 +162,11 @@ def _check_device(device: Device, *, allow_real_device: bool) -> None:
         if device.is_emulator():
             return
     except UiprobeError as error:
+        if isinstance(error, DeviceNotFoundError) and error.details.get("reason") in (
+            "device_changed",
+            PIN_WAIT_STOPPED,
+        ):
+            raise  # the pin itself failed: that is the error, not the check
         reason = "unreadable"
         cause = error.code
     detail = (
@@ -190,6 +198,12 @@ NOT_SENT_KEYBOARD_SHOWN: Final = "keyboard_shown"
 NOT_SENT_CHANGED: Final = "changed_before_send"
 NOT_SENT_REFUSED: Final = "changed_before_press"
 NOT_SENT_START: Final = "start_not_sent"
+# The pinned device was away (and came back, proven the same) after the
+# observation the action was chosen on: what was read may be stale.
+NOT_SENT_RECONNECTED: Final = "device_reconnected"
+# What `_Run.relaunch` returns when it force-stopped the app and then did not
+# start it because the device had to be proven again (not an end-line reason).
+_HALF_RELAUNCH: Final = "relaunch_half_sent"
 # The stop reason of a run that ended because BACK or a relaunch was not sent.
 STOP_NOT_SENT: Final = "not_sent"
 MAX_DURATION: Final = "max_duration"  # the engine's reason for the time limit
@@ -216,7 +230,6 @@ class _Run:
         engine: CrawlEngine,
         policy: Policy,
         *,
-        identity: DeviceIdentity,
         emulator: bool,
         screenshots: bool,
         settle: float,
@@ -230,7 +243,6 @@ class _Run:
         self.writer = writer
         self.engine = engine
         self.policy = policy
-        self.identity = identity
         self.emulator = emulator
         self.screenshots = screenshots
         self.settle = settle
@@ -244,6 +256,21 @@ class _Run:
         self._stop_seen = False  # stop() once returned True: it stays so
         self._next_id = 0  # the action id of the next start line
         self._open: int | None = None  # sent action that has no end line yet
+        # An action whose start line is written and that is in the gate: not
+        # sent yet, so a run that ends there can close it as not sent.
+        self.unsent: int | None = None
+        # A refused tap and the screen it was chosen on, until the engine
+        # releases it (see `run`).
+        self.held: tuple[Tap, Screen | None] | None = None
+        # Device.pin_epoch when the current observation began its reads, and
+        # after the gate's own pin check: an input goes out only when nothing
+        # happened to the pin since the observation it was chosen on.
+        self.epoch_seen = device.pin_epoch
+        self.gate_epoch = device.pin_epoch
+        self.sent_epoch = device.pin_epoch  # when the last action was sent
+        self.repins_before = len(device.repins)  # moves made before this run
+        # Why a wait for the device was stopped (a not_sent reason), once known.
+        self.wait_stop: str | None = None
         self._skips_written = 0
 
     # -- the loop --
@@ -254,14 +281,23 @@ class _Run:
             return INTERRUPTED
         engine = self.engine
         refused, _ = self.send(engine.start(), None)
-        if refused is not None:  # only stop() or the time limit hold a launch
+        if refused == NOT_SENT_RECONNECTED:
+            self.notes.append(f"launch was not sent: {refused}")
+            return STOP_NOT_SENT
+        if refused is not None:  # otherwise only stop() or the time limit
             return INTERRUPTED if self._stop_seen else MAX_DURATION
         observation = self.observe()
         while True:
             if self.stopped():
                 return INTERRUPTED
             action = engine.next(observation)
-            self.write_skips(observation.screen)
+            # A tap refused on reads an event crossed is released here: its
+            # rows name elements of the screen it was chosen on.
+            held, self.held = self.held, None
+            if held is None:
+                self.write_skips(observation.screen)
+            else:
+                self.write_skips(observation.screen, held[1], tap=held[0])
             if isinstance(action, Stop):
                 return action.reason
             if isinstance(action, Reread):
@@ -288,12 +324,27 @@ class _Run:
         counted it, so rather than go on from a wrong count the run ends
         (alpha: the safe side).
         """
+        if refused == _HALF_RELAUNCH:
+            return STOP_NOT_SENT  # the summary already says what happened
         if refused in (NOT_SENT_STOPPED, NOT_SENT_TIME_LIMIT, NOT_SENT_START):
             return INTERRUPTED if self._stop_seen else MAX_DURATION
         if refused is not None and isinstance(action, Back | Relaunch):
             self.notes.append(f"{_kind(action)} was not sent: {refused}")
             return STOP_NOT_SENT
         return INTERRUPTED if self._stop_seen else None
+
+    def waiting_stopped(self) -> bool:
+        """Whether a wait for the device should end: the time limit, or a
+        `stop` that already returned True before the wait. `stop` itself is
+        not called while the device is being proven (it may read the device,
+        which is refused then); it is asked again after the wait. The first
+        reason is kept for the ending."""
+        if self.wait_stop is None:
+            if self._stop_seen:
+                self.wait_stop = NOT_SENT_STOPPED
+            elif self.clock() >= self.deadline:
+                self.wait_stop = NOT_SENT_TIME_LIMIT
+        return self.wait_stop is not None
 
     def stopped(self) -> bool:
         """Whether `stop` asked to end; once it did, the answer stays True."""
@@ -317,6 +368,51 @@ class _Run:
         """
         self._next_id += 1
         action_id = self._next_id
+        screen = None if observation is None else observation.screen
+        self.write_start(action_id, action, observation)
+        self.unsent = action_id
+        reason, seen = self.gate(action, observation)
+        self.unsent = None
+        if reason is not None:
+            self.writer.write_transition_end(action_id, not_sent=reason)
+            if seen is not None and isinstance(action, Tap):
+                return reason, self.refused_tap(action, screen, seen)
+            return reason, None
+        # Nothing runs between the gate's last read and the input: no user
+        # code (stop() and the clock were asked first), no other read, no write.
+        self._open = action_id
+        self.sent_epoch = self.device.pin_epoch
+        if isinstance(action, Relaunch):
+            return self.relaunch(action_id), None
+        try:
+            if isinstance(action, Tap):
+                self.device.tap(action.point)
+            elif isinstance(action, Back):
+                self.device.key("back")
+            else:
+                self.launch()
+        except DeviceNotFoundError as error:
+            if error.details.get("reason") != PIN_NOT_PROVEN:
+                raise
+            # Nothing was sent: the device has to be proven again first. The
+            # action is closed as the gate would have closed it.
+            self._open = None
+            self.writer.write_transition_end(action_id, not_sent=NOT_SENT_RECONNECTED)
+            if isinstance(action, Tap):
+                self.held = (action, screen)
+            return NOT_SENT_RECONNECTED, None
+        if isinstance(action, Tap):
+            self.engine.tap_sent(action)
+            if seen is not None:
+                self.write_skips(screen, seen.observation.screen, tap=action)
+        if isinstance(action, Tap | Back):
+            self.pause()
+        return None, None
+
+    def write_start(
+        self, action_id: int, action: Action, observation: Observation | None
+    ) -> None:
+        """Write the start line of `action`, before its gate."""
         screen = None if observation is None else observation.screen
         from_id = None if screen is None else screen.screen_id
         element: Element | None = None
@@ -356,31 +452,29 @@ class _Run:
             off_target_foreground=foreground,
             off_target_focus=focus,
         )
-        reason, seen = self.gate(action, observation)
-        if reason is not None:
-            self.writer.write_transition_end(action_id, not_sent=reason)
-            if seen is not None and isinstance(action, Tap):
-                self.write_skips(screen, seen.observation.screen, tap=action)
-                self.record(seen)
-                return reason, seen.observation
-            return reason, None
-        # Nothing runs between the gate's last read and the input: no user
-        # code (stop() and the clock were asked first), no other read, no write.
-        self._open = action_id
-        if isinstance(action, Tap):
-            self.device.tap(action.point)
-            self.engine.tap_sent(action)
-            if seen is not None:
-                self.write_skips(screen, seen.observation.screen, tap=action)
-            self.pause()
-        elif isinstance(action, Back):
-            self.device.key("back")
-            self.pause()
-        elif isinstance(action, Relaunch):
-            return self.relaunch(action_id), None
-        else:
-            self.launch()
-        return None, None
+
+    def refused_tap(
+        self, tap: Tap, screen: Screen | None, seen: _Seen
+    ) -> Observation | None:
+        """Record what a refused tap's gate read; return it as the next
+        observation, or None to read the screen again.
+
+        The gate's reads began after its own pin check. If something happened
+        to the pin during them they are mixed: they are not recorded, and the
+        screen is read again from scratch.
+        """
+        if self.device.pin_epoch != self.gate_epoch:
+            # The skip rows come from the screen the tap was chosen on, now
+            # and when the engine releases the tap.
+            self.write_skips(screen, tap=tap)
+            self.held = (tap, screen)
+            return None
+        self.write_skips(screen, seen.observation.screen, tap=tap)
+        self.record(seen, self.gate_epoch)
+        if self.device.pin_epoch != self.gate_epoch:
+            return None  # the screenshot's reads saw an event
+        self.epoch_seen = self.gate_epoch
+        return seen.observation
 
     def gate(
         self, action: Action, observation: Observation | None
@@ -399,9 +493,10 @@ class _Run:
         reason = self.halt(now)
         if reason is not None:
             return reason, None
-        self.device.check_pin(self.identity, emulator=self.emulator)
+        self.device.check_pin(emulator=self.emulator)
         if isinstance(action, Launch):
             return None, None
+        self.gate_epoch = self.device.pin_epoch
         # For a tap: the focused window before and after the dump must be the
         # same window of the app, so the dump shows that window (uiautomator
         # dumps the focused window: seen on API 24, 30 and 36 with the shade).
@@ -456,7 +551,15 @@ class _Run:
             )
         # The engine re-checks with the same time the gate took first, which was
         # before the limit, so its refusal is never about the time.
-        return next((why for failed, why in checks if failed), None), seen
+        # Last, after every other check: if anything happened to the pin since
+        # the observation the action was chosen on (or during these reads),
+        # nothing read before can be trusted.
+        # Every condition is evaluated to a reason first (the truth tests run
+        # here), then nothing but one integer comparison follows.
+        why = next((reason for failed, reason in checks if bool(failed)), None)
+        if self.device.pin_epoch != self.epoch_seen:
+            return NOT_SENT_RECONNECTED, seen
+        return why, seen
 
     def halt(self, now: float | None = None) -> str | None:
         """The reason not to send that does not depend on the screen, if any."""
@@ -504,11 +607,43 @@ class _Run:
         (``start_not_sent``) and the summary says so. Returns that reason, or
         None when the app was started.
         """
-        self.device.stop_app(self.package)
-        reason = self.halt()
-        if reason is None:
-            # The device behind the pin is checked again before the start.
-            self.device.check_pin(self.identity, emulator=self.emulator)
+        try:
+            self.device.stop_app(self.package)
+        except DeviceNotFoundError as error:
+            if error.details.get("reason") != PIN_NOT_PROVEN:
+                raise
+            self._open = None  # nothing was sent
+            self.writer.write_transition_end(action_id, not_sent=NOT_SENT_RECONNECTED)
+            return NOT_SENT_RECONNECTED
+        try:
+            # stop() may read the device, so it is inside the handler too.
+            reason = self.halt()
+            if reason is None:
+                # The device behind the pin is checked again before the start.
+                self.device.check_pin(emulator=self.emulator)
+        except DeviceNotFoundError as error:
+            if error.details.get("reason") != PIN_WAIT_STOPPED:
+                raise
+            # The time limit (or a stop seen before) ended a wait for the
+            # device: the start was not sent, which the record says before
+            # the run ends.
+            self._open = None
+            why = self.wait_stop or NOT_SENT_STOPPED
+            self.writer.write_transition_end(action_id, not_sent=NOT_SENT_START)
+            self.notes.append(
+                f"{self.package} was force-stopped but not started again ({why})"
+            )
+            raise
+        if reason is None and self.device.pin_epoch != self.sent_epoch:
+            # The device had to be proven again after the force-stop: the
+            # start is not sent on the earlier decision.
+            self._open = None
+            self.writer.write_transition_end(action_id, not_sent=NOT_SENT_START)
+            self.notes.append(
+                f"{self.package} was force-stopped but not started again"
+                f" ({NOT_SENT_RECONNECTED})"
+            )
+            return _HALF_RELAUNCH
         if reason is not None:
             self._open = None
             self.writer.write_transition_end(action_id, not_sent=NOT_SENT_START)
@@ -516,7 +651,18 @@ class _Run:
                 f"{self.package} was force-stopped but not started again ({reason})"
             )
             return NOT_SENT_START
-        self.launch()
+        try:
+            self.launch()
+        except DeviceNotFoundError as error:
+            if error.details.get("reason") != PIN_NOT_PROVEN:
+                raise
+            self._open = None  # the force-stop went out, the start did not
+            self.writer.write_transition_end(action_id, not_sent=NOT_SENT_START)
+            self.notes.append(
+                f"{self.package} was force-stopped but not started again"
+                f" ({NOT_SENT_RECONNECTED})"
+            )
+            return _HALF_RELAUNCH
         return None
 
     # -- reading --
@@ -537,10 +683,35 @@ class _Run:
 
         The pin is checked first: a dump writes a file on the device and
         removes it, so even reading goes only to the device that was checked.
+        Reads that an event on the pin crossed are read again from the pin
+        check on (bounded: every event makes the next check prove the device
+        again, which `MAX_RECONNECTS` limits), before the screen is written
+        or handed on. The open transition is closed as soon as one dump and
+        foreground read are not crossed by an event (or the dump failed,
+        which the engine counts toward its limit). A failed dump is handed
+        on as it is, and `stop` or the time limit end the rereading.
         """
-        self.device.check_pin(self.identity, emulator=self.emulator)
-        screen = self.dump()
-        foreground = self.device.foreground()
+        while True:
+            self.device.check_pin(emulator=self.emulator)
+            self.epoch_seen = self.device.pin_epoch
+            screen = self.dump()
+            foreground = self.device.foreground()
+            if screen is None or self.device.pin_epoch == self.epoch_seen:
+                self.close_transition(screen, foreground)
+            keyboard = self.device.keyboard_shown()
+            focus = self.device.focused_window()
+            if (
+                screen is None
+                or self.device.pin_epoch == self.epoch_seen
+                or self.halt() is not None
+            ):
+                break
+        observation = Observation(screen, foreground, keyboard, self.clock())
+        self.record(_Seen(observation, focus), self.epoch_seen)
+        return observation
+
+    def close_transition(self, screen: Screen | None, foreground: str | None) -> None:
+        """Write the end line of the open transition and count the screen."""
         if self._open is not None:
             action_id, self._open = self._open, None
             if screen is None:
@@ -549,17 +720,18 @@ class _Run:
                 self.writer.write_transition_end(action_id, screen.screen_id)
         if screen is not None and self.on_target(screen, foreground):
             self.screens_seen.add(screen.screen_id)  # counted when observed
-        keyboard = self.device.keyboard_shown()
-        focus = self.device.focused_window()
-        observation = Observation(screen, foreground, keyboard, self.clock())
-        self.record(_Seen(observation, focus))
-        return observation
 
-    def record(self, seen: _Seen) -> None:
-        """Remember the focus, count and write a target screen, then its image."""
+    def record(self, seen: _Seen, epoch: int) -> None:
+        """Remember the focus, count and write a target screen, then its image.
+
+        Nothing is written when the pin's epoch is no longer `epoch` (the one
+        the reads began at): reads that an event crossed may be mixed.
+        """
         self.focus = seen.focus
         screen = seen.observation.screen
         if screen is None or not self.on_target(screen, seen.observation.foreground):
+            return
+        if self.device.pin_epoch != epoch:
             return
         self.screens_seen.add(screen.screen_id)
         if not self.writer.write_screen(screen) or not self.screenshots:
@@ -575,6 +747,12 @@ class _Run:
             # Another app may have come forward while the image was taken.
             self.notes.append(
                 f"no screenshot of {screen.screen_id}: the app was not in front"
+            )
+            return
+        if self.device.pin_epoch != epoch:
+            # An event crossed the screenshot's reads: the image is dropped.
+            self.notes.append(
+                f"no screenshot of {screen.screen_id}: the device was proven again"
             )
             return
         self.writer.write_screenshot(screen.screen_id, png)
@@ -746,6 +924,12 @@ def crawl(
             be written.
         UiprobeError: A device or adb error that prevents going on.
     """
+    # Arguments are turned into plain values once, here, and only those are
+    # used: a subclass cannot run code (a device read, say) in the middle of
+    # a check later. The callables (stop, clock, sleep) cannot be turned into
+    # plain values; no caller code runs after the gate's last comparison.
+    if isinstance(package, str):
+        package = str.__str__(package)
     check_package(package)
     if not isinstance(policy, Policy):
         msg = f"policy must be a Policy, not {type(policy).__name__}"
@@ -753,12 +937,22 @@ def crawl(
     if not isinstance(limits, Limits):
         msg = f"limits must be a Limits, not {type(limits).__name__}"
         raise TypeError(msg)
+    limits = Limits(
+        depth=int.__int__(limits.depth),
+        actions=int.__int__(limits.actions),
+        minutes=int.__int__(limits.minutes),
+    )
     if not isinstance(out, str | os.PathLike):
         msg = f"out must be a str or a path, not {type(out).__name__}"
         raise TypeError(msg)
     _check_flag("screenshots", screenshots)
     _check_flag("allow_real_device", allow_real_device)
     _check_clock("settle", settle)
+    settle = (
+        float.__float__(settle)
+        if isinstance(settle, float)
+        else float(int.__int__(settle))
+    )
     if settle < 0:
         msg = f"settle must not be negative, got {settle}"
         raise ValueError(msg)
@@ -766,19 +960,55 @@ def crawl(
         _check_callable("stop", stop)
     _check_callable("clock", clock)
     _check_callable("sleep", sleep)
-    # Pin first, then check through the pinned transport: the device that was
-    # checked is the only one that can receive anything afterwards. Its
-    # identity is kept so that the gate can see a different device behind the
-    # same transport number (a restarted adb server numbers anew).
+    # Pin first (unless Device(..., pin=True) already did, right when the
+    # device was chosen), then check through the pinned transport: the device
+    # that was checked is the only one that can receive anything afterwards.
+    # The identity read at the pin lets the gate see a different device behind
+    # the same transport number (a restarted adb server numbers anew), and its
+    # boot id decides whether a renumbered transport may be followed.
+    # Before the run exists, a wait for the device asks nothing (stop is not
+    # called while the device is being proven); the caller's own watch is put
+    # back at the end.
+    caller_watch = device.pin_watch
+    device.set_pin_watch(None)
+    repins_before = len(device.repins)
+    try:
+        return _crawl_on(
+            device,
+            package,
+            out,
+            policy=policy,
+            limits=limits,
+            screenshots=screenshots,
+            allow_real_device=allow_real_device,
+            settle=settle,
+            stop=stop,
+            clock=clock,
+            sleep=sleep,
+            repins_before=repins_before,
+        )
+    finally:
+        device.set_pin_watch(caller_watch)
+
+
+def _crawl_on(
+    device: Device,
+    package: str,
+    out: str | os.PathLike[str],
+    *,
+    policy: Policy,
+    limits: Limits,
+    screenshots: bool,
+    allow_real_device: bool,
+    settle: float,
+    stop: Callable[[], bool] | None,
+    clock: Callable[[], float],
+    sleep: Callable[[float], None],
+    repins_before: int,
+) -> CrawlResult:
+    """`crawl` after its arguments were checked: pin, check, run."""
     device.pin_transport()
     _check_device(device, allow_real_device=allow_real_device)
-    identity = device.identity()
-    if identity is None or not identity.fingerprint:
-        msg = (
-            f"the identity of {device.serial} (ro.build.fingerprint) could not be"
-            " read, so the device cannot be told apart from another one later"
-        )
-        raise AdbError(msg, details={"serial": device.serial})
     started_at = clock()
     _check_clock("clock()", started_at)
     engine = CrawlEngine(package, policy, limits, started_at=started_at)
@@ -789,6 +1019,7 @@ def crawl(
         deny_words=policy.deny_words,
         serial=device.serial,
         back_on_other_screens=policy.back_on_other_screens,
+        repin=device.can_repin,
     )
     try:
         run = _Run(
@@ -797,7 +1028,6 @@ def crawl(
             writer,
             engine,
             policy,
-            identity=identity,
             emulator=not allow_real_device,
             screenshots=screenshots,
             settle=settle,
@@ -806,6 +1036,9 @@ def crawl(
             clock=clock,
             sleep=sleep,
         )
+        run.repins_before = repins_before  # moves made before this call
+        # Asked only while the device waits for a renumbered transport.
+        device.set_pin_watch(run.waiting_stopped)
         return _drive(run, writer)
     finally:
         with contextlib.suppress(RunFolderError):
@@ -816,6 +1049,20 @@ def _drive(run: _Run, writer: RunWriter) -> CrawlResult:
     """Run the crawl and end the run folder for every way it can end."""
     try:
         reason = run.run()
+    except DeviceNotFoundError as error:
+        if error.details.get("reason") != PIN_WAIT_STOPPED:
+            code = error.code
+            _end(run, writer, STOP_ERROR, quiet=True, error_code=code)
+            raise
+        # The device was waited for and stop() or the time limit ended the
+        # wait: the run ends as it would have between two actions. An action
+        # still in the gate was not sent and is closed as such; one already
+        # sent keeps its start line alone (its result is unknown).
+        why = run.wait_stop or NOT_SENT_STOPPED
+        reason = MAX_DURATION if why == NOT_SENT_TIME_LIMIT else INTERRUPTED
+        if run.unsent is not None:
+            with contextlib.suppress(RunFolderError):
+                writer.write_transition_end(run.unsent, not_sent=why)
     except KeyboardInterrupt:
         # Returned only when stop() asks for it and run.json was written; a
         # run.json that could not be written (the interrupt hit a write and
@@ -855,11 +1102,23 @@ def _end(
     """
     screens, actions = run.count()
     notes = list(run.notes)
+    repins = run.device.repins[run.repins_before :]
+    notes.extend(
+        f"transport {old} -> {new} for {run.device.serial}:"
+        " same serial, identity and boot id"
+        for old, new in repins
+    )
     if error_code is not None:
         notes.append(f"error: {error_code}")
     try:
         with writer.critical():
-            writer.finish(reason, screens=screens, actions=actions, notes=notes)
+            writer.finish(
+                reason,
+                screens=screens,
+                actions=actions,
+                notes=notes,
+                repins=len(repins),
+            )
     except RunFolderError:
         if not quiet:
             raise
