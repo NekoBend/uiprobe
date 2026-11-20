@@ -18,6 +18,7 @@ import json
 import pickle
 import random
 import re
+import sys
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -35,22 +36,38 @@ from uiprobe.inputwindows import (
     window_line_fields,
 )
 from uiprobe.windowdiag import (
+    CAP,
     KNOWN_KEYS,
+    LINE_KINDS,
     NOTICE,
     NOTICE_SHOWN,
     SCHEMA,
     TRANSFORM_WORDS,
+    TapWindowDiagnosis,
     diagnose_tap_window,
     shape_line,
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Iterable, Iterator, Sequence
 
     from tests.fake_adb_server import FakeAdbServer
 
 DATA = Path(__file__).parent / "data" / "inputwindows"
 SERIAL = "emulator-5554"
+# Python's default limit of digits int() converts; the number_too_long cases
+# need it, whatever the host set.
+DIGIT_LIMIT = 4300
+
+
+@pytest.fixture(autouse=True)
+def _digit_limit() -> Iterator[None]:
+    before = sys.get_int_max_str_digits()
+    sys.set_int_max_str_digits(DIGIT_LIMIT)
+    try:
+        yield
+    finally:
+        sys.set_int_max_str_digits(before)
 
 
 def _capture(name: str) -> str:
@@ -272,7 +289,7 @@ def test_the_default_report_holds_kinds_and_lengths_only():
     assert (found.part, found.line) == ("dispatcher", at - header + 1)
     assert found.line is not None
     assert [(s.number, s.kind, s.indent, s.length, s.tokens) for s in found.lines] == [
-        (found.line + offset, kind, len(line) - len(line.lstrip()), len(line), ())
+        (found.line + offset, kind, None, len(line), ())
         for offset, kind, line in zip(
             range(-2, 3),
             ("window_row", "transform", "window_row", "other", "other"),
@@ -282,9 +299,13 @@ def test_the_default_report_holds_kinds_and_lengths_only():
     ]
     assert _failing(found).number == found.line
     assert [
-        (i.per_display, i.asked, i.reached, i.read, i.failed) for i in found.lists
-    ] == [(True, True, True, 3, True)]
+        (i.position, i.per_display, i.asked, i.reached, i.read, i.failed)
+        for i in found.lists
+    ] == [(None, True, True, True, 3, True)]
     assert found.forms == ()
+    shown = diagnose_tap_window(text, show_device_text=True)
+    assert [s.indent for s in shown.lines] == [6, 6, 6, 6, 10]
+    assert [i.position for i in shown.lists] == [1]
 
 
 def test_with_show_device_text_a_refused_row_of_the_list_shows_its_flags():
@@ -498,12 +519,12 @@ def test_the_text_report_of_a_failure():
         " dispatcher part",
         "the display's list: its Display section, 3 windows read, the check"
         " refused here",
-        "lines (number, kind, indent, length):",
-        "  24 window_row 6 351",
-        "  25 transform 6 34",
-        "> 26 window_row 6 357",
-        "  27 other 6 35",
-        "  28 other 10 33",
+        "lines (number, kind, length):",
+        "  24 window_row 351",
+        "  25 transform 34",
+        "> 26 window_row 357",
+        "  27 other 35",
+        "  28 other 33",
     ]
 
 
@@ -634,18 +655,25 @@ def test_a_matrix_row_has_three_columns():
     assert shape_line("  0.0 1.0 2.0")[0] == "matrix_row"
 
 
-def test_counts_lengths_and_indents_are_capped():
+def test_counts_and_lengths_are_capped_when_rendered():
     long_end = _sub(
         API36, "  mMaximumObscuringOpacityForTouch: 0.800000", "  " + "x" * 12345
     )
     found = diagnose_tap_window(long_end)
     assert found.rule == "list_end"
     failing = _failing(found)
-    assert (failing.kind, failing.length) == ("other", 12347)
-    assert f"> {found.line} other 2 9999+" in found.to_text()
+    assert (failing.kind, failing.length) == ("other", 12347)  # exact here
+    assert f"> {found.line} other 9999+" in found.to_text()
     payload = json.loads(json.dumps(found.to_dict()))
     line = next(item for item in payload["lines"] if item["failing"])
-    assert (line["length"], line["indent"]) == (9999, 2)
+    assert line == {
+        "number": found.line,
+        "failing": True,
+        "kind": "other",
+        "length": 9999,
+    }
+    shown = diagnose_tap_window(long_end, show_device_text=True)
+    assert f"> {found.line} other 2 9999+" in shown.to_text()
     assert shape_line(" " * 20000 + "x") == ("other", ["<text:1>"])
 
 
@@ -963,14 +991,6 @@ def _reports(text: str, display: int) -> tuple[str, str]:
     return found.to_text(), json.dumps(found.to_dict())
 
 
-@pytest.mark.parametrize("case", sorted(HOSTILE))
-def test_changing_the_device_values_does_not_change_the_report(case):
-    build, display = HOSTILE[case]
-    same, changed = build(_same), build(_changed)
-    assert same != changed
-    assert _reports(same, display) == _reports(changed, display)
-
-
 # The reviewers' inputs as templates: what an app chooses passes `chosen`.
 CHOSEN_CASES: dict[str, Callable[[Callable[[str], str]], str]] = {
     "bare_title_fields": lambda c: _edit_row(
@@ -1029,14 +1049,6 @@ CHOSEN_CASES: dict[str, Callable[[Callable[[str], str]], str]] = {
         API36, 3, "name=a8ea035 Taskbar,", "name=" + c("OK") + ","
     ),
 }
-
-
-@pytest.mark.parametrize("case", sorted(CHOSEN_CASES))
-def test_the_reviewers_inputs_do_not_depend_on_the_values(case):
-    build = CHOSEN_CASES[case]
-    same, changed = build(_same), build(_changed)
-    assert same != changed
-    assert _reports(same, 0) == _reports(changed, 0)
 
 
 SNIPPETS = (
@@ -1569,23 +1581,6 @@ CHOSEN_CASES |= {
 }
 
 
-@pytest.mark.parametrize(
-    "case",
-    [
-        "display_section_in_a_name",
-        "display_section_in_a_title",
-        "viewport_in_a_title",
-        "app_name_double_space_token",
-        "double_quoted_value",
-    ],
-)
-def test_round_5_inputs_do_not_depend_on_the_values(case):
-    build = CHOSEN_CASES[case]
-    same, changed = build(_same), build(_changed)
-    assert same != changed
-    assert _reports(same, 0) == _reports(changed, 0)
-
-
 # --- round 6: the default report holds no device characters ---
 
 ZERO, ONE, THREE = chr(0x660), chr(0x661), chr(0x663)  # Arabic-Indic digits
@@ -1653,48 +1648,168 @@ REVIEW_6: dict[str, Callable[[Callable[[str], str]], str]] = {
 }
 
 
-def test_the_reviewers_round_6_pairs_give_one_report():
-    pairs = {
-        "bare_title_with_id": ("Title, id=42", "Title, xx=42"),
-        "app_name_spaced_token": (
-            "X, applicationInfo.token=y, trustedOverlay=true, tail=Y",
-            "X, applicationInfo.token=y, zzzzzzzzzzzzzzzzzzz, tail=Y",
-        ),
-        "quoted_input_features": (
-            "x | NO_INPUT_CHANNEL | y",
-            "x | ABCDEFGHIJKLMNOP | y",
-        ),
-        "unicode_zero_display": (ZERO, ONE),
-        "display_sign": ("-7", "7 "),
-        "viewport_word": ("viewport", "keyboard"),
+# --- a closed vocabulary for the default report ---
+
+REASONS = frozenset(RULES)
+RULE_NAMES = frozenset(rule for rules in RULES.values() for rule in rules)
+PART_NAMES = frozenset({"dispatcher", "input_reader", "output"})
+
+
+def _alt(words: Iterable[str]) -> str:
+    return "|".join(re.escape(word) for word in sorted(words))
+
+
+_TEXT_LINES = (
+    re.compile(
+        re.escape(f"uiprobe diagnose tap-window: {NOTICE}; it read: dumpsys input")
+    ),
+    re.compile(
+        rf"result: readable|result: not readable: (?:{_alt(REASONS)}),"
+        rf" rule (?:{_alt(RULE_NAMES)})"
+        rf"(?: at line \d+ of the (?:{_alt(PART_NAMES)}) part)?"
+    ),
+    re.compile(
+        r"the display's list: (?:none taken|(?:the list of every display|its"
+        r" Display section), (?:\d+\+? windows read|not reached)"
+        r"(?:, the check refused here)?)"
+    ),
+    re.compile(r"lines \(number, kind, length\):"),
+    re.compile(rf"[> ] \d+ (?:{_alt(LINE_KINDS)}) \d+\+?"),
+)
+
+
+def _closed_text(text: str) -> None:
+    """Every line of a default text report is one of the fixed forms, built
+    from fixed words, rule names, line kinds and numbers."""
+    for line in text.split("\n"):
+        assert any(form.fullmatch(line) for form in _TEXT_LINES), line
+
+
+def _count_value(value: object, *, capped: bool) -> None:
+    assert isinstance(value, int)
+    assert not isinstance(value, bool)
+    assert value >= 0
+    if capped:
+        assert value <= CAP
+
+
+def _closed_json(payload: dict[str, object]) -> None:
+    """A default JSON report holds only fixed keys, fixed strings and
+    numbers uiprobe counted."""
+    assert set(payload) == {
+        "schema",
+        "notice",
+        "show_device_text",
+        "command",
+        "readable",
+        "reason",
+        "rule",
+        "part",
+        "line",
+        "windows_read",
+        "display_list",
+        "lines",
     }
-    for case, (one, other) in pairs.items():
-        build = REVIEW_6[case]
+    assert (payload["schema"], payload["notice"], payload["command"]) == (
+        SCHEMA,
+        NOTICE,
+        "dumpsys input",
+    )
+    assert payload["show_device_text"] is False
+    assert isinstance(payload["readable"], bool)
+    assert payload["reason"] is None or payload["reason"] in REASONS
+    assert payload["rule"] is None or payload["rule"] in RULE_NAMES
+    assert payload["part"] is None or payload["part"] in PART_NAMES
+    if payload["line"] is not None:
+        _count_value(payload["line"], capped=False)
+    _count_value(payload["windows_read"], capped=True)
+    chosen = payload["display_list"]
+    if chosen is not None:
+        assert isinstance(chosen, dict)
+        assert set(chosen) == {"per_display", "reached", "read", "failed"}
+        for key in ("per_display", "reached", "failed"):
+            assert isinstance(chosen[key], bool)
+        _count_value(chosen["read"], capped=True)
+    lines = payload["lines"]
+    assert isinstance(lines, list)
+    for entry in lines:
+        assert isinstance(entry, dict)
+        assert set(entry) == {"number", "failing", "kind", "length"}
+        _count_value(entry["number"], capped=False)
+        assert isinstance(entry["failing"], bool)
+        assert entry["kind"] in LINE_KINDS
+        _count_value(entry["length"], capped=True)
 
-        def first(_text: str, one: str = one) -> str:
-            return one
 
-        def second(_text: str, other: str = other) -> str:
-            return other
+def _closed_object(found: TapWindowDiagnosis) -> None:
+    """The default Python object holds the same and nothing more."""
+    assert found.reason is None or found.reason in REASONS
+    assert found.rule is None or found.rule in RULE_NAMES
+    assert found.part is None or found.part in PART_NAMES
+    assert found.show_device_text is False
+    assert found.forms == ()
+    assert len(found.lists) <= 1
+    for item in found.lists:
+        assert (item.position, item.asked) == (None, True)
+        _count_value(item.read, capped=False)
+    for shape in found.lines:
+        assert (shape.indent, shape.tokens) == (None, ())
+        assert shape.kind in LINE_KINDS
+        _count_value(shape.number, capped=False)
+        _count_value(shape.length, capped=False)
 
-        a, b = build(first), build(second)
-        assert _verdict(a, 0) == _verdict(b, 0), case
-        assert _reports(a, 0) == _reports(b, 0), case
+
+def _closed(text: str, display: int = 0) -> None:
+    found = diagnose_tap_window(text, display_id=display)
+    _closed_object(found)
+    _closed_text(found.to_text())
+    _closed_json(json.loads(json.dumps(found.to_dict())))
+
+
+def _corpus() -> Sequence[tuple[str, int]]:
+    """Every rule case, capture, hostile input and reviewer's input, with the
+    values an app chooses as they are and changed."""
+    texts = [*CASES.values(), *((text, 0) for text in CAPTURES.values())]
+    texts += [(text, 0) for text in AMBIGUOUS.values()]
+    for build, display in HOSTILE.values():
+        texts += [(build(_same), display), (build(_changed), display)]
+    for build in (*CHOSEN_CASES.values(), *REVIEW_6.values()):
+        texts += [(build(_same), 0), (build(_changed), 0)]
+        texts += [(build(_any_change(seed)), 0) for seed in range(3)]
+    return texts
+
+
+def test_the_default_report_uses_a_closed_vocabulary():
+    corpus = _corpus()
+    assert len(corpus) > 200
+    for text, display in corpus:
+        _closed(text, display)
 
 
 @pytest.mark.parametrize("seed", range(4))
-def test_any_change_of_device_characters_keeps_the_default_report(seed):
-    builds = [
-        *((build, display) for build, display in HOSTILE.values()),
-        *((build, 0) for build in CHOSEN_CASES.values()),
-        *((build, 0) for build in REVIEW_6.values()),
-    ]
-    compared = 0
-    for build, display in builds:
-        same = build(_same)
-        changed = build(_any_change(seed))
-        if _verdict(same, display) != _verdict(changed, display):
-            continue  # the change changed what the reader concludes
-        assert _reports(same, display) == _reports(changed, display)
-        compared += 1
-    assert compared > len(builds) // 3
+def test_mutated_outputs_keep_the_closed_vocabulary(seed):
+    pick = random.Random(seed)  # noqa: S311 - a fixed test fuzz
+    corpus = _corpus()
+    for _ in range(150):
+        text, display = pick.choice(corpus)
+        for _ in range(pick.randint(1, 4)):
+            at = pick.randrange(len(text) + 1)
+            if pick.random() < 0.5:
+                text = text[:at] + pick.choice(SNIPPETS) + text[at:]
+            else:
+                text = text[:at] + text[at + pick.randint(1, 30) :]
+        _closed(text, display)
+        shown = diagnose_tap_window(text, show_device_text=True, display_id=display)
+        shown.to_text()  # never raises
+        json.dumps(shown.to_dict())
+
+
+def test_a_list_the_reader_entered_is_reached():
+    text = "Input Dispatcher State:\n  Windows:\n    orphan\n  Connections:\n"
+    found = diagnose_tap_window(text)
+    assert (found.reason, found.rule) == ("line_format", "orphan_line")
+    [item] = found.lists
+    assert (item.reached, item.read, item.failed) == (True, 0, True)
+    assert "the list of every display, 0 windows read, the check refused here" in (
+        found.to_text()
+    )

@@ -511,7 +511,7 @@ def _add_diagnose_parser(add_parser: Callable[..., argparse.ArgumentParser]) -> 
             " it (without a point). Print whether the window list reads or"
             " which rule refused it and at which line, the window lists found"
             " and how many windows were read, and for the lines around the"
-            " failure their kind, indent and length. No text of the device's"
+            " failure their kind and length. No text of the device's"
             " output is printed: no serial, app or window names, coordinates,"
             " accounts or network values (unless --show-device-text). Nothing"
             " is sent to the device but that one read."

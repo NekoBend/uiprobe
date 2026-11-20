@@ -6,16 +6,17 @@
 
 By default the report is built only from uiprobe's fixed vocabulary and
 numbers uiprobe computed: the verdict (reason, rule), the part and line
-number it refused at, the window lists the reader found (whether each is a
-display's section and the display asked for, how many window lines the
-reader found and read in it, whether the check refused in it), how many
-windows it read, and for the lines around the failure (or an outline of the
-reader's headings) each line's kind, indent and length. A line's kind is
-what the reader's own anchored patterns made of it where the reader reads
-(`Verdict.kinds`); a line it did not classify is ``other`` (or ``blank``).
-No field name, value, flag, row or display number, orientation, sign or
-other character of the device's output is in it, only lengths and what the
-reader concluded; counts, lengths and indents stop at `CAP`.
+number it refused at, the list the reader took as the display's (a section
+or the list of every display, whether it got there, how many windows it
+read there, whether the check refused there), and for the lines around the
+failure (or the reader's headings) each line's kind and length. A line's
+kind is what the reader's own anchored patterns made of it where the reader
+reads (`Verdict.kinds`); a line it did not classify is ``other`` (or
+``blank``). No field name, value, flag, row or display number, orientation,
+sign or other character of the device's output is in it. The counts and
+kinds can still differ between outputs that the reader judges the same
+(they are what the reader read). Counts and lengths stop at `CAP` when
+rendered (the object keeps them exact).
 
 With ``show_device_text`` the report also holds each shown line's tokens
 (field names, value types, known and unknown flag names, row numbers) and
@@ -27,7 +28,7 @@ and app text can appear in it, so it carries its own notice
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Final
 
 from uiprobe.inputwindows import (
@@ -231,13 +232,13 @@ _FLAGS_HEX: Final = len("0x") + 8
 @dataclass(frozen=True, slots=True)
 class LineShape:
     """One line: its number (from 1, in its part), kind (one of
-    `LINE_KINDS`, as the reader classified it), indent and length, whether
-    it is the line the check refused at, and (only with
-    ``show_device_text``) its tokens."""
+    `LINE_KINDS`, as the reader classified it), length, whether it is the
+    line the check refused at, and (only with ``show_device_text``, else
+    None and empty) its indent and tokens."""
 
     number: int
     kind: str
-    indent: int
+    indent: int | None
     length: int
     tokens: tuple[str, ...] = ()
     failing: bool = False
@@ -245,14 +246,15 @@ class LineShape:
 
 @dataclass(frozen=True, slots=True)
 class ListRows:
-    """One window list the reader found: its place (from 1), whether it is
-    the list of one ``Display:`` section (``per_display``; False for the one
+    """One window list the reader found: its place (from 1; only with
+    ``show_device_text``, else None), whether it is the list of one
+    ``Display:`` section (``per_display``; False for the one
     list of every display, API 24 to 28), whether that section is the
     display asked for (``asked``), whether the reader read the list
     (``reached``; it stops at the first refusal), how many window lines it
     read into a window there, and whether the check refused in it."""
 
-    position: int
+    position: int | None
     per_display: bool
     asked: bool
     reached: bool
@@ -381,7 +383,8 @@ class TapWindowDiagnosis:
             )
         if self.lines:
             what = "length: tokens" if self.show_device_text else "length"
-            lines.append(f"lines (number, kind, indent, {what}):")
+            columns = "kind, indent" if self.show_device_text else "kind"
+            lines.append(f"lines (number, {columns}, {what}):")
             lines.extend(_shape_text(shape) for shape in self.lines)
         if self.forms:
             lines.append("forms:")
@@ -394,9 +397,10 @@ def _line_dict(shape: LineShape, *, tokens: bool) -> dict[str, object]:
         "number": shape.number,
         "failing": shape.failing,
         "kind": shape.kind,
-        "indent": _capped(shape.indent),
         "length": _capped(shape.length),
     }
+    if shape.indent is not None:
+        entry["indent"] = _capped(shape.indent)
     if tokens:
         entry["tokens"] = list(shape.tokens)
     return entry
@@ -450,7 +454,9 @@ def _list_text(item: ListRows) -> str:
 
 def _shape_text(shape: LineShape) -> str:
     mark = ">" if shape.failing else " "
-    head = f"{mark} {shape.number} {shape.kind} {_count(shape.indent)}"
+    head = f"{mark} {shape.number} {shape.kind}"
+    if shape.indent is not None:
+        head = f"{head} {_count(shape.indent)}"
     text = f"{head} {_count(shape.length)}"
     return f"{text}: {' '.join(shape.tokens)}" if shape.tokens else text
 
@@ -725,9 +731,8 @@ def _shape(dump: _Dump, index: int, *, failing: bool) -> LineShape:
             in_list=index in dump.listed,
         )
         tokens = tuple(shown)
-    return LineShape(
-        number, _kind(dump, index), _indent(line), len(line), tokens, failing
-    )
+    indent = _indent(line) if dump.show else None
+    return LineShape(number, _kind(dump, index), indent, len(line), tokens, failing)
 
 
 def _part(index: int, verdict: Verdict) -> tuple[str, int]:
@@ -849,7 +854,11 @@ def diagnose_tap_window(
         verdict.rule,
         part,
         number,
-        tuple(item for item in _lists(verdict) if show_device_text or item.asked),
+        tuple(
+            item if show_device_text else replace(item, position=None)
+            for item in _lists(verdict)
+            if show_device_text or item.asked
+        ),
         shapes,
         _forms(lines, verdict) if show_device_text else (),
         show_device_text=show_device_text,

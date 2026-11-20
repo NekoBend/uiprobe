@@ -180,6 +180,7 @@ def test_an_unknown_line_after_a_row_is_recorded_as_such(
     }
 
 
+@pytest.mark.usefixtures("_digit_limit")
 def test_a_huge_rotation_after_a_row_is_refused_not_raised(
     tmp_path: Path, device, android, clock, monkeypatch
 ):

@@ -1110,10 +1110,10 @@ def _read(
 ) -> tuple[InputWindow, ...] | _Refusal:
     """Read the windows of `display_id` in the list `found` (see
     `parse_input_windows`), noting in `trace` what it read."""
+    _note_rows(trace, found)  # entered, also when it refuses right away
     groups = _group(found)
     if isinstance(groups, _Refusal):
         return groups
-    _note_rows(trace, found)
     refused = _whole(groups, found)
     if refused is not None:
         return refused
