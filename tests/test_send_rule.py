@@ -12,9 +12,11 @@ The test logs one ordered list of events:
   hook of the values they return (``__float__``, ``__bool__``, comparisons,
   ``__del__``), every field read of a `Policy` subclass, every method of the
   words in it, and every write of the run writer;
-* ``decided``: the final comparison itself, logged by a wrapper around
-  `_Run.epoch_is`, the comparison `_Run.final_check` makes, when it holds,
-  with the sending path `final_check` was asked for;
+* ``decided``: the final comparison itself. `_Run.epoch_is` must be exactly
+  ``return self.device.pin_epoch == approved`` (checked on its source), so the
+  read of its operand `Device.pin_epoch` is the comparison; that read is
+  logged inside it, and becomes ``decided`` (with the path `final_check` was
+  asked for) when the comparison holds;
 * ``send``: every request that changes the device, as the fake device
   receives it.
 
@@ -23,14 +25,15 @@ kind before it is that decision, of the path whose command it is), and no
 ``caller`` event may lie between them. The rows are the sending paths, each
 checked on its own; the set of rows must equal the paths the crawl declares
 (`crawl_driver._SEND_PATHS`), and a send without a decision fails, so a new
-sending path cannot be added without a row. Two meta-tests show that the
-test fails when a clock call is inserted into the production
-`_Run.final_check` right after its comparison (for every path), and when the
-row of a path is removed.
+sending path cannot be added without a row. Meta-tests show that the test
+fails, for every path, when a clock call is inserted into the production
+`_Run.final_check` right after its comparison or into `_Run.epoch_is` right
+after the equality, and when the row of a path is removed.
 """
 
 from __future__ import annotations
 
+import ast
 import inspect
 import re
 import textwrap
@@ -184,6 +187,47 @@ def hooked_policy(log: _Log) -> Policy:
     )
 
 
+def instrument_decisions(log: _Log, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Log the final comparison: the operand read inside `_Run.epoch_is`
+    becomes ``decided`` when the comparison holds."""
+    final_check = crawl_driver._Run.final_check
+    epoch_is = crawl_driver._Run.epoch_is
+    asked: list[str] = []  # the path final_check is deciding for
+
+    def with_path(self, path: str, approved: int) -> bool:
+        asked.append(path)
+        try:
+            return final_check(self, path, approved)
+        finally:
+            asked.pop()
+
+    inside: list[int] = []  # the index of the operand read in epoch_is
+    pin_epoch = Device.pin_epoch
+
+    def operand(device: Device) -> int:
+        value = pin_epoch.fget(device)
+        if asked and inside == [-1]:
+            inside[0] = len(log.events)
+            log.events.append(("operand", asked[-1]))
+        return value
+
+    def compared(self, approved: int) -> bool:
+        inside.append(-1)
+        try:
+            holds = epoch_is(self, approved)
+            at = inside[-1]
+        finally:
+            inside.pop()
+        if holds and asked and at >= 0:
+            # The operand read was the comparison: it is the decision.
+            log.events[at] = ("decided", asked[-1])
+        return holds
+
+    monkeypatch.setattr(crawl_driver._Run, "final_check", with_path)
+    monkeypatch.setattr(crawl_driver._Run, "epoch_is", compared)
+    monkeypatch.setattr(Device, "pin_epoch", property(operand))
+
+
 def instrumented_run(
     tmp_path: Path,
     fake_adb: FakeAdbServer,
@@ -210,25 +254,7 @@ def instrumented_run(
 
     android.override(re.compile(r"^(?:dumpsys |uiautomator |cat )"), read)
 
-    final_check = crawl_driver._Run.final_check
-    epoch_is = crawl_driver._Run.epoch_is
-    asked: list[str] = []  # the path final_check is deciding for
-
-    def with_path(self, path: str, approved: int) -> bool:
-        asked.append(path)
-        try:
-            return final_check(self, path, approved)
-        finally:
-            asked.pop()
-
-    def compared(self, approved: int) -> bool:
-        holds = epoch_is(self, approved)
-        if holds and asked:
-            log.events.append(("decided", asked[-1]))  # at the comparison
-        return holds
-
-    monkeypatch.setattr(crawl_driver._Run, "final_check", with_path)
-    monkeypatch.setattr(crawl_driver._Run, "epoch_is", compared)
+    instrument_decisions(log, monkeypatch)
 
     for name in [n for n in vars(RunWriter) if n.startswith("write_")] + [
         "finish",
@@ -329,6 +355,21 @@ def test_every_sending_path_has_a_row():
     check_complete(ROWS)
 
 
+def test_the_comparison_is_one_equality_and_nothing_else():
+    # So that the read of its operand, which the rule test logs, is the
+    # comparison itself.
+    tree = ast.parse(textwrap.dedent(inspect.getsource(crawl_driver._Run.epoch_is)))
+    function = tree.body[0]
+    assert isinstance(function, ast.FunctionDef)
+    body = function.body
+    if isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant):
+        body = body[1:]  # the docstring
+    assert len(body) == 1
+    statement = body[0]
+    assert isinstance(statement, ast.Return)
+    assert ast.unparse(statement) == "return self.device.pin_epoch == approved"
+
+
 def test_every_changing_command_the_fake_admits_is_a_path_or_never_sent(fake_adb):
     android = FakeAndroid(fake_adb, SERIAL, SCREENS, start="home", general_swipes=True)
     families = set()
@@ -366,6 +407,32 @@ def clock_after_the_comparison(monkeypatch: pytest.MonkeyPatch) -> None:
     namespace: dict[str, object] = {}
     exec(source, vars(crawl_driver), namespace)  # noqa: S102 - the meta-test edits the method
     monkeypatch.setattr(crawl_driver._Run, "final_check", namespace["final_check"])
+
+
+def clock_after_the_equality(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Put ``self.clock()`` into `_Run.epoch_is`, right after its equality."""
+    source = textwrap.dedent(inspect.getsource(crawl_driver._Run.epoch_is))
+    anchor = "    return self.device.pin_epoch == approved\n"
+    assert source.count(anchor) == 1, "the equality in epoch_is moved"
+    source = source.replace(
+        anchor,
+        "    result = self.device.pin_epoch == approved\n"
+        "    self.clock()\n"
+        "    return result\n",
+    )
+    namespace: dict[str, object] = {}
+    exec(source, vars(crawl_driver), namespace)  # noqa: S102 - the meta-test edits the method
+    monkeypatch.setattr(crawl_driver._Run, "epoch_is", namespace["epoch_is"])
+
+
+@pytest.mark.parametrize("path", list(ROWS))
+def test_the_rule_test_fails_on_a_clock_call_inside_epoch_is(
+    tmp_path, fake_adb, monkeypatch, path
+):
+    clock_after_the_equality(monkeypatch)
+    events = instrumented_run(tmp_path, fake_adb, monkeypatch, ROWS[path])
+    with pytest.raises(AssertionError, match="ran before"):
+        check_rule(events, path)
 
 
 @pytest.mark.parametrize("path", list(ROWS))

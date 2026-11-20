@@ -611,7 +611,10 @@ def test_max_duration_is_judged_on_the_injected_clock(tmp_path, device, clock):
     assert result.stop_reason == "max_duration"
     assert clock.pauses
     assert max(clock.pauses) <= crawl_driver.PAUSE_STEP
-    assert clock.now >= 5000.0 + 60
+    # The end the injected clock reports, also by uiprobe's own clock (which
+    # the pauses here do not move): it can come a moment earlier, by the time
+    # the run's own code took.
+    assert clock.now >= 5000.0 + 60 - 0.01
     assert clock.now <= 5000.0 + 60 + crawl_driver.PAUSE_STEP  # no pause past it
 
 
@@ -935,11 +938,22 @@ class Trusted:
 
     def __init__(self, monkeypatch: pytest.MonkeyPatch) -> None:
         self.now = 1000.0
+        self.sleeps: list[tuple[float, float]] = []  # (when, how long)
         monkeypatch.setattr(
             device_module,
             "time",
             SimpleNamespace(monotonic=lambda: self.now, sleep=lambda _s: None),
         )
+
+    def attach(self, device: Device) -> None:
+        """Make the device's own clock and pauses (its waits) this clock."""
+        device._clock = lambda: self.now
+
+        def sleep(seconds: float) -> None:
+            self.sleeps.append((self.now, seconds))
+            self.now += seconds
+
+        device._sleep = sleep
 
 
 @pytest.mark.usefixtures("android")
@@ -1188,6 +1202,242 @@ def test_a_policy_with_avoided_areas_crawls_as_before(tmp_path, device, android,
     ]
     assert kinds == ["launch", "tap", "tap", "back", "back", "tap", "back"]
     assert android.stopped == []
+
+
+# --- no request starts after the run's end ---
+
+
+def requests_after(fake_adb: FakeAdbServer, index: int) -> list[str]:
+    return fake_adb.requests[index + 1 :]
+
+
+def test_no_request_follows_a_dump_that_returns_after_the_end(
+    tmp_path, device, android, monkeypatch, clock, fake_adb
+):
+    trusted = Trusted(monkeypatch)
+    late: list[int] = []
+
+    def slow_dump(command: str):
+        reply = android._shell(command)
+        if start_requests(fake_adb) and not late:
+            trusted.now = 1061.0  # the first dump after the launch ends at 61 s
+            late.append(len(fake_adb.requests) - 1)
+        return reply
+
+    android.override(re.compile(r"^uiautomator dump"), slow_dump)
+    result = run(device, clock, tmp_path / "run", limits=Limits(minutes=1))
+    assert late
+    assert result.stop_reason == "max_duration"
+    assert requests_after(fake_adb, late[0]) == []  # no cat, rm, wm or dumpsys
+
+
+def test_no_request_follows_a_screenshot_that_returns_after_the_end(
+    tmp_path, device, android, monkeypatch, clock, fake_adb
+):
+    trusted = Trusted(monkeypatch)
+    late: list[int] = []
+
+    def slow_screencap(command: str):
+        reply = android._shell(command)
+        if not late:
+            trusted.now = 1061.0
+            late.append(len(fake_adb.requests) - 1)
+        return reply
+
+    android.override(re.compile(r"^screencap"), slow_screencap)
+    result = run(
+        device, clock, tmp_path / "run", limits=Limits(minutes=1), screenshots=True
+    )
+    assert late
+    assert result.stop_reason == "max_duration"
+    assert requests_after(fake_adb, late[0]) == []  # no foreground read after it
+
+
+def test_no_window_read_follows_a_package_uid_read_that_returns_after_the_end(
+    tmp_path, device, android, monkeypatch, clock, fake_adb
+):
+    trusted = Trusted(monkeypatch)
+    late: list[int] = []
+
+    def slow_package(command: str):
+        reply = android._shell(command)
+        if start_requests(fake_adb) and not late:  # the gate's read, not the start's
+            trusted.now = 1061.0
+            late.append(len(fake_adb.requests) - 1)
+        return reply
+
+    android.override(re.compile(r"^dumpsys package"), slow_package)
+    result = run(device, clock, tmp_path / "run", limits=Limits(minutes=1))
+    assert late
+    assert result.stop_reason == "max_duration"
+    assert requests_after(fake_adb, late[0]) == []  # no dumpsys input, no tap
+    assert not [i for i in android.inputs if i.kind == "tap"]
+
+
+def test_a_device_offline_just_before_the_end_ends_the_run_at_the_end(
+    tmp_path, device, android, monkeypatch, clock, fake_adb
+):
+    # The device goes offline at 59.9 s: the wait for it ends at 60 s, with
+    # no listing after it, and the run ends with max_duration.
+    trusted = Trusted(monkeypatch)
+    trusted.attach(device)
+    listings: list[float] = []
+    original = device._client.devices
+
+    def devices():
+        listings.append(trusted.now)
+        return original()
+
+    def start_then_offline(command: str):
+        reply = android._shell(command)
+        trusted.now = 1059.9
+        fake_adb.devices[:] = [
+            {"serial": SERIAL, "state": "offline", "transport_id": TRANSPORT}
+        ]
+        return reply
+
+    android.override(re.compile(r"^am start"), start_then_offline)
+    monkeypatch.setattr(device._client, "devices", devices)
+    out = tmp_path / "run"
+    result = run(device, clock, out, limits=Limits(minutes=1))
+    assert result.stop_reason == "max_duration"
+    assert [t for t in listings if t >= 1060.0] == []
+    assert all(when + pause <= 1060.0 + 1e-9 for when, pause in trusted.sleeps)
+
+
+def test_the_launch_polls_against_the_end_as_it_is_now(
+    tmp_path, device, android, monkeypatch, clock
+):
+    # During the wait for the app to come to the front, the run's end comes
+    # earlier (to 1001, as a clock value read in a proof of the pin would
+    # bring it): the wait stops at once, no read every half second to 1010.
+    trusted = Trusted(monkeypatch)
+    trusted.attach(device)
+    android.launch_in_front = False
+    runs: list[crawl_driver._Run] = []
+    launch = crawl_driver._Run.launch
+
+    def capture(self):
+        runs.append(self)
+        return launch(self)
+
+    reads: list[float] = []
+    original = device.foreground
+
+    def foreground() -> str | None:
+        reads.append(trusted.now)
+        if len(reads) == 1 and runs:
+            runs[0].send_by = 1001.0
+            trusted.now = 1001.0
+        return original()
+
+    monkeypatch.setattr(crawl_driver._Run, "launch", capture)
+    monkeypatch.setattr(device, "foreground", foreground)
+    result = run(device, clock, tmp_path / "run", limits=Limits(minutes=1))
+    assert result.stop_reason == "max_duration"
+    assert reads == [1000.0]
+
+
+def test_no_pause_runs_past_the_end(tmp_path, device, android, monkeypatch):
+    # The app does not come to the front: its last foreground read returns at
+    # 1059.99; the next pause is cut to the 0.01 s left. A settle step with
+    # 0.01 s left is cut the same way.
+    trusted = Trusted(monkeypatch)
+    trusted.attach(device)
+    android.launch_in_front = False
+    original = device.foreground
+
+    def late_reply() -> str | None:
+        seen = original()
+        trusted.now = 1059.99
+        return seen
+
+    monkeypatch.setattr(device, "foreground", late_reply)
+    settles: list[float] = []
+    result = crawl(
+        device,
+        SHOP,
+        tmp_path / "run",
+        policy=Policy(),
+        limits=Limits(minutes=1),
+        settle=1.0,
+        clock=lambda: 1000.0,
+        sleep=settles.append,
+    )
+    assert result.stop_reason == "max_duration"
+    assert trusted.sleeps
+    assert all(when + pause <= 1060.0 + 1e-9 for when, pause in trusted.sleeps)
+    assert all(pause <= 0.01 + 1e-9 for pause in settles)
+
+
+@pytest.mark.usefixtures("android")
+def test_the_settle_step_is_cut_to_the_time_left(
+    tmp_path, device, monkeypatch, fake_adb
+):
+    trusted = Trusted(monkeypatch)
+    original = device.tap
+
+    def tap_then_late(point, _send_by=None, _epoch=None):
+        result = original(point, _send_by=_send_by, _epoch=_epoch)
+        trusted.now = 1059.99  # 0.01 s left
+        return result
+
+    monkeypatch.setattr(device, "tap", tap_then_late)
+    settles: list[float] = []
+
+    def sleep(seconds: float) -> None:
+        settles.append(seconds)
+        trusted.now += seconds
+
+    result = crawl(
+        device,
+        SHOP,
+        tmp_path / "run",
+        policy=Policy(),
+        limits=Limits(minutes=1),
+        settle=1.0,
+        clock=lambda: 1000.0,
+        sleep=sleep,
+    )
+    assert result.stop_reason == "max_duration"
+    assert settles
+    assert all(pause <= 0.01 + 1e-9 for pause in settles)
+    taps = [i for i, (_, _, c) in enumerate(fake_adb.commands) if c.startswith("input")]
+    assert len(taps) == 1
+    assert fake_adb.commands[taps[0] + 1 :] == []
+
+
+@pytest.mark.usefixtures("android")
+def test_a_read_is_not_sent_when_the_end_comes_while_its_transport_is_selected(
+    tmp_path, device, monkeypatch, clock, fake_adb
+):
+    # The adb server acknowledges host:transport-id:N for a read after the
+    # run's end: the read itself is not written on that connection.
+    trusted = Trusted(monkeypatch)
+    original_listed = Device._check_listed
+    original_send = adb_module._send_request
+    armed: list[bool] = []
+    selected: list[int] = []
+
+    def listed(self: Device, *, strict: bool = False) -> None:
+        original_listed(self, strict=strict)
+        if not strict and start_requests(fake_adb) and not selected:
+            armed.append(True)  # the first read after the launch
+
+    def send_request(sock, request: str):
+        message = original_send(sock, request)
+        if armed and request.startswith("host:transport-id:"):
+            armed.clear()
+            trusted.now = 1061.0
+            selected.append(len(fake_adb.requests) - 1)
+        return message
+
+    monkeypatch.setattr(Device, "_check_listed", listed)
+    monkeypatch.setattr(adb_module, "_send_request", send_request)
+    result = run(device, clock, tmp_path / "run", limits=Limits(minutes=1))
+    assert selected
+    assert result.stop_reason == "max_duration"
+    assert requests_after(fake_adb, selected[0]) == []
 
 
 # --- stop and the time limit right before a request ---

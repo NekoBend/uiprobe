@@ -1577,6 +1577,10 @@ class Device:
         # are past their first request (no adb server is started for them).
         self._failed_requests = 0
         self._launch_holds = 0
+        # Set by uiprobe's crawl only (`_limit_requests`): the run's end by
+        # uiprobe's own clock, read anew before each request; no request
+        # starts after it.
+        self._request_limit: Callable[[], float] | None = None
         if pin:
             # Right after the listing, so the identity is the chosen device's.
             self.pin_transport()
@@ -1602,6 +1606,7 @@ class Device:
         """
         if self._broken is not None:
             raise self._broken_error()
+        self._check_time_left()  # before the listing, too
         if self._repinning:
             # A request while the device is being proven (first or again;
             # from the watch, say): nothing goes out, and the proof fails.
@@ -1646,7 +1651,12 @@ class Device:
         there, never a caller's.
         """
         pin = self._pin(strict=strict)  # moves the epoch itself on a failure
-        guard = self._dispatch_guard(self._epoch, dispatch) if changing else None
+        if changing:
+            guard = self._dispatch_guard(self._epoch, dispatch)
+        elif self._request_limit is not None:
+            guard = self._check_time_left  # a read: only the crawl's end
+        else:
+            guard = None
         succeeded = False
         try:
             result = send(pin) if guard is None else send(pin, guard)
@@ -1662,6 +1672,31 @@ class Device:
                     self._epoch += 1  # any way out but success, whatever the error
         return result
 
+    def _limit_requests(self, limit: Callable[[], float] | None) -> None:
+        """For uiprobe's crawl only: `limit` returns the run's end as a value
+        of `_monotonic`, read anew before every request; from then on no
+        request, read or not, host request included, starts at or after it
+        (`DeviceNotFoundError`, ``send_stopped``, ``why`` ``time_limit``).
+        None removes it."""
+        self._request_limit = limit
+
+    def _time_left(self) -> float | None:
+        """Seconds of uiprobe's own clock left before the crawl's end, or
+        None without a limit."""
+        limit = self._request_limit
+        return None if limit is None else limit() - _monotonic()
+
+    def _time_up(self) -> DeviceNotFoundError:
+        msg = f"nothing was sent to {self.serial}: the time limit had passed"
+        details = {"serial": self.serial, "reason": SEND_STOPPED, "why": "time_limit"}
+        return DeviceNotFoundError(msg, details=details)
+
+    def _check_time_left(self) -> None:
+        """Raise `_time_up` once the crawl's end has come."""
+        left = self._time_left()
+        if left is not None and left <= 0:
+            raise self._time_up()
+
     def _dispatch_guard(
         self, epoch: int, dispatch: _Dispatch | None
     ) -> Callable[[], None]:
@@ -1675,6 +1710,7 @@ class Device:
             epoch = dispatch.epoch
 
         def guard() -> None:
+            self._check_time_left()
             if self._epoch != epoch:
                 msg = (
                     f"{self.serial} has to be proven again before an input"
@@ -1818,7 +1854,8 @@ class Device:
 
     def _stop_if_watched(self) -> None:
         watch = self._pin_watch
-        stopped = watch is not None and watch()
+        left = self._time_left()
+        stopped = (left is not None and left <= 0) or (watch is not None and watch())
         if self._broken is not None:
             # A request inside the watch failed the pin (and may have been
             # swallowed there): the wait ends with that failure.
@@ -1863,6 +1900,7 @@ class Device:
                     break
                 new = self._candidate(old)
                 if new is not None and self._clock() < deadline:
+                    self._stop_if_watched()
                     found = self._identity_through(new)
                     if found is not None:
                         if not self._same_device(found):
@@ -1876,7 +1914,11 @@ class Device:
                         return
                 now = self._clock()
                 if now < deadline:
-                    self._sleep(min(REPIN_POLL, deadline - now))
+                    pause = min(REPIN_POLL, deadline - now)
+                    left = self._time_left()
+                    if left is not None:
+                        pause = min(pause, max(0.0, left))  # not past the crawl
+                    self._sleep(pause)
             raise self._fail(
                 self._changed(f"did not come back within {REPIN_WAIT:g} s")
             )
@@ -2701,6 +2743,7 @@ class Device:
         dispatch: _Dispatch | None,
     ) -> None:
         """`launch` after its arguments were checked."""
+        read = activity is None  # the launcher read is the launch's first request
         if activity is None:
             # The read goes out only to a device proven now, as a start would,
             # and nothing follows it when anything happened to the pin.
@@ -2715,16 +2758,40 @@ class Device:
                 raise DeviceNotFoundError(msg, details=details)
         # After the first request, a request that fails (also one a read
         # swallows) ends the launch, and no adb server is started for it: a
-        # launch never goes on after an observed failure.
+        # launch never goes on after an observed failure. With `activity`
+        # given, the first request is the stop or the start itself.
         failed = self._failed_requests
-        self._launch_holds += 1
+        held = [read]
+        if read:
+            self._launch_holds += 1
         try:
             self._launch_rest(
-                package, activity, limit, restart=restart, stop=stop, dispatch=dispatch
+                package,
+                activity,
+                limit,
+                restart=restart,
+                stop=stop,
+                dispatch=dispatch,
+                held=held,
             )
         finally:
-            self._launch_holds -= 1
+            if held[0]:
+                self._launch_holds -= 1
         self._check_no_failure(failed)
+
+    def _hold(self, held: list[bool]) -> None:
+        """Hold the launch from here on (its first request went out)."""
+        if not held[0]:
+            self._launch_holds += 1
+            held[0] = True
+
+    def _crawl_time_left(self, dispatch: _Dispatch | None) -> float | None:
+        """Seconds left before the crawl's end, read anew (the request
+        limit, else the value the call was given), or None without one."""
+        left = self._time_left()
+        if left is None and dispatch is not None and dispatch.send_by is not None:
+            left = dispatch.send_by - _monotonic()
+        return left
 
     def _check_no_failure(self, failed: int) -> None:
         """Raise when a request failed since `failed` was taken in a launch."""
@@ -2744,28 +2811,37 @@ class Device:
         restart: bool,
         stop: Callable[[], bool] | None,
         dispatch: _Dispatch | None,
+        held: list[bool],
     ) -> None:
         """The launch after its launcher read: stop, start, foreground."""
         failed = self._failed_requests
         if restart:
             self._force_stop(package, dispatch)
+            self._hold(held)
         self._check_no_failure(failed)
         self._start(package, activity, limit, force_stopped=restart, dispatch=dispatch)
+        self._hold(held)
         details: dict[str, object] = {"package": package}
         deadline = self._clock() + limit
-        send_by = None if dispatch is None else dispatch.send_by
         while True:
             self._check_no_failure(failed)
             if stop is not None and stop():
                 return  # the caller (the crawl) asked to stop: no more reads
-            if send_by is not None and _monotonic() >= send_by:
+            left = self._crawl_time_left(dispatch)  # read anew before each poll
+            if left is not None and left <= 0:
                 return  # the crawl's time is up: no more reads
             seen = self.foreground()
             if seen == package:
                 return
             if self._clock() >= deadline:
                 break
-            self._sleep(max(0.0, min(LAUNCH_POLL_INTERVAL, deadline - self._clock())))
+            pause = max(0.0, min(LAUNCH_POLL_INTERVAL, deadline - self._clock()))
+            left = self._crawl_time_left(dispatch)  # and right before the pause
+            if left is not None:
+                if left <= 0:
+                    return
+                pause = min(pause, left)
+            self._sleep(pause)
             if self._clock() > deadline:
                 break  # no read starts after the deadline
         shown = None if seen is None else _shown_foreground(seen)
@@ -3261,11 +3337,12 @@ class Device:
                 PNG image.
         """
         data = self._call(
-            lambda pin: self._client.exec_out(
+            lambda pin, guard=None: self._client.exec_out(
                 self.serial,
                 quote_args("screencap", "-p"),
                 timeout=SCREENSHOT_TIMEOUT,
                 **pin,
+                **self._extras(guard),
             ),
             strict=False,
         )
@@ -3306,8 +3383,8 @@ class Device:
                     details={"output": output.strip()[:DUMP_MESSAGE_LIMIT]},
                 )
             return self._call(
-                lambda pin: self._client.exec_out(
-                    self.serial, quote_args("cat", path), **pin
+                lambda pin, guard=None: self._client.exec_out(
+                    self.serial, quote_args("cat", path), **pin, **self._extras(guard)
                 ),
                 strict=False,
             )

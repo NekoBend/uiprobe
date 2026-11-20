@@ -82,8 +82,8 @@ _ADDRESS_FORMAT = "expected tcp:HOST:PORT"
 _START_HINTS: Final = {
     "disabled": "starting the server is disabled",
     "mid_launch": (
-        "a launch already sent a request; a server that went away is not"
-        " started again in the middle of it"
+        "the launch already sent its first request; a server that went away"
+        " is not started again in the middle of it"
     ),
     "address_not_default": "adb start-server is not run for an address you chose",
     "adb_not_found": "adb was not found; install platform-tools or set UIPROBE_ADB",
@@ -678,12 +678,22 @@ class AdbClient:
         *,
         timeout: float | None = None,
         transport_id: int | None = None,
+        _before_send: Callable[[], None] | None = None,
+        _no_start: bool = False,
     ) -> bytes:
         """Run `command` with the binary-safe ``exec:`` service.
 
-        `timeout` and `transport_id` are as for `shell`.
+        `timeout`, `transport_id`, `_before_send` and `_no_start` are as for
+        `shell`.
         """
-        return self._device_service(serial, f"exec:{command}", timeout, transport_id)
+        return self._device_service(
+            serial,
+            f"exec:{command}",
+            timeout,
+            transport_id,
+            _before_send,
+            no_start=_no_start,
+        )
 
     def _host_query(self, request: str) -> bytes:
         with self._connect() as sock:

@@ -1481,6 +1481,37 @@ def test_launch_asks_the_stop_hook_before_each_foreground_read(device, fake_adb)
     assert fake_adb.commands[-1][2] == START
 
 
+def test_the_launch_waits_against_the_crawl_end_as_it_is_now(
+    device, android, monkeypatch, clock
+):
+    # The crawl's end comes earlier while the launch waits for the app: the
+    # wait ends at once, without another read, and the launch returns.
+    from uiprobe import device as device_module
+
+    trusted = [1000.0]
+    monkeypatch.setattr(
+        device_module,
+        "time",
+        SimpleNamespace(monotonic=lambda: trusted[0], sleep=clock.sleep),
+    )
+    end = [1060.0]
+    device._limit_requests(lambda: end[0])
+    android.launch_in_front = False
+    original = device.foreground
+    reads: list[int] = []
+
+    def read_then_earlier() -> str | None:
+        reads.append(1)
+        seen = original()
+        end[0] = trusted[0]  # the end is now
+        return seen
+
+    monkeypatch.setattr(device, "foreground", read_then_earlier)
+    assert device.launch(SHOP, activity=f"{SHOP}/.Main", _send_by=1060.0) is None
+    assert reads == [1]
+    assert clock.pauses == []
+
+
 def test_there_is_no_public_send_check():
     assert not hasattr(Device, "set_send_check")
     assert not hasattr(Device, "send_check")
@@ -1545,20 +1576,39 @@ def test_a_launch_never_goes_on_through_a_server_started_again(
         second.stop()
 
 
-def test_a_launch_ends_when_a_read_swallows_a_failure(device, android, monkeypatch):
+def test_a_launch_ends_when_a_read_swallows_a_failure(
+    device, android, monkeypatch, fake_adb
+):
     # A foreground read that hides a failed request still ends the launch:
-    # nothing more is read or sent after it.
+    # nothing more is read or sent after it (the request trace ends there).
     android.launch_in_front = False
     original = device.foreground
-    calls: list[int] = []
+    after: list[int] = []
 
     def failing_read() -> str | None:
-        calls.append(1)
+        seen = original()
         device._failed_requests += 1  # as a read that swallowed an error
-        return original()
+        after.append(len(fake_adb.requests))
+        return seen
 
     monkeypatch.setattr(device, "foreground", failing_read)
     with pytest.raises(AdbError) as info:
         device.launch(SHOP)
     assert info.value.details["reason"] == "launch_interrupted"
-    assert calls == [1]
+    assert len(after) == 1
+    assert len(fake_adb.requests) == after[0]  # no request after the failure
+
+
+def test_a_launch_with_a_given_activity_on_a_stopped_server_says_what_happened(
+    fake_adb,
+):
+    # The start is this launch's first request: a server that is down is
+    # reported as for any first request, not as a stop in the middle.
+    from uiprobe.errors import AdbServerUnavailableError
+
+    FakeAndroid(fake_adb, SERIAL, SCREENS, start="launcher")
+    device = Device(adb_server=fake_adb.address)
+    fake_adb.stop()
+    with pytest.raises(AdbServerUnavailableError) as info:
+        device.launch(SHOP, activity=f"{SHOP}/.Main")
+    assert info.value.details.get("start_skipped") != "mid_launch"
