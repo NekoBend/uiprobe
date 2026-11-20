@@ -48,10 +48,12 @@ foreground and focused window (and for BACK keyboard) as the observation they
 were chosen on, and for a BACK chosen on a screen of the app also a focused
 window owned by the app (a BACK goes to the focused window). The table of
 checks per action is in docs/python.md. After the decision nothing else runs
-before the input. A refused tap's fresh observation goes to `CrawlEngine.next`,
-which releases the unreported tap; a refused BACK or relaunch ends the run with
-``not_sent``, because the engine already counted it. Every observation checks
-the pin too.
+before the input. An action refused as ``device_reconnected`` (by the gate,
+or because the device had to be proven again right before the input) is taken
+back with `CrawlEngine.withdraw` and decided again on a fresh read. Otherwise a
+refused tap's fresh observation goes to `CrawlEngine.next`, which releases the
+unreported tap, and a refused BACK or relaunch ends the run with ``not_sent``,
+because the engine already counted it. Every observation checks the pin too.
 
 How a run ends. The engine's stop reason, ``not_sent``, ``interrupted`` (the ``stop``
 callable returned True between two actions, or Ctrl+C arrived while it

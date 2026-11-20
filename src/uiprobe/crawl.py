@@ -500,6 +500,10 @@ class Transition:
     screen the action was decided on (None for the launch). ``fingerprint`` and
     ``point`` are set for taps. ``to_screen_id`` is the first screen seen
     afterwards, or None when that dump failed (``dump_failed`` is then True).
+    When the next action is withdrawn (`CrawlEngine.withdraw`), the screen
+    seen before it does not count: ``to_screen_id`` is the screen of the
+    fresh observation that `next` gets after the withdrawal (a driver's own
+    record may keep the earlier one).
     """
 
     action_id: int
