@@ -640,6 +640,25 @@ def test_a_rotation_too_long_to_read_on_a_skipped_row_is_rotation():
     assert read_window_at(text, (160, 320)) == ROTATION
 
 
+@pytest.mark.usefixtures("_digit_limit")
+def test_an_orientation_too_long_to_read_on_a_skipped_row_is_not_read():
+    # A list of every display: the orientation of display 1's row is not
+    # read for display 0 (as before, when int() never saw it), unlike its
+    # transform line, so display 0's window is found as without it.
+    base = _combined("0")
+    text = _edit(
+        base,
+        "u0 StatusBar}",
+        ", ownerUid=",
+        f", displayOrientation={'0' * (LIMIT + 1)}, ownerUid=",
+    )
+    assert text != base
+    found = read_window_at(text, (160, 320))
+    assert isinstance(found, InputWindow)
+    assert found.title == SETTINGS
+    assert found == read_window_at(base, (160, 320))
+
+
 def test_without_a_viewport_line_every_form_is_rotation():
     for text in (API24, API30, API31, API32, API33, API34, API35, API36):
         assert isinstance(read_window_at(text, (160, 320)), InputWindow)
