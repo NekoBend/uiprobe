@@ -11,7 +11,9 @@ them.
 
 from __future__ import annotations
 
+import copy
 import json
+import pickle
 import re
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -19,6 +21,7 @@ from typing import TYPE_CHECKING
 import pytest
 
 from uiprobe import cli
+from uiprobe.crawl_driver import CrawlResult
 from uiprobe.device import Device
 from uiprobe.inputwindows import (
     RULES,
@@ -35,6 +38,7 @@ from uiprobe.windowdiag import (
     KNOWN_VALUES,
     LINE_KINDS,
     NOTICE,
+    NOTICE_SHOWN,
     SCHEMA,
     TRANSFORM_WORDS,
     diagnose_tap_window,
@@ -385,17 +389,26 @@ def test_the_json_report_of_a_readable_list():
         "schema": SCHEMA,
         "notice": NOTICE,
         "command": "dumpsys input",
+        "show_flag_names": False,
         "readable": True,
         "reason": None,
         "rule": None,
         "part": None,
         "line": None,
-        "lists": [{"position": 1, "display": None, "rows": 7, "failed": False}],
+        "lists": [
+            {
+                "position": 1,
+                "per_display": False,
+                "display": None,
+                "display_digits": 0,
+                "rows": 7,
+                "failed": False,
+            }
+        ],
         "lines": [],
         "forms": [
             {
                 "position": 1,
-                "display": None,
                 "rows": 7,
                 "quoted": True,
                 "transform": False,
@@ -535,7 +548,8 @@ def _allowed_words() -> set[str]:
         for item in vocabulary:
             words.update(_pieces(item))
     template = (
-        f"{NOTICE} uiprobe diagnose tap-window it read dumpsys input result"
+        f"{NOTICE} {NOTICE_SHOWN} per_display display_digits show_flag_names"
+        " output uiprobe diagnose tap-window it read dumpsys input result"
         " readable not rule at line of the dispatcher input_reader part lists"
         " list display every window rows check refused here none found lines"
         " number kind indent length tokens forms quoted bare name transform no"
@@ -551,7 +565,7 @@ def _pieces(text: str) -> list[str]:
 
 
 ALLOWED = _allowed_words()
-TAG = re.compile(r"<[a-z_]+>|<[a-z_]+|\d+>|row|-?\d+")
+TAG = re.compile(r"<[a-z_]+>|<[a-z_]+|\d+\+?>|row|-?\d+\+?")
 
 
 def _check_text(text: str, *, shown_flags: frozenset[str] = frozenset()) -> None:
@@ -611,11 +625,17 @@ def test_show_flag_names_shows_only_upper_case_words():
     assert "|<unknown_flag:10>|<unknown_flag:19>|<unknown_flag:15>" in plain
     assert "|<unknown_flag:R5CT123ABC>|<unknown_flag:19>|<unknown_flag:15>" in shown
     assert shown.count("R5CT123ABC") == 1  # only the flag, not the title or keys
-    long_name = "A" * 49
-    for name, visible in (("A" * 48, True), (long_name, False), ("Ab", False)):
-        kind, tokens = shape_line(f"  flags={name}", show_flag_names=True)
-        assert kind == "fields"
-        assert (name in tokens[0]) is visible, tokens
+    row = _row(API36, 3)
+    for name, visible in (("A" * 48, True), ("A" * 49, False), ("Ab", False)):
+        line = row.replace("| SLIPPERY", f"| SLIPPERY | {name}")
+        kind, tokens = shape_line(line, show_flag_names=True)
+        assert kind == "window_row"
+        assert (f"|<unknown_flag:{name}>" in " ".join(tokens)) is visible, tokens
+    # Outside a window line's own flags fields no name is shown.
+    assert shape_line("  flags=SECRETWORD", show_flag_names=True) == (
+        "fields",
+        ["flags=<unknown_flag:10>"],
+    )
 
 
 # --- the command line ---
@@ -659,6 +679,7 @@ def test_the_command_prints_json(phone, capsys):
     assert code == 0
     payload = json.loads(out)
     assert payload["schema"] == "uiprobe.diagnose_tap_window/1"
+    assert (payload["notice"], payload["show_flag_names"]) == (NOTICE_SHOWN, True)
     assert (payload["readable"], payload["reason"], payload["rule"]) == (
         False,
         "line_format",
@@ -727,4 +748,256 @@ def test_the_check_is_required(capsys):
     code, out, err = invoke(capsys, "diagnose")
     assert code == 2
     assert out == ""
-    assert "CHECK" in err or "check" in err
+    assert "uiprobe [-s SERIAL] diagnose tap-window" in err
+
+
+# --- round 2 ---
+
+
+def test_show_flag_names_has_its_own_notice():
+    text, _ = HOSTILE["unknown_flag"]
+    shown = diagnose_tap_window(text, show_flag_names=True)
+    plain = diagnose_tap_window(text)
+    first = shown.to_text().split("\n")[0]
+    assert (
+        first == f"uiprobe diagnose tap-window: {NOTICE_SHOWN}; it read: dumpsys input"
+    )
+    assert f"{NOTICE};" not in shown.to_text()  # the plain promise is not made
+    assert "verbatim" in NOTICE_SHOWN
+    assert shown.to_dict()["notice"] == NOTICE_SHOWN
+    assert plain.to_dict()["notice"] == NOTICE
+    assert plain.to_text().startswith(f"uiprobe diagnose tap-window: {NOTICE};")
+
+
+# Window lines whose name or applicationInfo.name holds a flags field: the
+# reader refuses each one (a read field twice), and no mode shows the word.
+FAKED_FLAGS = {
+    "bare_title_input_config": _edit_row(
+        API36, 3, "name=a8ea035 Taskbar,", "name=Bad, inputConfig=SECRETWORD,"
+    ),
+    "quoted_title_flags": _edit_row(
+        API24,
+        0,
+        "name='Window{b24c1c0 u0 StatusBar}'",
+        "name='T, flags=SECRETWORD, z=1'",
+    ),
+    "app_name_input_config": _edit_row(
+        API36,
+        3,
+        "applicationInfo.name=,",
+        "applicationInfo.name=X, inputConfig=SECRETWORD | NOT_VISIBLE,",
+    ),
+    "app_name_flags": _edit_row(
+        _capture("api31"),
+        0,
+        "applicationInfo.name=,",
+        "applicationInfo.name=X, flags=SECRETWORD,",
+    ),
+}
+
+
+@pytest.mark.parametrize("case", sorted(FAKED_FLAGS))
+def test_flag_names_show_only_from_the_real_flags_fields(case):
+    text = FAKED_FLAGS[case]
+    found = diagnose_tap_window(text, show_flag_names=True)
+    assert found.rule == "field_twice"
+    assert any(shape.failing for shape in found.lines)
+    assert "SECRETWORD" not in found.to_text()
+    assert "SECRETWORD" not in json.dumps(found.to_dict())
+
+
+def test_a_name_that_fakes_a_whole_window_line_can_show_its_word():
+    # Why the mode has its own notice: a name holding a line break can fake a
+    # whole window line, which the reader cuts like any other.
+    fake = "      3: name=x, id=1, displayId=0, inputConfig=SECRETWORD"
+    text = _sub(API36, _row(API36, 3), _row(API36, 3) + "\n" + fake)
+    found = diagnose_tap_window(text, show_flag_names=True)
+    assert "<unknown_flag:SECRETWORD>" in found.to_text()
+    assert found.to_text().startswith(f"uiprobe diagnose tap-window: {NOTICE_SHOWN}")
+    assert "SECRETWORD" not in diagnose_tap_window(text).to_text()
+
+
+def test_a_name_is_only_its_length_even_when_it_is_a_known_word():
+    text = _edit_row(CASES["unknown_flag"][0], 3, "name=a8ea035 Taskbar,", "name=OK,")
+    found = diagnose_tap_window(text)
+    failing = next(shape for shape in found.lines if shape.failing)
+    assert failing.tokens[:2] == ("row:3", "name=<text:2>")
+    assert "OK" not in failing.tokens
+    for word in ("true", "false", "None", "BLOCK_UNTRUSTED"):
+        line = _row(API36, 3).replace("name=a8ea035 Taskbar,", f"name={word},")
+        assert shape_line(line)[1][1] == f"name=<text:{len(word)}>"
+    line = _row(API36, 3).replace(
+        "applicationInfo.name=,", "applicationInfo.name=true, x=OK,"
+    )
+    assert "applicationInfo.name=<text:10>" in shape_line(line)[1]
+
+
+def test_a_quoted_name_is_cut_where_the_reader_cuts_it():
+    text = _edit_row(
+        API24, 0, "name='Window{b24c1c0 u0 StatusBar}'", "name='My title, vendor=demo'"
+    )
+    found = diagnose_tap_window(text)
+    assert found.readable  # the reader takes the whole quoted name
+    tokens = shape_line(_row(text, 0))[1]
+    assert tokens[1] == "name=<quoted:21>"
+    assert not any(token.startswith("<unknown_key") for token in tokens)
+    assert {(form.quoted, form.rows) for form in found.forms} == {(True, 7)}
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["diagnose", "-s", "DEMO_SERIAL", "tap-window", "--json"],
+        ["diagnose", "tap-window", "DEMO_SERIAL", "--json"],
+        ["diagnose", "tap-window", "--bogus=DEMO_SERIAL"],
+        ["diagnose", "DEMO_SERIAL"],
+        [
+            "-s",
+            "DEMO_SERIAL",
+            "diagnose",
+            "tap-window",
+            "--adb-server",
+            "x DEMO_SERIAL",
+        ],
+    ],
+)
+def test_diagnose_arguments_are_never_echoed(capsys, argv):
+    code, out, err = invoke(capsys, *argv)
+    assert code == 2
+    assert "DEMO_SERIAL" not in out + err
+    shown = json.loads(out)["error"]["message"] if "--json" in argv else err
+    assert "uiprobe [-s SERIAL] diagnose tap-window [-s SERIAL]" in shown
+
+
+def test_long_row_numbers_are_not_converted():
+    # 4301 digits: past what int() converts; the reader says row_shape.
+    long_row = _edit_row(API36, 3, "3: name=", "1" * 4301 + ": name=")
+    found = diagnose_tap_window(long_row)
+    assert (found.reason, found.rule) == ("line_format", "row_shape")
+    failing = next(shape for shape in found.lines if shape.failing)
+    assert failing.tokens[0] == "row:<num:4301>"
+    assert shape_line("  000000000001234: name=x") == (
+        "window_row",
+        ["row:<num:15>", "name=<text:1>"],
+    )
+    assert shape_line("  0012: name=x")[1][0] == "row:12"
+
+
+def test_the_command_reports_a_long_row_number(fake_adb, capsys):
+    fake_adb.add_device(SERIAL)
+    text = _edit_row(API36, 3, "3: name=", "1" * 4301 + ": name=")
+    fake_adb.on_shell(SERIAL, "dumpsys input", text.encode())
+    argv = ["diagnose", "tap-window", "--json", "--adb-server", fake_adb.address]
+    code, out, _ = invoke(capsys, *argv)
+    assert code == 0
+    assert json.loads(out)["rule"] == "row_shape"
+
+
+@pytest.mark.parametrize(("written", "digits"), [("0000001234", 10), ("12345", 5)])
+def test_a_long_display_number_is_hidden_not_every_display(written, digits):
+    text = _sub(API36, "  Display: 0\n", f"  Display: {written}\n")
+    found = diagnose_tap_window(text)
+    assert found.rule == "display_missing"
+    [item] = found.lists
+    assert (item.per_display, item.display, item.display_digits) == (True, None, digits)
+    assert f"list 1 (display <num:{digits}>): 13 window rows" in found.to_text()
+    assert "every display" not in found.to_text()
+    legacy = diagnose_tap_window(API24).lists[0]
+    assert (legacy.per_display, legacy.display) == (False, None)
+
+
+def test_an_unknown_line_after_a_row_is_named_not_a_transform():
+    text = _sub(API24, _row(API24, 0), _row(API24, 0) + "\n      vendor note")
+    lines = text.split("\n")
+    header = lines.index("Input Dispatcher State:")
+    found = diagnose_tap_window(text)
+    assert (found.reason, found.rule) == ("line_format", "unknown_line")
+    assert found.line == lines.index("      vendor note") - header + 1
+    assert read_window_at(text, (1, 1)) == "line_format"  # still refused
+    # A real transform mismatch is still named as one.
+    assert diagnose_tap_window(CASES["transform_mismatch"][0]).rule == (
+        "transform_mismatch"
+    )
+
+
+@pytest.mark.parametrize("protocol", range(pickle.HIGHEST_PROTOCOL + 1))
+def test_unreadable_survives_copy_and_pickle(protocol):
+    found = parse_input_windows("")
+    assert isinstance(found, Unreadable)
+    for made in (
+        copy.copy(found),
+        copy.deepcopy(found),
+        pickle.loads(pickle.dumps(found, protocol=protocol)),  # noqa: S301
+    ):
+        assert isinstance(made, Unreadable)
+        assert (made, made.rule) == ("no_list", "no_dispatcher")
+
+
+def test_counts_lengths_and_indents_are_capped():
+    long_end = _sub(
+        API36, "  mMaximumObscuringOpacityForTouch: 0.800000", "  " + "x" * 12345
+    )
+    found = diagnose_tap_window(long_end)
+    assert found.rule == "list_end"
+    failing = next(shape for shape in found.lines if shape.failing)
+    assert failing.tokens == ("<text:9999+>",)
+    assert f"> {found.line} other 2 9999+: <text:9999+>" in found.to_text()
+    payload = json.loads(json.dumps(found.to_dict()))
+    line = next(item for item in payload["lines"] if item["failing"])
+    assert (line["length"], line["indent"]) == (9999, 2)
+    deep = " " * 20000 + "x"
+    assert shape_line(deep) == ("other", ["<text:1>"])
+    _check_text(found.to_text())
+
+
+def test_the_refusing_list_is_marked_even_at_a_line_outside_it():
+    found = diagnose_tap_window(CASES["list_end"][0])
+    assert found.rule == "list_end"
+    assert [item.failed for item in found.lists] == [True]
+
+
+def test_without_one_dispatcher_lines_count_from_the_top():
+    text, _ = CASES["dispatcher_twice"]
+    found = diagnose_tap_window(text)
+    lines = text.split("\n")
+    second = len(lines) - 1 - lines[::-1].index("Input Dispatcher State:")
+    assert (found.part, found.line) == ("output", second + 1)
+    assert "of the output part" in found.to_text()
+
+
+def test_a_flag_of_another_field_is_marked_unknown():
+    text = _edit_row(API36, 3, "| SLIPPERY", "| SLIPPERY | ALT_FOCUSABLE_IM")
+    found = diagnose_tap_window(text, show_flag_names=True)
+    assert found.rule == "unknown_flag"
+    failing = next(shape for shape in found.lines if shape.failing)
+    assert (
+        "inputConfig=NOT_FOCUSABLE|TRUSTED_OVERLAY|SLIPPERY"
+        "|<unknown_flag:ALT_FOCUSABLE_IM>"
+    ) in failing.tokens
+    assert "|<unknown_flag:16>" in " ".join(
+        next(s for s in diagnose_tap_window(text).lines if s.failing).tokens
+    )
+
+
+@pytest.mark.parametrize(
+    ("unknown", "rule", "named"),
+    [
+        ("rotation", None, False),
+        ("rotation", "rotated", True),
+        ("line_format", None, False),
+    ],
+)
+def test_the_crawl_hint_names_diagnose_only_with_a_reader_rule(unknown, rule, named):
+    result = CrawlResult(
+        Path("run"),
+        "not_sent",
+        1,
+        1,
+        not_sent=(("cover_unknown", 1),),
+        repin=True,
+        cover_unknown=unknown,
+        cover_rule=rule,
+    )
+    [hint] = cli._press_hints(result)
+    assert ("diagnose tap-window" in hint) is named
+    assert (f"rule {rule}" in hint) is named

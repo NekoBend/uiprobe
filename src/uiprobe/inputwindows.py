@@ -126,7 +126,7 @@ return); `explain_input_windows` adds the line it refused at, for
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Final, Self
 
 __all__ = [
@@ -438,16 +438,22 @@ class Unreadable(str):
         made.rule = rule
         return made
 
+    def __reduce__(self) -> tuple[type[Unreadable], tuple[str, str]]:
+        """Copy and pickle with the rule (``str``'s own would drop it)."""
+        return type(self), (str(self), self.rule)
+
 
 @dataclass(frozen=True, slots=True)
 class _Refusal:
     """Why a list is not read: the public reason, the rule that refused (one
-    of `RULES`) and the index, in the text's lines, of the line it refused at
-    (None when no one line is to blame)."""
+    of `RULES`), the index, in the text's lines, of the line it refused at
+    (None when no one line is to blame) and the index of the ``Windows``
+    line of the list it refused in (None when it was no one list)."""
 
     reason: str
     rule: str
     line: int | None = None
+    head: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -456,6 +462,7 @@ class _List:
 
     lines: list[str]
     at: list[int]  # the index of each line in the whole text
+    head: int  # the index of the list's ``Windows:`` line
     display: int | None  # the list's ``Display:`` section; None: one list
     rotated: _Refusal | None  # why the section's display transform turns
     problem: _Refusal | None = None  # why the list cannot be read as a whole
@@ -475,9 +482,11 @@ class _Group:
 
 @dataclass(frozen=True, slots=True)
 class _Span:
-    """Where a list is: the index of its end line (None: the end of the
-    text) and whether that line is one a list is known to end at."""
+    """Where a list is: the index of its ``Windows:`` line, of its lines,
+    of its end line (None: the end of the text) and whether that line is one
+    a list is known to end at."""
 
+    head: int
     taken: list[int]
     end: int | None
     ended: bool
@@ -541,9 +550,9 @@ def _listed(lines: list[str], head: int) -> _Span:
         if not line.strip():
             continue
         if _indent(line) <= level and not line.lstrip().startswith("transform ("):
-            return _Span(taken, i, _LIST_END.match(line.strip()) is not None)
+            return _Span(head, taken, i, _LIST_END.match(line.strip()) is not None)
         taken.append(i)
-    return _Span(taken, None, ended=False)
+    return _Span(head, taken, None, ended=False)
 
 
 def _dispatcher_start(lines: list[str]) -> int | _Refusal:
@@ -609,12 +618,13 @@ def _one_list(lines: list[str], lists: list[int]) -> _List | _Refusal:
     """The one list of every display (API 24 to 28), whose ``Windows:`` line
     must be the only one at `lists` and say nothing more."""
     if len(lists) != 1:
-        return _Refusal(NO_LIST, "lists_twice", lists[1])
+        return _Refusal(NO_LIST, "lists_twice", lists[1], lists[1])
     if lines[lists[0]].strip() != "Windows:":
-        return _Refusal(NO_LIST, "list_heading", lists[0])
+        return _Refusal(NO_LIST, "list_heading", lists[0], lists[0])
     span = _listed(lines, lists[0])
     taken = span.taken
-    return _List([lines[i] for i in taken], taken, None, None, _stray(lines, [span]))
+    problem = _stray(lines, [span])
+    return _List([lines[i] for i in taken], taken, lists[0], None, None, problem)
 
 
 def _twice(lines: list[str], sections: list[int]) -> _Refusal | None:
@@ -641,11 +651,11 @@ def _display_turn(
     transforms = [i for i in above if lines[i].strip().startswith("transform ")]
     sized = any(lines[i].strip().startswith("logicalSize=") for i in above)
     if (sized or configured) and not (sized and transforms):
-        return _Refusal(ROTATION, "display_transform_missing", head)
+        return _Refusal(ROTATION, "display_transform_missing", head, head)
     if len(transforms) > 1:
-        return _Refusal(ROTATION, "display_transform", transforms[1])
+        return _Refusal(ROTATION, "display_transform", transforms[1], head)
     turned = [i for i in transforms if lines[i].strip() != _IDENTITY]
-    return _Refusal(ROTATION, "display_transform", turned[0]) if turned else None
+    return _Refusal(ROTATION, "display_transform", turned[0], head) if turned else None
 
 
 def _sections(
@@ -661,10 +671,10 @@ def _sections(
         heads = _heads(lines, section, inner)
         listed = [i for i in heads if lines[i].strip() == "Windows:"]
         if len(heads) > 1:
-            return _Refusal(NO_LIST, "lists_twice", heads[1])
+            return _Refusal(NO_LIST, "lists_twice", heads[1], heads[1])
         if head == ours and not listed:
             if heads:
-                return _Refusal(NO_LIST, "list_heading", heads[0])
+                return _Refusal(NO_LIST, "list_heading", heads[0], heads[0])
             return _Refusal(NO_LIST, "no_list", head)
         if not listed:
             continue
@@ -675,7 +685,7 @@ def _sections(
         configured = any(", inputConfig=" in _meta(lines[i].strip()) for i in taken)
         rotated = _display_turn(lines, above, listed[0], configured=configured)
         shown = _display_of(lines[head])
-        read = _List([lines[i] for i in taken], taken, shown, rotated)
+        read = _List([lines[i] for i in taken], taken, listed[0], shown, rotated)
         if head == ours:
             mine = read
         else:
@@ -686,6 +696,7 @@ def _sections(
     return _List(
         mine.lines,
         mine.at,
+        mine.head,
         display_id,
         rotated=mine.rotated,
         problem=problem,
@@ -706,7 +717,7 @@ def _stray(lines: list[str], spans: list[_Span]) -> _Refusal | None:
         if not span.ended:
             last = span.taken[-1] if span.taken else None
             end = span.end if span.end is not None else last
-            return _Refusal(LINE_FORMAT, "list_end", end)
+            return _Refusal(LINE_FORMAT, "list_end", end, span.head)
     taken = {i for span in spans for i in span.taken}
     stray = [
         i for i, line in enumerate(lines) if i not in taken and "ownerUid=" in line
@@ -946,18 +957,30 @@ def _parse(lines: list[str], display_id: int) -> tuple[InputWindow, ...] | _Refu
         return found
     if found.problem is not None:
         return found.problem
+    reading = found
     try:
         for other in found.others:  # read as well: a name could have made them
+            reading = other
             read = _read(other, display_id if other.display is None else other.display)
             if isinstance(read, _Refusal) and read.reason in {
                 LINE_FORMAT,
                 REGION_FORMAT,
             }:
-                return read
-        return _read(found, display_id)
+                return _in(read, other)
+        reading = found
+        return _in(_read(found, display_id), found)
     except _TooLongError as error:
         # Such a number could be anything, 0 or display 0 included.
-        return _Refusal(ROTATION, "number_too_long", error.line)
+        return _Refusal(ROTATION, "number_too_long", error.line, reading.head)
+
+
+def _in(
+    read: tuple[InputWindow, ...] | _Refusal, found: _List
+) -> tuple[InputWindow, ...] | _Refusal:
+    """`read` with the list `found` named as where a refusal was made."""
+    if isinstance(read, _Refusal) and read.head is None:
+        return replace(read, head=found.head)
+    return read
 
 
 def parse_input_windows(
@@ -1004,7 +1027,9 @@ def _form(line: str) -> tuple[bool, tuple[str, ...]]:
 def _whole(groups: list[_Group], found: _List) -> _Refusal | None:
     """Why the rows of a list do not read as one list: a row of API 24 to 28
     in a list per display, rows that differ in form, or rows that differ in
-    having transform lines (all or none)."""
+    having lines after them (all or none): named after the first such lines
+    that are no transform with its rows (`_turned`), else
+    ``transform_mismatch``."""
     if found.display is not None:
         # A list per display (API 29 on) has no row of API 24 to 28 (scale=).
         legacy = [g for g in groups if ", scale=" in _meta(g.line)]
@@ -1017,10 +1042,16 @@ def _whole(groups: list[_Group], found: _List) -> _Refusal | None:
     for group in groups:
         if _form(group.line) != form:
             return _Refusal(LINE_FORMAT, "form_mismatch", group.at)
+    odd = [g for g in groups if bool(g.rest) != bool(first.rest)]
+    if not odd:
+        return None
+    # Some rows have lines after them and some do not. When such lines are
+    # not a transform with its rows, name that line (also refused below).
     for group in groups:
-        if bool(group.rest) != bool(first.rest):
-            return _Refusal(LINE_FORMAT, "transform_mismatch", group.at)
-    return None
+        turned = _turned(group)
+        if isinstance(turned, _Refusal):
+            return turned
+    return _Refusal(LINE_FORMAT, "transform_mismatch", odd[0].at)
 
 
 def _read(found: _List, display_id: int) -> tuple[InputWindow, ...] | _Refusal:
@@ -1132,12 +1163,14 @@ class ListSpan:
     finds them (see `explain_input_windows`).
 
     ``display`` is the number of its ``Display:`` section, None for the one
-    list of every display (API 24 to 28); ``head`` the index of its
-    ``Windows:`` line in the text's lines, ``lines`` the indices of its lines
-    and ``rows`` how many of them are window lines.
+    list of every display (API 24 to 28), and ``digits`` how many digits
+    that number is written with (0 for the one list); ``head`` the index of
+    its ``Windows:`` line in the text's lines, ``lines`` the indices of its
+    lines and ``rows`` how many of them are window lines.
     """
 
     display: int | None
+    digits: int
     head: int
     lines: tuple[int, ...]
     rows: int
@@ -1154,7 +1187,8 @@ class Verdict:
     the check that refused; ``line`` the index, in ``text.split("\\n")``, of
     the line it refused at, None when no one line is to blame; ``start``
     the index of the dispatcher's header line, None when there is not
-    exactly one; ``lists`` the window lists found.
+    exactly one; ``lists`` the window lists found; ``list_head`` the
+    ``head`` of the list it refused in, None when it was no one list.
     """
 
     reason: str | None
@@ -1162,6 +1196,7 @@ class Verdict:
     line: int | None
     start: int | None
     lists: tuple[ListSpan, ...]
+    list_head: int | None = None
 
 
 def _spans(lines: list[str], start: int) -> tuple[ListSpan, ...]:
@@ -1170,15 +1205,18 @@ def _spans(lines: list[str], start: int) -> tuple[ListSpan, ...]:
     found, level = _under(lines, start)
     spans: list[ListSpan] = []
     for i in (i for i in found if _indent(lines[i]) == level):
-        if _DISPLAY.match(lines[i].strip()):
+        heading = lines[i].strip()
+        if _DISPLAY.match(heading):
             section, inner = _under(lines, i)
-            heads = [(_display_of(lines[i]), h) for h in _heads(lines, section, inner)]
+            shown = _display_of(heading)
+            digits = len(heading.removeprefix("Display: ").lstrip("-"))
+            heads = [(shown, digits, h) for h in _heads(lines, section, inner)]
         else:
-            heads = [(None, h) for h in _heads(lines, [i], level)]
-        for display, head in heads:
+            heads = [(None, 0, h) for h in _heads(lines, [i], level)]
+        for display, digits, head in heads:
             taken = _listed(lines, head).taken
             rows = sum(1 for t in taken if _INDEX.match(lines[t].strip()))
-            spans.append(ListSpan(display, head, tuple(taken), rows))
+            spans.append(ListSpan(display, digits, head, tuple(taken), rows))
     return tuple(spans)
 
 
@@ -1195,7 +1233,7 @@ def explain_input_windows(text: str, display_id: int = 0) -> Verdict:
     lists = () if first is None else _spans(lines, first)
     read = _checked(lines, display_id)
     if isinstance(read, _Refusal):
-        return Verdict(read.reason, read.rule, read.line, first, lists)
+        return Verdict(read.reason, read.rule, read.line, first, lists, read.head)
     return Verdict(None, None, None, first, lists)
 
 

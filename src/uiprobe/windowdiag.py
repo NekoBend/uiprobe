@@ -15,13 +15,22 @@ one of:
   value words and flag names the reader knows (`KNOWN_KEYS`,
   `KNOWN_LABELS`, `KNOWN_VALUES`, `KNOWN_FLAGS`, `TRANSFORM_WORDS`,
   `KNOWN_LINES`);
-* an integer (line numbers, indents, lengths, counts, small row and display
-  numbers), or a tag built from a constant and an integer
-  (``<text:12>``, ``<unknown_key:7>``).
+* a number: a line number, or a count, length or indent of at most four
+  digits (`CAP`; more is shown as ``9999+`` in text and as 9999 in JSON
+  numbers), or a row or display number of at most four digits; or a tag
+  built from a constant and such a number (``<text:12>``, ``<num:7>``).
 
-The one exception is opt-in: with ``show_flag_names`` an unknown name in a
-flags field (``flags=``, ``inputConfig=``, ``inputFeatures=``) is shown when
-it is an upper-case word (`SHOWABLE_FLAG`), as ``<unknown_flag:NAME>``.
+A window's name and ``applicationInfo.name`` are text an app sets: they are
+cut where the reader cuts them and shown only as their length, never as a
+known word. Text an app sets that spans lines can still look like other
+lines of ``dumpsys input``; then the known words in it are shown as such.
+
+The one exception is opt-in: with ``show_flag_names`` an unknown name in the
+``flags=``, ``inputConfig=`` or ``inputFeatures=`` field of a window line,
+as the reader delimits it (after the name), is shown when it is an
+upper-case word (`SHOWABLE_FLAG`), as ``<unknown_flag:NAME>``. A window name
+that spans lines can fake a whole window line, so such a name can still be
+any upper-case device text; the report then says so (`NOTICE_SHOWN`).
 """
 
 from __future__ import annotations
@@ -33,15 +42,17 @@ from typing import Final
 from uiprobe.inputwindows import (
     _FLAG_NAMES,
     _INPUT_CONFIG_NAMES,
+    _LINE,
     RULES,
-    ListSpan,
     Verdict,
     explain_input_windows,
 )
 
 __all__ = [
+    "CAP",
     "COMMAND",
     "NOTICE",
+    "NOTICE_SHOWN",
     "SCHEMA",
     "Form",
     "LineShape",
@@ -57,16 +68,25 @@ NOTICE: Final = (
     "this output contains no device serial, app or window names, coordinates,"
     " accounts or network values"
 )
+NOTICE_SHOWN: Final = (
+    "this output contains no device serial, app or window names, coordinates,"
+    " accounts or network values, except that --show-flag-names prints"
+    " unknown upper-case flag names verbatim from the device: a window name"
+    " can fake them, so they can be any upper-case device text, such as a serial"
+)
 DISPATCHER: Final = "dispatcher"
 INPUT_READER: Final = "input_reader"
+OUTPUT: Final = "output"  # the whole output, when there is no one dispatcher
 # How many lines before and after the failing one are shown.
 _CONTEXT: Final = 2
 # The most lines an outline (when no one line failed) and a forms summary show.
 _OUTLINE_LINES: Final = 40
 _MAX_FORMS: Final = 20
-# Row and display numbers are shown up to this many digits; longer ones are
-# not numbers a dispatcher prints and are shown as <num>.
-_SMALL: Final = 9999
+# The largest count, length or indent shown, and the most digits a row or
+# display number is shown with; longer ones are not numbers a dispatcher
+# prints.
+CAP: Final = 9999
+_SMALL_DIGITS: Final = 4
 
 LINE_KINDS: Final = (
     "window_row",
@@ -191,9 +211,30 @@ KNOWN_VALUES: Final = frozenset(
         "true",
     }
 )
-# The fields whose value is a list of flag names (``A | B``).
-FLAG_KEYS: Final = frozenset({"flags", "inputConfig", "inputFeatures"})
-KNOWN_FLAGS: Final = _FLAG_NAMES | _INPUT_CONFIG_NAMES
+# The names of ``inputFeatures=`` (API 31 and 32 print them as names); the
+# reader does not read the field.
+INPUT_FEATURE_NAMES: Final = frozenset(
+    {
+        "DISABLE_TOUCH_PAD_GESTURES",
+        "DISABLE_USER_ACTIVITY",
+        "DROP_INPUT",
+        "DROP_INPUT_IF_OBSCURED",
+        "NO_INPUT_CHANNEL",
+    }
+)
+# The fields whose value is a list of flag names (``A | B``), each with the
+# names known in that field, so a name of one field in another is unknown.
+FLAG_VOCABULARIES: Final = {
+    "flags": _FLAG_NAMES,
+    "inputConfig": _INPUT_CONFIG_NAMES,
+    "inputFeatures": INPUT_FEATURE_NAMES,
+}
+KNOWN_FLAGS: Final = _FLAG_NAMES | _INPUT_CONFIG_NAMES | INPUT_FEATURE_NAMES
+# Fields whose value is text an app sets (or a window's title): always shown
+# as its length, never as a known word.
+TEXT_KEYS: Final = frozenset(
+    {"name", "applicationInfo.name", "windowName", "channelName"}
+)
 # The words of a ``transform (ROT_<n>) (<kind>)`` line.
 TRANSFORM_WORDS: Final = frozenset(
     {
@@ -212,6 +253,8 @@ TRANSFORM_WORDS: Final = frozenset(
 SHOWABLE_FLAG: Final = re.compile(r"[A-Z][A-Z0-9_]{0,47}")
 
 _ROW_HEAD = re.compile(r"(\d+): ")
+_ROW_META = re.compile(r", (?:id|displayId)=")
+_APP_NAME_END: Final = ", applicationInfo.token="
 _LABEL = re.compile(r"([A-Za-z][A-Za-z0-9 ()_-]*?):(?= |$)")
 _KEY = re.compile(r"(?:^|, )([A-Za-z][A-Za-z0-9_.]*)=")
 _TRANSFORM_LINE = re.compile(r"transform \(([^()]*)\) \(([^()]*)\)(.*)")
@@ -220,11 +263,12 @@ _MATRIX = re.compile(rf"{_DECIMAL}(?: +{_DECIMAL})*")
 _DIGITS = re.compile(r"\d+")
 _NUMBER_LIST = re.compile(r"\[(-?\d+(?:\.\d+)?(?:, ?-?\d+(?:\.\d+)?)*)\]")
 _WORD = re.compile(r"[A-Z][A-Z0-9_]*")
+_HEX = re.compile(r"0x[0-9a-fA-F]+")
 # (pattern, tag) for values of one simple type, tried in order.
 _SIMPLE: Final = (
     (re.compile(r"-?\d+"), "<num>"),
     (re.compile(_DECIMAL), "<dec>"),
-    (re.compile(r"0x[0-9a-fA-F]+"), "<hex>"),
+    (_HEX, "<hex>"),
     (re.compile(r"\[-?\d+,-?\d+\]\[-?\d+,-?\d+\]"), "<rect>"),
     (re.compile(r"\d+x\d+"), "<size>"),
     (re.compile(r"-?\d+(?:\.\d+)?ms"), "<ms>"),
@@ -247,13 +291,17 @@ class LineShape:
 
 @dataclass(frozen=True, slots=True)
 class ListRows:
-    """One window list: its place among the lists (from 1), its display
-    (None: the one list of every display, or a number of more than four
-    digits), how many window rows it has and whether the check refused in
+    """One window list: its place among the lists (from 1), whether it is the
+    list of one ``Display:`` section (``per_display``; False for the one list
+    of every display, API 24 to 28), that display's number (None when it has
+    more than four digits, or for the one list), how many digits the number
+    has, how many window rows the list has and whether the check refused in
     it."""
 
     position: int
+    per_display: bool
     display: int | None
+    display_digits: int
     rows: int
     failed: bool
 
@@ -265,7 +313,6 @@ class Form:
     whether transform lines follow the row, and how many rows."""
 
     position: int
-    display: int | None
     quoted: bool
     fields: tuple[str, ...]
     transform: bool
@@ -278,9 +325,12 @@ class TapWindowDiagnosis:
     it).
 
     ``reason`` and ``rule`` are None when the list reads; ``part`` is
-    `DISPATCHER` or `INPUT_READER` (the Viewport lines above it) and
-    ``line`` the line number in it (from 1, the dispatcher's header being
-    line 1) where the check refused, both None when no one line is to blame.
+    `DISPATCHER`, `INPUT_READER` (the Viewport lines above it) or `OUTPUT`
+    (the whole output, when there is not exactly one dispatcher header) and
+    ``line`` the line number in it (from 1; the dispatcher's header is line 1
+    of `DISPATCHER`) where the check refused, both None when no one line is
+    to blame. ``show_flag_names`` says whether unknown flag names may be in
+    it (and so which notice it carries).
     """
 
     reason: str | None
@@ -290,17 +340,25 @@ class TapWindowDiagnosis:
     lists: tuple[ListRows, ...]
     lines: tuple[LineShape, ...]
     forms: tuple[Form, ...]
+    show_flag_names: bool = False
 
     @property
     def readable(self) -> bool:
         """Whether the check would read the list (and go on to the point)."""
         return self.reason is None
 
+    @property
+    def notice(self) -> str:
+        """What the report holds: `NOTICE`, or `NOTICE_SHOWN` with
+        ``show_flag_names``."""
+        return NOTICE_SHOWN if self.show_flag_names else NOTICE
+
     def to_dict(self) -> dict[str, object]:
         """Return the ``uiprobe.diagnose_tap_window/1`` JSON object."""
         return {
             "schema": SCHEMA,
-            "notice": NOTICE,
+            "notice": self.notice,
+            "show_flag_names": self.show_flag_names,
             "command": COMMAND,
             "readable": self.readable,
             "reason": self.reason,
@@ -310,8 +368,10 @@ class TapWindowDiagnosis:
             "lists": [
                 {
                     "position": item.position,
+                    "per_display": item.per_display,
                     "display": item.display,
-                    "rows": item.rows,
+                    "display_digits": _capped(item.display_digits),
+                    "rows": _capped(item.rows),
                     "failed": item.failed,
                 }
                 for item in self.lists
@@ -321,8 +381,8 @@ class TapWindowDiagnosis:
                     "number": shape.number,
                     "failing": shape.failing,
                     "kind": shape.kind,
-                    "indent": shape.indent,
-                    "length": shape.length,
+                    "indent": _capped(shape.indent),
+                    "length": _capped(shape.length),
                     "tokens": list(shape.tokens),
                 }
                 for shape in self.lines
@@ -330,8 +390,7 @@ class TapWindowDiagnosis:
             "forms": [
                 {
                     "position": form.position,
-                    "display": form.display,
-                    "rows": form.rows,
+                    "rows": _capped(form.rows),
                     "quoted": form.quoted,
                     "transform": form.transform,
                     "fields": list(form.fields),
@@ -342,7 +401,7 @@ class TapWindowDiagnosis:
 
     def to_text(self) -> str:
         """Return the report as lines of text, the notice first."""
-        lines = [f"uiprobe diagnose tap-window: {NOTICE}; it read: {COMMAND}"]
+        lines = [f"uiprobe diagnose tap-window: {self.notice}; it read: {COMMAND}"]
         if self.reason is None:
             lines.append("result: readable")
         else:
@@ -368,56 +427,79 @@ class TapWindowDiagnosis:
         return "\n".join(lines)
 
 
-def _display_text(display: int | None) -> str:
-    return "every display" if display is None else f"display {display}"
+def _count(number: int) -> str:
+    """A count, length or indent as text: ``9999+`` past `CAP`."""
+    return str(number) if number <= CAP else f"{CAP}+"
+
+
+def _capped(number: int) -> int:
+    """A count, length or indent as a JSON number: at most `CAP`."""
+    return min(number, CAP)
 
 
 def _list_text(item: ListRows) -> str:
+    if not item.per_display:
+        display = "every display"
+    elif item.display is None:
+        display = f"display <num:{_count(item.display_digits)}>"
+    else:
+        display = f"display {item.display}"
     failed = ", the check refused here" if item.failed else ""
-    return (
-        f"list {item.position} ({_display_text(item.display)}):"
-        f" {item.rows} window rows{failed}"
-    )
+    return f"list {item.position} ({display}): {_count(item.rows)} window rows{failed}"
 
 
 def _shape_text(shape: LineShape) -> str:
     mark = ">" if shape.failing else " "
     tokens = " ".join(shape.tokens)
-    return f"{mark} {shape.number} {shape.kind} {shape.indent} {shape.length}: {tokens}"
+    head = f"{mark} {shape.number} {shape.kind} {_count(shape.indent)}"
+    return f"{head} {_count(shape.length)}: {tokens}"
 
 
 def _form_text(form: Form) -> str:
     name = "quoted name" if form.quoted else "bare name"
     transform = "transform lines" if form.transform else "no transform lines"
     return (
-        f"list {form.position} ({_display_text(form.display)}): {form.rows} rows,"
-        f" {name}, {transform}; fields: {' '.join(form.fields)}"
+        f"list {form.position}: {_count(form.rows)} rows, {name}, {transform};"
+        f" fields: {' '.join(form.fields)}"
     )
 
 
-def _small(number: int) -> str:
-    """A row or display number: as it is up to four digits, else <num>."""
-    return str(number) if -_SMALL <= number <= _SMALL else "<num>"
-
-
 def _tag(name: str, number: int) -> str:
-    """A tag of a constant `name` and an integer, such as ``<text:12>``."""
-    return f"<{name}:{number}>"
+    """A tag of a constant `name` and a count, such as ``<text:12>``."""
+    return f"<{name}:{_count(number)}>"
 
 
-def _flag(name: str, *, show: bool) -> str:
-    if name in KNOWN_FLAGS:
+def _row_number(digits: str) -> str:
+    """The token of a row number, from its digits (counted before any
+    conversion): the number up to four digits, else ``row:<num:DIGITS>``."""
+    if len(digits) <= _SMALL_DIGITS:
+        return f"row:{int(digits)}"
+    return "row:" + _tag("num", len(digits))
+
+
+def _flag(name: str, known: frozenset[str], *, show: bool) -> str:
+    if name in known:
         return name
     if show and SHOWABLE_FLAG.fullmatch(name):
         return f"<unknown_flag:{name}>"
     return _tag("unknown_flag", len(name))
 
 
-def _flags(value: str, *, show: bool) -> str:
-    """A ``A | B`` value as flag tokens joined by ``|``."""
+def _flags(key: str, value: str, *, show: bool) -> str:
+    """A ``A | B`` value of the flags field `key` as flag tokens joined by
+    ``|``, each name checked against the names of that field."""
+    known = FLAG_VOCABULARIES[key]
     return "|".join(
-        _flag(name, show=show) if name else "<blank>" for name in value.split(" | ")
+        _flag(name, known, show=show) if name else "<blank>"
+        for name in value.split(" | ")
     )
+
+
+def _text(value: str) -> str:
+    """Text an app sets: its length, quoted or not."""
+    if len(value) >= 2 and value[0] == value[-1] == "'":
+        return _tag("quoted", len(value) - 2)
+    return _tag("text", len(value))
 
 
 def _typed(value: str) -> str | None:
@@ -434,31 +516,45 @@ def _typed(value: str) -> str | None:
 
 
 def _value(key: str | None, value: str, *, show: bool) -> str:
-    """The token of a value: a known word, a type tag, flag tokens for a
-    flags field, or ``<text:LEN>``."""
+    """The token of a value: a length for text an app sets, else a known
+    word, a type tag, flag tokens for a flags field, or ``<text:LEN>``.
+    `show` lets unknown flag names show (only for a window line's own flags
+    fields)."""
+    if key in TEXT_KEYS:
+        return "<blank>" if value == "" else _text(value)
+    if key is not None and key in FLAG_VOCABULARIES:
+        if _HEX.fullmatch(value):
+            return "<hex>"
+        return _flags(key, value, show=show)
     typed = _typed(value)
     if typed is not None:
         return typed
-    if key in FLAG_KEYS:
-        return _flags(value, show=show)
     if len(value) >= 2 and value[0] == value[-1] == "'":
         return _tag("quoted", len(value) - 2)
     return _tag("word" if _WORD.fullmatch(value) else "text", len(value))
 
 
-def _fields(text: str, *, show: bool) -> list[str]:
+def _fields(text: str, *, show: bool = False) -> list[str]:
     """The tokens of ``key=value, key=value`` text: each key (known, or
     ``<unknown_key:LEN>``) with its value's token; text before the first key
-    as one value."""
+    as one value. ``applicationInfo.name`` runs to ``, applicationInfo.token=``
+    when that follows, as the reader cuts it."""
     keys = list(_KEY.finditer(text))
     if not keys:
-        return [_value(None, text, show=show)] if text else []
+        return [_value(None, text, show=False)] if text else []
     tokens: list[str] = []
     if keys[0].start() > 0:
-        tokens.append(_value(None, text[: keys[0].start()], show=show))
+        tokens.append(_value(None, text[: keys[0].start()], show=False))
+    skip_to = -1
     for i, key in enumerate(keys):
-        end = keys[i + 1].start() if i + 1 < len(keys) else len(text)
+        if key.start() < skip_to:
+            continue
         name = key[1]
+        end = keys[i + 1].start() if i + 1 < len(keys) else len(text)
+        if name == "applicationInfo.name":
+            token = text.find(_APP_NAME_END, key.end())
+            if token >= 0:
+                end = skip_to = token
         shown = name if name in KNOWN_KEYS else _tag("unknown_key", len(name))
         tokens.append(f"{shown}={_value(name, text[key.end() : end], show=show)}")
     return tokens
@@ -494,6 +590,31 @@ def _simple_line(text: str) -> tuple[str, list[str]] | None:
     return None
 
 
+def _window_row(text: str, digits: str, rest: str, *, show: bool) -> list[str]:
+    """The tokens of a window line (stripped `text`, its row number's
+    `digits`, the `rest` after them). The name is cut where the reader cuts
+    it (`uiprobe.inputwindows`) and shown as its length; only the fields
+    after it are read, and only there may unknown flag names show."""
+    number = _row_number(digits)
+    match = _LINE.match(text)
+    if match is not None:
+        quoted = match["quoted"] is not None
+        name = match["quoted"] if quoted else match["bare"]
+        tag = _tag("quoted" if quoted else "text", len(name))
+        start = match.start("id") if match["id"] is not None else match.start("fields")
+        return [number, f"name={tag}", *_fields(text[start:], show=show)]
+    # A line the reader cannot cut: the name is taken to run to the first
+    # ", id=" or ", displayId=" (or to the end), and no flag name is shown.
+    if not rest.startswith("name="):
+        return [number, *_fields(rest)]
+    body = rest.removeprefix("name=")
+    cut = _ROW_META.search(body)
+    if cut is None:
+        return [number, f"name={_tag('text', len(body))}"]
+    meta = body[cut.start() + len(", ") :]
+    return [number, f"name={_tag('text', cut.start())}", *_fields(meta)]
+
+
 def shape_line(line: str, *, show_flag_names: bool = False) -> tuple[str, list[str]]:
     """Return the kind (one of `LINE_KINDS`) and tokens of one line of
     ``dumpsys input``; no text of the line is in them (see the module)."""
@@ -504,14 +625,13 @@ def shape_line(line: str, *, show_flag_names: bool = False) -> tuple[str, list[s
     row = _ROW_HEAD.match(text)
     if row is not None:
         rest = text[row.end() :]
-        tokens = [f"row:{_small(int(row[1]))}", *_fields(rest, show=show_flag_names)]
-        return "window_row", tokens
+        return "window_row", _window_row(text, row[1], rest, show=show_flag_names)
     label = _LABEL.match(text)
     if label is not None and "=" not in label[1]:
         rest = text[label.end() :].strip()
-        tokens = [_label(label[1]), *_fields(rest, show=show_flag_names)]
+        tokens = [_label(label[1]), *_fields(rest)]
         return ("fields" if "=" in rest else "heading"), tokens
-    return ("fields" if "=" in text else "other"), _fields(text, show=show_flag_names)
+    return ("fields" if "=" in text else "other"), _fields(text)
 
 
 def _indent(line: str) -> int:
@@ -519,16 +639,19 @@ def _indent(line: str) -> int:
 
 
 def _shape(
-    lines: list[str], index: int, number: int, *, failing: bool, show: bool
+    lines: list[str], index: int, start: int | None, *, failing: bool, show: bool
 ) -> LineShape:
     line = lines[index]
     kind, tokens = shape_line(line, show_flag_names=show)
+    number = _part(index, start)[1]
     return LineShape(number, kind, _indent(line), len(line), tuple(tokens), failing)
 
 
 def _part(index: int, start: int | None) -> tuple[str, int]:
     """The part a line index is in and its number there."""
-    if start is not None and index >= start:
+    if start is None:
+        return OUTPUT, index + 1
+    if index >= start:
         return DISPATCHER, index - start + 1
     return INPUT_READER, index + 1
 
@@ -539,14 +662,16 @@ def _around(lines: list[str], verdict: Verdict, *, show: bool) -> tuple[LineShap
     if failing is None:
         return ()
     start = verdict.start
-    if start is not None and failing >= start:
+    if start is None:
+        low, high = 0, len(lines)
+    elif failing >= start:
         low, high = start, len(lines)
     else:
-        low, high = 0, len(lines) if start is None else start
+        low, high = 0, start
     first = max(low, failing - _CONTEXT)
     last = min(high, failing + _CONTEXT + 1)
     return tuple(
-        _shape(lines, i, _part(i, start)[1], failing=i == failing, show=show)
+        _shape(lines, i, start, failing=i == failing, show=show)
         for i in range(first, last)
     )
 
@@ -578,25 +703,21 @@ def _outline(
         level = min((_indent(lines[i]) for i in under), default=0)
         chosen = [start, *(i for i in under if _indent(lines[i]) == level)]
     return tuple(
-        _shape(lines, i, _part(i, start)[1], failing=False, show=show)
+        _shape(lines, i, start, failing=False, show=show)
         for i in chosen[:_OUTLINE_LINES]
     )
 
 
-def _shown_display(display: int | None) -> int | None:
-    return display if display is not None and -_SMALL <= display <= _SMALL else None
-
-
 def _lists(verdict: Verdict) -> tuple[ListRows, ...]:
-    def failed(span: ListSpan) -> bool:
-        return verdict.line is not None and (
-            verdict.line == span.head or verdict.line in span.lines
+    rows: list[ListRows] = []
+    for position, span in enumerate(verdict.lists, start=1):
+        per_display = span.display is not None
+        shown = span.display if span.digits <= _SMALL_DIGITS else None
+        failed = verdict.list_head is not None and verdict.list_head == span.head
+        rows.append(
+            ListRows(position, per_display, shown, span.digits, span.rows, failed)
         )
-
-    return tuple(
-        ListRows(i, _shown_display(span.display), span.rows, failed(span))
-        for i, span in enumerate(verdict.lists, start=1)
-    )
+    return tuple(rows)
 
 
 def _row_form(line: str, after: str | None) -> tuple[bool, tuple[str, ...], bool]:
@@ -625,9 +746,8 @@ def _forms(lines: list[str], verdict: Verdict) -> tuple[Form, ...]:
                 after = lines[span.lines[i + 1]] if i + 1 < len(span.lines) else None
                 form = _row_form(lines[at], after)
                 counts[form] = counts.get(form, 0) + 1
-        display = _shown_display(span.display)
         forms.extend(
-            Form(position, display, quoted, fields, transform, rows)
+            Form(position, quoted, fields, transform, rows)
             for (quoted, fields, transform), rows in counts.items()
         )
     return tuple(forms[:_MAX_FORMS])
@@ -639,8 +759,8 @@ def diagnose_tap_window(
     """Diagnose the tap window check on the whole text of ``dumpsys input``.
 
     The result holds no text of `text` (see the module); with
-    `show_flag_names` an unknown flag name that is an upper-case word is
-    shown.
+    `show_flag_names` an unknown flag name that is an upper-case word, in a
+    flags field of a window line, is shown.
     """
     lines = [line.removesuffix("\r") for line in text.split("\n")]
     verdict = explain_input_windows(text, display_id)
@@ -662,4 +782,5 @@ def diagnose_tap_window(
         _lists(verdict),
         shapes,
         _forms(lines, verdict),
+        show_flag_names=show_flag_names,
     )

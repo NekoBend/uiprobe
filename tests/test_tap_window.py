@@ -147,11 +147,37 @@ def test_the_record_names_the_rule_that_refused_the_list(
 
     monkeypatch.setattr(android, "_dumpsys_input", owner_twice)
     out = tmp_path / "run"
-    run(device, clock, out, limits=Limits(actions=3))
+    result = run(device, clock, out, limits=Limits(actions=3))
     assert _taps(android) == []
     refused = _covered(out)
     assert refused
     assert refused[0]["details"] == {"unreadable": "line_format", "rule": "field_twice"}
+    assert (result.cover_unknown, result.cover_rule) == ("line_format", "field_twice")
+
+
+def test_an_unknown_line_after_a_row_is_recorded_as_such(
+    tmp_path: Path, device, android, clock, monkeypatch
+):
+    # A line after the top row that is no transform line: on every form the
+    # record names that line's rule, not transform_mismatch (API 24 rows have
+    # no transform lines, so the rows differ in having lines after them).
+    original = android._dumpsys_input
+
+    def note_after_top_row() -> str:
+        lines = original().split("\n")
+        top = next(i for i, line in enumerate(lines) if line.strip().startswith("0: "))
+        lines.insert(top + 1, " " * 8 + "vendor note")
+        return "\n".join(lines)
+
+    monkeypatch.setattr(android, "_dumpsys_input", note_after_top_row)
+    out = tmp_path / "run"
+    run(device, clock, out, limits=Limits(actions=3))
+    refused = _covered(out)
+    assert refused
+    assert refused[0]["details"] == {
+        "unreadable": "line_format",
+        "rule": "unknown_line",
+    }
 
 
 def test_an_app_uid_that_cannot_be_read_refuses_every_tap(
@@ -557,13 +583,15 @@ def test_a_rotated_dump_refuses_the_tap_even_with_viewport_0(
     # hierarchy is turned once: the tap is refused before the window read.
     android.dump_rotation = 1
     out = tmp_path / "run"
-    run(device, clock, out, limits=Limits(actions=3))
+    result = run(device, clock, out, limits=Limits(actions=3))
     assert _taps(android) == []
     refused = _covered(out)
     assert refused
     assert {r["reason"] for r in refused} == {"cover_unknown"}
     assert refused[0]["details"] == {"unreadable": "rotation"}
     assert not [c for _, _, c in fake_adb.commands if c == "dumpsys input"]
+    # The window list was not read, so there is no reader rule to diagnose.
+    assert (result.cover_unknown, result.cover_rule) == ("rotation", None)
 
 
 def test_a_focused_window_whose_owner_uid_is_of_another_user_refuses(

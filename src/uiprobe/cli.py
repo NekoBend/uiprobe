@@ -59,7 +59,6 @@ from uiprobe.errors import (
     UiprobeError,
 )
 from uiprobe.guards import REASONS, Policy
-from uiprobe.inputwindows import RULES
 from uiprobe.model import MAX_CANDIDATES, _describe
 from uiprobe.pngfile import (
     PngFileError,
@@ -1536,16 +1535,16 @@ def _press_hints(result: CrawlResult) -> list[str]:
     refused = dict(result.not_sent)
     if refused.get("cover_unknown"):
         unknown = result.cover_unknown or "unknown"
-        # The reasons the window list itself gives (the keys of RULES).
+        # Only a refusal the window list reader made has a rule to diagnose.
         diagnose = (
-            "; uiprobe diagnose tap-window tells which rule refused it without"
-            " printing device values"
-            if unknown in RULES
+            f", rule {result.cover_rule}; uiprobe diagnose tap-window shows where"
+            " without printing device values"
+            if result.cover_rule is not None
             else ""
         )
         hints.append(
-            f"the window at a tap point could not be read on this device ({unknown})"
-            f"{diagnose}; --no-tap-window-check turns the check off, but then an"
+            f"the window at a tap point could not be read on this device ({unknown}"
+            f"{diagnose}); --no-tap-window-check turns the check off, but then an"
             " overlay of another app over the point can receive a tap"
         )
     if not result.repin:
@@ -1717,8 +1716,8 @@ def _cmd_diagnose(args: argparse.Namespace) -> int:
         found = device.diagnose_tap_window(show_flag_names=args.show_flag_names)
     except UiprobeError as exc:
         return _diagnose_failure((exc.code, exc.exit_code), as_json=args.json)
-    except (TypeError, ValueError):
-        return _diagnose_failure(USAGE_ERROR, as_json=args.json)
+    except (TypeError, ValueError):  # a malformed serial or server address
+        return _fail(USAGE_ERROR, _DIAGNOSE_USAGE_MESSAGE, as_json=args.json)
     except Exception as exc:  # noqa: BLE001 - its message could hold device text
         details: dict[str, object] = {"type": type(exc).__name__}
         return _diagnose_failure(INTERNAL_ERROR, as_json=args.json, details=details)
@@ -1832,6 +1831,15 @@ _TYPE_USAGE_MESSAGE = (
     " text to type); give TEXT as one quoted argument, after -- when it starts"
     " with -; for how to use it see uiprobe type --help"
 )
+# argparse quotes the words it cannot place, and with diagnose those can be a
+# serial or other text that names the device.
+_DIAGNOSE_USAGE_MESSAGE = (
+    "the arguments of diagnose could not be read (they are not shown, as they"
+    " can name the device); use: uiprobe [-s SERIAL] diagnose tap-window"
+    " [-s SERIAL] [--adb PATH] [--adb-server tcp:HOST:PORT] [--no-start-server]"
+    " [--json] [--show-flag-names]; device options go after tap-window or"
+    " before diagnose"
+)
 # Options before the command that take a value: their value is not a command.
 _TOP_OPTIONS_WITH_VALUE = frozenset({"-s", "--serial", "--adb", "--adb-server"})
 _DEVICE_OPTIONS = ("--serial", "--adb", "--adb-server")
@@ -1890,21 +1898,23 @@ def _parse(argv: Sequence[str]) -> argparse.Namespace:
     When the command is ``type``, a device option after it is refused before
     anything else, and an argparse error is replaced by a message that shows
     none of the arguments, raised outside the handler so that it chains to
-    nothing that holds them.
+    nothing that holds them. The same replacement is made for ``diagnose``,
+    whose arguments can name the device.
     """
     where = _command_index(argv)
     is_type = where is not None and argv[where] == "type"
+    is_diagnose = where is not None and argv[where] == "diagnose"
     if is_type and where is not None and _device_option_after_type(argv[where + 1 :]):
         raise _UsageError(_DEVICE_OPTION_AFTER_TYPE)
     try:
         args = _build_parser().parse_args(argv)
     except _UsageError:
-        if not is_type:
+        if not (is_type or is_diagnose):
             raise
     else:
         _single_serial(args)
         return args
-    raise _UsageError(_TYPE_USAGE_MESSAGE)
+    raise _UsageError(_DIAGNOSE_USAGE_MESSAGE if is_diagnose else _TYPE_USAGE_MESSAGE)
 
 
 def _guided_failure(exc: _GuidedUsageError, *, as_json: bool) -> int:

@@ -309,16 +309,16 @@ lines (number, kind, indent, length: tokens):
   27 transform 6 35: transform ROT_0 TRANSLATE
   28 matrix_row 10 33: <dec> <dec> <dec>
 forms:
-  list 1 (display 0): 13 rows, bare name, transform lines; fields: id displayId inputConfig alpha frame globalScale applicationInfo.name applicationInfo.token touchableRegion ownerPid ownerUid dispatchingTimeout token touchOcclusionMode
+  list 1: 13 rows, bare name, transform lines; fields: id displayId inputConfig alpha frame globalScale applicationInfo.name applicationInfo.token touchableRegion ownerPid ownerUid dispatchingTimeout token touchOcclusionMode
 ```
 
 On a list the check reads, the result line says `result: readable`, and no lines are shown.
 
 It sends exactly one command to the device, `dumpsys input` (besides the adb server's device listing that every command uses to choose the device), and runs the same checks on it as the crawl does right before a tap, up to the point: the window list of display 0, then the display's orientation in the `Viewport` lines. It presses nothing. The report has:
 
-- `result`: `readable`, or the reason the crawl would record (`no_list`, `line_format`, `region_format` or `rotation`), the rule that refused (see the table below) and the line it refused at, counted from 1 in its part: in the `dispatcher` part the line `Input Dispatcher State:` is line 1; in the `input_reader` part (the `Viewport` lines above it) the first line of the output is line 1. Some rules have no one line to blame; then no line is named.
-- `lists`: each window list the dispatcher prints directly under its header or under a `Display:` section, with its display number (`every display` for the one list of API 24 to 28; a number of more than four digits is not shown) and how many window rows it has, and which list the check refused in.
-- `lines`: the failing line (marked `>`) and up to two lines before and after it in the same part. When no one line is to blame, the dispatcher's top-level lines instead (with no dispatcher header, the lines at indent 0; for `viewport_missing`, the lines above the dispatcher that mention a viewport), at most 40. Each line is shown as its number, kind (`window_row`, `transform`, `matrix_row`, `heading`, `fields`, `other` or `blank`), indent, length and tokens.
+- `result`: `readable`, or the reason the crawl would record (`no_list`, `line_format`, `region_format` or `rotation`), the rule that refused (see the table below) and the line it refused at, counted from 1 in its part: in the `dispatcher` part the line `Input Dispatcher State:` is line 1; in the `input_reader` part (the `Viewport` lines above it) the first line of the output is line 1; when there is not exactly one `Input Dispatcher State:` line, the part is `output`, the whole output from its first line. Some rules have no one line to blame; then no line is named. Line numbers are not capped.
+- `lists`: each window list the dispatcher prints directly under its header or under a `Display:` section, with its display number (`every display` for the one list of API 24 to 28; a number written with more than four digits is not shown, only how many digits it has, as `display <num:10>`) and how many window rows it has, and which list the check refused in (also when the line it refused at is outside the list, such as the line a list ended at).
+- `lines`: the failing line (marked `>`) and up to two lines before and after it in the same part. When no one line is to blame, the dispatcher's top-level lines instead (with no dispatcher header, the lines at indent 0; for `viewport_missing`, the lines above the dispatcher that mention a viewport), at most 40. Each line is shown as its number, kind (`window_row`, `transform`, `matrix_row`, `heading`, `fields`, `other` or `blank`), indent, length and tokens. Counts, lengths and indents stop at 9999: past that the text shows `9999+` (also in tags, `<text:9999+>`) and JSON shows 9999.
 - `forms`: for each list, the rows that look alike, counted: whether the window name is quoted, whether transform lines follow the row, and the field names after the name (an unknown one as `<unknown_key>`), at most 20 forms.
 
 Tokens are built only from words uiprobe knows, value types and numbers; no text of the device's output is copied:
@@ -328,13 +328,14 @@ Tokens are built only from words uiprobe knows, value types and numbers; no text
 | `key=VALUE` | A field. `key` is a field name uiprobe knows (such as `ownerUid`, `inputConfig`, `uniqueId`); any other is `<unknown_key:LENGTH>`. |
 | `<num>`, `<dec>`, `<hex>`, `<rect>`, `<size>`, `<ms>`, `<list:COUNT>`, `<blank>` | A value of that type: an integer, a decimal, `0x...`, `[l,t][r,b]`, `WxH`, a duration, `[a, b, ...]` with COUNT numbers, or nothing. |
 | `true`, `false`, `<empty>`, `<null>`, `<none>`, `None`, `OK`, `BLOCK_UNTRUSTED`, `USE_OPACITY`, `ALLOW` | Values shown as they are. |
-| `A\|B\|...` | The value of `flags=`, `inputConfig=` or `inputFeatures=`: each flag name uiprobe knows as it is, any other as `<unknown_flag:LENGTH>`. |
-| `<quoted:LENGTH>`, `<word:LENGTH>`, `<text:LENGTH>` | Any other value: quoted text, an upper-case word, other text. Window names are always one of these. |
-| `row:N` | The row number of a window line (`row:<num>` past four digits). |
+| `A\|B\|...` | The value of `flags=`, `inputConfig=` or `inputFeatures=`: each name uiprobe knows for that field as it is, any other as `<unknown_flag:LENGTH>` (so `ALT_FOCUSABLE_IM`, a `flags=` name, is unknown in `inputConfig=`). |
+| `<quoted:LENGTH>`, `<word:LENGTH>`, `<text:LENGTH>` | Any other value: quoted text, an upper-case word, other text. |
+| `name=<quoted:LENGTH>`, `name=<text:LENGTH>` | A window's name, quoted or bare. It is cut where the reader cuts it (up to `, id=` or `, displayId=`, the quotes included in the cut for a quoted name) and shown only as its length, also when it is a word uiprobe knows (a window named `OK`); only the fields after it are read. `applicationInfo.name` is shown the same way, up to `, applicationInfo.token=`. |
+| `row:N` | The row number of a window line; a number written with more than four digits is `row:<num:DIGITS>` (it is never converted). |
 | `LABEL:` | The label of a `Label: ...` line uiprobe knows (such as `Display:`, `Windows:`, `Viewport INTERNAL:`); any other is `<label:LENGTH>:`. |
 | `transform ROT_0 IDENTITY` | A transform line: its rotation and kind words (an unknown word as `<word:LENGTH>`). A `matrix_row` is three `<dec>`. |
 
-With `--show-flag-names`, an unknown flag name is shown as `<unknown_flag:NAME>` when it is an upper-case word: `A` to `Z` first, then `A` to `Z`, `0` to `9` and `_`, at most 48 characters in all; any other stays `<unknown_flag:LENGTH>`. This is the one place where text of the device's output can be printed. Flag names come from Android's code, but a window name that fakes a field (an app chooses its window names) could put an upper-case word of its choice there, so look at what is shown before you share it.
+With `--show-flag-names`, an unknown flag name is shown as `<unknown_flag:NAME>` when it is an upper-case word: `A` to `Z` first, then `A` to `Z`, `0` to `9` and `_`, at most 48 characters in all; any other stays `<unknown_flag:LENGTH>`. Names are shown only from the `flags=`, `inputConfig=` and `inputFeatures=` fields of a window line as the reader cuts it, after the name: never from a window name, `applicationInfo.name`, a heading or any other line, even when that text reads `inputConfig=WORD`. This is the one place where text of the device's output is printed. Flag names come from Android's code, but a window name that holds a line break can fake a whole window line, with flags of its choice, and the reader cuts that line like any other. So in this mode the first line of the report (and `notice` in JSON) says instead that the report includes unknown upper-case flag names verbatim from the device, which can be any upper-case device text such as a serial; look at what is shown before you share it.
 
 The rules, under the reason the crawl records with them (`details.rule` next to `details.unreadable` in the run folder, see [The run folder](run-folder.md#json-formats)):
 
@@ -354,7 +355,7 @@ The rules, under the reason the crawl records with them (`details.rule` next to 
 | `line_format` | `orphan_line` | A line in the list comes before its first window row. |
 | `line_format` | `legacy_row_in_display_list` | A list per display holds a row of API 24 to 28 (`scale=`). |
 | `line_format` | `form_mismatch` | A row differs from the list's first row in form: a quoted or bare name, or which known fields it prints. |
-| `line_format` | `transform_mismatch` | Some rows are followed by transform lines and others are not. |
+| `line_format` | `transform_mismatch` | Some rows are followed by transform lines and others are not (when the lines after a row are not a transform line with its rows, `unknown_line` or `transform_shape` names them instead). |
 | `line_format` | `unknown_line` | A line after a window row that is neither a transform line nor one of its matrix rows. |
 | `line_format` | `transform_shape` | A transform line with matrix rows missing, malformed or too many (none for `IDENTITY`, three otherwise). |
 | `line_format` | `row_shape` | A window line whose start is of no known form (`N: name=..., [id=N, ]displayId=N`). |
@@ -384,7 +385,7 @@ The rules, under the reason the crawl records with them (`details.rule` next to 
 
 A rule refuses only what the crawl's check refuses: running the diagnosis changes nothing in how the crawl reads the list.
 
-Device options go after `tap-window` (`uiprobe diagnose tap-window -s SERIAL --json`) or before `diagnose`. With `--json` the report is a `uiprobe.diagnose_tap_window/1` object (see [Output formats](output.md)). An error (no adb server, no such device, a failed read) is reported by its error code and exit code alone, with a fixed message: the error's own message is not printed, because it can name the device. The exit code is 0 whenever the report was printed, readable or not.
+Device options go after `tap-window` (`uiprobe diagnose tap-window -s SERIAL --json`) or before `diagnose`. When the arguments cannot be read (an option in the wrong place, an extra word, a malformed serial or server address), the usage error (exit 2) shows none of them, only the valid form: `uiprobe [-s SERIAL] diagnose tap-window [-s SERIAL] [--adb PATH] [--adb-server tcp:HOST:PORT] [--no-start-server] [--json] [--show-flag-names]`. With `--json` the report is a `uiprobe.diagnose_tap_window/1` object (see [Output formats](output.md)). An error (no adb server, no such device, a failed read) is reported by its error code and exit code alone, with a fixed message: the error's own message is not printed, because it can name the device. The exit code is 0 whenever the report was printed, readable or not.
 
 From Python, `Device.diagnose_tap_window(show_flag_names=False)` returns the report (`to_text()`, `to_dict()`), and `uiprobe.windowdiag.diagnose_tap_window(text)` makes it from a saved `dumpsys input`.
 
