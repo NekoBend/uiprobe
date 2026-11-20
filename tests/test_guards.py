@@ -3871,12 +3871,55 @@ def test_an_outer_clickable_cannot_hide_an_inner_buttons_refusal(
     found = run(elements, policy=policy)
     inner = deny_of(found, "e3")
     assert inner is not None
+    # The longer exception would span two texts, so it never excuses: the
+    # clickable container's own joined text holds the hit when there is one.
+    holder = "e2" if outer_clickable else "e3"
     assert (inner.word, inner.field, inner.element_id) == (
         "\u524a\u9664",
         "joined",
-        "e3",
+        holder,
     )
     if outer_clickable:
         outer = deny_of(found, "e2")
         assert outer is not None
-        assert (outer.field, outer.element_id) == ("joined", "e3")
+        assert (outer.field, outer.element_id) == ("joined", "e2")
+
+
+# -- a hit is excused only inside one field of the joined text -------------------------
+
+
+@pytest.mark.parametrize(
+    ("parts", "exceptions"),
+    [
+        # The tight reading would excuse "recorders", a word over two texts.
+        (("recorder", "s"), ("recorder", "recorders")),
+        # NFKC composes r + U+0301 in the tight reading and the hit is gone
+        # there; the spaced reading still has it, and the mark joins.
+        (("recorder", "\u0301"), ("recorder",)),
+        # A combining mark at the end of the previous text joins.
+        (("\u0332", "recorder"), ("recorder",)),
+        (("x\u0332", "\u200b", "recorder"), ("recorder",)),
+    ],
+)
+def test_a_hit_is_not_excused_across_a_field_boundary(parts, exceptions) -> None:
+    policy = Policy(deny_exceptions=exceptions)
+    detail = deny_of(run(_fragment_row(parts), policy=policy), "e2")
+    assert detail is not None
+    assert (detail.word, detail.field) == ("order", "joined")
+
+
+@pytest.mark.parametrize(
+    "parts",
+    [
+        ("\u200b", "Settings"),
+        ("\u200b", "recorder"),
+        ("\u200b",),
+        ("", "\u200b", "Help"),
+    ],
+)
+def test_texts_with_only_invisible_characters_are_passed_over(parts) -> None:
+    # A first text without a visible character used to raise TypeError.
+    policy = Policy(deny_exceptions=("recorder",))
+    elements = _fragment_row(parts)
+    found = run(elements, policy=policy, root_bounds=(0, 0, 320, 640))
+    assert "deny_word" not in reasons(found, "e2")

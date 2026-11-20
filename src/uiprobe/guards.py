@@ -41,14 +41,21 @@ exception word does not have (or has differently) in it. A run counts only when
 it is a whole word also with the invisible characters around it removed
 (``x`` + U+200B + U+0332 + ``recorder`` is one word) and in the original text
 before NFKC (U+013F + ``recorder`` is one word; NFKC would split it). In a
-joined text, the space put between two parts is no word boundary where the
-visible characters on both sides of it are letters, digits or combining marks,
-in any script (`_tight_join`): an exception word must stand alone in that
-reading too, so ``recorder`` + ``s``, 削除済み + にする and ``Turn on`` +
-``automatically`` (with ``automatically`` listed) are refused like the single
-labels. So an exception word excuses a hit only as one whole word within the
-text of one element, or in a joined text where the boundaries around it are
-real separators (a space, punctuation or the end of the text).
+joined text (`_Joined`), every hit is traced back to the field values it
+comes from, and it may be excused only when the hit and the exception word
+around it both lie inside the value of one field, the exception word stands
+whole there as above, and in the joined text both of its ends are real
+boundaries: a space or punctuation inside the value, or the value's end where
+the neighbouring value's adjacent visible character is not a letter, digit or
+combining mark (values with only invisible characters are passed over; a mark
+at the start of the next value joins). A hit that spans two values, an
+exception word that would span two values, and a hit that cannot be traced
+are never excused. Hits are found both with the values joined by one space
+and with the values joined directly where letters, digits or marks touch
+(`_tight_separators`); a hit found in either reading counts unless excused.
+So ``recorder`` + ``s``, ``recorder`` + U+0301, U+0332 + ``recorder``,
+削除済み + にする and ``Turn on`` + ``automatically`` (with the exception word
+listed) are refused, and the Wi-Fi summary of a Settings row stays excused.
 When the trace is not certain (NFKC of the characters one by one differs from
 NFKC of the field, or a traced form differs from the real one), every
 occurrence counts. Resource ids, the irreversibility phrases and the
@@ -296,7 +303,7 @@ from typing import TYPE_CHECKING, Final, Literal, get_args
 from uiprobe.model import MIN_VISIBLE_PX, Bounds
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable
+    from collections.abc import Iterable, Sequence
 
     from uiprobe.model import Element, Screen
 
@@ -707,9 +714,14 @@ def _is_word_char(char: str) -> bool:
     return char.isalnum() or unicodedata.category(char)[0] == "M"
 
 
-def _tight_join(parts: Iterable[str]) -> str:
-    """Join the parts as the joined text does, but without the space where
-    the parts may continue one word.
+def _visible_end(text: str, *, last: bool) -> str:
+    """Return the first (or last) visible character of `text`, or ``""``."""
+    chars = reversed(text) if last else iter(text)
+    return next((c for c in chars if not _is_invisible(c)), "")
+
+
+def _tight_separators(parts: Sequence[str]) -> list[str]:
+    """Return the separator put before each part in the tight reading.
 
     The space between two parts is uiprobe's, not the app's. Where the last
     visible character before it and the first visible character after it
@@ -717,21 +729,74 @@ def _tight_join(parts: Iterable[str]) -> str:
     are joined directly (``recorder`` + ``s`` reads ``recorders``,
     ``削除済み`` + ``にする`` reads ``削除済みにする``). A part with no visible
     character is joined directly and does not count as either side, so
-    ``削除済み`` + U+200B + ``にする`` reads as one word too. Invisible
-    characters stay where they are; spaces and punctuation inside a part
-    stay real separators.
+    ``削除済み`` + U+200B + ``にする`` reads as one word too, and a first part
+    with no visible character adds no space before the next one.
     """
-    out: list[str] = []
+    separators: list[str] = []
     last = ""
     for part in parts:
-        first = next((c for c in part if not _is_invisible(c)), "")
-        if out and first and not (_is_word_char(last) and _is_word_char(first)):
-            out.append(" ")
-        out.append(part)
-        tail = next((c for c in reversed(part) if not _is_invisible(c)), "")
+        first = _visible_end(part, last=False)
+        if not separators:
+            separators.append("")
+        elif first and last and not (_is_word_char(last) and _is_word_char(first)):
+            separators.append(" ")
+        else:
+            separators.append("")
+        tail = _visible_end(part, last=True)
         if tail:
             last = tail
-    return "".join(out)
+    return separators
+
+
+def _join(parts: Sequence[str], separators: Sequence[str]) -> tuple[str, list[int]]:
+    """Join the parts with the separators; return the text and where each
+    part starts in it."""
+    out: list[str] = []
+    starts: list[int] = []
+    length = 0
+    for separator, part in zip(separators, parts, strict=True):
+        out.append(separator)
+        length += len(separator)
+        starts.append(length)
+        out.append(part)
+        length += len(part)
+    return "".join(out), starts
+
+
+def _alone_in_join(raw: str, start: int, end: int, part: tuple[int, int]) -> bool:
+    """True when ``raw[start:end]``, an exception run inside the value at
+    ``raw[part[0]:part[1]]``, has real boundaries in the values written one
+    after another (`raw`, with no separator added).
+
+    Inside the value, the run already stands alone (`_Excuser`). Where the
+    run reaches the start of the value (past invisible characters and
+    combining marks) or its end (past invisible characters), the nearest
+    visible character of the neighbouring values must not be a letter, a
+    digit or a combining mark; values with only invisible characters are
+    passed over.
+    """
+    first, last = part
+    before = start - 1
+    while before >= first and (
+        _is_invisible(raw[before]) or unicodedata.category(raw[before])[0] == "M"
+    ):
+        before -= 1
+    if before < first:
+        before = first - 1
+        while before >= 0 and _is_invisible(raw[before]):
+            before -= 1
+        if before >= 0 and _is_word_char(raw[before]):
+            return False
+    after = end
+    while after < last and _is_invisible(raw[after]):
+        after += 1
+    if after >= last:
+        after = last
+        while after < len(raw) and _is_invisible(raw[after]):
+            after += 1
+        if after < len(raw) and _is_word_char(raw[after]):
+            return False
+    return True
 
 
 def _is_japanese_letter(char: str) -> bool:
@@ -1095,23 +1160,30 @@ class _Excuser:
     def _compute(self, value: str) -> _Traced | None:
         if not self.keys:
             return None
-        chars: list[str] = []
-        unchanged: list[bool] = []
-        origin: list[int] = []
-        for index, char in enumerate(value):
-            mapped = unicodedata.normalize("NFKC", char)
-            chars.extend(mapped)
-            unchanged.extend([mapped == char] * len(mapped))
-            origin.extend([index] * len(mapped))
-        text = "".join(chars)
-        if text != unicodedata.normalize("NFKC", value):
+        traced = _nfkc_traced(value)
+        if traced is None:
             return None
-        # A run counts only when it is a whole word both after NFKC and in the
-        # original text: NFKC can create a boundary (U+013F becomes "L" and a
-        # middle dot), and invisible characters can hide a longer word. The
-        # characters of a counted run are unchanged by NFKC, so the run is
-        # the same span of the original text.
-        runs = [
+        text, unchanged, origin = traced
+        runs = self._runs(value, text, unchanged, origin)
+        if not runs:
+            return None
+        forms = _traced_forms(text)
+        if forms is None:
+            return None
+        return forms, runs
+
+    def _runs(
+        self, value: str, text: str, unchanged: list[bool], origin: list[int]
+    ) -> list[tuple[int, int, bool]]:
+        """Return the exception runs of `text` (the NFKC of `value`).
+
+        A run counts only when it is a whole word both after NFKC and in the
+        original text: NFKC can create a boundary (U+013F becomes "L" and a
+        middle dot), and invisible characters can hide a longer word. The
+        characters of a counted run are unchanged by NFKC, so the run is the
+        same span of the original text.
+        """
+        return [
             (start, end, text[start:end].casefold() in _BUILTIN_EXCEPTION_KEYS)
             for start, end in _word_runs(text)
             if text[start:end].casefold() in self.keys
@@ -1119,12 +1191,108 @@ class _Excuser:
             and _stands_alone(text, start, end)
             and _stands_alone(value, origin[start], origin[end - 1] + 1)
         ]
-        if not runs:
-            return None
-        forms = _traced_forms(text)
-        if forms is None:
-            return None
-        return forms, runs
+
+    def part_runs(self, value: str) -> list[tuple[int, int, bool]]:
+        """Return the exception runs of one field value as spans of the value
+        itself (before NFKC); none when tracing is not certain."""
+        if not self.keys:
+            return []
+        traced = _nfkc_traced(value)
+        if traced is None:
+            return []
+        text, unchanged, origin = traced
+        return [
+            (origin[start], origin[end - 1] + 1, builtin)
+            for start, end, builtin in self._runs(value, text, unchanged, origin)
+        ]
+
+
+def _nfkc_traced(value: str) -> tuple[str, list[bool], list[int]] | None:
+    """Return the NFKC of `value` with, per character, whether NFKC left its
+    source character unchanged and the index of that source character; None
+    when NFKC of the characters one by one differs from NFKC of the whole."""
+    chars: list[str] = []
+    unchanged: list[bool] = []
+    origin: list[int] = []
+    for index, char in enumerate(value):
+        mapped = unicodedata.normalize("NFKC", char)
+        chars.extend(mapped)
+        unchanged.extend([mapped == char] * len(mapped))
+        origin.extend([index] * len(mapped))
+    text = "".join(chars)
+    if text != unicodedata.normalize("NFKC", value):
+        return None
+    return text, unchanged, origin
+
+
+class _Joined:
+    """The joined text of several field values, matched with exceptions.
+
+    An exception may excuse a hit only when the hit and the exception word
+    around it both lie inside the value of one field, and the exception word
+    is a whole word there (`_Excuser`) with real boundaries in the joined
+    text too (`_alone_in_join`: the neighbouring value's adjacent visible
+    character is not a letter, digit or combining mark). Hits are found in
+    two readings, the values joined by one space and the tight reading
+    (`_tight_separators`), and traced back to the characters of the values;
+    a hit that spans two values, or one that cannot be traced, counts. A
+    hit found in either reading counts unless it is excused there.
+    """
+
+    def __init__(self, parts: Sequence[str], excuser: _Excuser) -> None:
+        raw, raw_starts = _join(parts, [""] * len(parts))
+        spans: list[tuple[int, int, int, bool]] = []
+        for index, part in enumerate(parts):
+            for start, end, builtin in excuser.part_runs(part):
+                offset = raw_starts[index]
+                bounds = (offset, offset + len(part))
+                if _alone_in_join(raw, offset + start, offset + end, bounds):
+                    spans.append((index, start, end, builtin))
+        self.readings: list[
+            tuple[
+                tuple[str, ...],
+                list[tuple[str, list[int]]] | None,
+                list[tuple[int, int, bool]],
+            ]
+        ] = []
+        seen: set[str] = set()
+        for separators in ([" "] * len(parts), _tight_separators(parts)):
+            separators[0] = ""
+            text, starts = _join(parts, separators)
+            if text in seen:
+                continue
+            seen.add(text)
+            runs = [(starts[i] + a, starts[i] + b, own) for i, a, b, own in spans]
+            self.readings.append((_forms(text), _original_forms(text), runs))
+
+    def counts(self, word_forms: tuple[str, ...], *, builtin: bool) -> bool:
+        """Return True when a hit of the word counts in either reading."""
+        for field_forms, traced, runs in self.readings:
+            if not _forms_match(word_forms, field_forms):
+                continue
+            if traced is None:
+                return True
+            usable = [(a, b) for a, b, own in runs if builtin or not own]
+            if not usable:
+                return True
+            for form, sources in traced:
+                for word_form in word_forms:
+                    if word_form and _hit_outside(form, sources, word_form, usable):
+                        return True
+        return False
+
+
+def _original_forms(value: str) -> list[tuple[str, list[int]]] | None:
+    """Return the three forms of `value`, each character with the index of the
+    character of `value` (before NFKC) it comes from; None when not certain."""
+    traced = _nfkc_traced(value)
+    if traced is None:
+        return None
+    text, _, origin = traced
+    forms = _traced_forms(text)
+    if forms is None:
+        return None
+    return [(form, [origin[i] for i in sources]) for form, sources in forms]
 
 
 def _id_name(resource_id: str) -> str:
@@ -1149,9 +1317,6 @@ class _Matcher:
         self._words = tuple(
             (word, _forms(word), _is_builtin_word(word)) for word in words
         )
-        self._order: dict[str, int] = {}
-        for index, (word, _, _) in enumerate(self._words):
-            self._order.setdefault(word, index)
         self._excuser = _Excuser(_exception_keys(exceptions))
         self._cache: dict[str, str | None] = {}
         self._plain_cache: dict[str, str | None] = {}
@@ -1161,11 +1326,18 @@ class _Matcher:
         """True when there are exception words."""
         return bool(self._excuser.keys)
 
-    def match_texts(self, values: Iterable[str]) -> str | None:
-        """Return the first deny word (in list order) that counts in any of
-        the strings, or None."""
-        found = [word for word in map(self.match_text, values) if word is not None]
-        return min(found, key=self._order.__getitem__, default=None)
+    def match_joined(self, parts: Sequence[str]) -> str | None:
+        """Return the first deny word that counts in the joined text of the
+        field values `parts` (see `_Joined`), or None."""
+        joined = _Joined(parts, self._excuser)
+        return next(
+            (
+                word
+                for word, word_forms, builtin in self._words
+                if joined.counts(word_forms, builtin=builtin)
+            ),
+            None,
+        )
 
     def match(self, element: Element) -> tuple[str, str] | None:
         """Return ``(word, field)`` of the first match in the element.
@@ -2069,16 +2241,10 @@ class _Judge:
                 descs.append(element.content_desc)
         matcher = matcher or self.matcher
         for joined in (parts, texts, descs):
-            spaced = " ".join(joined)
             if not matcher.excuses:
-                word = matcher.match_text(spaced)
+                word = matcher.match_text(" ".join(joined))
             else:
-                # The space between two parts is uiprobe's, not the app's: where
-                # letters touch on both sides it is no word boundary, so an
-                # exception word must stand alone without it too.
-                tight = _tight_join(joined)
-                values = (spaced,) if tight == spaced else (spaced, tight)
-                word = matcher.match_texts(values)
+                word = matcher.match_joined(joined) if joined else None
             if word is not None:
                 return word
         return None
@@ -2528,12 +2694,17 @@ def judge(
       (nested rows and cards are all in scope), and, for every hit target, its
       own fields, its whole subtree when it is clickable, and the subtrees of
       its clickable ancestors. Each field is matched alone, then the joined
-      subtree text (field ``joined``) of the candidate, its clickable
-      ancestors and the clickable hit targets: the text and content_desc
-      sequence, the texts alone and the content_descs alone. A hit inside an
-      exception word of ``policy.deny_exceptions`` that stands whole in a
-      text, content_desc, hint or joined text does not count (see the module
-      docstring); the resource id has no exceptions.
+      subtree text (field ``joined``) of the highest clickable element in
+      scope above the candidate and above each clickable hit target: the
+      text and content_desc sequence, the texts alone and the content_descs
+      alone. With exception words, the joined text of every clickable
+      element in that highest subtree is matched as well, siblings of the
+      candidate included, and the detail's ``element_id`` names the clickable
+      element whose joined text held the hit. A hit inside an exception word
+      of ``policy.deny_exceptions`` that stands whole in a text, content_desc
+      or hint, or in one field's value inside a joined text with real
+      boundaries around it, does not count (see the module docstring); the
+      resource id has no exceptions.
     * ``irreversible_screen``: the text, content description or hint of any
       element of the screen holds a phrase of ``policy.irreversible_phrases``
       (unless ``skip_irreversible`` is False). Every candidate gets it. The
