@@ -268,6 +268,14 @@ Known limits:
   other deny word matches, including labels that name an action: with
   ``automatically`` listed, ``Bill my card automatically``, ``Dial
   automatically`` and ``Redial automatically`` are pressable.
+* Accepted limits of exception words in joined texts and folding: a
+  compatibility character that NFKC turns into a letter at the start of the
+  next part is not seen as continuing the word (``recorder`` + U+24E2), a
+  combining mark at the start of a part after punctuation is passed over
+  (``!`` + U+0332 + ``recorder``), and case folding can create the hit that
+  the exception excuses (``reaßigning`` with ``reassigning`` listed). The
+  other way round, a neighbouring part that NFKC changes makes the whole
+  reading untraceable, and every hit in it counts.
 * The nine words for disabling, force-stopping and signing in (``disable``,
   ``force stop``, ``sign in``, ``log in``, ``login``, 無効, 強制停止, ログイン,
   サインイン)
@@ -1240,21 +1248,16 @@ class _Joined:
     """
 
     def __init__(self, parts: Sequence[str], excuser: _Excuser) -> None:
-        raw, raw_starts = _join(parts, [""] * len(parts))
-        spans: list[tuple[int, int, int, bool]] = []
-        for index, part in enumerate(parts):
-            for start, end, builtin in excuser.part_runs(part):
-                offset = raw_starts[index]
-                bounds = (offset, offset + len(part))
-                if _alone_in_join(raw, offset + start, offset + end, bounds):
-                    spans.append((index, start, end, builtin))
-        self.readings: list[
-            tuple[
-                tuple[str, ...],
-                list[tuple[str, list[int]]] | None,
-                list[tuple[int, int, bool]],
-            ]
-        ] = []
+        self._parts = tuple(parts)
+        self._excuser = excuser
+        # The exception spans, as (part, start, end, builtin) in the part's own
+        # text; found on the first hit, so a text without hits costs nothing
+        # more than the matching without exceptions.
+        self._spans: list[tuple[int, int, int, bool]] | None = None
+        # Per reading: its forms, where each part starts in it, and its traced
+        # forms (built only when a hit there needs an exception span).
+        self._readings: list[tuple[str, tuple[str, ...], list[int]]] = []
+        self._traced: dict[str, list[tuple[str, list[int]]] | None] = {}
         seen: set[str] = set()
         for separators in ([" "] * len(parts), _tight_separators(parts)):
             separators[0] = ""
@@ -1262,18 +1265,38 @@ class _Joined:
             if text in seen:
                 continue
             seen.add(text)
-            runs = [(starts[i] + a, starts[i] + b, own) for i, a, b, own in spans]
-            self.readings.append((_forms(text), _original_forms(text), runs))
+            self._readings.append((text, _forms(text), starts))
+
+    def _exception_spans(self) -> list[tuple[int, int, int, bool]]:
+        if self._spans is None:
+            parts = self._parts
+            raw, raw_starts = _join(parts, [""] * len(parts))
+            spans: list[tuple[int, int, int, bool]] = []
+            for index, part in enumerate(parts):
+                for start, end, builtin in self._excuser.part_runs(part):
+                    offset = raw_starts[index]
+                    bounds = (offset, offset + len(part))
+                    if _alone_in_join(raw, offset + start, offset + end, bounds):
+                        spans.append((index, start, end, builtin))
+            self._spans = spans
+        return self._spans
 
     def counts(self, word_forms: tuple[str, ...], *, builtin: bool) -> bool:
         """Return True when a hit of the word counts in either reading."""
-        for field_forms, traced, runs in self.readings:
+        for text, field_forms, starts in self._readings:
             if not _forms_match(word_forms, field_forms):
                 continue
-            if traced is None:
-                return True
-            usable = [(a, b) for a, b, own in runs if builtin or not own]
+            usable = [
+                (starts[i] + a, starts[i] + b)
+                for i, a, b, own in self._exception_spans()
+                if builtin or not own
+            ]
             if not usable:
+                return True
+            if text not in self._traced:
+                self._traced[text] = _original_forms(text)
+            traced = self._traced[text]
+            if traced is None:
                 return True
             for form, sources in traced:
                 for word_form in word_forms:

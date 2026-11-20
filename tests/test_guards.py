@@ -3923,3 +3923,39 @@ def test_texts_with_only_invisible_characters_are_passed_over(parts) -> None:
     elements = _fragment_row(parts)
     found = run(elements, policy=policy, root_bounds=(0, 0, 320, 640))
     assert "deny_word" not in reasons(found, "e2")
+
+
+def _count_calls(monkeypatch, name):
+    calls: list[str] = []
+    original = getattr(guards, name)
+
+    def counted(*args):
+        calls.append(name)
+        return original(*args)
+
+    monkeypatch.setattr(guards, name, counted)
+    return calls
+
+
+def test_a_joined_text_without_hits_builds_no_source_maps(monkeypatch) -> None:
+    traced = _count_calls(monkeypatch, "_original_forms")
+    nfkc = _count_calls(monkeypatch, "_nfkc_traced")
+    policy = Policy(deny_exceptions=("recorder",))
+    long_text = "Hello world, nothing to see here. " * 300
+    found = run(_fragment_row((long_text, long_text)), policy=policy)
+    assert reasons(found, "e2") == ()
+    assert traced == []
+    assert nfkc == []
+
+
+def test_source_maps_are_built_only_for_a_hit_with_an_exception(monkeypatch) -> None:
+    traced = _count_calls(monkeypatch, "_original_forms")
+    policy = Policy(deny_exceptions=("recorder",))
+    # A hit, but no exception word in the texts: it counts without a map.
+    found = run(_fragment_row(("Delete", "files")), policy=policy)
+    assert reasons(found, "e2") == ("deny_word",)
+    assert traced == []
+    # A hit inside an exception word: the map decides, and the hit is excused.
+    found = run(_fragment_row(("Voice recorder", "!")), policy=policy)
+    assert reasons(found, "e2") == ()
+    assert traced
