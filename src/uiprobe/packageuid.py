@@ -27,7 +27,8 @@ the package anywhere else in the section gives None, and so do a number of
 100000 or more, two different numbers in the stanza (or a number line of
 another form, such as ``appId=1 userId=2``), a ``sharedUser=`` line of
 another form or at another indent, and a ``Shared users:`` entry with the
-package's number while the stanza has no ``sharedUser=`` line.
+package's number while the stanza has no ``sharedUser=`` line (or with a
+number too long to read, which could be the package's).
 
 Only a line whose key (the text before its first ``=``) is ``userId`` or
 ``appId`` claims a number, and only a line keyed ``sharedUser`` claims a
@@ -131,18 +132,25 @@ def _stanza(lines: list[str], package: str) -> list[str] | None:
 
 def _shared_numbers(lines: list[str]) -> set[int] | None:
     """The numbers the ``Shared users:`` section gives its shared users (none
-    when there is no such section), None when it is there more than once."""
+    when there is no such section), None when it is there more than once or
+    a number is too long to read (`int` refuses more than
+    `sys.get_int_max_str_digits` digits, 4300 by default, with `ValueError`;
+    with leading zeros such a number could still be the package's)."""
     if lines.count(_SHARED_USERS) == 0:
         return set()
     section = _section(lines, _SHARED_USERS)
     if section is None:
         return None
-    return {
-        int(claim)
+    claims = [
+        claim
         for line in section
         if not _SHARED_HEADER.match(line)
         for claim in _CLAIM.findall(line)
-    }
+    ]
+    try:
+        return {int(claim) for claim in claims}
+    except ValueError:
+        return None
 
 
 def _number(stanza: list[str]) -> int | None:

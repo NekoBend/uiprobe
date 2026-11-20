@@ -468,6 +468,44 @@ def test_a_rotated_transform_in_the_list_is_rotation():
     assert parse_input_windows(orientation) == ROTATION
 
 
+# More digits than `int` converts by default (4300): it raises ValueError.
+OVERLONG = ["1" * 4301, "0" * 4301]
+
+
+@pytest.mark.parametrize("digits", OVERLONG)
+def test_a_row_rotation_too_long_to_read_is_rotation(digits):
+    row = _line(API36, "0: name=stylus-handwriting-event-receiver-0")
+    after = row + "\n      transform (ROT_0) (IDENTITY)"
+    assert API36.count(after) == 1
+    text = API36.replace(after, f"{row}\n      transform (ROT_{digits}) (IDENTITY)")
+    assert parse_input_windows(text) == ROTATION
+    assert read_window_at(text, (160, 320)) == ROTATION
+
+
+@pytest.mark.parametrize("digits", OVERLONG)
+def test_a_viewport_display_number_too_long_to_read_is_rotation(digits):
+    # The second Viewport line of display 0 still says 0, but the first one
+    # could be of display 0 too.
+    marker = "Viewport INTERNAL: displayId=0,"
+    assert API36.count(marker) == 2
+    text = API36.replace(marker, f"Viewport INTERNAL: displayId={digits},", 1)
+    assert isinstance(parse_input_windows(text), tuple)  # the list is fine
+    assert display_orientation(text) is None
+    assert read_window_at(text, (160, 320)) == ROTATION
+
+
+@pytest.mark.parametrize("digits", OVERLONG)
+def test_a_display_orientation_too_long_to_read_is_rotation(digits):
+    text = _edit(
+        API32,
+        "2c0698f ScreenDecorOverlayBottom",
+        "displayOrientation=0",
+        f"displayOrientation={digits}",
+    )
+    assert parse_input_windows(text) == ROTATION
+    assert read_window_at(text, (160, 320)) == ROTATION
+
+
 def test_without_a_viewport_line_every_form_is_rotation():
     for text in (API24, API30, API31, API32, API33, API34, API35, API36):
         assert isinstance(read_window_at(text, (160, 320)), InputWindow)

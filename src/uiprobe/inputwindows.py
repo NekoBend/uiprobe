@@ -105,7 +105,8 @@ form, none at all, or lines that disagree are `ROTATION` as well. In
 addition a ``transform`` line in the list whose rotation is not ``ROT_0``, a
 ``displayOrientation=`` other than 0 (API 32) or a display transform that is
 not ``(ROT_0) (IDENTITY)`` (API 36; a display scaled with ``wm size`` is not
-the identity either) is `ROTATION`, and so is a display section that prints
+the identity either) is `ROTATION` (a number too long to read, more digits
+than `int` converts, is not 0), and so is a display section that prints
 ``logicalSize=`` without a display transform line, or a list of the
 ``inputConfig`` forms (API 33 to 36, which printed ``logicalSize=`` and the
 display transform above every list on the emulators) without both.
@@ -373,6 +374,17 @@ class _List:
 
 def _indent(line: str) -> int:
     return len(line) - len(line.lstrip())
+
+
+def _number(digits: str) -> int | None:
+    """`digits` (a digit run a pattern matched, maybe with ``-``) as a number;
+    None when it is too long to convert: `int` refuses a run of more than
+    `sys.get_int_max_str_digits` digits (4300 by default) with `ValueError`.
+    Every run `int` reads is read the same."""
+    try:
+        return int(digits)
+    except ValueError:
+        return None
 
 
 def _under(lines: list[str], start: int) -> tuple[list[int], int]:
@@ -673,7 +685,8 @@ def _turned(rest: list[str]) -> bool | None:
     rows = 0 if transform["kind"] == "IDENTITY" else _MATRIX_ROWS
     if len(rest) != 1 + rows or not all(_MATRIX_ROW.match(row) for row in rest[1:]):
         return None
-    return int(transform["rot"]) != 0
+    # A rotation too long to read is not known to be 0: rotated.
+    return _number(transform["rot"]) != 0
 
 
 def _row(
@@ -767,7 +780,8 @@ def _read(found: _List, display_id: int) -> tuple[InputWindow, ...] | str:
         if window is not None:
             windows.append(window)
             orientations = _LINE_ORIENTATION.findall(line)
-            rotated = rotated or turned or any(int(o) != 0 for o in orientations)
+            # An orientation too long to read is not known to be 0: rotated.
+            rotated = rotated or turned or any(_number(o) != 0 for o in orientations)
     if not windows:
         return NO_LIST
     return ROTATION if rotated else tuple(windows)
@@ -781,7 +795,8 @@ def display_orientation(text: str, display_id: int = 0) -> int | None:
     dispatcher's part of ``dumpsys input``. Every line that names the display
     must be of a known form and have its logical frame equal to its physical
     frame (a display that is not scaled or moved), and all must say the same
-    orientation.
+    orientation. A line whose display number is too long to read could name
+    the display: None.
     """
     lines = [line.removesuffix("\r") for line in text.split("\n")]
     start = _dispatcher_start(lines)
@@ -790,7 +805,12 @@ def display_orientation(text: str, display_id: int = 0) -> int | None:
     said: set[int] = set()
     for line in lines[:start]:
         claim = _VIEWPORT_CLAIM.match(line)
-        if claim is None or int(claim["display"]) != display_id:
+        if claim is None:
+            continue
+        claimed = _number(claim["display"])
+        if claimed is None:
+            return None  # a display number too long to read could be this one
+        if claimed != display_id:
             continue
         match = _VIEWPORT.fullmatch(line)
         if match is None or match["logical"] != match["physical"]:

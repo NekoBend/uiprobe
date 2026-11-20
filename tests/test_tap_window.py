@@ -16,6 +16,7 @@ from uiprobe.guards import Policy
 from uiprobe.packageuid import PackageUid
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from pathlib import Path
 
     from tests.fake_adb_server import FakeAdbServer
@@ -243,6 +244,86 @@ def test_a_rotated_or_unknown_display_refuses_every_tap(
     assert refused
     assert {r["reason"] for r in refused} == {"cover_unknown"}
     assert refused[0]["details"] == {"unreadable": "rotation"}
+
+
+# More digits than `int` converts by default (4300): it raises ValueError.
+OVERLONG = "1" * 4301
+
+
+def _row_rotation(text: str) -> str:
+    """The first row's transform (API 31 on) with a rotation too long to read."""
+    identity = "\n      transform (ROT_0) (IDENTITY)\n"
+    return text.replace(identity, f"\n      transform (ROT_{OVERLONG}) (IDENTITY)\n", 1)
+
+
+def _viewport_display(text: str) -> str:
+    """A copy of the Viewport line above it, with a display number too long
+    to read (the real line still says display 0, orientation 0)."""
+    line = next(line for line in text.split("\n") if "Viewport" in line)
+    copy = line.replace("displayId=0,", f"displayId={OVERLONG},")
+    return text.replace(line, f"{copy}\n{line}", 1)
+
+
+def _display_orientation(text: str) -> str:
+    """The first row with a ``displayOrientation=`` too long to read."""
+    field = f", displayOrientation={OVERLONG}, ownerUid="
+    return text.replace(", ownerUid=", field, 1)
+
+
+@pytest.mark.parametrize(
+    ("android", "edit"),
+    [
+        *[(api, _row_rotation) for api in (31, 36)],
+        *[(api, _viewport_display) for api in (24, 31, 36)],
+        *[(api, _display_orientation) for api in (24, 31, 36)],
+    ],
+    ids=[
+        *[f"row_rotation-api{api}" for api in (31, 36)],
+        *[f"viewport_display-api{api}" for api in (24, 31, 36)],
+        *[f"display_orientation-api{api}" for api in (24, 31, 36)],
+    ],
+    indirect=["android"],
+)
+def test_a_number_too_long_to_read_in_the_window_list_refuses_every_tap(
+    tmp_path: Path,
+    device,
+    android,
+    clock,
+    monkeypatch,
+    edit: Callable[[str], str],
+):
+    original = android._dumpsys_input
+    assert edit(original()) != original()
+    monkeypatch.setattr(android, "_dumpsys_input", lambda: edit(original()))
+    out = tmp_path / "run"
+    run(device, clock, out, limits=Limits(actions=3))
+    assert _taps(android) == []
+    refused = _covered(out)
+    assert refused
+    assert {r["reason"] for r in refused} == {"cover_unknown"}
+    assert refused[0]["details"] == {"unreadable": "rotation"}
+
+
+def test_a_shared_user_number_too_long_to_read_refuses_every_tap(
+    tmp_path: Path, device, android, clock, monkeypatch, fake_adb
+):
+    android.uids[SHOP] = 10500
+    android.shared_users[SHOP] = "com.example.shared"
+    original = android._dumpsys_package
+
+    def overlong(name: str) -> str:
+        head, _, shared = original(name).partition("Shared users:")
+        assert "=10500" in shared
+        return head + "Shared users:" + shared.replace("=10500", f"={OVERLONG}")
+
+    monkeypatch.setattr(android, "_dumpsys_package", overlong)
+    out = tmp_path / "run"
+    run(device, clock, out, limits=Limits(actions=3))
+    assert _taps(android) == []
+    refused = _covered(out)
+    assert refused
+    assert refused[0]["details"] == {"unreadable": "target_uid"}
+    assert not [c for _, _, c in fake_adb.commands if c == "dumpsys input"]
 
 
 def test_a_device_away_during_the_window_read_is_device_reconnected(

@@ -231,6 +231,16 @@ def test_two_number_lines_that_disagree_are_none():
     assert parse_package_uid(text, "com.android.calculator2") is None
 
 
+@pytest.mark.parametrize("digits", ["1" * 4301, "0" * 4297 + "1000"])
+def test_a_shared_user_number_too_long_to_read_is_none(digits):
+    # More digits than `int` converts by default (4300); with leading zeros
+    # the number could be the package's own.
+    head, _, shared = SETTINGS24.partition("Shared users:")
+    assert shared.count("userId=1000") == 1
+    text = head + "Shared users:" + shared.replace("userId=1000", f"userId={digits}")
+    assert parse_package_uid(text, "com.android.settings") is None
+
+
 def test_a_shared_user_entry_with_the_number_needs_the_stanza_line():
     # API 24 SystemUI: the Shared users: section has SharedUser
     # [android.uid.systemui] with userId=10027.
