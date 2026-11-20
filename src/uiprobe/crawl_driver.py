@@ -498,13 +498,17 @@ class _Run:
         )
 
     def cover(
-        self, point: tuple[int, int], users: set[int], screen: Screen | None
+        self,
+        point: tuple[int, int],
+        focus: tuple[FocusedWindow | None, ...],
+        screen: Screen | None,
     ) -> tuple[str, dict[str, str | int]] | None:
         """Why a tap at `point` must not go out, from the window there, or
         None when the window that takes it belongs to the app.
 
-        `users` are the Android users of the focused window as read before
-        and after the dump: any other than user 0 refuses (``target_user``).
+        `focus` is the focused window as read before and after the dump: a
+        user other than 0 refuses (``target_user``), and so does an owner uid
+        (``mOwnerUid=``) other than the app's (``target_uid``).
         `screen` is the gate's own dump: a hierarchy rotated by the dump's
         ``rotation`` attribute refuses (``rotation``), even when the input
         reader's Viewport lines say 0; a dump that could not be read leaves
@@ -522,7 +526,7 @@ class _Run:
         window does); a window of the app with another title is refused.
         """
         app = self.app_uid
-        unknown = "target_uid" if app is None else self.uncovered(app, users, screen)
+        unknown = "target_uid" if app is None else self.uncovered(app, focus, screen)
         if app is None or unknown is not None:
             return NOT_SENT_COVER_UNKNOWN, {"unreadable": unknown or "target_uid"}
         found = self.device.window_at(point)
@@ -537,12 +541,24 @@ class _Run:
         return NOT_SENT_COVERED, {"window": found.title, "owner_uid": found.owner_uid}
 
     def uncovered(
-        self, app: PackageUid, users: set[int], screen: Screen | None
+        self,
+        app: PackageUid,
+        focus: tuple[FocusedWindow | None, ...],
+        screen: Screen | None,
     ) -> str | None:
         """What makes the window at a tap's point not worth reading (see
-        `cover`), checked in this order, or None."""
+        `cover`), checked in this order, or None.
+
+        `focus` are the focused window as read before and after the dump:
+        each one's user must be 0 (``target_user``) and its owner uid, when
+        read, the app's uid (``target_uid``).
+        """
+        users = {f.user for f in focus if f is not None}
+        owners = [f.owner_uid for f in focus if f is not None]
         if users - {0}:
             return "target_user"
+        if any(uid is not None and uid != app.uid for uid in owners):
+            return "target_uid"
         if screen is not None and screen.rotation != 0:
             return ROTATION
         if self.device.package_uid(self.package) != app:
@@ -605,9 +621,8 @@ class _Run:
         self.gate_details = None
         if isinstance(action, Tap):
             # The last read: the window that takes a touch at the point.
-            users = {f.user for f in (before, focus) if f is not None}
             cover = (
-                self.cover(action.point, users, screen)
+                self.cover(action.point, (before, focus), screen)
                 if self.policy.check_tap_window
                 else None
             )

@@ -401,9 +401,10 @@ WINDOWS = re.compile(r"^dumpsys window windows\Z")
 
 @pytest.mark.parametrize("api", APIS)
 def test_focused_window_names_the_app_in_front(fake_adb, api):
-    _, device = make(fake_adb, api=api)
+    android, device = make(fake_adb, api=api)
     title = f"{SHOP}/{SHOP}.Main"
-    assert device.focused_window() == FocusedWindow(SHOP, title, _hex(title))
+    expected = FocusedWindow(SHOP, title, _hex(title), 0, android.uid_of(SHOP))
+    assert device.focused_window() == expected
 
 
 @pytest.mark.parametrize("api", sorted(CAPTURED_BLOCKS))
@@ -417,7 +418,8 @@ def test_focused_window_reads_the_captured_owner_line(fake_adb, api):
         if title == "NotificationShade"
         else "com.android.settings"
     )
-    assert device.focused_window() == FocusedWindow(expected, title, window)
+    uid = int(owner.split("mOwnerUid=")[1].split(" ")[0])
+    assert device.focused_window() == FocusedWindow(expected, title, window, 0, uid)
     assert_no_input(fake_adb, android)
 
 
@@ -425,7 +427,11 @@ def test_the_shade_belongs_to_the_system_ui(fake_adb):
     android, device = make(fake_adb)
     android.focus_window = ("NotificationShade", "com.android.systemui")
     assert device.focused_window() == FocusedWindow(
-        "com.android.systemui", "NotificationShade", _hex("NotificationShade")
+        "com.android.systemui",
+        "NotificationShade",
+        _hex("NotificationShade"),
+        0,
+        android.uid_of("com.android.systemui"),
     )
 
 
@@ -436,7 +442,7 @@ def test_a_title_shaped_like_the_target_does_not_make_it_the_owner(fake_adb):
     android.override(
         WINDOWS, block("abc123", title, SECOND, owner_line(OTHER)).encode()
     )
-    assert device.focused_window() == FocusedWindow(OTHER, title, "abc123")
+    assert device.focused_window() == FocusedWindow(OTHER, title, "abc123", 0, 10150)
 
 
 @pytest.mark.parametrize(

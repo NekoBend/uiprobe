@@ -106,13 +106,16 @@ class FocusedWindow(NamedTuple):
     tells two windows with the same owner and title apart. ``user`` is the
     Android user it belongs to (the ``u<N>`` of ``Window{<hash> u<N> ...}``),
     or -1 when the window's owner uid (``mOwnerUid=``, user * 100000 + app
-    id) names another user.
+    id) names another user. ``owner_uid`` is that full uid (on the emulators
+    checked, API 24, 30, 33 to 36, the focused app window's equals the app's
+    uid), None when not read.
     """
 
     owner: str
     title: str
     window: str
     user: int = 0
+    owner_uid: int | None = None
 
 
 class DeviceIdentity(NamedTuple):
@@ -1028,7 +1031,7 @@ def _read_window_owner(
     # The owner uid tells the user too (user * 100000 + app id); when it
     # disagrees with u<N>, the user is not known: -1, which no check takes.
     known = int(user) if int(owner["uid"]) // _UIDS_PER_USER == int(user) else -1
-    return FocusedWindow(owner["package"], title, window, known)
+    return FocusedWindow(owner["package"], title, window, known, int(owner["uid"]))
 
 
 _BOOL = r"(true|false)"

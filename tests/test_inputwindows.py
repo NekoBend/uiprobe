@@ -6,15 +6,16 @@ lines left out but none changed or renumbered:
 * api24.txt and api36.txt: excerpts of a whole ``dumpsys input`` (the reader's
   ``Viewport`` lines of display 0 and the dispatcher's part down to the end
   of the window list).
-* api30.txt to api35.txt: the window list (``Windows:`` and its lines) of
-  one capture, with the ``Input Dispatcher State:`` and ``Display: 0`` lines
-  added above it (an emulator of the same image printed them there right
-  above ``Windows:``), and a line the capture script stopped at added below
-  it (``Connections:``; the script stopped at that line or at
-  ``MonitoringChannels:``, ``mMaximumObscuring...`` or ``Global monitors``,
-  and did not record which). The ``Viewport`` lines of display 0 above them
-  come from a search of the same output (API 33 to 35) or, for API 30 to 32,
-  from another boot of an emulator of the same image.
+* api30.txt to api35.txt: the window list (``Windows:`` and its lines) of one
+  capture, with the ``Input Dispatcher State:`` and ``Display: 0`` lines added
+  above it (an emulator of the same image printed them there right above
+  ``Windows:``; on API 33 to 35 also ``logicalSize=320x640`` and ``transform
+  (ROT_0) (IDENTITY)``, as another boot of those images did), and a line the
+  capture script stopped at added below it (``Connections:``; the script
+  stopped at that line or at ``MonitoringChannels:``, ``mMaximumObscuring...``
+  or ``Global monitors``, and did not record which). The ``Viewport`` lines of
+  display 0 above them come from a search of the same output (API 33 to 35)
+  or, for API 30 to 32, from another boot of an emulator of the same image.
 
 Other text in the tests (a rotated ``Viewport`` line, a rotated transform)
 is copied from the rotated emulators; changed lines are changed in place.
@@ -933,3 +934,83 @@ def test_the_lowest_row_faking_a_whole_row_is_the_documented_limit():
     found = read_window_at(lowest, (400, 900))
     assert isinstance(found, InputWindow)
     assert found.owner_uid == 1000  # the fake row: the check cannot tell
+
+
+# --- round 4: display metadata, legacy rows per display, form from fields ---
+
+
+@pytest.mark.parametrize("text", [API33, API34, API35, API36])
+def test_the_display_metadata_is_required_for_the_input_config_forms(text):
+    header = "    logicalSize=320x640\n        transform (ROT_0) (IDENTITY)\n"
+    assert header in text
+    bare = text.replace(header, "")
+    assert parse_input_windows(bare) == ROTATION
+    point = (140, 225) if text is API36 else (160, 320)
+    assert read_window_at(bare, point) == ROTATION
+    unsized = text.replace("    logicalSize=320x640\n", "")
+    assert parse_input_windows(unsized) == ROTATION
+
+
+def test_a_list_per_display_of_api_24_rows_is_line_format():
+    rows = API24[API24.index("  Windows:\n") : API24.index("  MonitoringChannels:")]
+    per_display = API24.replace(
+        rows,
+        "  Display: 0\n" + "\n".join("  " + r for r in rows.split("\n") if r) + "\n",
+    )
+    assert "  Display: 0\n    Windows:\n      0: name=" in per_display
+    assert parse_input_windows(per_display) == LINE_FORMAT
+
+
+def test_field_text_in_a_name_does_not_change_the_form():
+    titled = _edit(
+        API36, "5ebeeda FloatingMenu", "FloatingMenu,", "FloatingMenu, scale=100%,"
+    )
+    found = read_window_at(titled, (296, 458))
+    assert isinstance(found, InputWindow)
+    assert found.title == "FloatingMenu, scale=100%"
+    assert found.owner_uid == 10186
+    # The same in applicationInfo.name.
+    named = _edit(
+        API36,
+        "5ebeeda FloatingMenu",
+        "applicationInfo.name=,",
+        "applicationInfo.name=a, scale=1,",
+    )
+    assert isinstance(read_window_at(named, (296, 458)), InputWindow)
+    # On the hex form too (API 24): a title with scale= and globalScale=.
+    hexed = _edit(
+        API24, "u0 InputMethod}", "InputMethod}", "InputMethod, globalScale=2}"
+    )
+    found = read_window_at(hexed, (160, 500))
+    assert isinstance(found, InputWindow)
+    assert found.owner_uid == 10053
+
+
+FAKES = (
+    "ownerUid={uid}",
+    COVER_ALL,
+    "inputConfig=0x0",
+    "displayId=0",
+    "ownerUid={uid}, " + COVER_ALL + ", inputConfig=0x0, displayId=0",
+)
+
+
+@pytest.mark.parametrize("fake", FAKES)
+@pytest.mark.parametrize(
+    ("text", "marker", "old", "uid", "point"),
+    [
+        (API24, "u0 InputMethod}", "InputMethod}'", 1000, (160, 500)),
+        (API31, "d145dce StatusBar", "StatusBar'", 10133, (160, 10)),
+        (API33, "bfd95f5 StatusBar", "StatusBar'", 10153, (160, 10)),
+        (API34, "fd38730 StatusBar", "StatusBar'", 10169, (160, 10)),
+        (API35, "66391f2 StatusBar", "StatusBar,", 10179, (160, 10)),
+        (API36, "5ebeeda FloatingMenu", "FloatingMenu,", 1000, (296, 458)),
+    ],
+)
+def test_each_same_line_fake_is_line_format_on_each_form(
+    text, marker, old, uid, point, fake
+):
+    quote = "'" if old.endswith("'") else ""
+    written = fake.format(uid=uid)
+    edited = _edit(text, marker, old, f"{old[:-1]}{quote}, {written}, x{old[-1]}")
+    assert read_window_at(edited, point) == LINE_FORMAT

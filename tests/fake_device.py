@@ -280,8 +280,9 @@ class FakeAndroid:
     focus_user: int = 0
     # The ``rotation`` attribute of the uiautomator dump's hierarchy.
     dump_rotation: int = 0
-    # The owner uid printed in the focused window's block (``mOwnerUid=``).
-    focus_owner_uid: int = 10150
+    # The owner uid printed in the focused window's block (``mOwnerUid=``);
+    # None: the owner package's uid (as on the emulators).
+    focus_owner_uid: int | None = None
     # What ``cat /proc/sys/kernel/random/boot_id`` prints; None: the file
     # cannot be read (the identity command then prints an empty line).
     boot_id: str | None = "3ea6a12b-8379-445f-852a-73a2c4c3ff17"
@@ -1005,10 +1006,16 @@ class FakeAndroid:
             " appop=NONE",
             f"  Window #1 Window{{{_hex(title)} u{self.focus_user} {title}}}:",
             "    mDisplayId=0 taskId=5 mSession=Session{88 2:u0a2} mClient=Proxy@2",
-            f"    mOwnerUid={self.focus_owner_uid} showForAllUsers=false"
+            f"    mOwnerUid={self._focus_owner_uid(owner)} showForAllUsers=false"
             f" package={owner} appop=NONE",
         ]
         return "\n".join(lines) + "\n" + self.extra_dumpsys.get("windows", "")
+
+    def _focus_owner_uid(self, owner: str) -> int:
+        """The ``mOwnerUid=`` of the focused window's block."""
+        if self.focus_owner_uid is not None:
+            return self.focus_owner_uid
+        return self.uid_of(owner)
 
     def _dumpsys_service(self, words: list[str]) -> str:
         """``dumpsys input``, ``dumpsys input_method`` or ``dumpsys package X``."""

@@ -389,3 +389,17 @@ def test_a_focused_window_whose_owner_uid_is_of_another_user_refuses(
     assert _taps(android) == []
     assert _covered(out)[0]["details"] == {"unreadable": "target_user"}
     assert not [c for _, _, c in fake_adb.commands if c == "dumpsys input"]
+
+
+def test_a_focused_window_owned_by_another_uid_refuses(
+    tmp_path: Path, device, android, clock, fake_adb
+):
+    # The focused window names the app's package but its owner uid (user 0)
+    # is another app's: the uid read from dumpsys package is not the one the
+    # app's window has, so the window at the point cannot be judged by it.
+    android.focus_owner_uid = android.uid_of(SHOP) + 1
+    out = tmp_path / "run"
+    run(device, clock, out, limits=Limits(actions=3))
+    assert _taps(android) == []
+    assert _covered(out)[0]["details"] == {"unreadable": "target_uid"}
+    assert not [c for _, _, c in fake_adb.commands if c == "dumpsys input"]

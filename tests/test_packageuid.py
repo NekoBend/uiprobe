@@ -143,11 +143,15 @@ def test_missing_or_conflicting_numbers_are_none():
     assert parse_package_uid(none, "com.android.calculator2") is None
 
 
-def test_only_the_stanza_level_is_read():
+def test_a_number_claimed_deeper_must_agree():
+    # Another number anywhere in the stanza is a contradiction; the same one
+    # deeper down is not.
     deeper = CALCULATOR24.replace(
         "    userId=10044\n", "    userId=10044\n    gids:\n      userId=5\n"
     )
-    assert parse_package_uid(deeper, "com.android.calculator2") == PackageUid(
+    assert parse_package_uid(deeper, "com.android.calculator2") is None
+    same = deeper.replace("userId=5", "userId=10044")
+    assert parse_package_uid(same, "com.android.calculator2") == PackageUid(
         10044, shared=False
     )
     crlf = CALCULATOR24.replace("\n", "\r\n")
@@ -202,3 +206,55 @@ def test_a_number_of_another_user_is_none():
     assert parse_package_uid(below, "com.android.calculator2") == PackageUid(
         99999, shared=False
     )
+
+
+# --- round 4 ---
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "    appId=10044 userId=10045",
+        "    userId=10044 appId=10044",
+        "    userId=10044x",
+    ],
+)
+def test_a_number_line_of_another_form_is_none(line):
+    text = CALCULATOR24.replace("    userId=10044", line)
+    assert parse_package_uid(text, "com.android.calculator2") is None
+
+
+def test_two_number_lines_that_disagree_are_none():
+    text = CALCULATOR24.replace(
+        "    userId=10044\n", "    userId=10044\n    appId=10045\n"
+    )
+    assert parse_package_uid(text, "com.android.calculator2") is None
+
+
+def test_a_shared_user_entry_with_the_number_needs_the_stanza_line():
+    # API 24 SystemUI: the Shared users: section has SharedUser
+    # [android.uid.systemui] with userId=10027.
+    systemui24 = (
+        "Packages:\n"
+        "  Package [com.android.systemui] (1c54a76):\n"
+        "    userId=10027\n"
+        "    sharedUser=SharedUserSetting{b0b8303 android.uid.systemui/10027}\n"
+        "    pkg=Package{1c50e3b com.android.systemui}\n"
+        "    User 0: ceDataInode=114806 installed=true hidden=false"
+        " suspended=false stopped=false notLaunched=false enabled=0\n"
+        "Shared users:\n"
+        "  SharedUser [android.uid.systemui] (b0b8303):\n"
+        "    userId=10027\n"
+    )
+    package = "com.android.systemui"
+    assert parse_package_uid(systemui24, package) == PackageUid(10027, shared=True)
+    marker = "    sharedUser=SharedUserSetting{b0b8303 android.uid.systemui/10027}\n"
+    missing = systemui24.replace(marker, "")
+    assert parse_package_uid(missing, package) is None
+    misplaced = systemui24.replace(marker, "      " + marker.lstrip())
+    assert parse_package_uid(misplaced, package) is None
+    # An entry with another number does not matter.
+    other = missing[: missing.index("Shared users:")] + (
+        "Shared users:\n  SharedUser [android.uid.other] (1):\n    userId=10099\n"
+    )
+    assert parse_package_uid(other, package) == PackageUid(10027, shared=False)

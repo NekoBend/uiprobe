@@ -2,6 +2,8 @@
         Viewport INTERNAL: displayId=0, uniqueId=local:4619827259835644672, port=0, orientation=0, logicalFrame=[0, 0, 320, 640], physicalFrame=[0, 0, 320, 640], deviceSize=[320, 640], isActive=[1]
 Input Dispatcher State:
   Display: 0
+    logicalSize=320x640
+        transform (ROT_0) (IDENTITY)
     Windows:
       0: name=stylus-handwriting-event-receiver-0, id=86, displayId=0, inputConfig=NOT_FOCUSABLE | NOT_TOUCHABLE | TRUSTED_OVERLAY | SPY | INTERCEPTS_STYLUS, alpha=1, frame=[0,0][0,0], globalScale=1, applicationInfo.name=stylus-handwriting-event-receiver-0, applicationInfo.token=<null>, touchableRegion=[-3199,-6399][3200,6400], ownerPid=560, ownerUid=1000, dispatchingTimeout=5000ms, token=0x763c08b49ed0, touchOcclusionMode=BLOCK_UNTRUSTED
     transform (ROT_0) (IDENTITY)
