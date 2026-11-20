@@ -1466,6 +1466,12 @@ class Device:
                 raise self._fail(self._changed("could not be proven the same again"))
             self._proven = self._epoch
             succeeded = True
+        except BaseException as error:
+            code = (
+                error.code if isinstance(error, UiprobeError) else type(error).__name__
+            )
+            self._fail(self._changed(f"could not be proven again ({code})"))
+            raise
         finally:
             self._repinning = False
             if not succeeded:

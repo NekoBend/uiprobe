@@ -259,6 +259,9 @@ class _Run:
         # An action whose start line is written and that is in the gate: not
         # sent yet, so a run that ends there can close it as not sent.
         self.unsent: int | None = None
+        # A refused tap and the screen it was chosen on, until the engine
+        # releases it (see `run`).
+        self.held: tuple[Tap, Screen | None] | None = None
         # Device.pin_epoch when the current observation began its reads, and
         # after the gate's own pin check: an input goes out only when nothing
         # happened to the pin since the observation it was chosen on.
@@ -285,7 +288,13 @@ class _Run:
             if self.stopped():
                 return INTERRUPTED
             action = engine.next(observation)
-            self.write_skips(observation.screen)
+            # A tap refused on reads an event crossed is released here: its
+            # rows name elements of the screen it was chosen on.
+            held, self.held = self.held, None
+            if held is None:
+                self.write_skips(observation.screen)
+            else:
+                self.write_skips(observation.screen, held[1], tap=held[0])
             if isinstance(action, Stop):
                 return action.reason
             if isinstance(action, Reread):
@@ -427,8 +436,10 @@ class _Run:
         screen is read again from scratch.
         """
         if self.device.pin_epoch != self.gate_epoch:
-            # The skip rows come from the screen the tap was chosen on.
+            # The skip rows come from the screen the tap was chosen on, now
+            # and when the engine releases the tap.
             self.write_skips(screen, tap=tap)
+            self.held = (tap, screen)
             return None
         self.write_skips(screen, seen.observation.screen, tap=tap)
         self.record(seen, self.gate_epoch)
@@ -627,17 +638,33 @@ class _Run:
         removes it, so even reading goes only to the device that was checked.
         Reads that an event on the pin crossed are read again from the pin
         check on (bounded: every event makes the next check prove the device
-        again, which `MAX_RECONNECTS` limits), before anything is written.
+        again, which `MAX_RECONNECTS` limits), before the screen is written
+        or handed on. The open transition is closed as soon as one dump and
+        foreground read are not crossed by an event (or the dump failed,
+        which the engine counts toward its limit). A failed dump is handed
+        on as it is, and `stop` or the time limit end the rereading.
         """
         while True:
             self.device.check_pin(emulator=self.emulator)
             self.epoch_seen = self.device.pin_epoch
             screen = self.dump()
             foreground = self.device.foreground()
+            if screen is None or self.device.pin_epoch == self.epoch_seen:
+                self.close_transition(screen, foreground)
             keyboard = self.device.keyboard_shown()
             focus = self.device.focused_window()
-            if self.device.pin_epoch == self.epoch_seen:
+            if (
+                screen is None
+                or self.device.pin_epoch == self.epoch_seen
+                or self.halt() is not None
+            ):
                 break
+        observation = Observation(screen, foreground, keyboard, self.clock())
+        self.record(_Seen(observation, focus), self.epoch_seen)
+        return observation
+
+    def close_transition(self, screen: Screen | None, foreground: str | None) -> None:
+        """Write the end line of the open transition and count the screen."""
         if self._open is not None:
             action_id, self._open = self._open, None
             if screen is None:
@@ -646,9 +673,6 @@ class _Run:
                 self.writer.write_transition_end(action_id, screen.screen_id)
         if screen is not None and self.on_target(screen, foreground):
             self.screens_seen.add(screen.screen_id)  # counted when observed
-        observation = Observation(screen, foreground, keyboard, self.clock())
-        self.record(_Seen(observation, focus), self.epoch_seen)
-        return observation
 
     def record(self, seen: _Seen, epoch: int) -> None:
         """Remember the focus, count and write a target screen, then its image.

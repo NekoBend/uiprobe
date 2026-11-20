@@ -33,6 +33,7 @@ from uiprobe.errors import (
     AdbServerUnavailableError,
     DeviceNotFoundError,
     DeviceOfflineError,
+    DumpError,
 )
 
 if TYPE_CHECKING:
@@ -955,3 +956,45 @@ def test_a_move_during_the_check_before_the_run_is_counted(
     out = tmp_path / "run"
     run(device, clock, out, limits=Limits(actions=1))
     assert json.loads((out / "run.json").read_bytes())["repins"] == 1
+
+
+@pytest.mark.usefixtures("android")
+def test_dumps_that_keep_failing_still_end_with_the_engine_limit(
+    tmp_path: Path, fake_adb, clock, monkeypatch
+):
+    # A dump that times out every time also moves the pin's epoch (the
+    # request failed); the observation is not reread forever: the failed
+    # dump goes to the engine, which stops after three.
+    device = pinned(fake_adb)
+
+    def failing_dump() -> object:
+        device._epoch += 1  # what a failed request on the pin does
+        raise DumpError("timed out", details={})
+
+    monkeypatch.setattr(device, "dump", failing_dump)
+    out = tmp_path / "run"
+    result = run(device, clock, out)
+    assert result.stop_reason == "dump_failed_repeatedly"
+    records = lines(out / "transitions.jsonl")
+    ends = [r for r in records if "action" not in r]
+    assert ends
+    assert ends[0]["dump_failed"] is True
+
+
+@pytest.mark.usefixtures("android")
+def test_a_failed_keyboard_read_keeps_the_destination_read_before_it(
+    tmp_path: Path, fake_adb, clock, monkeypatch
+):
+    device = pinned(fake_adb)
+
+    def no_keyboard() -> object:
+        raise AdbError("connection closed", details={})
+
+    monkeypatch.setattr(device, "keyboard_shown", no_keyboard)
+    out = tmp_path / "run"
+    with pytest.raises(AdbError):
+        run(device, clock, out)
+    records = lines(out / "transitions.jsonl")
+    ends = [r for r in records if "action" not in r]
+    assert [e["action_id"] for e in ends] == [1]  # the launch got its end line
+    assert ends[0]["dump_failed"] is False
