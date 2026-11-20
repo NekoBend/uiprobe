@@ -812,6 +812,14 @@ class Policy:
     (force-stop, then start), and when a 4th relaunch in a row without a sent
     tap would be needed the crawl stops.
 
+    ``check_tap_window`` (default True) is read by the pressing crawl only.
+    False lets a tap go out without reading which window takes a touch at its
+    point; then a window of another app that takes touches there without
+    taking the input focus (an overlay drawn over other apps, a floating
+    button) gets the tap. With the default the crawl reads that window right
+    before each tap and sends the tap only to a window of the app; when it
+    cannot be read, nothing is sent.
+
     ``edges`` holds the sizes in pixels ``(top, bottom, left, right)`` that
     `judge` turns into `edge_areas` of each screen's display when ``avoid`` is
     None; None keeps the API 36 sizes. An explicit ``avoid`` wins over
@@ -828,7 +836,7 @@ class Policy:
             ``edges`` is not four non-negative integers, or ``min_visible_px``
             is not an integer of at least 1.
         TypeError: ``edges`` is not a sequence, or ``back_on_other_screens``
-            is not a bool.
+            or ``check_tap_window`` is not a bool.
     """
 
     deny_words: tuple[str, ...] = DEFAULT_DENY_WORDS
@@ -843,10 +851,14 @@ class Policy:
     irreversible_phrases: tuple[str, ...] = IRREVERSIBLE_PHRASES
     skip_irreversible: bool = True
     back_on_other_screens: bool = False
+    check_tap_window: bool = True
 
     def __post_init__(self) -> None:
         if type(self.back_on_other_screens) is not bool:
             msg = "back_on_other_screens must be a bool"
+            raise TypeError(msg)
+        if type(self.check_tap_window) is not bool:
+            msg = "check_tap_window must be a bool"
             raise TypeError(msg)
         for word in (*self.deny_words, *self.confirm_words, *self.irreversible_phrases):
             _check_word(word)
@@ -889,6 +901,7 @@ class Policy:
             irreversible_phrases=self.irreversible_phrases,
             skip_irreversible=self.skip_irreversible,
             back_on_other_screens=self.back_on_other_screens,
+            check_tap_window=self.check_tap_window,
         )
 
 

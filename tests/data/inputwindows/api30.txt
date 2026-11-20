@@ -1,0 +1,5 @@
+Input Dispatcher State:
+  Windows:
+    1: name='Window{3955619 u0 com.google.android.apps.nexuslauncher/com.google.android.apps.nexuslauncher.NexusLauncherActivity}', displayId=0, portalToDisplayId=-1, paused=false, hasFocus=false, hasWallpaper=false, visible=true, canReceiveKeys=false, flags=0x81850118, type=0x00000004, frame=[0,0][320,640], globalScale=1.000000, windowScale=(1.000000,1.000000), touchableRegion=[0,0][320,640], inputFeatures=0x00000000, ownerPid=1, ownerUid=10153, dispatchingTimeout=5000ms
+    2: name='Window{4f4eb39 u0 com.google.android.apps.nexuslauncher/com.google.android.apps.nexuslauncher.NexusLauncherActivity}', displayId=0, portalToDisplayId=-1, paused=false, hasFocus=true, hasWallpaper=true, visible=true, canReceiveKeys=true, flags=0x81910120, type=0x00000001, frame=[0,0][320,640], globalScale=1.000000, windowScale=(1.000000,1.000000), touchableRegion=[0,0][320,640], inputFeatures=0x00000000, ownerPid=2, ownerUid=10153, dispatchingTimeout=5000ms
+  Global monitors in display 0:

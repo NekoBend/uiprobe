@@ -1,0 +1,9 @@
+Input Dispatcher State:
+  DispatchEnabled: 1
+  Windows:
+    0: name='Window{17c8eca u0 StatusBar}', displayId=0, paused=false, hasFocus=false, hasWallpaper=false, visible=true, canReceiveKeys=false, flags=0x81840048, type=0x000007d0, layer=161000, frame=[0,0][320,24], scale=1.000000, touchableRegion=[0,0][320,24], inputFeatures=0x00000000, ownerPid=1808, ownerUid=10027, dispatchingTimeout=5000.000ms
+    1: name='Window{128d05c u0 KeyguardScrim}', displayId=0, paused=false, hasFocus=false, hasWallpaper=false, visible=false, canReceiveKeys=false, flags=0x01110900, type=0x000007ed, layer=141000, frame=[0,0][320,640], scale=1.000000, touchableRegion=[0,0][320,640], inputFeatures=0x00000000, ownerPid=1632, ownerUid=1000, dispatchingTimeout=5000.000ms
+    2: name='Window{b3ee354 u0 InputMethod}', displayId=0, paused=false, hasFocus=false, hasWallpaper=false, visible=true, canReceiveKeys=false, flags=0x01800108, type=0x000007db, layer=21015, frame=[0,24][320,640], scale=1.000000, touchableRegion=[0,394][320,740], inputFeatures=0x00000000, ownerPid=2001, ownerUid=10053, dispatchingTimeout=5000.000ms
+    3: name='Window{7630578 u0 com.android.settings/com.android.settings.Settings}', displayId=0, paused=false, hasFocus=true, hasWallpaper=false, visible=true, canReceiveKeys=true, flags=0x85810120, type=0x00000001, layer=21010, frame=[0,0][320,640], scale=1.000000, touchableRegion=[0,0][320,640], inputFeatures=0x00000000, ownerPid=3997, ownerUid=1000, dispatchingTimeout=5000.000ms
+  MonitoringChannels:
+    0: 'WindowManager (server)'

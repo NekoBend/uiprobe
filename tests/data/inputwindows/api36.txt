@@ -1,0 +1,21 @@
+Input Dispatcher State:
+  FocusedWindows:
+    displayId=0, name='6461878 com.android.settings/com.android.settings.Settings'
+  Display: 0
+    logicalSize=320x640
+    Windows:
+      0: name=stylus-handwriting-event-receiver-0, id=101, displayId=0, inputConfig=NOT_FOCUSABLE | NOT_TOUCHABLE | TRUSTED_OVERLAY | SPY | INTERCEPTS_STYLUS, alpha=1, frame=[0,0][320,640], globalScale=1, applicationInfo.name=x, touchableRegion=[0,0][320,640], ownerPid=1, ownerUid=1000, dispatchingTimeout=5000ms
+      transform (ROT_0) (IDENTITY)
+      1: name=[Gesture Monitor] swipe-up, id=85, displayId=0, inputConfig=NOT_FOCUSABLE | TRUSTED_OVERLAY | SPY, alpha=1, frame=[0,0][0,0], globalScale=1, applicationInfo.name=[Gesture Monitor] swipe-up, applicationInfo.token=<null>, touchableRegion=[-3200,-6400][3200,6400], ownerPid=2, ownerUid=10180, dispatchingTimeout=5000ms
+      transform (ROT_0) (IDENTITY)
+      2: name=5ebeeda FloatingMenu, id=133, displayId=0, inputConfig=NOT_FOCUSABLE | TRUSTED_OVERLAY, alpha=1, frame=[0,0][320,640], globalScale=1, applicationInfo.name=, applicationInfo.token=<null>, touchableRegion=[272,434][320,482], ownerPid=1030, ownerUid=10186, dispatchingTimeout=5000ms, token=0x7f1f9e1b7410, touchOcclusionMode=BLOCK_UNTRUSTED
+      transform (ROT_0) (IDENTITY)
+      3: name=a8ea035 Taskbar, id=97, displayId=0, inputConfig=NOT_FOCUSABLE | TRUSTED_OVERLAY | SLIPPERY, alpha=1, frame=[0,616][320,640], globalScale=1, applicationInfo.name=, applicationInfo.token=<null>, touchableRegion=<empty>, ownerPid=1283, ownerUid=10180, dispatchingTimeout=5000ms
+      transform (ROT_0) (TRANSLATE)
+          1.0000  0.0000  -0.0000
+          0.0000  1.0000  -616.0000
+          0.0000  0.0000  1.0000
+      4: name=6461878 com.android.settings/com.android.settings.Settings, id=121, displayId=0, inputConfig=0x0, alpha=1, frame=[0,0][320,640], globalScale=1, applicationInfo.name=ActivityRecord{168678237 u0 com.android.settings/.Settings t8}, applicationInfo.token=0x1, touchableRegion=[0,0][320,640], ownerPid=4, ownerUid=1000, dispatchingTimeout=5000ms
+      transform (ROT_0) (IDENTITY)
+      5: name=Dim layer#60, id=60, displayId=0, inputConfig=NO_INPUT_CHANNEL | NOT_VISIBLE, alpha=1, frame=[0,0][0,0], globalScale=1, applicationInfo.name=, applicationInfo.token=<null>, touchableRegion=<empty>, ownerPid=1030, ownerUid=10186, dispatchingTimeout=5000ms
+  mMaximumObscuringOpacityForTouch: 0.800000

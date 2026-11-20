@@ -156,6 +156,7 @@ def test_with_deny_words_copies_every_other_field() -> None:
         edges=(1, 2, 3, 4),
         min_visible_px=3,
         back_on_other_screens=True,
+        check_tap_window=False,
     )
     copy = original.with_deny_words(["rent"])
     assert copy is not original
@@ -164,6 +165,14 @@ def test_with_deny_words_copies_every_other_field() -> None:
             assert copy.deny_words == ("buy", "rent")
         else:
             assert getattr(copy, f.name) == getattr(original, f.name), f.name
+
+
+def test_check_tap_window_is_on_by_default_and_must_be_a_bool() -> None:
+    assert Policy().check_tap_window is True
+    loose: Any = Policy
+    for value in (0, "no", None):
+        with pytest.raises(TypeError, match="check_tap_window must be a bool"):
+            loose(check_tap_window=value)
 
 
 def test_back_on_other_screens_is_off_by_default_and_must_be_a_bool() -> None:

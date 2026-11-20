@@ -1017,6 +1017,29 @@ def test_run_start_and_run_json_record_the_repins(tmp_path):
         make(tmp_path, "fourth").finish("done", screens=0, actions=0, repins=-1)
 
 
+def test_a_not_sent_end_line_can_say_why_in_details(tmp_path):
+    writer = make(tmp_path, check_tap_window=True)
+    writer.write_transition_start(1, "tap", ID_A)
+    writer.write_transition_end(
+        1,
+        not_sent="covered_by_other",
+        details={"window": "ChatHead", "owner_uid": 10234},
+    )
+    end = lines_of(tmp_path / "run" / "transitions.jsonl")[-1]
+    assert end["reason"] == "covered_by_other"
+    assert end["details"] == {"window": "ChatHead", "owner_uid": 10234}
+    assert list(end)[-1] == "details"
+    start = json.loads((tmp_path / "run" / "run-start.json").read_bytes())
+    assert start["check_tap_window"] is True
+    with pytest.raises(ValueError, match="only for an action that was not sent"):
+        writer.write_transition_end(2, ID_B, details={"x": "y"})
+    loose: Any = writer.write_transition_end
+    with pytest.raises(TypeError, match="details values must be str or int"):
+        loose(3, not_sent="cover_unknown", details={"x": 1.5})
+    with pytest.raises(TypeError, match="details values must be str or int"):
+        loose(3, not_sent="cover_unknown", details={"x": True})
+
+
 def test_a_start_line_names_the_screen_of_another_app(tmp_path):
     writer = make(tmp_path)
     writer.write_transition_start(

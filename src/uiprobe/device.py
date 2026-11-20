@@ -34,6 +34,7 @@ from uiprobe.errors import (
     ScreenshotFailedError,
     UiprobeError,
 )
+from uiprobe.inputwindows import NO_WINDOW, InputWindow, parse_input_windows, window_at
 from uiprobe.model import (
     Bounds,
     Element,
@@ -71,6 +72,8 @@ IDENTITY_COMMAND: Final = (
     "getprop ro.kernel.qemu; getprop ro.serialno; getprop ro.build.fingerprint;"
     ' echo "$(cat /proc/sys/kernel/random/boot_id 2>/dev/null)"'
 )
+# The first ``userId=`` line of ``dumpsys package <name>``: the app's uid.
+_USER_ID = re.compile(r"^\s*userId=(\d+)\b", re.MULTILINE)
 _BOOT_ID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\Z")
 # A pinned transport that the adb server renumbered: how long to wait for the
 # device to come back, how often to look, and how many times one Device may
@@ -2487,6 +2490,50 @@ class Device:
             raise self._fail(DeviceNotFoundError(msg, details=details))
         # No mark is set here: the identity read itself went out only with a
         # current proof (see `_check_listed`), which a proof had set.
+
+    def window_at(self, point: tuple[int, int]) -> InputWindow | str:
+        """Return the window a touch at `point` would reach, or why that is
+        not known.
+
+        Reads ``dumpsys input`` once and takes the topmost window of display
+        0 that takes touches at `point` (see `uiprobe.inputwindows`). The
+        string is one of ``no_list``, ``line_format``, ``region_format`` or
+        ``no_window`` (no window takes a touch there).
+
+        Raises:
+            AdbError: The adb protocol or the command failed.
+            AdbServerUnavailableError: The adb server cannot be reached.
+            DeviceNotFoundError: The device is gone.
+            DeviceOfflineError: The device is offline.
+            DeviceUnauthorizedError: The device has not authorized this host.
+        """
+        windows = parse_input_windows(self._shell("dumpsys input"))
+        if isinstance(windows, str):
+            return windows
+        found = window_at(windows, point)
+        return NO_WINDOW if found is None else found
+
+    def package_uid(self, package: str) -> int | None:
+        """Return the uid the system gave `package`, None when not readable.
+
+        Reads ``userId=`` from ``dumpsys package <package>``; a package that
+        is not installed gives None. The uid can change when the app is
+        installed again.
+
+        Raises:
+            TypeError, ValueError: `package` is not a valid package name
+                (before any request).
+            AdbError: The adb protocol or the command failed.
+            AdbServerUnavailableError: The adb server cannot be reached.
+            DeviceNotFoundError: The device is gone.
+            DeviceOfflineError: The device is offline.
+            DeviceUnauthorizedError: The device has not authorized this host.
+        """
+        if isinstance(package, str):
+            package = str.__str__(package)
+        check_package(package)
+        found = _USER_ID.search(self._shell(quote_args("dumpsys", "package", package)))
+        return None if found is None else int(found[1])
 
     def keyboard_shown(self) -> bool | None:
         """Return whether the soft keyboard is shown, or None when unknown.

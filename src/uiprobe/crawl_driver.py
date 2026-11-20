@@ -203,6 +203,14 @@ NOT_SENT_START: Final = "start_not_sent"
 # The pinned device was away (and came back, proven the same) after the
 # observation the action was chosen on: what was read may be stale.
 NOT_SENT_RECONNECTED: Final = "device_reconnected"
+# A window of another app takes touches at the tap point, or which window
+# does cannot be read (Policy.check_tap_window).
+NOT_SENT_COVERED: Final = "covered_by_other"
+NOT_SENT_COVER_UNKNOWN: Final = "cover_unknown"
+_COVER_REASONS: Final = frozenset({NOT_SENT_COVERED, NOT_SENT_COVER_UNKNOWN})
+# Android gives installed apps uids from 10000 on; below are system uids that
+# several packages share.
+_FIRST_APP_UID: Final = 10000
 # What `_Run.relaunch` returns when it force-stopped the app and then did not
 # start it because the device had to be proven again (not an end-line reason).
 _HALF_RELAUNCH: Final = "relaunch_half_sent"
@@ -233,6 +241,7 @@ class _Run:
         policy: Policy,
         *,
         emulator: bool,
+        app_uid: int | None = None,
         screenshots: bool,
         settle: float,
         deadline: float,
@@ -246,6 +255,8 @@ class _Run:
         self.engine = engine
         self.policy = policy
         self.emulator = emulator
+        self.app_uid = app_uid  # read once at the start (check_tap_window)
+        self.gate_details: dict[str, str | int] | None = None  # why, for cover
         self.screenshots = screenshots
         self.settle = settle
         self.deadline = deadline
@@ -411,7 +422,10 @@ class _Run:
         reason, seen = self.gate(action, observation)
         self.unsent = None
         if reason is not None:
-            self.writer.write_transition_end(action_id, not_sent=reason)
+            details = self.gate_details if reason in _COVER_REASONS else None
+            self.writer.write_transition_end(
+                action_id, not_sent=reason, details=details
+            )
             if reason == NOT_SENT_RECONNECTED and not isinstance(action, Launch):
                 # Nothing was sent and nothing about the screen is known: the
                 # engine takes the action back and decides again on a fresh
@@ -481,6 +495,26 @@ class _Run:
             off_target_focus=focus,
         )
 
+    def cover(self, point: tuple[int, int]) -> tuple[str, dict[str, str | int]] | None:
+        """Why a tap at `point` must not go out, from the window there, or
+        None when the window that takes it belongs to the app.
+
+        The window's owner uid must be the app's. An app that runs with a
+        uid below 10000 (a system uid such as Settings' 1000, which other
+        windows share) must also have its package in the window's name.
+        """
+        if self.app_uid is None:
+            return NOT_SENT_COVER_UNKNOWN, {"unreadable": "target_uid"}
+        found = self.device.window_at(point)
+        if isinstance(found, str):
+            return NOT_SENT_COVER_UNKNOWN, {"unreadable": found}
+        ours = found.owner_uid == self.app_uid and (
+            self.app_uid >= _FIRST_APP_UID or self.package in found.title
+        )
+        if ours:
+            return None
+        return NOT_SENT_COVERED, {"window": found.title, "owner_uid": found.owner_uid}
+
     def refused_tap(
         self, tap: Tap, screen: Screen | None, seen: _Seen
     ) -> Observation | None:
@@ -534,7 +568,10 @@ class _Run:
         focus = self.device.focused_window()
         keyboard = self.device.keyboard_shown()
         seen = _Seen(Observation(screen, foreground, keyboard, now), focus)
+        self.gate_details = None
         if isinstance(action, Tap):
+            # The last read: the window that takes a touch at the point.
+            cover = self.cover(action.point) if self.policy.check_tap_window else None
             allowed = self.engine.recheck(action, seen.observation)
             owners = {None if f is None else f.owner for f in (before, focus)}
             checks = (
@@ -543,8 +580,14 @@ class _Run:
                 (before is None or focus is None, NOT_SENT_FOCUS_UNKNOWN),
                 (owners != {self.package}, NOT_SENT_FOCUS_OTHER),
                 (before != focus, NOT_SENT_FOCUS_CHANGED),
+                (
+                    cover is not None,
+                    NOT_SENT_COVER_UNKNOWN if cover is None else cover[0],
+                ),
                 (not allowed, NOT_SENT_REFUSED),
             )
+            if cover is not None:
+                self.gate_details = cover[1]
         else:
             before = observation
             back = isinstance(action, Back)
@@ -1038,6 +1081,9 @@ def _crawl_on(
     """`crawl` after its arguments were checked: pin, check, run."""
     device.pin_transport()
     _check_device(device, allow_real_device=allow_real_device)
+    # The app's uid, which a tap's window must have (Policy.check_tap_window);
+    # None when it cannot be read: then every tap is refused (cover_unknown).
+    app_uid = device.package_uid(package) if policy.check_tap_window else None
     started_at = clock()
     _check_clock("clock()", started_at)
     engine = CrawlEngine(package, policy, limits, started_at=started_at)
@@ -1049,6 +1095,7 @@ def _crawl_on(
         serial=device.serial,
         back_on_other_screens=policy.back_on_other_screens,
         repin=device.can_repin,
+        check_tap_window=policy.check_tap_window,
     )
     try:
         run = _Run(
@@ -1058,6 +1105,7 @@ def _crawl_on(
             engine,
             policy,
             emulator=not allow_real_device,
+            app_uid=app_uid,
             screenshots=screenshots,
             settle=settle,
             deadline=started_at + limits.minutes * 60,
