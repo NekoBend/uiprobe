@@ -1014,3 +1014,112 @@ def test_each_same_line_fake_is_line_format_on_each_form(
     written = fake.format(uid=uid)
     edited = _edit(text, marker, old, f"{old[:-1]}{quote}, {written}, x{old[-1]}")
     assert read_window_at(edited, point) == LINE_FORMAT
+
+
+# --- round 5: an apostrophe in a quoted name ---
+
+SETTINGS24_ROW = "4: name='Window{faa132d u0 com.android.settings/"
+
+
+@pytest.mark.parametrize(
+    ("text", "marker", "old", "new", "point", "title"),
+    [
+        (
+            API24,
+            SETTINGS24_ROW,
+            "com.android.settings.Settings}'",
+            "Today's Orders}'",
+            (160, 100),
+            "com.android.settings/Today's Orders",
+        ),
+        (
+            API30,
+            "u0 StatusBar}",
+            "StatusBar}'",
+            "Today's Bar}'",
+            (160, 10),
+            "Today's Bar",
+        ),
+        (
+            API31,
+            "d145dce StatusBar",
+            "StatusBar'",
+            "Today's Bar'",
+            (160, 10),
+            "Today's Bar",
+        ),
+        (
+            API33,
+            "bfd95f5 StatusBar",
+            "StatusBar'",
+            "'Today's' Bar'",
+            (160, 10),
+            "'Today's' Bar",
+        ),
+        (
+            API34,
+            "fd38730 StatusBar",
+            "StatusBar'",
+            "Today's Bar, x'",
+            (160, 10),
+            "Today's Bar, x",
+        ),
+    ],
+)
+def test_an_apostrophe_in_a_quoted_name_stays_in_the_title(
+    text, marker, old, new, point, title
+):
+    edited = _edit(text, marker, old, new)
+    plain = read_window_at(text, point)
+    found = read_window_at(edited, point)
+    assert isinstance(plain, InputWindow)
+    assert isinstance(found, InputWindow)
+    assert found.title == title
+    assert found.owner_uid == plain.owner_uid
+
+
+# The quoted forms with the fields that follow each name: API 24 to 30 print
+# displayId= right after the name, API 31 to 34 id= and then displayId=.
+QUOTED = [
+    (API24, "u0 InputMethod}", "InputMethod}'", 1000, (160, 500), ""),
+    (API30, "u0 StatusBar}", "StatusBar}'", 10153, (160, 10), ""),
+    (API31, "d145dce StatusBar", "StatusBar'", 10133, (160, 10), "id=5, "),
+    (API33, "bfd95f5 StatusBar", "StatusBar'", 10153, (160, 10), "id=5, "),
+    (API34, "fd38730 StatusBar", "StatusBar'", 10169, (160, 10), "id=5, "),
+]
+BOUNDARY_FAKES = (
+    # the whole rest of a window line, as the target's
+    "{id}displayId=0, ownerUid={uid}, " + COVER_ALL + ", x",
+    # a row of another display: it would be skipped, uncovering the point
+    "{id}displayId=1, x",
+    # just the boundary, nothing else faked
+    "{id}displayId=0, x",
+    # the boundary with the other key spelling and no id
+    "displayId=0, ownerUid={uid}, x",
+)
+
+
+@pytest.mark.parametrize("fake", BOUNDARY_FAKES)
+@pytest.mark.parametrize(("text", "marker", "old", "uid", "point", "id_"), QUOTED)
+def test_a_quoted_name_that_fakes_its_closing_boundary_is_line_format(
+    text, marker, old, uid, point, id_, fake
+):
+    # The window above the target ends its name with a quote followed by
+    # metadata of its own; the name is now taken up to the first quote that
+    # metadata follows, so its fake fields come before the real ones.
+    written = fake.format(id=id_, uid=uid)
+    edited = _edit(text, marker, old, f"{old[:-1]}', {written}'")
+    assert read_window_at(edited, point) == LINE_FORMAT
+
+
+@pytest.mark.parametrize(
+    ("text", "marker", "old", "uid", "point"), [row[:5] for row in QUOTED]
+)
+def test_an_apostrophe_name_that_fakes_the_owner_is_still_line_format(
+    text, marker, old, uid, point
+):
+    # The apostrophe that now stays in the title does not let field text
+    # after it pass: the owner and region in the name are still read twice.
+    fake = f"{old[:-1]}'s, ownerUid={uid}, {COVER_ALL}{old[-1]}"
+    edited = _edit(text, marker, old, fake)
+    assert read_window_at(edited, point) == LINE_FORMAT

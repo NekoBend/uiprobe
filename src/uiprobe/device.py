@@ -970,12 +970,19 @@ def _read_source(text: str, source: _Source) -> tuple[str, str] | object | None:
 
 
 _CURRENT_FOCUS_CLAIM: Final = re.compile(r"\s*mCurrentFocus=")
+# The hash and user sit at fixed places right after ``Window{``; the title is
+# the rest of the record up to its final brace, so it may hold braces of its
+# own (``Order {7}``) but cannot move the hash or the user.
 _CURRENT_FOCUS: Final = re.compile(
-    r"\s*mCurrentFocus=Window\{([0-9a-f]{1,16}) u([0-9]{1,3}) ([^{}\r\n]{1,512})\}\s*"
+    r"\s*mCurrentFocus=Window\{([0-9a-f]{1,16}) u([0-9]{1,3}) ([^\r\n]{1,512})\}\s*"
 )
 _WINDOW_HEAD: Final = re.compile(
-    r"  Window #[0-9]{1,4} Window\{([0-9a-f]{1,16}) u([0-9]{1,3}) ([^{}\r\n]{1,512})\}:"
+    r"  Window #[0-9]{1,4} Window\{([0-9a-f]{1,16}) u([0-9]{1,3}) ([^\r\n]{1,512})\}:"
 )
+# Where a window block's header names its hash: any line that names a hash
+# there counts as a header of that hash (a title that holds ``Window{<hash>``
+# further on does not).
+_WINDOW_HEAD_HASH: Final = re.compile(r"  Window #[0-9]+ Window\{([0-9a-f]+) ")
 # The system writes this line; 24 has mShowToOwnerOnly, 30 and 36 showForAllUsers.
 _WINDOW_OWNER: Final = re.compile(
     r"    mOwnerUid=(?P<uid>[0-9]{1,10})"
@@ -1016,7 +1023,7 @@ def _read_window_owner(
     heads = [
         index
         for index, line in enumerate(lines)
-        if line.startswith("  Window #") and f" Window{{{window} " in line
+        if (named := _WINDOW_HEAD_HASH.match(line)) is not None and named[1] == window
     ]
     if len(heads) != 1 or heads[0] + 2 >= len(lines):
         return None

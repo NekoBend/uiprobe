@@ -258,3 +258,78 @@ def test_a_shared_user_entry_with_the_number_needs_the_stanza_line():
         "Shared users:\n  SharedUser [android.uid.other] (1):\n    userId=10099\n"
     )
     assert parse_package_uid(other, package) == PackageUid(10027, shared=False)
+
+
+# --- round 5: text the app sets inside the stanza ---
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "    versionName=Release (appId=7)",
+        "    versionName=x userId=10044",
+        "    versionName=x userId=10099",
+        "    versionName=x appId=10099 userId=1000",
+        "    versionCode=7 minSdk=24 targetSdk=36",
+    ],
+)
+def test_a_uid_written_inside_another_field_is_no_claim(line):
+    text = CALCULATOR24.replace("    pkg=", f"{line}\n    pkg=")
+    assert parse_package_uid(text, "com.android.calculator2") == PackageUid(
+        10044, shared=False
+    )
+
+
+def test_a_uid_written_inside_another_field_cannot_stand_in_for_the_real_one():
+    # Without the real uid line, the same text gives no uid at all.
+    text = CALCULATOR24.replace(
+        "    userId=10044\n", "    versionName=x userId=10044\n"
+    )
+    assert parse_package_uid(text, "com.android.calculator2") is None
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "      sharedUser.demo.permission.SYNC: granted=true",
+        "    sharedUser.demo.permission.SYNC: granted=true",
+        "    requestedPermissions: sharedUser.demo.permission.SYNC",
+        "    versionName=x sharedUser=SharedUserSetting{1 android.uid.system/1000}",
+    ],
+)
+def test_text_holding_shared_user_is_no_marker(line):
+    text = CALCULATOR24.replace("    pkg=", f"{line}\n    pkg=")
+    assert parse_package_uid(text, "com.android.calculator2") == PackageUid(
+        10044, shared=False
+    )
+    # Nor does it stand in for, or hide, the real marker of a shared uid.
+    shared = SYSTEMUI36.replace("    pkg=", f"{line}\n    pkg=")
+    assert parse_package_uid(shared, "com.android.systemui") == PackageUid(
+        10182, shared=True
+    )
+
+
+def test_text_holding_shared_user_does_not_hide_a_shared_users_entry():
+    # The marker is gone and the permission name holds the word: the entry in
+    # Shared users: with the number still makes it None.
+    marker = "    sharedUser=SharedUserSetting{d5f3dd5 android.uid.systemui/10182}\n"
+    text = SYSTEMUI36.replace(
+        marker, "    sharedUser.demo.permission.SYNC: granted=true\n"
+    )
+    assert parse_package_uid(text, "com.android.systemui") is None
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "      sharedUser=",  # a shared-user line at another indent
+        "      sharedUser=SharedUserSetting{1 android.uid.system/10044}",
+        "      appId=7",  # an exact uid line deeper down, another number
+        "      userId=10044 x",  # a uid line deeper down of another form
+        "    appId=10044 (x)",  # a uid line at the field indent, another form
+        "    appId=10099",  # a second uid line (a line break in a text field)
+    ],
+)
+def test_a_line_keyed_as_a_field_elsewhere_still_refuses(line):
+    text = CALCULATOR24.replace("    pkg=", f"{line}\n    pkg=")
+    assert parse_package_uid(text, "com.android.calculator2") is None

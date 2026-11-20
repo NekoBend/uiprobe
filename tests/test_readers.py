@@ -526,3 +526,85 @@ def test_identity_of_another_shape_is_unknown(fake_adb, answer):
     android, device = make(fake_adb)
     android.override(re.compile(r"^getprop ro\.kernel\.qemu;"), answer)
     assert device.identity() is None
+
+
+# --- focused_window: braces in titles ---
+
+
+@pytest.mark.parametrize(
+    "title",
+    ["Order {7}", "{x}", "a}: b", "Window{abc u0 x}", f"{SHOP}/{SHOP}.Main {{}}"],
+)
+def test_braces_in_the_focused_title_are_read(fake_adb, title):
+    android, device = make(fake_adb)
+    android.override(WINDOW, focus("abc", title).encode())
+    android.override(WINDOWS, block("abc", title, SECOND, owner_line(SHOP)).encode())
+    assert device.focused_window() == FocusedWindow(SHOP, title, "abc", 0, 10150)
+
+
+def test_another_window_titled_like_a_window_record_is_not_a_second_block(fake_adb):
+    android, device = make(fake_adb)
+    android.override(WINDOW, focus("abc", "Orders").encode())
+    other = block("def", "Inspector Window{abc preview}", SECOND, owner_line(OTHER))
+    focused = block("abc", "Orders", SECOND, owner_line(SHOP), number=5)
+    for windows in (other + focused, focused + other):
+        android.override(WINDOWS, windows.encode())
+        assert device.focused_window() == FocusedWindow(SHOP, "Orders", "abc", 0, 10150)
+
+
+def test_a_title_that_fakes_the_record_end_does_not_move_the_hash_or_user(fake_adb):
+    # The focused window (hash abc, user 0, owner OTHER) is titled so that its
+    # record seems to end early and name the target; the hash, user and owner
+    # still come from their fixed places and the system's owner line.
+    title = f"X}} u0 {SHOP}/.Main"
+    android, device = make(fake_adb)
+    android.override(WINDOW, focus("abc", title).encode())
+    decoy = block("ffff", f"{SHOP}/.Main", SECOND, owner_line(SHOP), number=2)
+    real = block("abc", title, SECOND, owner_line(OTHER))
+    android.override(WINDOWS, (decoy + real).encode())
+    assert device.focused_window() == FocusedWindow(OTHER, title, "abc", 0, 10150)
+    # The user at the fixed place is u10: a title holding " u0 " does not make
+    # it user 0 (the owner uid 10150 is of user 0, so the user is unknown).
+    android.override(WINDOW, f"  mCurrentFocus=Window{{abc u10 {title}}}\n".encode())
+    head = f"  Window #4 Window{{abc u10 {title}}}:"
+    android.override(WINDOWS, f"{head}\n{SECOND}\n{owner_line(OTHER)}\n".encode())
+    assert device.focused_window() == FocusedWindow(OTHER, title, "abc", -1, 10150)
+
+
+@pytest.mark.parametrize(
+    ("window_text", "windows_text"),
+    [
+        # The block's title runs past the focused title's final brace.
+        (focus("abc", "a"), block("abc", "a}: b", SECOND, owner_line(SHOP))),
+        (focus("abc", "a}: b"), block("abc", "a", SECOND, owner_line(SHOP))),
+        # A line break in another window's title forges a header of the
+        # focused hash at the header position: still two blocks.
+        (
+            focus("abc", "x"),
+            block("def", "y}:\n  Window #7 Window{abc u0 x", SECOND, owner_line(SHOP))
+            + block("abc", "x", SECOND, owner_line(OTHER)),
+        ),
+        # A focus line whose title holds a line break does not read.
+        (focus("abc", "x}\n  mCurrentFocus=Window{def u0 y"), ""),
+        # Text after the record's final brace is not a record.
+        (
+            "  mCurrentFocus=Window{abc u0 x} y\n",
+            block("abc", "x", SECOND, owner_line(SHOP)),
+        ),
+    ],
+    ids=[
+        "block-title-longer",
+        "block-title-shorter",
+        "forged-header-by-line-break",
+        "focus-line-break",
+        "text-after-record",
+    ],
+)
+def test_braces_in_titles_do_not_make_a_record_readable_otherwise(
+    fake_adb, window_text, windows_text
+):
+    android, device = make(fake_adb)
+    android.override(WINDOW, window_text.encode())
+    android.override(WINDOWS, windows_text.encode())
+    assert device.focused_window() is None
+    assert_no_input(fake_adb, android)

@@ -241,8 +241,12 @@ _FORM_FIELDS: Final = (
 # A field's value ends where the next field begins (or the line ends), so a
 # value is read whole: text after it that is not another field is no form.
 _NEXT = r"(?=, [A-Za-z][A-Za-z0-9_.]*=|$)"
+# A quoted name ends at the first quote followed by the metadata that comes
+# after every name (``, id=N`` or ``, displayId=N``), so a quote in the title
+# (``Today's Orders``) stays in it. A name that fakes that metadata inside it
+# prints ``displayId=`` twice, which `_ONCE` refuses.
 _LINE = re.compile(
-    r"^(?P<index>0|[1-9]\d{0,4}): name=(?:'(?P<quoted>[^']*)'|(?P<bare>.*?)), "
+    r"^(?P<index>0|[1-9]\d{0,4}): name=(?:'(?P<quoted>.*?)'|(?P<bare>.*?)), "
     rf"(?P<id>id=\d{{1,10}}, )?(?P<fields>displayId=(?P<display>-?\d{{1,10}})){_NEXT}"
 )
 _NUMBER: Final = r"-?\d{1,7}"
