@@ -1526,3 +1526,26 @@ def test_another_device_behind_the_new_number_ends_the_wait_at_once(fake_adb, an
         device.foreground()
     assert caught.value.details["reason"] == "device_changed"
     assert waits.pauses == []
+
+
+def test_a_failed_identity_read_on_the_last_poll_still_ends_the_launch(
+    fake_adb, android, monkeypatch
+):
+    # The read at the deadline proves the device again after a failed
+    # identity read and finds another app in front: launch_interrupted, not
+    # not_in_front (on which a crawl would go on to a relaunch).
+    from tests.test_launch import OK_36
+
+    device = pinned(fake_adb)
+    Waits(device, [])
+    reply = OK_36.replace("{activity}", f"{SHOP}/.Main").encode()
+    android.override(re.compile(r"^am start"), reply)  # the app stays behind
+    reads = _identity_fails_once_after(
+        monkeypatch, fake_adb, android, device, "_start", 1, b"not an identity\n"
+    )
+    with pytest.raises(AdbError) as caught:
+        device.launch(SHOP, timeout=0)
+    assert caught.value.details["reason"] == "launch_interrupted"
+    assert len(reads) == 2
+    starts = [c for _, _, c in fake_adb.commands if c.startswith("am start")]
+    assert len(starts) == 1

@@ -2766,7 +2766,7 @@ class Device:
         if self._failed_requests != failed:
             msg = (
                 f"a request to {self.serial} failed during the launch; nothing"
-                " more was sent"
+                " that changes the device was sent after it"
             )
             raise AdbError(msg, details={"reason": "launch_interrupted"})
 
@@ -2805,6 +2805,9 @@ class Device:
         while True:
             self._check_no_failure(failed)
             seen = self.foreground()
+            # A read can succeed after a failure inside it (a wait that read
+            # the identity again), also on the last poll: that ends it too.
+            self._check_no_failure(failed)
             if seen == package:
                 return
             if self._clock() >= deadline:
