@@ -10,9 +10,10 @@ clock or file), and the writer imports it, so the driver sits above both.
 What is sent. Only what the engine returned, and for a tap only what
 `CrawlEngine.recheck` allowed for that very `Tap` object, in the gate right
 before it is sent: the first launch, a
-relaunch (``force-stop`` then start), a tap at the point judge gave, and the
-BACK key. Text, long presses, swipes and other keys are never sent. By
-default the engine never returns BACK for a screen of another app (it
+relaunch (``force-stop`` then start; a launch is ``am start -W`` of the
+launcher activity, read right before each start, never ``monkey``), a tap at the
+point judge gave, and the BACK key. Text, long presses, swipes and other keys
+are never sent. By default the engine never returns BACK for a screen of another app (it
 relaunches instead); ``Policy.back_on_other_screens`` allows it. A BACK or
 relaunch decided on such a screen names its package (and the foreground) as
 ``off_target`` in the start line. Every
@@ -39,8 +40,14 @@ The loop (the protocol of the `CrawlEngine` docstring)::
 The gate (`_Run.gate`) is the one place every action passes right before it is
 sent. In order: `stop` and the time limit; the pin (`Device.check_pin`: the
 same transport, serial and identity with its boot id, a renumbered transport
-followed only as `Device.can_repin` allows, else an error); then fresh reads,
-for a tap the dump first. It refuses, with a ``not_sent`` end line and nothing
+followed only as `Device.can_repin` allows, else an error); `stop` again;
+then fresh reads, for a tap the dump first; then the clock again (the
+caller's code, as on main); last the comparison of the pin. No code of the
+caller runs between that comparison and the input: `stop`, `sleep` and the
+run folder writes all come before the reads or after the input. The time
+limit is also turned into a value of uiprobe's own clock (`_Run.now`) and
+checked by the device, with the pin, on the request's own connection right
+before it is written. It refuses, with a ``not_sent`` end line and nothing
 sent, when anything it needs cannot be read or has changed: for a tap the
 engine's `CrawlEngine.recheck` on the fresh dump, a keyboard known to be hidden
 and a focused window owned by the app; for BACK and relaunch the same
@@ -100,7 +107,7 @@ from uiprobe.crawl import (
     _Prints,
 )
 from uiprobe.crawl_preview import check_package
-from uiprobe.device import PIN_NOT_PROVEN, PIN_WAIT_STOPPED
+from uiprobe.device import PIN_NOT_PROVEN, PIN_WAIT_STOPPED, SEND_STOPPED, _monotonic
 from uiprobe.errors import (
     DeviceNotFoundError,
     DumpError,
@@ -111,6 +118,7 @@ from uiprobe.errors import (
 )
 from uiprobe.guards import _WORD_REASONS, Policy, judge
 from uiprobe.inputwindows import ROTATION, Unreadable
+from uiprobe.model import Bounds
 from uiprobe.runlog import RunFolderError, RunWriter
 
 if TYPE_CHECKING:
@@ -238,6 +246,127 @@ MAX_DURATION: Final = "max_duration"  # the engine's reason for the time limit
 PAUSE_STEP: Final = 0.1
 
 
+class _Ended(Exception):  # noqa: N818 - a signal inside the driver, not an error
+    """The run ends before a screen is read: `stop` returned True after the
+    pin check of an observation (``interrupted``), or uiprobe's own clock
+    passed the run's time (``max_duration``)."""
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
+
+
+# The requests that change the device, each passing `_Run.final_check` right
+# before it is sent: a tap, BACK, the force-stop of a relaunch, the first
+# launch's start and a relaunch's start.
+_SEND_PATHS: Final = ("tap", "back", "force-stop", "launch", "start")
+# The default clock of `crawl`: uiprobe's own (`time.monotonic`).
+_OWN_CLOCK: Final = time.monotonic
+_MAX_SECONDS: Final = 2**40
+
+
+def _seconds(value: object) -> float:
+    """A clock value turned into a built-in float at once, when it is received.
+
+    Only the number is kept, so nothing of the caller's object (a method of a
+    subclass, a finalizer) can run later.
+    """
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        msg = f"clock() must return a number of seconds, not {type(value).__name__}"
+        raise TypeError(msg)
+    try:
+        seconds = float(value)
+    except OverflowError:
+        seconds = float("inf")  # refused below, as any value out of range
+    if type(seconds) is not float:
+        msg = "clock() must return a number of seconds"
+        raise TypeError(msg)
+    if not 0 <= seconds < _MAX_SECONDS:  # also false for NaN
+        msg = "clock() must return at least 0 and below 2**40 seconds"
+        raise ValueError(msg)
+    return seconds
+
+
+def _words(name: str, value: object) -> tuple[str, ...]:
+    """A tuple of plain str read once from a policy field."""
+    if not isinstance(value, tuple | list):
+        msg = f"policy.{name} must be a tuple of str"
+        raise TypeError(msg)
+    words = tuple(value)
+    if not all(isinstance(word, str) for word in words):
+        msg = f"policy.{name} must hold only str"
+        raise TypeError(msg)
+    return tuple(str.__str__(word) for word in words)
+
+
+def _ints(name: str, value: object) -> tuple[int, ...]:
+    """A tuple of plain int read once from a policy field."""
+    if not isinstance(value, tuple | list):
+        msg = f"policy.{name} must be a tuple of int"
+        raise TypeError(msg)
+    numbers = tuple(value)
+    if any(isinstance(n, bool) or not isinstance(n, int) for n in numbers):
+        msg = f"policy.{name} must hold only int"
+        raise TypeError(msg)
+    return tuple(int.__int__(n) for n in numbers)
+
+
+def _bounds(value: object) -> Bounds:
+    """A fresh `Bounds` of built-in ints, its four sides read once."""
+    if not isinstance(value, Bounds):
+        msg = f"policy.avoid must hold Bounds, not {type(value).__name__}"
+        raise TypeError(msg)
+    sides = _ints("avoid", (value.left, value.top, value.right, value.bottom))
+    return Bounds(*sides)
+
+
+def _flag(name: str, value: object) -> bool:
+    if not isinstance(value, bool):  # bool cannot be subclassed
+        msg = f"policy.{name} must be a bool"
+        raise TypeError(msg)
+    return value
+
+
+def _plain_policy(policy: Policy) -> Policy:
+    """A `Policy` of the built-in class holding only plain values, read once.
+
+    Every field is read here, at the start, so no accessor of a subclass and
+    no method of a value the caller made runs while the crawl decides.
+    """
+    avoid = policy.avoid
+    edges = policy.edges
+    min_visible = policy.min_visible_px
+    if isinstance(min_visible, bool) or not isinstance(min_visible, int):
+        msg = "policy.min_visible_px must be an int"
+        raise TypeError(msg)
+    if avoid is not None and not isinstance(avoid, tuple | list):
+        msg = "policy.avoid must be a tuple of bounds or None"
+        raise TypeError(msg)
+    bounds = None if avoid is None else tuple(_bounds(b) for b in tuple(avoid))
+    return Policy(
+        deny_words=_words("deny_words", policy.deny_words),
+        confirm_words=_words("confirm_words", policy.confirm_words),
+        tap_unlabeled=_flag("tap_unlabeled", policy.tap_unlabeled),
+        avoid=bounds,
+        skip_number_only=_flag("skip_number_only", policy.skip_number_only),
+        skip_toggles=_flag("skip_toggles", policy.skip_toggles),
+        refuse_dialog_confirm=_flag(
+            "refuse_dialog_confirm", policy.refuse_dialog_confirm
+        ),
+        edges=None if edges is None else _ints("edges", edges),  # ty: ignore[invalid-argument-type]
+        min_visible_px=int.__int__(min_visible),
+        irreversible_phrases=_words(
+            "irreversible_phrases", policy.irreversible_phrases
+        ),
+        skip_irreversible=_flag("skip_irreversible", policy.skip_irreversible),
+        back_on_other_screens=_flag(
+            "back_on_other_screens", policy.back_on_other_screens
+        ),
+        check_tap_window=_flag("check_tap_window", policy.check_tap_window),
+        deny_exceptions=_words("deny_exceptions", policy.deny_exceptions),
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class _Seen:
     """What the device showed: the observation plus the focused window."""
@@ -265,6 +394,8 @@ class _Run:
         stop: Callable[[], bool] | None,
         clock: Callable[[], float],
         sleep: Callable[[float], None],
+        send_limit: float | None = None,
+        own_clock: bool = False,
     ) -> None:
         self.device = device
         self.package = package
@@ -273,6 +404,9 @@ class _Run:
         self.policy = policy
         self.emulator = emulator
         self.app_uid = app_uid  # read once at the start (check_tap_window)
+        # The launcher activity read in the gate of the start about to go
+        # out (the first launch or a relaunch), used by that start only.
+        self.start_component: str | None = None
         self.gate_details: dict[str, str | int] | None = None  # why, for cover
         self.not_sent: dict[str, int] = {}  # not_sent end lines by reason
         self.cover_unknown: str | None = None  # what the first cover_unknown missed
@@ -305,6 +439,20 @@ class _Run:
         self.epoch_seen = device.pin_epoch
         self.gate_epoch = device.pin_epoch
         self.sent_epoch = device.pin_epoch  # when the last action was sent
+        # The run's end as a value of uiprobe's own clock, set once at the
+        # start; later values can only come earlier (`now`).
+        self.send_limit = (
+            _monotonic() + 3600.0 * 24 if send_limit is None else send_limit
+        )
+        # The time limit as a value of uiprobe's own clock (`now`), by
+        # which the next input, stop or start must go out.
+        self.send_by: float = self.send_limit
+        # Whether `clock` is uiprobe's own (the default): then it is read
+        # once per check and the end set at the start stays as it is.
+        self.own_clock = own_clock
+        # The pin epoch the last `final_check` approved; the device compares
+        # it again right before the request is written.
+        self.approved: int = device.pin_epoch
         self.repins_before = len(device.repins)  # moves made before this run
         # Why a wait for the device was stopped (a not_sent reason), once known.
         self.wait_stop: str | None = None
@@ -314,17 +462,27 @@ class _Run:
 
     def run(self) -> str:
         """Run until a stop reason is known; return it."""
-        if self.stopped():
-            return INTERRUPTED
+        try:
+            return self.run_loop()
+        except _Ended as ended:
+            if self.unsent is not None:  # in the gate: not sent
+                why = (
+                    NOT_SENT_TIME_LIMIT
+                    if ended.reason == MAX_DURATION
+                    else NOT_SENT_STOPPED
+                )
+                self.end_not_sent(self.unsent, why)
+                self.unsent = None
+            return ended.reason
+
+    def run_loop(self) -> str:
+        """`run`, which a stop seen inside an observation ends."""
+        reason = self.first_launch()
+        if reason is not None:
+            return reason
         engine = self.engine
-        refused, _ = self.send(engine.start(), None)
-        if refused == NOT_SENT_RECONNECTED:
-            self.notes.append(f"launch was not sent: {refused}")
-            return STOP_NOT_SENT
-        if refused is not None:  # otherwise only stop() or the time limit
-            return INTERRUPTED if self._stop_seen else MAX_DURATION
-        observation = self.observe()
-        while True:
+        observation = self.next_observation()
+        while observation is not None:
             if self.stopped():
                 return INTERRUPTED
             action = engine.next(observation)
@@ -344,34 +502,93 @@ class _Run:
             ending = self.ending(action, refused)
             if ending is not None:
                 return ending
-            if fresh is not None:
-                # A tap the gate did not send: the screen it re-read goes to
-                # the engine, which releases the unreported tap.
-                observation = fresh
-                continue
-            observation = self.observe()
+            # A tap the gate did not send: the screen it re-read goes to the
+            # engine, which releases the unreported tap.
+            observation = fresh if fresh is not None else self.next_observation()
+        return INTERRUPTED
 
-    def send_input(self, action: Action, action_id: int) -> bool:
-        """Send a tap, BACK or the first launch; False when nothing was sent
-        because the device has to be proven again first (the action is
-        closed as the gate would have closed it, and taken back unless it is
-        the first launch)."""
+    def first_launch(self) -> str | None:
+        """Send the first launch; the stop reason when the run ends there."""
+        if self.stopped():
+            return INTERRUPTED
+        refused, _ = self.send(self.engine.start(), None)
+        if refused == NOT_SENT_RECONNECTED:
+            self.notes.append(f"launch was not sent: {refused}")
+            return STOP_NOT_SENT
+        if refused is not None:  # otherwise only stop() or the time limit
+            return INTERRUPTED if self._stop_seen else MAX_DURATION
+        return None
+
+    def next_observation(self) -> Observation | None:
+        """Ask `stop` again, then read the screen; None when `stop` said so
+        (after an action, before any read of the screen)."""
+        if self.stopped():
+            return None
+        return self.observe()
+
+    def send_input(self, action: Action, action_id: int) -> str | None:
+        """Send a tap, BACK or the first launch; return why nothing was sent,
+        or None when it was sent.
+
+        ``device_reconnected``: the device has to be proven again first (the
+        action is closed as the gate would have closed it, and taken back
+        unless it is the first launch). ``time_limit``: the time limit had
+        passed when the request was about to go out (checked by the device
+        with uiprobe's own clock, see `now`);
+        the action is closed as not sent and the run ends.
+        """
         try:
             if isinstance(action, Tap):
-                self.device.tap(action.point)
+                self.device.tap(
+                    action.point, _send_by=self.send_by, _epoch=self.approved
+                )
             elif isinstance(action, Back):
-                self.device.key("back")
+                self.device.key("back", _send_by=self.send_by, _epoch=self.approved)
             else:
                 self.launch()
         except DeviceNotFoundError as error:
-            if error.details.get("reason") != PIN_NOT_PROVEN:
+            reason = error.details.get("reason")
+            if reason == SEND_STOPPED:
+                self._open = None
+                why = str(error.details.get("why", NOT_SENT_TIME_LIMIT))
+                self.end_not_sent(action_id, why)
+                return why
+            if reason != PIN_NOT_PROVEN:
                 raise
             self._open = None
             self.end_not_sent(action_id, NOT_SENT_RECONNECTED)
             if not isinstance(action, Launch):
                 self.withdraw(action)
-            return False
-        return True
+            return NOT_SENT_RECONNECTED
+        return None
+
+    def end_failed(self, action_id: int, error: Exception) -> None:
+        """Close a launch or relaunch whose sending failed and ends the run.
+
+        The end line has ``failed``, the reason and ``outcome: unknown``: the
+        device may have acted on what was sent. A start whose reply did not
+        come in time also gets a note in the summary.
+        """
+        self._open = None
+        if isinstance(error, LaunchFailedError):
+            reason = str(error.details.get("reason", error.code))
+        elif isinstance(error, UiprobeError):
+            reason = error.code
+        else:
+            reason = "internal_error"
+        if reason == "start_timeout":
+            seconds = (
+                error.details.get("timeout")
+                if isinstance(error, UiprobeError)
+                else None
+            )
+            self.notes.append(
+                f"the reply of am start -W for {self.package} did not come within"
+                f" {seconds} seconds; whether the app started is unknown, so the"
+                " run ended"
+            )
+        with contextlib.suppress(RunFolderError):
+            self.writer.write_transition_end(action_id, failed=reason)
 
     def end_not_sent(
         self,
@@ -427,9 +644,57 @@ class _Run:
         if self.wait_stop is None:
             if self._stop_seen:
                 self.wait_stop = NOT_SENT_STOPPED
-            elif self.clock() >= self.deadline:
+            elif self.now() >= self.deadline:
                 self.wait_stop = NOT_SENT_TIME_LIMIT
         return self.wait_stop is not None
+
+    def now(self) -> float:
+        """The run's clock, read once and kept as a built-in float.
+
+        With uiprobe's own clock (the default) it is read once, and the run's
+        end by it (`send_by`, which the device checks right before a request
+        that changes it goes out) is the one set at the start. With a clock
+        of the caller's, uiprobe's own clock is read first, and the time the
+        caller's clock says is left, counted from that moment, can bring
+        `send_by` earlier, never later.
+        """
+        if self.own_clock:
+            return _monotonic()
+        before = _monotonic()
+        now = _seconds(self.clock())
+        self.send_by = min(self.send_by, before + (self.deadline - now))
+        return now
+
+    def past(self) -> bool:
+        """Whether the run's end by uiprobe's own clock has come."""
+        return _monotonic() >= self.send_by
+
+    def check_time(self) -> None:
+        """End the run (``max_duration``) once its end by uiprobe's own clock
+        has come (asked when an observation begins)."""
+        if self.past():
+            raise _Ended(MAX_DURATION)
+
+    def final_check(self, path: str, approved: int) -> bool:
+        """The last comparison before a request that changes the device.
+
+        True when nothing happened to the pin since `approved` (the epoch the
+        reads before it began at). The value is kept and handed to the device
+        with the request, which compares it once more on the request's own
+        connection. No code of the caller runs from here to the request.
+        """
+        if path not in _SEND_PATHS:
+            msg = f"not a sending path: {path!r}"
+            raise ValueError(msg)
+        if not self.epoch_is(approved):
+            return False
+        self.approved = approved
+        return True
+
+    def epoch_is(self, approved: int) -> bool:
+        """The comparison of `final_check` itself: the pin epoch is still
+        `approved`."""
+        return self.device.pin_epoch == approved
 
     def stopped(self) -> bool:
         """Whether `stop` asked to end; once it did, the answer stays True."""
@@ -460,8 +725,8 @@ class _Run:
         self.unsent = None
         if seen is not None and reason != NOT_SENT_RECONNECTED:
             # A read the pin check kept: it names the last screen and app
-            # (the id was computed in the gate, before its last look at the
-            # clock, so no work of this size runs after the last check).
+            # (the id was computed in the gate, before its last comparison,
+            # so no work of this size runs between it and the input).
             if self.gate_screen_id is not None:
                 self.last_screen_id = self.gate_screen_id
             self.last_foreground = seen.observation.foreground
@@ -477,14 +742,22 @@ class _Run:
             if seen is not None and isinstance(action, Tap):
                 return reason, self.refused_tap(action, screen, seen)
             return reason, None
-        # Nothing runs between the gate's last read and the input: no user
-        # code (stop() and the clock were asked first), no other read, no write.
+        # Nothing of the caller's runs between the gate's last comparison and
+        # the input; a start uses the launcher activity its gate read.
         self._open = action_id
         self.sent_epoch = self.device.pin_epoch
-        if isinstance(action, Relaunch):
-            return self.relaunch(action_id, action), None
-        if not self.send_input(action, action_id):
-            return NOT_SENT_RECONNECTED, None
+        try:
+            if isinstance(action, Relaunch):
+                return self.relaunch(action_id, action), None
+            refused = self.send_input(action, action_id)
+        except Exception as error:
+            # A launch or relaunch that failed ends the run; its end line says
+            # so (a tap or BACK keeps a start line alone: result unknown).
+            if isinstance(action, Launch | Relaunch) and self._open == action_id:
+                self.end_failed(action_id, error)
+            raise
+        if refused is not None:
+            return refused, None
         if isinstance(action, Tap):
             self.engine.tap_sent(action)
             if seen is not None:
@@ -640,25 +913,31 @@ class _Run:
 
         The one place every action passes right before it is sent. First `stop`
         and the time limit, then that the pinned transport still leads to the
-        checked device (an error if not), then a fresh read: for a tap the dump
+        checked device (an error if not), then `stop` again (the pin check can
+        wait for the device), then a fresh read: for a tap the dump
         first and then foreground, focused window and keyboard, so the reads
         nearest the press come last. Anything that cannot be read, or that
         differs from what the action was chosen on, is a refusal. After the
         decision nothing else runs before the input is sent.
         """
-        now = self.clock()  # the one time taken, before any read
+        now = self.now()  # the one time taken, before any read
         reason = self.halt(now)
         if reason is not None:
             return reason, None
         self.device.check_pin(emulator=self.emulator)
         if isinstance(action, Launch):
             return self.launch_gate(), None
+        # Asked again after the pin check, which can block for long (a wait
+        # for the device); after it only the reads run before the input.
+        if self.stopped():
+            return NOT_SENT_STOPPED, None
         self.gate_epoch = self.device.pin_epoch
+        tap = isinstance(action, Tap)
         # For a tap: the focused window before and after the dump must be the
         # same window of the app, so the dump shows that window (uiautomator
         # dumps the focused window: seen on API 24, 30 and 36 with the shade).
-        before = self.device.focused_window() if isinstance(action, Tap) else None
-        screen = self.dump() if isinstance(action, Tap) else None
+        before = self.device.focused_window() if tap else None
+        screen = self.dump() if tap else None
         foreground = self.device.foreground()
         focus = self.device.focused_window()
         keyboard = self.device.keyboard_shown()
@@ -729,32 +1008,73 @@ class _Run:
         why = next((reason for failed, reason in checks if bool(failed)), None)
         self.gate_screen_id = None if screen is None else screen.screen_id
         # The time again, after the reads (they can take long) and before the
-        # last comparison, so that the clock, which may be the caller's code,
-        # runs before it and nothing runs after it: past the limit, nothing is
-        # sent.
-        late = self.clock() >= self.deadline
-        if self.device.pin_epoch != self.epoch_seen:
+        # last comparison, as on main: the clock, which may be the caller's
+        # code, runs before the comparison and nothing runs after it. The
+        # device also checks the time with uiprobe's own clock right before
+        # the input goes out.
+        late = self.now() >= self.deadline
+        path = (
+            "tap"
+            if isinstance(action, Tap)
+            else "back"
+            if isinstance(action, Back)
+            else "force-stop"
+        )
+        if not self.final_check(path, self.epoch_seen):
             return NOT_SENT_RECONNECTED, seen
         if late:
             return NOT_SENT_TIME_LIMIT, None
         return why, seen
 
     def launch_gate(self) -> str | None:
-        """The end of the first launch's gate, after the pin check: the time
-        again (the check's reads can take long), then the last comparison."""
+        """The end of the first launch's gate, after the pin check: `stop`
+        again (the check can take long), the launcher read, the time again
+        (the read can take long too), then the last comparison."""
         epoch = self.device.pin_epoch
-        late = self.clock() >= self.deadline
-        if self.device.pin_epoch != epoch:
+        stopped = self.stopped()  # asked again after the pin check
+        read = stopped or self.read_start_component(None)
+        now = self.now()
+        late = now >= self.deadline or self.past()
+        if not read or not self.final_check("launch", epoch):
             return NOT_SENT_RECONNECTED
+        if stopped:
+            return NOT_SENT_STOPPED
         if late:
             return NOT_SENT_TIME_LIMIT
         return None
+
+    def read_start_component(self, relaunch_id: int | None) -> bool:
+        """Read the launcher activity for the start about to go out; False
+        when the device had to be proven again during the read.
+
+        When it cannot be read, the start is not sent: the action is closed
+        (a first launch as not sent, a relaunch with `relaunch_id` as
+        ``start_not_sent``) and `LaunchFailedError` (``launcher_unreadable``)
+        ends the run.
+        """
+        self.start_component = None
+        try:
+            read = self.device._start_component  # noqa: SLF001 - internal to uiprobe
+            self.start_component = read(self.package)
+        except DeviceNotFoundError as error:
+            if error.details.get("reason") != PIN_NOT_PROVEN:
+                raise
+            return False
+        except LaunchFailedError as error:
+            if _unreadable_launcher(error):
+                if relaunch_id is not None:
+                    self.half_sent(relaunch_id, "launcher_unreadable")
+                elif self.unsent is not None:
+                    self.end_not_sent(self.unsent, "launcher_unreadable")
+                    self.unsent = None
+            raise
+        return True
 
     def halt(self, now: float | None = None) -> str | None:
         """The reason not to send that does not depend on the screen, if any."""
         if self.stopped():
             return NOT_SENT_STOPPED
-        if (self.clock() if now is None else now) >= self.deadline:
+        if (self.now() if now is None else now) >= self.deadline:
             return NOT_SENT_TIME_LIMIT
         return None
 
@@ -764,9 +1084,9 @@ class _Run:
         The number of steps is bounded, so a clock that does not move cannot
         keep the pause going.
         """
-        end = min(self.clock() + self.settle, self.deadline)
+        end = min(self.now() + self.settle, self.deadline)
         for _ in range(int(self.settle / PAUSE_STEP) + 2):
-            left = end - self.clock()
+            left = end - self.now()
             if left <= 0 or self.stopped():
                 return
             self.sleep(min(PAUSE_STEP, left))
@@ -774,17 +1094,41 @@ class _Run:
     def launch(self) -> None:
         """Start the app; an app that is not in front afterwards is not fatal.
 
-        ``not_in_front`` means monkey started something, but another package
-        (a permission dialog, a splash screen) holds the focus. The engine
-        handles an off-target screen, so the crawl observes and goes on. The
-        action stays counted as sent. Any other launch failure is raised.
+        It starts the launcher activity its gate read (before the gate's last
+        clock read and comparison; no component is kept between starts) with
+        ``am start -W`` and waits for the app to come to the front. No code of
+        the caller runs in that call; the start goes out only while the pin
+        epoch is still the one the gate approved and the time limit has not
+        passed.
+        ``not_in_front`` means the start reported success, but
+        another package (a permission dialog, a splash screen) holds the
+        focus; ``other_activity`` means the start reported success with an
+        activity of another app (on API 36, Settings' search screen of
+        another package stays on top of its task after a force-stop) and the
+        app was not in front after the same wait either. The
+        engine handles an off-target screen, so the crawl observes and goes
+        on. The action stays counted as sent. Any other launch failure,
+        ``start_timeout`` included (whether the app started is unknown), is
+        raised and ends the run.
         """
+        component, self.start_component = self.start_component, None
+        if component is None:  # every gate of a start reads it first
+            msg = "no launcher activity was read for this start"
+            raise RuntimeError(msg)
         try:
-            self.device.launch(self.package)
+            self.device._launch_component(  # noqa: SLF001 - internal to uiprobe
+                self.package, component, _send_by=self.send_by, _epoch=self.approved
+            )
         except LaunchFailedError as error:
-            if error.details.get("reason") != "not_in_front":
+            reason = error.details.get("reason")
+            if reason == "other_activity":
+                # The start went to an activity of another app (one that was
+                # on top of the app's task): that app is in front.
+                seen = str(error.details.get("activity", "")).partition("/")[0]
+            elif reason == "not_in_front":
+                seen = error.details.get("foreground")
+            else:
                 raise
-            seen = error.details.get("foreground")
             self.notes.append(f"{self.package} was not in front after launch ({seen})")
 
     def relaunch(self, action_id: int, action: Relaunch) -> str | None:
@@ -796,24 +1140,71 @@ class _Run:
         (``start_not_sent``) and the summary says so. Returns that reason, or
         None when the app was started.
         """
+        unsent = self.relaunch_stop(action_id, action)
+        if unsent is not None:
+            return unsent
+        reason = self.relaunch_halt(action_id)
+        if reason == NOT_SENT_RECONNECTED or (
+            reason is None and not self.final_check("start", self.sent_epoch)
+        ):
+            # The device had to be proven again after the force-stop: the
+            # start is not sent on the earlier decision.
+            return self.half_sent(action_id, NOT_SENT_RECONNECTED)
+        if reason is not None:
+            self.half_sent(action_id, reason)
+            return NOT_SENT_START
         try:
-            self.device.stop_app(self.package)
+            self.launch()
         except DeviceNotFoundError as error:
-            if error.details.get("reason") != PIN_NOT_PROVEN:
+            why = error.details.get("reason")
+            if why == SEND_STOPPED:
+                # The time limit passed right before the start went out.
+                self.half_sent(action_id, str(error.details.get("why", "")))
+                return NOT_SENT_START
+            if why != PIN_NOT_PROVEN:
+                raise
+            # The force-stop went out, the start did not.
+            return self.half_sent(action_id, NOT_SENT_RECONNECTED)
+        return None
+
+    def relaunch_stop(self, action_id: int, action: Relaunch) -> str | None:
+        """Send the force-stop of a relaunch; why it was not sent, or None."""
+        try:
+            self.device.stop_app(
+                self.package, _send_by=self.send_by, _epoch=self.approved
+            )
+        except DeviceNotFoundError as error:
+            reason = error.details.get("reason")
+            if reason == SEND_STOPPED:
+                self._open = None  # nothing was sent: the time limit had passed
+                why = str(error.details.get("why", NOT_SENT_TIME_LIMIT))
+                self.end_not_sent(action_id, why)
+                return why
+            if reason != PIN_NOT_PROVEN:
                 raise
             self._open = None  # nothing was sent
             self.end_not_sent(action_id, NOT_SENT_RECONNECTED)
             self.withdraw(action)
             return NOT_SENT_RECONNECTED
+        return None
+
+    def relaunch_halt(self, action_id: int) -> str | None:
+        """Between the force-stop and the start: `stop`, the time, the pin
+        check, `stop`, the launcher read and the time again; why not to start,
+        or None."""
         try:
             # stop() may read the device, so it is inside the handler too.
             reason = self.halt()
             if reason is None:
                 # The device behind the pin is checked again before the start,
-                # then the time (its reads can take long), then, below, the
-                # last comparison of the pin.
+                # then stop() (the check can block for long) and the time,
+                # then, in `relaunch`, the last comparison of the pin.
                 self.device.check_pin(emulator=self.emulator)
-                if self.clock() >= self.deadline:
+                if self.stopped():
+                    reason = NOT_SENT_STOPPED
+                elif not self.read_start_component(action_id):
+                    reason = NOT_SENT_RECONNECTED
+                elif self.now() >= self.deadline or self.past():
                     reason = NOT_SENT_TIME_LIMIT
         except DeviceNotFoundError as error:
             if error.details.get("reason") != PIN_WAIT_STOPPED:
@@ -821,45 +1212,19 @@ class _Run:
             # The time limit (or a stop seen before) ended a wait for the
             # device: the start was not sent, which the record says before
             # the run ends.
-            self._open = None
-            why = self.wait_stop or NOT_SENT_STOPPED
-            self.end_not_sent(action_id, NOT_SENT_START)
-            self.notes.append(
-                f"{self.package} was force-stopped but not started again ({why})"
-            )
+            self.half_sent(action_id, self.wait_stop or NOT_SENT_STOPPED)
             raise
-        if reason is None and self.device.pin_epoch != self.sent_epoch:
-            # The device had to be proven again after the force-stop: the
-            # start is not sent on the earlier decision.
-            self._open = None
-            self.end_not_sent(action_id, NOT_SENT_START)
-            self.notes.append(
-                f"{self.package} was force-stopped but not started again"
-                f" ({NOT_SENT_RECONNECTED})"
-            )
-            return _HALF_RELAUNCH
-        if reason is not None:
-            self._open = None
-            self.end_not_sent(action_id, NOT_SENT_START)
-            self.notes.append(
-                f"{self.package} was force-stopped but not started again ({reason})"
-            )
-            return NOT_SENT_START
-        try:
-            self.launch()
-        except DeviceNotFoundError as error:
-            if error.details.get("reason") != PIN_NOT_PROVEN:
-                raise
-            self._open = None  # the force-stop went out, the start did not
-            self.end_not_sent(action_id, NOT_SENT_START)
-            self.notes.append(
-                f"{self.package} was force-stopped but not started again"
-                f" ({NOT_SENT_RECONNECTED})"
-            )
-            return _HALF_RELAUNCH
-        return None
+        return reason
 
-    # -- reading --
+    def half_sent(self, action_id: int, why: str) -> str:
+        """Close a relaunch whose force-stop went out and whose start did not;
+        return `_HALF_RELAUNCH`."""
+        self._open = None
+        self.end_not_sent(action_id, NOT_SENT_START)
+        self.notes.append(
+            f"{self.package} was force-stopped but not started again ({why})"
+        )
+        return _HALF_RELAUNCH
 
     def dump(self) -> Screen | None:
         try:
@@ -885,6 +1250,12 @@ class _Run:
         which the engine counts toward its limit). A failed dump is handed
         on as it is, and `stop` or the time limit end the rereading.
         """
+        # A step boundary: `stop` and the run's end are looked at when an
+        # observation begins (as before each send); a read in progress then
+        # runs until it finishes.
+        if self.stopped():
+            raise _Ended(INTERRUPTED)
+        self.check_time()
         while True:
             self.device.check_pin(emulator=self.emulator)
             self.epoch_seen = self.device.pin_epoch
@@ -903,7 +1274,7 @@ class _Run:
         if screen is not None:
             self.last_screen_id = screen.screen_id
         self.last_foreground = foreground
-        observation = Observation(screen, foreground, keyboard, self.clock())
+        observation = Observation(screen, foreground, keyboard, self.now())
         self.record(_Seen(observation, focus), self.epoch_seen)
         return observation
 
@@ -976,6 +1347,14 @@ class _Run:
             self.writer.write_skip(
                 item.screen_id, item.fingerprint, item.reasons, body, details
             )
+
+
+def _unreadable_launcher(error: Exception) -> bool:
+    """Whether `error` is a launch that stopped at its launcher read."""
+    return (
+        isinstance(error, LaunchFailedError)
+        and error.details.get("reason") == "launcher_unreadable"
+    )
 
 
 def _kind(action: Action) -> str:
@@ -1078,7 +1457,11 @@ def crawl(
 
     The order is: check the arguments, check the device, make the run folder,
     run. Nothing is written and no input is sent before the first two have
-    passed (the device check itself reads one property). Unless
+    passed (the device check itself reads one property). Every launch and
+    relaunch reads the app's launcher activity with ``cmd package
+    resolve-activity`` right before its start and starts it with ``am start
+    -W`` (`Device.launch`); when it cannot be read, the start is not sent and
+    the run ends with `LaunchFailedError` (``launcher_unreadable``). Unless
     `allow_real_device` is True, the device must answer that it is an
     emulator; an answer that cannot be read counts as a real device.
 
@@ -1120,6 +1503,9 @@ def crawl(
             be read) and `allow_real_device` is False. Nothing was written.
         AdbError: The adb server reported no transport id for the device, so
             it cannot be pinned. Nothing was written.
+        LaunchFailedError: A launch failed other than by not coming to the
+            front in time (``launcher_unreadable`` among them: the start was
+            not sent).
         RunFolderError: `out` exists, its parent is missing, or a file cannot
             be written.
         UiprobeError: A device or adb error that prevents going on.
@@ -1134,6 +1520,7 @@ def crawl(
     if not isinstance(policy, Policy):
         msg = f"policy must be a Policy, not {type(policy).__name__}"
         raise TypeError(msg)
+    policy = _plain_policy(policy)
     if not isinstance(limits, Limits):
         msg = f"limits must be a Limits, not {type(limits).__name__}"
         raise TypeError(msg)
@@ -1213,8 +1600,17 @@ def _crawl_on(
     # and whether other packages share it; None when it cannot be read: then
     # every tap is refused (cover_unknown) before any window is read.
     app_uid = device.package_uid(package) if policy.check_tap_window else None
-    started_at = clock()
-    _check_clock("clock()", started_at)
+    # The run's end by uiprobe's own clock, set once. With uiprobe's own
+    # clock (the default) it is read once, for both. With a clock of the
+    # caller's, uiprobe's is read before the caller's first value, and a
+    # later caller value can bring the end earlier, never later.
+    own_clock = clock is _OWN_CLOCK
+    if own_clock:
+        started_at = _monotonic()
+        send_limit = started_at + limits.minutes * 60
+    else:
+        send_limit = _monotonic() + limits.minutes * 60
+        started_at = _seconds(clock())
     engine = CrawlEngine(package, policy, limits, started_at=started_at)
     writer = RunWriter.create(
         out,
@@ -1242,6 +1638,8 @@ def _crawl_on(
             stop=stop,
             clock=clock,
             sleep=sleep,
+            send_limit=send_limit,
+            own_clock=own_clock,
         )
         run.repins_before = repins_before  # moves made before this call
         # Asked only while the device waits for a renumbered transport.

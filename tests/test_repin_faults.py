@@ -158,7 +158,7 @@ def test_the_crawl_without_faults_sends_inputs(tmp_path, monkeypatch):
     crawl_with(tmp_path, monkeypatch, faults, "clean")
     inputs = [e[2] for e in faults.log if e[2] and e[2].startswith(CHANGING)]
     # a launch, taps and a BACK: the faults have every kind of input to hit
-    assert any(c.startswith("monkey ") for c in inputs)
+    assert any(c.startswith("am start ") for c in inputs)
     assert any(c.startswith("input swipe ") for c in inputs)  # a tap held 10 ms
     assert any("KEYCODE_BACK" in c for c in inputs)
     assert violations(faults) == []

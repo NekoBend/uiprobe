@@ -1,0 +1,16 @@
+# Real output of Settings started again while it was running in front, on an API 24 emulator (Android 7.0, AVD "settings24").
+# Source: the emulator capture of 2026-11-21 (amstart out.txt, block
+# "######## settings24", section "== am start running"), taken over adb with
+# "adb -s emulator-5554 shell '<command>' | tr -d '\r'" (so no CR).
+# Command: am start -W -a android.intent.action.MAIN -c android.intent.category.LAUNCHER -n com.android.settings/.Settings; echo uiprobe-exit:$?
+# The body below this header is verbatim; nothing was replaced (an
+# emulator has no device-identifying values in this output).
+Starting: Intent { act=android.intent.action.MAIN cat=[android.intent.category.LAUNCHER] cmp=com.android.settings/.Settings }
+Warning: Activity not started, its current task has been brought to the front
+Status: ok
+Activity: com.android.settings/.Settings
+ThisTime: 0
+TotalTime: 0
+WaitTime: 2
+Complete
+uiprobe-exit:0

@@ -1,0 +1,10 @@
+# Real output of the launcher activity of Settings, on a Samsung phone (Android 16, API 36, One UI).
+# Source: device capture samsung-api36-1121/resolve-activity-settings.txt of 2026-11-21, taken
+# with adb on the host; its lines end in CR LF, kept as captured.
+# Command: cmd package resolve-activity --brief -c android.intent.category.LAUNCHER com.android.settings
+# Checked for device-identifying values (serial, account, IMEI, build,
+# address): none found, so the body below this header is verbatim.
+# Captured without '; echo uiprobe-exit:$?', which uiprobe appends: tests
+# append the line uiprobe-exit:0.
+priority=0 preferredOrder=0 match=0x108000 specificIndex=-1 isDefault=true
+com.android.settings/.Settings

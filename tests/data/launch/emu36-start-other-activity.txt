@@ -1,0 +1,19 @@
+# Real output of Settings started right after am force-stop com.android.settings, done while
+# the search screen of com.google.android.settings.intelligence (opened by a
+# tap on the Settings search bar) was in front: the reply names that
+# package's activity, on an API 36 emulator (Android 16, AVD "settings36").
+# Source: the emulator capture of 2026-11-21 (amcap relaunch1.bin): the raw bytes of
+# "adb -s emulator-5554 shell '<command>'", passed through base64 unchanged
+# (no CR in them).
+# Command: am start -W -a android.intent.action.MAIN -c android.intent.category.LAUNCHER -n com.android.settings/.Settings; echo uiprobe-exit:$?
+# The body below this header is verbatim; nothing was replaced (an
+# emulator has no device-identifying values in this output).
+Starting: Intent { act=android.intent.action.MAIN cat=[android.intent.category.LAUNCHER] cmp=com.android.settings/.Settings }
+Warning: Activity not started, intent has been delivered to currently running top-most instance.
+Status: ok
+LaunchState: UNKNOWN (0)
+Activity: com.google.android.settings.intelligence/.modules.search.activity.SearchActivity
+TotalTime: 0
+WaitTime: 143
+Complete
+uiprobe-exit:0

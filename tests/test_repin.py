@@ -269,7 +269,11 @@ def test_a_boot_id_that_can_no_longer_be_read_is_a_change(fake_adb, android):
         (lambda d: d.key("back"), "input"),
         (lambda d: d.tap((10, 10)), "input"),
         (lambda d: d.stop_app(SHOP), "am"),
-        (lambda d: d.launch(SHOP), "monkey"),
+        # The launcher read goes out on the same rule as the start: neither
+        # follows the renumbered transport.
+        (lambda d: d.launch(SHOP), "am start"),
+        (lambda d: d.launch(SHOP, restart=True), "am "),
+        (lambda d: d.launch(SHOP), "cmd package"),
     ],
 )
 def test_an_input_never_follows_a_renumbered_transport(
@@ -286,6 +290,27 @@ def test_an_input_never_follows_a_renumbered_transport(
     assert through(fake_adb, TRANSPORT + 1, since) == []
     assert not [c for _, _, c in fake_adb.commands if c.startswith(command)]
     assert android.inputs == []
+    assert android.stopped == []
+
+
+@pytest.mark.parametrize("restart", [False, True])
+def test_a_launch_sends_nothing_when_the_pin_moved_during_the_launcher_read(
+    fake_adb, android, monkeypatch, restart
+):
+    device = pinned(fake_adb)
+    original = device._shell_text
+
+    def read_then_doubt(command: str, **kwargs: object) -> str:
+        text = original(command, **kwargs)  # ty: ignore[invalid-argument-type]
+        if command.startswith("cmd package"):
+            device._epoch += 1  # as a failed request in between would
+        return text
+
+    monkeypatch.setattr(device, "_shell_text", read_then_doubt)
+    with pytest.raises(DeviceNotFoundError) as caught:
+        device.launch(SHOP, restart=restart)
+    assert caught.value.details["reason"] == PIN_NOT_PROVEN
+    assert not [c for _, _, c in fake_adb.commands if c.startswith("am ")]
     assert android.stopped == []
 
 
@@ -647,14 +672,14 @@ def test_the_check_before_the_run_does_not_ask_stop_and_restores_the_watch(
 def _covered_after_launch(monkeypatch, device, android) -> None:
     """Every launch ends with a screen of another app in front (a relaunch
     follows by default)."""
-    original_launch = device.launch
+    original_launch = device._launch_component
 
     def launch_under(*args: object, **kwargs: object) -> object:
         result = original_launch(*args, **kwargs)
         android.show("ext1")
         return result
 
-    monkeypatch.setattr(device, "launch", launch_under)
+    monkeypatch.setattr(device, "_launch_component", launch_under)
 
 
 def test_the_time_limit_inside_the_wait_after_force_stop_is_recorded(
@@ -667,8 +692,10 @@ def test_the_time_limit_inside_the_wait_after_force_stop_is_recorded(
     dropped: list[bool] = []
     original_stop = device.stop_app
 
-    def stop_then_drop(package: str) -> None:
-        original_stop(package)
+    def stop_then_drop(
+        package: str, _send_by: float | None = None, _epoch: int | None = None
+    ) -> None:
+        original_stop(package, _send_by=_send_by, _epoch=_epoch)
         listing(fake_adb)
         dropped.append(True)
 
@@ -684,7 +711,7 @@ def test_the_time_limit_inside_the_wait_after_force_stop_is_recorded(
     result = run(device, LateClock(), out)
     assert result.stop_reason == "max_duration"
     assert android.stopped == [SHOP]
-    starts = [c for _, _, c in fake_adb.commands if c.startswith("monkey")]
+    starts = [c for _, _, c in fake_adb.commands if c.startswith("am start")]
     assert len(starts) == 1  # the first launch only
     records = lines(out / "transitions.jsonl")
     assert [r["reason"] for r in records if r.get("not_sent")] == ["start_not_sent"]
@@ -701,8 +728,10 @@ def test_a_device_proven_again_after_force_stop_gets_no_start(
     _covered_after_launch(monkeypatch, device, android)
     original_stop = device.stop_app
 
-    def stop_then_renumber(package: str) -> None:
-        original_stop(package)
+    def stop_then_renumber(
+        package: str, _send_by: float | None = None, _epoch: int | None = None
+    ) -> None:
+        original_stop(package, _send_by=_send_by, _epoch=_epoch)
         listing(fake_adb, (TRANSPORT + 1, "device"))
 
     monkeypatch.setattr(device, "stop_app", stop_then_renumber)
@@ -710,7 +739,7 @@ def test_a_device_proven_again_after_force_stop_gets_no_start(
     result = run(device, clock, out)
     assert result.stop_reason == "not_sent"
     assert device.repins == ((TRANSPORT, TRANSPORT + 1),)
-    starts = [c for _, _, c in fake_adb.commands if c.startswith("monkey")]
+    starts = [c for _, _, c in fake_adb.commands if c.startswith("am start")]
     assert len(starts) == 1
     records = lines(out / "transitions.jsonl")
     assert [r["reason"] for r in records if r.get("not_sent")] == ["start_not_sent"]
@@ -1139,11 +1168,13 @@ def test_a_tap_that_meets_a_renumbered_pin_is_not_sent_and_the_crawl_goes_on(
     original = device.tap
     moved: list[bool] = []
 
-    def renumber_then_tap(point: tuple[int, int]) -> tuple[int, int]:
+    def renumber_then_tap(
+        point: tuple[int, int], _send_by: float | None = None, _epoch: int | None = None
+    ) -> tuple[int, int]:
         if not moved:
             moved.append(True)
             listing(fake_adb, (TRANSPORT + 1, "device"))  # after the gate
-        return original(point)
+        return original(point, _send_by=_send_by, _epoch=_epoch)
 
     monkeypatch.setattr(device, "tap", renumber_then_tap)
     out = tmp_path / "run"
@@ -1221,8 +1252,8 @@ def test_a_restart_launch_on_a_stale_pin_says_it_force_stopped(
     device = pinned(fake_adb)
     original = device._force_stop
 
-    def stop_then_renumber(package: str) -> None:
-        original(package)
+    def stop_then_renumber(package: str, dispatch: object = None) -> None:
+        original(package, dispatch)  # ty: ignore[invalid-argument-type]
         listing(fake_adb, (TRANSPORT + 1, "device"))
 
     monkeypatch.setattr(device, "_force_stop", stop_then_renumber)
@@ -1231,7 +1262,7 @@ def test_a_restart_launch_on_a_stale_pin_says_it_force_stopped(
     assert caught.value.details["reason"] == PIN_NOT_PROVEN
     assert caught.value.details["force_stopped"] is True
     assert android.stopped == [SHOP]
-    assert not [c for _, _, c in fake_adb.commands if c.startswith("monkey")]
+    assert not [c for _, _, c in fake_adb.commands if c.startswith("am start")]
 
 
 @pytest.mark.usefixtures("android")
@@ -1258,8 +1289,10 @@ def test_a_stop_that_waits_after_force_stop_records_the_half_relaunch(
     dropped: list[bool] = []
     original_stop = device.stop_app
 
-    def stop_then_drop(package: str) -> None:
-        original_stop(package)
+    def stop_then_drop(
+        package: str, _send_by: float | None = None, _epoch: int | None = None
+    ) -> None:
+        original_stop(package, _send_by=_send_by, _epoch=_epoch)
         listing(fake_adb)
         dropped.append(True)
 
@@ -1290,11 +1323,13 @@ def test_a_relaunch_refused_before_its_force_stop_is_taken_back(
     original = device.stop_app
     moved: list[bool] = []
 
-    def renumber_then_stop(package: str) -> None:
+    def renumber_then_stop(
+        package: str, _send_by: float | None = None, _epoch: int | None = None
+    ) -> None:
         if not moved:
             moved.append(True)
             listing(fake_adb, (TRANSPORT + 1, "device"))
-        original(package)
+        original(package, _send_by=_send_by, _epoch=_epoch)
 
     monkeypatch.setattr(device, "stop_app", renumber_then_stop)
     out = tmp_path / "run"

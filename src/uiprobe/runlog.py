@@ -609,6 +609,7 @@ class RunWriter:
         dump_failed: bool = False,
         not_sent: str | None = None,
         details: Mapping[str, str | int] | None = None,
+        failed: str | None = None,
     ) -> None:
         """Write the line that says where an action led, or that it was not sent.
 
@@ -619,11 +620,29 @@ class RunWriter:
         nor ``to_screen_id`` (both must be left at their defaults).
         `details`, only with `not_sent`, is written as ``details``: short
         words or numbers that say more about why (for example the window that
-        would have taken a tap).
+        would have taken a tap). ``failed`` is the reason (a short word) when
+        sending the action failed and the run ends: the line then has
+        ``failed: true``, ``reason`` and ``outcome: "unknown"`` (the device
+        may have acted on it), and nothing else may be given.
         """
         if not isinstance(dump_failed, bool):
             msg = "dump_failed must be a bool"
             raise TypeError(msg)
+        if failed is not None:
+            _check_text("failed", failed)
+            if dump_failed or to_screen_id is not None or not_sent or details:
+                msg = "a failed action has only its reason"
+                raise ValueError(msg)
+            line_failed: dict[str, object] = {
+                "schema": TRANSITION_END_SCHEMA,
+                "recorded_at": _stamp(_now()),
+                "action_id": _check_action_id(action_id),
+                "failed": True,
+                "reason": failed,
+                "outcome": "unknown",
+            }
+            self._append("transitions.jsonl", _json_text(line_failed) + "\n")
+            return
         if details is not None and not_sent is None:
             msg = "details are written only for an action that was not sent"
             raise ValueError(msg)

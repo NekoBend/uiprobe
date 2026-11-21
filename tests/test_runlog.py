@@ -1956,6 +1956,38 @@ def test_a_not_sent_end_line_refuses_a_destination(tmp_path, kwargs):
         writer.write_transition_end(1, not_sent="stopped", **kwargs)
 
 
+def test_a_failed_end_line_has_its_reason_and_an_unknown_outcome(tmp_path):
+    writer = make(tmp_path)
+    writer.write_transition_start(1, "launch")
+    writer.write_transition_end(1, failed="start_timeout")
+    writer.close()
+    end = lines_of(tmp_path / "run" / "transitions.jsonl")[1]
+    assert end == {
+        "schema": "uiprobe.transition_end/1",
+        "recorded_at": end["recorded_at"],
+        "action_id": 1,
+        "failed": True,
+        "reason": "start_timeout",
+        "outcome": "unknown",
+    }
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"dump_failed": True},
+        {"to_screen_id": ID_A},
+        {"not_sent": "stopped"},
+        {"not_sent": "cover_unknown", "details": {"unreadable": "no_list"}},
+    ],
+    ids=["dump", "screen", "not-sent", "details"],
+)
+def test_a_failed_end_line_has_only_its_reason(tmp_path, kwargs):
+    writer = make(tmp_path)
+    with pytest.raises(ValueError, match="only its reason"):
+        writer.write_transition_end(1, failed="start_failed", **kwargs)
+
+
 def test_the_writer_counts_complete_start_lines(tmp_path):
     writer = make(tmp_path)
     assert writer.starts_written == 0

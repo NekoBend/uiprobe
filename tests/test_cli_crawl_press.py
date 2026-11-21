@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import json
+import re
 from typing import TYPE_CHECKING
 
 import pytest
@@ -298,14 +299,14 @@ def test_the_plan_is_out_before_the_app_is_started(
     fake_adb, capsys, tmp_path, monkeypatch, as_json
 ):
     seen: list[tuple[str, str]] = []
-    original = Device.launch
+    original = Device._launch_component
 
     def launch_after_reading(self: Device, *args: object, **kwargs: object) -> object:
         captured = capsys.readouterr()
         seen.append((captured.out, captured.err))
         return original(self, *args, **kwargs)  # ty: ignore[invalid-argument-type]
 
-    monkeypatch.setattr(Device, "launch", launch_after_reading)
+    monkeypatch.setattr(Device, "_launch_component", launch_after_reading)
     out = tmp_path / "run"
     argv = ["--press", "--out", str(out), "--actions", "2"]
     code, _text, _err = press(capsys, fake_adb, *argv, *(["--json"] if as_json else []))
@@ -373,6 +374,21 @@ def test_refusals_start_and_stop_nothing(fake_adb, android, capsys, tmp_path):
     code, _text, _err = press(capsys, fake_adb, "--press", "--out", str(existing))
     assert code != 0
     assert device_writes(fake_adb) == []
+
+
+@pytest.mark.usefixtures("here")
+def test_an_unreadable_launcher_activity_starts_nothing(
+    fake_adb, android, capsys, tmp_path
+):
+    android.override(re.compile(r"^cmd package"), b"No activity found\n")
+    out = tmp_path / "run"
+    code, text, _err = press(capsys, fake_adb, "--press", "--out", str(out), "--json")
+    assert code == 15
+    error = json.loads(text)["error"]
+    assert error["code"] == "launch_failed"
+    assert error["details"]["reason"] == "launcher_unreadable"
+    assert device_writes(fake_adb) == []
+    assert android.inputs == []
 
 
 @pytest.mark.usefixtures("here", "android")
