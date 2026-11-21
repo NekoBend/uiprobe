@@ -1,0 +1,15 @@
+# Real output of Settings started again while it was running, on a Samsung phone (Android 16, API 36, One UI).
+# Source: device capture samsung-api36-1121/am-start-W-settings-running.txt of 2026-11-21, taken
+# with adb on the host; its lines end in CR LF, kept as captured.
+# Command: am start -W -a android.intent.action.MAIN -c android.intent.category.LAUNCHER -n com.android.settings/.Settings
+# Checked for device-identifying values (serial, account, IMEI, build,
+# address): none found, so the body below this header is verbatim.
+# Captured without '; echo uiprobe-exit:$?': tests append a marker line.
+Starting: Intent { act=android.intent.action.MAIN cat=[android.intent.category.LAUNCHER] cmp=com.android.settings/.Settings }
+Warning: Activity not started, intent has been delivered to currently running top-most instance.
+Status: ok
+LaunchState: UNKNOWN (0)
+Activity: com.android.settings/.homepage.SettingsHomepageActivity
+TotalTime: 0
+WaitTime: 8
+Complete

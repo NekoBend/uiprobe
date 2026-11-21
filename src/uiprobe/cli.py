@@ -260,13 +260,15 @@ def _add_launch_parser(add_parser: Callable[..., _Parser]) -> None:
         allow_abbrev=False,
         help="start an app and wait until it is in front",
         description=(
-            "Start the app PACKAGE through its launcher activity and wait until"
-            " it is the foreground app. With --restart the app is stopped"
-            " first (am force-stop), so it starts a fresh task; state it has"
-            " not saved is lost. It starts the app on whatever device is"
-            " selected. Exit 15 (launch_failed) when the stop of --restart"
-            " fails, the app has no launcher activity, monkey prints something"
-            " unexpected, or the app is not in front within the timeout."
+            "Start the app PACKAGE through its launcher activity (read with"
+            " cmd package resolve-activity, started with am start -W) and wait"
+            " until it is the foreground app. With --restart the app is"
+            " stopped first (am force-stop), so it starts a fresh task; state"
+            " it has not saved is lost. It starts the app on whatever device is"
+            " selected. Exit 15 (launch_failed) when the launcher activity"
+            " cannot be read (nothing is started then), the stop of --restart"
+            " fails, am start does not report success, or the app is not in"
+            " front within the timeout."
         ),
     )
     _add_common_options(launch, in_command=True)
@@ -279,7 +281,10 @@ def _add_launch_parser(add_parser: Callable[..., _Parser]) -> None:
     launch.add_argument(
         "--timeout",
         metavar="SECONDS",
-        help="how long to wait for the app to come to the front (default 10)",
+        help=(
+            "how long the start may stay silent, then how long to wait for the"
+            " app to come to the front (default 10)"
+        ),
     )
 
 

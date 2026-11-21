@@ -1,0 +1,14 @@
+# Real output of Settings started right after am force-stop com.android.settings, on a Samsung phone (Android 16, API 36, One UI).
+# Source: device capture samsung-api36-1121/am-start-W-settings-after-force-stop.txt of 2026-11-21, taken
+# with adb on the host; its lines end in CR LF, kept as captured.
+# Command: am start -W -a android.intent.action.MAIN -c android.intent.category.LAUNCHER -n com.android.settings/.Settings
+# Checked for device-identifying values (serial, account, IMEI, build,
+# address): none found, so the body below this header is verbatim.
+# Captured without '; echo uiprobe-exit:$?': tests append a marker line.
+Starting: Intent { act=android.intent.action.MAIN cat=[android.intent.category.LAUNCHER] cmp=com.android.settings/.Settings }
+Status: ok
+LaunchState: COLD
+Activity: com.android.settings/.homepage.SettingsHomepageActivity
+TotalTime: 163
+WaitTime: 164
+Complete

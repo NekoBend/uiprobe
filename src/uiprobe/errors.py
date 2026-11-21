@@ -165,19 +165,33 @@ class LaunchFailedError(UiprobeError):
     """The app could not be started, or did not come to the front in time.
 
     ``details["package"]`` is the package and ``details["reason"]`` is one of:
+    ``launcher_unreadable`` (``cmd package resolve-activity`` did not name
+    one launcher activity of the package: it is not installed, has none, or
+    the output had another shape; ``details["output"]`` is the first line that
+    is not blank, stripped, cut to 200 characters and escaped; nothing was
+    sent that changes the device),
     ``stop_failed`` (``am force-stop`` before the launch did not report success;
     ``details["exit_status"]`` and ``details["output"]``, each set only when
     known, say how, and the launch was not sent),
-    ``not_installed_or_no_launcher`` (monkey found no launcher activity: the
-    package is not installed, or it has none), ``unexpected_output`` (monkey did
-    not report exactly one injected event; ``details["output"]`` is the first
-    line that is not blank, stripped, cut to 200 characters and escaped) or
-    ``not_in_front`` (monkey reported success but the app was not the foreground
-    app within the timeout; ``details["foreground"]`` is the last package seen
-    (escaped; past 1000 characters cut and ended with ``...``), or None, and
-    ``details["timeout"]`` the timeout in seconds).
+    ``start_failed`` (``am start`` printed a line starting with ``Error`` or
+    ended with an exit status other than 0, then in ``details["exit_status"]``),
+    ``other_activity`` (``am start`` reported a success that named an
+    activity of another app or of the system owner ``android``, which is then
+    in front; ``details["activity"]`` is that component, escaped),
+    ``unexpected_output`` (``am start`` did not report ``Status: ok`` and one
+    activity of the package in the known shape); for these three,
+    ``details["output"]`` is the line at fault, or the first line that is not
+    blank, cut to 200 characters and escaped,
+    ``start_timeout`` (the reply of ``am start -W`` did not come: it stayed
+    silent for ``details["timeout"]`` seconds) or
+    ``not_in_front`` (the start reported success but the app was not the
+    foreground app within the timeout; ``details["foreground"]`` is the last
+    package seen (escaped; past 1000 characters cut and ended with ``...``), or
+    None, and ``details["timeout"]`` the timeout in seconds).
 
-    A launch that failed with ``not_in_front`` may still have started the app.
+    A launch that failed with ``start_failed``, ``other_activity``,
+    ``unexpected_output``, ``start_timeout`` or ``not_in_front`` may still have
+    started the app.
     """
 
     code = "launch_failed"

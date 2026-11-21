@@ -2,7 +2,8 @@
 
 Screens are described compactly (`Screen` holding `El` elements) and rendered
 to uiautomator XML. `FakeAndroid` answers the commands uiprobe sends: dump,
-foreground app lines, ``wm size``, ``getprop``, input, relaunch and screencap.
+foreground app lines, ``wm size``, ``getprop``, input, the launcher activity
+(``cmd package resolve-activity``), start and stop of an app and screencap.
 Taps follow the transitions written into the screens, so a crawl test can run
 against a small app without any adb, emulator or network.
 
@@ -23,11 +24,14 @@ true in every capture, so it is no signal and is printed true always. Plain
 appeared only with ``dumpsys window windows`` on API 36), and the fake prints
 no keyboard line there.
 No capture shows the keyboard in the XML dump, so that (``keyboard_in_dump``)
-and where the keyboard sits on screen are assumptions, as are the failure
-output of ``am start`` and the API level (33) from which a protected screen's
-screencap is a black image rather than empty output (only API 24 and 36 are
-captured). ``am start -n`` of a component whose app already has screens on
-the stack resumes the app's top screen: assumed, not captured.
+and where the keyboard sits on screen are assumptions, as is the API level
+(33) from which a protected screen's screencap is a black image rather than
+empty output (only API 24 and 36 are captured). ``am start`` of a component
+whose app already has screens on the stack resumes the app's top screen:
+assumed, not captured. The outputs of ``cmd package resolve-activity`` and
+``am start -W`` follow the captures in tests/data/launch (API 24 and 36
+emulators, a Samsung API 36 phone); API 25 to 35 are assumed to print the API
+24 shape of ``am start -W``.
 """
 
 from __future__ import annotations
@@ -38,7 +42,6 @@ import struct
 import threading
 import zlib
 from dataclasses import dataclass, field
-from itertools import pairwise
 from types import MappingProxyType
 from typing import TYPE_CHECKING
 
@@ -54,31 +57,48 @@ KEYBOARD_PACKAGE = "com.google.android.inputmethod.latin"
 PERMISSION_PACKAGE = "com.google.android.permissioncontroller"
 DUMP_OK = "UI hierchary dumped to: {}\n"
 DUMP_FAILED = "ERROR: could not get idle state.\n"
-# Captured on API 36 and API 30 emulators: the monkey success
-# and failure outputs. Both start, after the
-# wrapper's marker, with a preamble that monkey itself prints, ``  bash arg: <a>``
-# per argument, then
-# ``args: [a, b]``, `` arg: "<a>"`` per argument and ``data="<pkg>"`` (plus
-# ``data="<category>"`` with ``-c``); the result line follows. Only API 30 and
-# 36 are captured: the preamble on API 24-29 is assumed to be the same.
-MONKEY_OK = (
-    "Events injected: 1\n"
-    "## Network stats: elapsed time=12ms (0ms mobile, 0ms wifi, 12ms not connected)\n"
-)
 LAUNCHER_CATEGORY = "android.intent.category.LAUNCHER"
+MAIN_ACTION = "android.intent.action.MAIN"
 INPUT_MARKER_SUFFIX = "; echo uiprobe-exit:$?"
-MONKEY_FAILED = "** No activities found to run, monkey aborted.\n"
-# Captured on API 36 and API 30 emulators: the success
-# line, with the component in its short form as given. Assumed, not captured:
-# the echo of a component given in full is the short form
-# (``package/.Class``), as ``Intent.toShortString`` prints it.
-AM_START_STARTED = "Starting: Intent {{ cmp={} }}\n"
-# Assumed, not captured: the failure output of am start.
-AM_START_FAILED = (
-    "Starting: Intent {{ cmp={0} }}\n"
-    "Error type 3\n"
-    "Error: Activity class {{{1}}} does not exist.\n"
+# ``cmd package resolve-activity --brief -c android.intent.category.LAUNCHER
+# PKG``, captured on API 24 and 36 emulators and a Samsung API 36 phone (the
+# same text on all three): one line about the match, then the component in
+# its short form; a package that is not installed gets RESOLVE_NONE. uiprobe
+# sends it in the marker form; the emulators printed exit status 0 for both.
+RESOLVE_INFO = (
+    "priority=0 preferredOrder=0 match=0x108000 specificIndex=-1 isDefault=true\n"
 )
+RESOLVE_NONE = "No activity found\n"
+# ``am start -W -a android.intent.action.MAIN -c
+# android.intent.category.LAUNCHER -n CMP``, captured on API 24 and 36
+# emulators and a Samsung API 36 phone (tests/data/launch). The component is
+# echoed in its short form; assumed, not captured: also when it was given in
+# full (``Intent.toShortString`` prints the short form).
+AM_START_STARTING = (
+    "Starting: Intent {{ act=android.intent.action.MAIN"
+    " cat=[android.intent.category.LAUNCHER] cmp={} }}\n"
+)
+# The Warning line of a start of an app that was running: captured in front
+# (API 36: delivered to the top-most instance; API 24: brought to the front).
+# Assumed: an app that runs behind another one gets the brought-to-front line
+# on every API.
+AM_START_ON_TOP = (
+    "Warning: Activity not started, intent has been delivered to currently"
+    " running top-most instance.\n"
+)
+AM_START_TO_FRONT = (
+    "Warning: Activity not started, its current task has been brought to the front\n"
+)
+# The rest of a success, by shape: API 36 (``LaunchState:``, COLD after a
+# stop, ``UNKNOWN (0)`` while running) and API 24 (``ThisTime:``).
+AM_START_OK_36 = (
+    "Status: ok\nLaunchState: {0}\nActivity: {1}\nTotalTime: 0\nWaitTime: 1\nComplete\n"
+)
+AM_START_OK_24 = (
+    "Status: ok\nActivity: {}\nThisTime: 0\nTotalTime: 0\nWaitTime: 1\nComplete\n"
+)
+# A class the app does not have: exit status 1 on API 36, 0 on API 24.
+AM_START_FAILED = "Error type 3\nError: Activity class {{{}}} does not exist.\n"
 Bounds = tuple[int, int, int, int]
 
 
@@ -214,17 +234,6 @@ def _short_component(component: str) -> str:
     return f"{package}/{name}"
 
 
-def _monkey_output(args: Sequence[str], *, ok: bool) -> str:
-    """Return the monkey output for `args` (the words after ``monkey``)."""
-    packages = [b for a, b in pairwise(args) if a == "-p"]
-    categories = [b for a, b in pairwise(args) if a == "-c"]
-    lines = [f"  bash arg: {a}" for a in args]
-    lines.append(f"args: [{', '.join(args)}]")
-    lines.extend(f' arg: "{a}"' for a in args)
-    lines.extend(f'data="{d}"' for d in (*packages, *categories))
-    return "\n".join(lines) + "\n" + (MONKEY_OK if ok else MONKEY_FAILED)
-
-
 def _point(x: str, y: str) -> tuple[int, int] | None:
     """Parse two coordinates; None when either is not an integer."""
     try:
@@ -243,9 +252,10 @@ class FakeAndroid:
     Strict mode is on by default: the constructor installs `allowed()` with
     `FakeAdbServer.allow_only` for this device's serial, so any other command,
     or one for another serial, or the wrong service kind, fails the test.
-    It admits ``monkey`` and ``am start`` only for the packages and components
-    of the device's own screens (plus ``extra_packages``) and only the LAUNCHER
-    category. Pass ``strict=False`` for a test that sends other commands; that
+    It admits ``cmd package resolve-activity`` and ``am start -W`` only in the
+    form uiprobe sends, with the LAUNCHER category, and only for the packages
+    and components of the device's own screens (plus ``extra_packages``).
+    Pass ``strict=False`` for a test that sends other commands; that
     serves every command of this serial (`FakeAdbServer.allow_any`) even when
     another device on the same server is strict.
     Scripts added to the server before this object is created win over the
@@ -296,8 +306,12 @@ class FakeAndroid:
     # a single-segment system package such as ``android``.
     _PACKAGE = rf"{_SEGMENT}(?:\.{_SEGMENT})+"
     _DECLARED_PACKAGE = rf"{_SEGMENT}(?:\.{_SEGMENT})*"
-    # No ``$``: a nested class would need shell quoting. Known limit.
-    _CLASS = r"\.?[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*"
+    # A declared class may hold ``$`` (a nested class): uiprobe sends such a
+    # component in single quotes, and the allowlist lists each declared
+    # spelling quoted as the shell needs it. A missing package's class
+    # (`extra_packages`) is admitted only without ``$``, so unquoted.
+    _CLASS = r"\.?[A-Za-z_$][A-Za-z0-9_$]*(?:\.[A-Za-z_$][A-Za-z0-9_$]*)*"
+    _PLAIN_CLASS = r"\.?[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*"
     # `cat` and `screencap` go through the binary-safe ``exec:`` service
     # (`Device` reads the dump with `exec_out`); everything else is ``shell:``.
     # The window with input focus as (title, owner package) when it is not the
@@ -388,8 +402,8 @@ class FakeAndroid:
 
         Args:
             extra_packages: Packages the device does not have, admitted so a
-                test can send the launch of a missing package (monkey, and
-                am start with any component of it).
+                test can send the launch of a missing package (the launcher
+                activity read, a stop, and am start with any component of it).
 
         Raises:
             ValueError: A screen's component is malformed, an extra package is
@@ -409,27 +423,47 @@ class FakeAndroid:
             if package in packages:
                 msg = f"the device already declares package {package!r}"
                 raise ValueError(msg)
+        # Every spelling of every declared component (as declared, short and
+        # full), quoted for the shell as uiprobe quotes it.
         components = sorted(
             {
-                form
+                shlex.quote(form)
                 for s in snapshot
-                for form in (s.component, _full_component(s.component))
+                for form in (
+                    s.component,
+                    _full_component(s.component),
+                    _short_component(s.component),
+                )
             }
         )
         extra = sorted(set(extra_packages))
-        monkey = "|".join(re.escape(p) for p in [*packages, *extra])
-        launcher = re.escape(LAUNCHER_CATEGORY)
+        names = "|".join(re.escape(p) for p in [*packages, *extra])
+        start = (
+            rf"^am start -W -a {re.escape(MAIN_ACTION)}"
+            rf" -c {re.escape(LAUNCHER_CATEGORY)} -n"
+        )
         patterns = [
-            re.compile(rf"^monkey -p (?:{monkey})(?: -c {launcher})? 1\Z"),
+            # The read, the start and the stop are sent in the marker form.
             re.compile(
-                "^am start -n (?:" + "|".join(re.escape(c) for c in components) + r")\Z"
+                r"^cmd package resolve-activity --brief"
+                rf" -c {re.escape(LAUNCHER_CATEGORY)} (?:{names})"
+                r"; echo uiprobe-exit:\$\?\Z"
             ),
-            # ``uiprobe launch --restart`` sends the stop in the marker form.
-            re.compile(rf"^am force-stop (?:{monkey}); echo uiprobe-exit:\$\?\Z"),
+            re.compile(
+                rf"{start} (?:"
+                + "|".join(re.escape(c) for c in components)
+                + r"); echo uiprobe-exit:\$\?\Z"
+            ),
+            re.compile(rf"^am force-stop (?:{names}); echo uiprobe-exit:\$\?\Z"),
         ]
         if extra:
             missing = "|".join(re.escape(p) for p in extra)
-            patterns.append(re.compile(rf"^am start -n (?:{missing})/{self._CLASS}\Z"))
+            patterns.append(
+                re.compile(
+                    rf"{start} (?:{missing})/{self._PLAIN_CLASS};"
+                    r" echo uiprobe-exit:\$\?\Z"
+                )
+            )
         return {
             "shell": (
                 *self.SHELL_ALLOWED,
@@ -521,7 +555,7 @@ class FakeAndroid:
         # Assumed: black from API 33; only API 24 (empty) and 36 (black) captured.
         self.secure_screencap = secure_screencap or ("black" if api >= 33 else "empty")
         self.serial = serial
-        # False: monkey reports success but the app does not come to the front.
+        # False: am start reports success but the app does not come to the front.
         self.launch_in_front = True
         # Packages stopped with ``am force-stop``, in order.
         self.stopped: list[str] = []
@@ -549,8 +583,9 @@ class FakeAndroid:
         # Replaces the text of ``dumpsys window displays`` when not None.
         self.displays_output: str | None = None
         self._drop_after: set[int] = set()
-        # What input commands in the marker form answer (see answer_input).
-        self._input_status, self._input_marker = 0, True
+        # What input commands in the marker form answer (see answer_input), and
+        # the exit status the last ``am start`` printed after its marker.
+        self._input_status, self._input_marker, self._start_status = 0, True, 0
         self._input_output = ""
         self._server = server
         self._lock = threading.RLock()
@@ -670,12 +705,18 @@ class FakeAndroid:
         """Run a command; in the marker form, answer with the marker line too."""
         if not command.endswith(INPUT_MARKER_SUFFIX):
             return self._run(command)
-        result = self._run(command.removesuffix(INPUT_MARKER_SUFFIX))
+        inner = command.removesuffix(INPUT_MARKER_SUFFIX)
+        result = self._run(inner)
         if isinstance(result, Reset):
             with self._lock:
                 self.dropped[-1] = command  # as the server recorded it
             return result
         with self._lock:
+            if inner.startswith("am start "):
+                # am start prints its own status; answer_input does not apply.
+                return result + b"uiprobe-exit:%d\n" % self._start_status
+            if inner.startswith("cmd package "):
+                return result + b"uiprobe-exit:0\n"  # also for no activity found
             out = result + self._input_output.encode()
             if self._input_marker:
                 out += b"uiprobe-exit:%d\n" % self._input_status
@@ -719,7 +760,7 @@ class FakeAndroid:
                     out = self._dumpsys_service(words[1:]).encode()
                 case ["input", *args]:
                     self._input(args)
-                case ["monkey" | "am", *_]:
+                case ["cmd", "package", "resolve-activity", *_] | ["am", *_]:
                     out = self._launch_command(words)
                 case ["screencap", "-p"]:
                     out = self._screencap()
@@ -731,27 +772,58 @@ class FakeAndroid:
 
     def _launch_command(self, words: list[str]) -> bytes:
         match words:
-            case ["monkey", "-p", package, *rest]:
-                args = words[1:]
-                categories = [c for a, c in pairwise(rest) if a == "-c"]
-                # An unsupported category matches no activity, as in real monkey.
-                ok = all(c == LAUNCHER_CATEGORY for c in categories)
-                if ok and self.launch_in_front:
-                    ok = self._launch(package)
-                elif ok:
-                    ok = any(s.package == package for s in self.screens.values())
-                return _monkey_output(args, ok=ok).encode()
+            case [
+                "cmd",
+                "package",
+                "resolve-activity",
+                "--brief",
+                "-c",
+                category,
+                package,
+            ]:
+                first = next(
+                    (s for s in self.screens.values() if s.package == package), None
+                )
+                if category != LAUNCHER_CATEGORY or first is None:
+                    return RESOLVE_NONE.encode()
+                return (
+                    RESOLVE_INFO + _short_component(first.component) + "\n"
+                ).encode()
             case ["am", "force-stop", package]:
                 self._stop(package)
                 return b""
-            case ["am", "start", "-n", component, *_]:
-                full = _full_component(component)
-                ok = self._launch(full.partition("/")[0], full)
-                short = _short_component(full)
-                started = AM_START_STARTED.format(short)
-                failed = AM_START_FAILED.format(short, full)
-                return (started if ok else failed).encode()
+            case ["am", "start", "-W", "-a", action, "-c", category, "-n", component]:
+                if (action, category) == (MAIN_ACTION, LAUNCHER_CATEGORY):
+                    return self._start(component).encode()
+        # Any other start (lax mode only) starts nothing and fails.
+        self._start_status = 1
         return b""
+
+    def _start(self, component: str) -> str:
+        """Answer ``am start -W`` of `component` and set its exit status."""
+        full = _full_component(component)
+        package = full.partition("/")[0]
+        short = _short_component(full)
+        text = AM_START_STARTING.format(short)
+        known = any(_full_component(s.component) == full for s in self.screens.values())
+        if not known:
+            self._start_status = 1 if self.api >= 36 else 0
+            return text + AM_START_FAILED.format(full)
+        self._start_status = 0
+        running = package not in self._gone and any(
+            self.screens[n].package == package for n in self.stack
+        )
+        in_front = running and self.screen.package == package
+        if running:
+            on_top = in_front and self.api >= 36
+            text += AM_START_ON_TOP if on_top else AM_START_TO_FRONT
+        if self.launch_in_front:
+            self._launch(package, full)
+            short = _short_component(self.screen.component)
+        if self.api >= 36:
+            state = "UNKNOWN (0)" if running else "COLD"
+            return text + AM_START_OK_36.format(state, short)
+        return text + AM_START_OK_24.format(short)
 
     def _screencap(self) -> bytes:
         if not self.screen.protected:
@@ -850,7 +922,7 @@ class FakeAndroid:
 
         When a screen of the package is on the stack, its top screen comes
         forward and the screens above it are dropped, whichever component was
-        named (assumed, not captured: a real ``am start -n`` of a component of
+        named (assumed, not captured: a real ``am start`` of a component of
         a running task may start a new instance or clear the task down to it).
         Otherwise the first matching screen is started. Return False when the
         device has no such screen.
