@@ -16,6 +16,63 @@ normalized form of each field (see `normalize`), also with camelCase and the
 separators ``_ - . / :`` read as spaces, and also with all spaces removed. So
 ``signUp``, ``sign-up`` and ``SIGN UP`` all match the word ``sign up``.
 
+Exception words (``Policy.deny_exceptions``; the settings file's ``[deny]
+except``) are empty by default (`DEFAULT_DENY_EXCEPTIONS` is ``()``), so the
+defaults decide exactly as substring matching alone. With exception words, in
+the text, content description and hint, and in the joined texts built from
+them, an occurrence of a deny word is not counted when it lies completely
+inside an exception word that stands as one whole word of the field: a word
+run (a maximal run of letters and digits, `str.isalnum`, with the combining
+marks that follow them) of the field after NFKC, with invisible characters
+still in place (they end a run), whose case-folded text equals the exception
+after NFKC and case folding, whose characters NFKC left unchanged, and next to
+which no invisible character hides a longer word. With ``automatically``
+listed, ``call`` in ``Automatically`` does not count, and an element holding
+the word is pressed unless another deny word or reason refuses it, also
+"Bill my card automatically": whoever lists the word takes that on. The deny
+words are still found on the normalized forms; each occurrence is traced back
+to the characters of the field it comes from and checked on its own: one
+occurrence outside every exception run, or one that only overlaps a run,
+counts (``Automatically pay``, ``Recorder order``). A run joined across a
+space or a separator does not count (``Job order`` holds ``border`` only once
+spaces are removed), nor does an inflected form (``Borders``), a run with an
+invisible character, a full-width or circled letter, or a combining mark the
+exception word does not have (or has differently) in it. A run counts only when
+it is a whole word also with the invisible characters around it removed
+(``x`` + U+200B + U+0332 + ``recorder`` is one word) and in the original text
+before NFKC (U+013F + ``recorder`` is one word; NFKC would split it). In a
+joined text (`_Joined`), every hit is traced back to the field values it
+comes from, and it may be excused only when the hit and the exception word
+around it both lie inside the value of one field, the exception word stands
+whole there as above, and in the joined text both of its ends are real
+boundaries: a space or punctuation inside the value, or the value's end where
+the neighbouring value's adjacent visible character is not a letter, digit or
+combining mark (values with only invisible characters are passed over; a mark
+at the start of the next value joins). A hit that spans two values, an
+exception word that would span two values, and a hit that cannot be traced
+are never excused. Hits are found both with the values joined by one space
+and with the values joined directly where letters, digits or marks touch
+(`_tight_separators`); a hit found in either reading counts unless excused.
+So ``recorder`` + ``s``, ``recorder`` + U+0301, U+0332 + ``recorder``,
+削除済み + にする and ``Turn on`` + ``automatically`` (with the exception word
+listed) are refused, and the Wi-Fi summary of a Settings row stays excused.
+When the trace is not certain (NFKC of the characters one by one differs from
+NFKC of the field, or a traced form differs from the real one), every
+occurrence counts. Resource ids, the irreversibility phrases and the
+screen-wide deny search behind ``confirm_button`` never use exception words.
+An exception word must be one word run without invisible characters and must
+not equal a deny word (any of its forms); `Policy.with_deny_words` drops an
+exception equal to an added word.
+
+Which words an exception excuses: an exception word the caller gives excuses
+hits of every deny word, built-in or added. A built-in exception word (there
+are none at present) would excuse only hits of a built-in deny word, one
+equal to an item of `DEFAULT_DENY_WORDS` after `normalize`, so that a word
+added with ``--deny`` or in a settings file is never weakened by uiprobe's own
+choice. Both are decided by equality, not by where a word came from: a
+settings file lists the built-in words itself, and an added word equal to a
+built-in one is that built-in word.
+
 The default deny words come from four lists: the base list (purchases,
 payments, sending, deleting, signing out and similar), a list of further
 actions such as subscriptions and starting over, the nine words for
@@ -23,9 +80,10 @@ disabling, force-stopping and signing in (``_SETTINGS_DENY_WORDS``), and the
 four words for carts and accounts (``_SHOP_DENY_WORDS``).
 
 Known and accepted over-block: because words are substrings, ``Posture``
-matches ``post`` and ``Recorder`` matches ``order``. They are not pressed. The
-package part of a resource id is not looked at, so ``com.example.pay:id/next``
-does not match ``pay``.
+matches ``post`` and ``Recorder`` matches ``order``. They are not pressed
+(unless the caller lists them as exception words). The package part of a
+resource id is not looked at, so ``com.example.pay:id/next`` does not match
+``pay``.
 
 Characters that carry no readable label (every Unicode
 Default_Ignorable_Code_Point from a hard-coded range table, such as soft
@@ -159,19 +217,27 @@ ancestors and the clickable hit targets. Three strings are matched, each
 joined by one space in document order: the texts and content_descs together,
 the texts alone and the content_descs alone, so a description between two
 parts of ``Log`` + ``out`` does not hide ``log out``. The detail has field
-``joined`` and names the subtree root. A deny word in the joined text of a
-subtree is also in that of every clickable ancestor, so only the highest
-clickable element above each element is matched.
+``joined`` and names the subtree root. Without exception words, a deny word in
+the joined text of a subtree is also in that of every clickable ancestor, so
+only the highest clickable element above each element is matched. With
+exception words that does not hold (a longer exception word can form in the
+ancestor's joined text), so the joined text of every clickable element in the
+highest clickable subtree is matched too, and a hit in any of them refuses
+(`_Judge.joined_root`).
 
 For ``confirm_button`` the whole screen counts: the deny words are matched in
 each field alone, then in the joined texts, the joined content_descs and the
-joined text and content_desc sequence of all elements in document order.
+joined text and content_desc sequence of all elements in document order. The
+exception words are not used there, so a deny word inside an exception word
+anywhere on the screen still refuses a confirm button.
 
 Cost: the work grows linearly with the number of elements. One pass over the
 tree finds, for every element, the first deny hit in its own fields and in its
 subtree; hit targets come from a grid over the display; both are cached per
 element and per press point. The joined text is matched once per highest
-clickable root, so nested clickables do not make it quadratic. The one
+clickable root, so nested clickables do not make it quadratic; with exception
+words it is matched once per clickable element, which grows with the nesting
+depth of clickables. The one
 exception is the confirm-label search (_find_label), which can be quadratic in
 the nesting depth of clickable chains (deeper than real layouts).
 
@@ -198,12 +264,25 @@ Known limits:
   because the confirm list has only ``はい``.
 * Substring matching over-blocks: ``Posture`` contains ``post`` and
   ``Recorder`` contains ``order``.
+* An exception word lets through every label in which it stands whole and no
+  other deny word matches, including labels that name an action: with
+  ``automatically`` listed, ``Bill my card automatically``, ``Dial
+  automatically`` and ``Redial automatically`` are pressable.
+* Accepted limits of exception words in joined texts and folding: a
+  compatibility character that NFKC turns into a letter at the start of the
+  next part is not seen as continuing the word (``recorder`` + U+24E2), a
+  combining mark at the start of a part after punctuation is passed over
+  (``!`` + U+0332 + ``recorder``), and case folding can create the hit that
+  the exception excuses (``reaßigning`` with ``reassigning`` listed). The
+  other way round, a neighbouring part that NFKC changes makes the whole
+  reading untraceable, and every hit in it counts.
 * The nine words for disabling, force-stopping and signing in (``disable``,
   ``force stop``, ``sign in``, ``log in``, ``login``, 無効, 強制停止, ログイン,
   サインイン)
   over-block too: ``sign in`` matches ``Designing`` and ``Signing out`` once
-  spaces are removed, and ``log in`` and ``sign in`` match any word ending in
-  ``log`` or ``sign`` followed by a word starting with ``in`` the same way
+  spaces are removed, and ``log in`` and
+  ``sign in`` match any word ending in ``log`` or ``sign`` followed by a word
+  starting with ``in`` the same way
   (``Log info``, ``Dialog input``, ``Catalog in stock``, ``Design info``,
   ``Sign inbox``); ログイン also matches inside ブログインポート.
   ``disable`` matches a ``Disabled`` status text, and 無効 matches a status
@@ -213,10 +292,12 @@ Known limits:
 * The four words for carts and accounts (``カート``, ``アカウント``,
   ``cart``, ``account``) over-block too: ``account`` matches ``Accounts`` in
   Settings and ``Accounting``; ``cart`` matches ``Cartoon``, ``Cartridge`` and
-  ``Descartes``; カート matches ``カートゥーン``; アカウント matches
-  ``アカウント情報``. With spaces removed, ``cart`` also matches a word ending
-  in ``c`` followed by a word starting with ``art`` (``Music artists``,
-  ``Comic art``) and ``account`` matches ``Ac count``. All of these are
+  ``Descartes``; カート matches ``カートゥーン``;
+  アカウント matches ``アカウント情報``. With spaces removed, ``cart`` also
+  matches a word ending in ``c`` followed by a word starting with ``art``
+  (``Music artists``, ``Comic art``) and ``account`` matches ``Ac count``.
+  Exception words do not help where the hit spans two words (``Dialog
+  input``, ``Catalog in stock``, ``Music artists``). All of these are
   accepted: a miss is worse than an over-block.
 """
 
@@ -230,7 +311,7 @@ from typing import TYPE_CHECKING, Final, Literal, get_args
 from uiprobe.model import MIN_VISIBLE_PX, Bounds
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable
+    from collections.abc import Iterable, Sequence
 
     from uiprobe.model import Element, Screen
 
@@ -239,6 +320,7 @@ __all__ = [
     "API36_SIDE_PX",
     "API36_TOP_PX",
     "CONFIRM_WORDS",
+    "DEFAULT_DENY_EXCEPTIONS",
     "DEFAULT_DENY_WORDS",
     "IRREVERSIBLE_PHRASES",
     "MAX_ELEMENTS",
@@ -279,6 +361,11 @@ Reason = Literal[
 
 # Every reason, in the fixed order a decision lists them.
 REASONS: Final[tuple[Reason, ...]] = get_args(Reason)
+# The reasons whose details name the matched deny word or phrase, the field
+# and the element (what skipped.jsonl records).
+_WORD_REASONS: Final[frozenset[str]] = frozenset(
+    {"deny_word", "irreversible_screen", "confirm_button"}
+)
 
 # The base list: purchases, payments, sending, deleting, signing out and
 # similar (Japanese, then English).
@@ -330,6 +417,11 @@ _BASE_DENY_WORDS: Final[tuple[str, ...]] = (
     "block",
     "call",
 )
+# Not deny words: "redial", "charge", "top up" and "renew" were considered as
+# defaults that would keep labels such as "Redial automatically" or "Charge
+# automatically" refused next to an exception word. They over-block
+# ("Charger", "Stop updates", "Renewal") and are left for a later, more
+# careful change; add them in a settings file to use them now.
 
 # Further deny words: subscriptions, sign-off and similar (Japanese, then English).
 _EXTRA_DENY_WORDS: Final[tuple[str, ...]] = (
@@ -411,6 +503,15 @@ _SHOP_DENY_WORDS: Final[tuple[str, ...]] = (
 DEFAULT_DENY_WORDS: Final[tuple[str, ...]] = (
     _BASE_DENY_WORDS + _EXTRA_DENY_WORDS + _SETTINGS_DENY_WORDS + _SHOP_DENY_WORDS
 )
+
+# Built-in exception words (see `word_matches`): none, so the defaults decide
+# exactly as substring matching alone. A built-in exception would excuse only
+# the built-in deny words; exception words come from the settings file's
+# ``[deny] except`` or ``Policy.deny_exceptions``. A word such as
+# ``automatically`` (holds ``call``) is a candidate, but it also lets through
+# labels such as "Bill my card automatically", so the choice is left to the
+# person who writes the settings file.
+DEFAULT_DENY_EXCEPTIONS: Final[tuple[str, ...]] = ()
 
 # Phrases that say a screen's action cannot be taken back (English, then
 # Japanese). A screen whose text holds one refuses every element
@@ -600,15 +701,110 @@ def _split_camel(value: str) -> str:
     return "".join(out)
 
 
-def _forms(value: str) -> tuple[str, ...]:
-    """Return the normalized, spaced and joined forms of a value."""
-    # The spaced form is redundant with plain + joined (removing spaces on
-    # both sides keeps a substring a substring); it is kept for clarity.
+def _form_triple(value: str) -> tuple[str, str, str]:
+    """Return the normalized, spaced and joined forms of a value, in order."""
     visible = _strip_invisible(unicodedata.normalize("NFKC", value))
     plain = normalize(visible)
     spaced = normalize(_separators_to_spaces(_split_camel(visible)))
     joined = "".join(spaced.split(" "))
-    return tuple(dict.fromkeys((plain, spaced, joined)))
+    return plain, spaced, joined
+
+
+def _forms(value: str) -> tuple[str, ...]:
+    """Return the distinct normalized, spaced and joined forms of a value."""
+    # The spaced form is redundant with plain + joined (removing spaces on
+    # both sides keeps a substring a substring); it is kept for clarity.
+    return tuple(dict.fromkeys(_form_triple(value)))
+
+
+def _is_word_char(char: str) -> bool:
+    """True for a letter, a digit or a combining mark."""
+    return char.isalnum() or unicodedata.category(char)[0] == "M"
+
+
+def _visible_end(text: str, *, last: bool) -> str:
+    """Return the first (or last) visible character of `text`, or ``""``."""
+    chars = reversed(text) if last else iter(text)
+    return next((c for c in chars if not _is_invisible(c)), "")
+
+
+def _tight_separators(parts: Sequence[str]) -> list[str]:
+    """Return the separator put before each part in the tight reading.
+
+    The space between two parts is uiprobe's, not the app's. Where the last
+    visible character before it and the first visible character after it
+    are both letters, digits or combining marks, in any script, the parts
+    are joined directly (``recorder`` + ``s`` reads ``recorders``,
+    ``削除済み`` + ``にする`` reads ``削除済みにする``). A part with no visible
+    character is joined directly and does not count as either side, so
+    ``削除済み`` + U+200B + ``にする`` reads as one word too, and a first part
+    with no visible character adds no space before the next one.
+    """
+    separators: list[str] = []
+    last = ""
+    for part in parts:
+        first = _visible_end(part, last=False)
+        if not separators:
+            separators.append("")
+        elif first and last and not (_is_word_char(last) and _is_word_char(first)):
+            separators.append(" ")
+        else:
+            separators.append("")
+        tail = _visible_end(part, last=True)
+        if tail:
+            last = tail
+    return separators
+
+
+def _join(parts: Sequence[str], separators: Sequence[str]) -> tuple[str, list[int]]:
+    """Join the parts with the separators; return the text and where each
+    part starts in it."""
+    out: list[str] = []
+    starts: list[int] = []
+    length = 0
+    for separator, part in zip(separators, parts, strict=True):
+        out.append(separator)
+        length += len(separator)
+        starts.append(length)
+        out.append(part)
+        length += len(part)
+    return "".join(out), starts
+
+
+def _alone_in_join(raw: str, start: int, end: int, part: tuple[int, int]) -> bool:
+    """True when ``raw[start:end]``, an exception run inside the value at
+    ``raw[part[0]:part[1]]``, has real boundaries in the values written one
+    after another (`raw`, with no separator added).
+
+    Inside the value, the run already stands alone (`_Excuser`). Where the
+    run reaches the start of the value (past invisible characters and
+    combining marks) or its end (past invisible characters), the nearest
+    visible character of the neighbouring values must not be a letter, a
+    digit or a combining mark; values with only invisible characters are
+    passed over.
+    """
+    first, last = part
+    before = start - 1
+    while before >= first and (
+        _is_invisible(raw[before]) or unicodedata.category(raw[before])[0] == "M"
+    ):
+        before -= 1
+    if before < first:
+        before = first - 1
+        while before >= 0 and _is_invisible(raw[before]):
+            before -= 1
+        if before >= 0 and _is_word_char(raw[before]):
+            return False
+    after = end
+    while after < last and _is_invisible(raw[after]):
+        after += 1
+    if after >= last:
+        after = last
+        while after < len(raw) and _is_invisible(raw[after]):
+            after += 1
+        if after < len(raw) and _is_word_char(raw[after]):
+            return False
+    return True
 
 
 def _is_japanese_letter(char: str) -> bool:
@@ -642,18 +838,484 @@ def _check_word(word: str) -> str:
     return word
 
 
-def word_matches(value: str, word: str) -> bool:
+def word_matches(value: str, word: str, *, exceptions: Iterable[str] = ()) -> bool:
     """Return True if the deny `word` matches the field `value`.
 
+    The word matches when one of its forms is a substring of a form of the
+    value (see the module docstring). With `exceptions` (exception words such
+    as ``("automatically",)``), an occurrence of the word that lies
+    completely inside a whole word of `value` equal to an exception word does
+    not count; every other occurrence still does (see `_Excuser`). This is
+    the rule of the text, content description and hint fields and of the
+    joined texts; a resource id is matched without exceptions.
+
+    A built-in exception word (equal to one of `DEFAULT_DENY_EXCEPTIONS`,
+    which is empty) would apply only when `word` is a built-in deny word
+    (equal to one of `DEFAULT_DENY_WORDS` after `normalize`); any other
+    exception word applies to every deny word.
+
     Raises:
-        ValueError: The word is empty after normalization.
+        TypeError: `exceptions` is one string, not a collection of words.
+        ValueError: The word is empty after normalization, an exception word
+            is not one word of letters and digits (or holds an invisible
+            character), or an exception word equals `word` (see `Policy`).
     """
     _check_word(word)
-    return _forms_match(_forms(word), _forms(value))
+    exceptions = tuple(_check_collection(exceptions))
+    excuser = _Excuser(_exception_keys(exceptions))
+    _check_no_conflict(exceptions, (word,))
+    word_forms = _forms(word)
+    if not _forms_match(word_forms, _forms(value)):
+        return False
+    return excuser.counts(value, word_forms, builtin=_is_builtin_word(word))
 
 
 def _forms_match(word_forms: tuple[str, ...], field_forms: tuple[str, ...]) -> bool:
     return any(w in f for w in word_forms if w for f in field_forms)
+
+
+# -- exception words ---------------------------------------------------------------
+
+
+def _in_word(char: str, *, inside: bool) -> bool:
+    """True for a character that belongs to a word run.
+
+    A run is a maximal sequence of letters and digits (`str.isalnum`) with the
+    combining marks (category M) that follow them; a mark starts no run.
+    """
+    return char.isalnum() or (inside and unicodedata.category(char)[0] == "M")
+
+
+def _word_runs(text: str) -> list[tuple[int, int]]:
+    """Return the ``(start, end)`` index pairs of the word runs of `text`."""
+    runs: list[tuple[int, int]] = []
+    start = -1
+    for index, char in enumerate(text):
+        if _in_word(char, inside=start != -1):
+            if start == -1:
+                start = index
+        elif start != -1:
+            runs.append((start, index))
+            start = -1
+    if start != -1:
+        runs.append((start, len(text)))
+    return runs
+
+
+def _is_combining(char: str) -> bool:
+    return unicodedata.category(char)[0] == "M"
+
+
+def _stands_alone(text: str, start: int, end: int) -> bool:
+    """True when ``text[start:end]`` is a whole word even with the invisible
+    characters around it removed.
+
+    Deny matching removes invisible characters, so ``recorder`` + U+200B +
+    ``s`` reads as ``recorders`` and ``x`` + U+200B + U+0332 + ``recorder``
+    as one word. Before the span, invisible characters and combining marks
+    are passed over: a letter or digit found there joins the span. After it,
+    invisible characters are passed over: a letter, digit or combining mark
+    found there joins the span.
+    """
+    before = start - 1
+    while before >= 0 and (_is_invisible(text[before]) or _is_combining(text[before])):
+        before -= 1
+    if before >= 0 and text[before].isalnum():
+        return False
+    after = end
+    while after < len(text) and _is_invisible(text[after]):
+        after += 1
+    return not (
+        after < len(text) and (text[after].isalnum() or _is_combining(text[after]))
+    )
+
+
+def _exception_key(word: str) -> str:
+    """Return the form a word run is compared with: NFKC, then case-folded.
+
+    Raises:
+        ValueError: The word is empty after normalization, holds an invisible
+            character (a default-ignorable one such as U+200B or the
+            variation selector U+FE0F, or a format or control character:
+            deny matching removes them, so the exception could equal a deny
+            word in disguise), or is not one word of letters and digits (a
+            space, a separator or punctuation in it would keep it from ever
+            being equal to a word of a text).
+    """
+    _check_word(word)
+    if any(_is_invisible(char) for char in word):
+        msg = f"exception word holds an invisible character: {word!r}"
+        raise ValueError(msg)
+    folded = unicodedata.normalize("NFKC", word)
+    if _word_runs(folded) != [(0, len(folded))]:
+        msg = f"exception word must be one word of letters and digits: {word!r}"
+        raise ValueError(msg)
+    return folded.casefold()
+
+
+def _is_builtin_word(word: str) -> bool:
+    """True for a deny word equal to a built-in one after `normalize`.
+
+    Only such a word is weakened by the built-in exception words.
+    """
+    return normalize(word) in _BUILTIN_WORD_KEYS
+
+
+def _check_collection(exceptions: Iterable[str]) -> Iterable[str]:
+    if isinstance(exceptions, str):
+        msg = "exception words must be a collection of words, not one string"
+        raise TypeError(msg)
+    return exceptions
+
+
+def _exception_keys(exceptions: Iterable[str]) -> frozenset[str]:
+    return frozenset(_exception_key(word) for word in _check_collection(exceptions))
+
+
+def _check_no_conflict(exceptions: Iterable[str], deny_words: Iterable[str]) -> None:
+    """Raise when an exception word equals a deny word (see `Policy`).
+
+    Raises:
+        ValueError: An exception word equals a deny word (any of its forms).
+    """
+    deny_forms = _deny_forms(deny_words)
+    for exception in exceptions:
+        word = _exception_conflict(exception, deny_forms)
+        if word is not None:
+            msg = (
+                f"exception word {exception!r} equals the deny word {word!r};"
+                " an exception cannot excuse its own deny word"
+            )
+            raise ValueError(msg)
+
+
+# What makes a deny word built-in (`_is_builtin_word`) and an exception word
+# built-in (its key is one of these): built-in exceptions excuse only hits of
+# built-in deny words.
+_BUILTIN_WORD_KEYS: Final = frozenset(normalize(word) for word in DEFAULT_DENY_WORDS)
+# The same as `_exception_key` of each word (a test checks it); that function
+# needs helpers defined further down.
+_BUILTIN_EXCEPTION_KEYS: Final = frozenset(
+    unicodedata.normalize("NFKC", word).casefold() for word in DEFAULT_DENY_EXCEPTIONS
+)
+
+
+def _deny_forms(words: Iterable[str]) -> dict[str, str]:
+    """Return every form (see `_forms`) of the deny words, each with its word."""
+    found: dict[str, str] = {}
+    for word in words:
+        for form in _forms(word):
+            found.setdefault(form, word)
+    return found
+
+
+def _exception_conflict(exception: str, deny_forms: dict[str, str]) -> str | None:
+    """Return the deny word that the exception word equals, or None.
+
+    `deny_forms` comes from `_deny_forms`. Equal means that one of the deny
+    word's forms is the exception's key, so that every whole-word hit of that
+    deny word would be excused.
+    """
+    return deny_forms.get(_exception_key(exception))
+
+
+def _fold_traced(pairs: Iterable[tuple[str, int]]) -> list[tuple[str, int]]:
+    """Case-fold, make every whitespace run one space and strip, with sources."""
+    out: list[tuple[str, int]] = []
+    for char, source in pairs:
+        for folded in char.casefold():
+            if not folded.isspace():
+                out.append((folded, source))
+            elif out and out[-1][0] != " ":
+                out.append((" ", source))
+    if out and out[-1][0] == " ":
+        out.pop()
+    return out
+
+
+def _traced_forms(text: str) -> list[tuple[str, list[int]]] | None:
+    """Return the three forms of an NFKC text, each with the index in `text`
+    of the character that every form character comes from.
+
+    The forms are built character by character the way `_form_triple` builds
+    them; None when the result differs from `_form_triple` (for example when
+    removing an invisible character lets NFKC compose two characters), so
+    that the caller can count every hit.
+    """
+    visible = [
+        (char, index) for index, char in enumerate(text) if not _is_invisible(char)
+    ]
+    camel: list[tuple[str, int]] = []
+    for position, (char, index) in enumerate(visible):
+        if position and char.isupper():
+            prev = visible[position - 1][0]
+            following = visible[position + 1][0] if position + 1 < len(visible) else ""
+            if prev.islower() or (prev.isupper() and following.islower()):
+                camel.append((" ", index))
+        camel.append((char, index))
+    separated = [
+        (
+            " "
+            if char in _SEPARATOR_CHARS or unicodedata.category(char) == "Pd"
+            else char,
+            index,
+        )
+        for char, index in camel
+    ]
+    plain = _fold_traced(visible)
+    spaced = _fold_traced(separated)
+    joined = [pair for pair in spaced if pair[0] != " "]
+    traced = [
+        ("".join(char for char, _ in pairs), [index for _, index in pairs])
+        for pairs in (plain, spaced, joined)
+    ]
+    if tuple(form for form, _ in traced) != _form_triple(text):
+        return None
+    return traced
+
+
+def _hit_outside(
+    form: str, sources: list[int], word_form: str, runs: list[tuple[int, int]]
+) -> bool:
+    """True when an occurrence of `word_form` in `form` is outside every run.
+
+    `runs` are disjoint and in text order, and the sources of later
+    occurrences do not start earlier (the traced forms keep text order), so
+    one index moves forward through the runs: the work is linear in the
+    number of occurrences plus runs. An occurrence that starts before the
+    current run counts, which can only block more.
+    """
+    index = 0
+    start = form.find(word_form)
+    while start != -1:
+        span = sources[start : start + len(word_form)]
+        low, high = min(span), max(span)
+        while index < len(runs) and runs[index][1] <= low:
+            index += 1
+        if index == len(runs) or not runs[index][0] <= low or high >= runs[index][1]:
+            return True
+        start = form.find(word_form, start + 1)
+    return False
+
+
+# The traced forms of a field (`_traced_forms`) and its exception runs, each
+# as ``(start, end, builtin)``: builtin is True when the run equals a built-in
+# exception word.
+_Traced = tuple[list[tuple[str, list[int]]], list[tuple[int, int, bool]]]
+
+
+class _Excuser:
+    """Decides whether a deny-word hit in a field lies inside an exception word.
+
+    An exception applies only where it is one whole word of the field: a word
+    run (see `_word_runs`) of the field after NFKC, with the invisible
+    characters still in place (they end a run), whose case-folded text equals
+    the key of an exception word, and whose characters NFKC left unchanged
+    (a circled or full-width letter in the run fails it). The deny words are
+    found on the normalized forms of the field (`_form_triple`); every hit is
+    traced back to the characters it comes from, and it is excused only when
+    all of them lie inside one such run. Every hit is checked on its own, so
+    one hit outside every exception run counts. When tracing is not certain
+    (NFKC of the characters one by one differs from NFKC of the whole field,
+    or a traced form differs from the real one), every hit counts. A run that
+    equals a built-in exception word (`DEFAULT_DENY_EXCEPTIONS`) excuses only
+    hits of a built-in deny word; a run equal to any other exception word
+    excuses hits of every deny word.
+    """
+
+    def __init__(self, keys: frozenset[str]) -> None:
+        self.keys = keys
+        self._cache: dict[str, _Traced | None] = {}
+        # The last long value (not cached): a joined text is matched against
+        # every deny word that hits it.
+        self._last: tuple[str, _Traced | None] | None = None
+
+    def counts(self, value: str, word_forms: tuple[str, ...], *, builtin: bool) -> bool:
+        """Return True when a hit of the word forms in `value` is not excused.
+
+        `builtin` tells whether the deny word is a built-in one
+        (`_is_builtin_word`); otherwise the built-in exception words do not
+        excuse it. The caller has already found at least one hit.
+        """
+        traced = self._trace(value)
+        if traced is None:
+            return True
+        forms, tagged = traced
+        runs = [(first, end) for first, end, own in tagged if builtin or not own]
+        if not runs:
+            return True
+        for form, sources in forms:
+            for word_form in word_forms:
+                if word_form and _hit_outside(form, sources, word_form, runs):
+                    return True
+        return False
+
+    def _trace(self, value: str) -> _Traced | None:
+        """Return the traced forms and the exception runs, or None when no
+        hit can be excused (no exception run, or tracing is not certain).
+        """
+        if value in self._cache:
+            return self._cache[value]
+        if self._last is not None and self._last[0] == value:
+            return self._last[1]
+        result = self._compute(value)
+        if len(value) <= _CACHED_VALUE_LENGTH:
+            self._cache[value] = result
+        else:
+            self._last = (value, result)
+        return result
+
+    def _compute(self, value: str) -> _Traced | None:
+        if not self.keys:
+            return None
+        traced = _nfkc_traced(value)
+        if traced is None:
+            return None
+        text, unchanged, origin = traced
+        runs = self._runs(value, text, unchanged, origin)
+        if not runs:
+            return None
+        forms = _traced_forms(text)
+        if forms is None:
+            return None
+        return forms, runs
+
+    def _runs(
+        self, value: str, text: str, unchanged: list[bool], origin: list[int]
+    ) -> list[tuple[int, int, bool]]:
+        """Return the exception runs of `text` (the NFKC of `value`).
+
+        A run counts only when it is a whole word both after NFKC and in the
+        original text: NFKC can create a boundary (U+013F becomes "L" and a
+        middle dot), and invisible characters can hide a longer word. The
+        characters of a counted run are unchanged by NFKC, so the run is the
+        same span of the original text.
+        """
+        return [
+            (start, end, text[start:end].casefold() in _BUILTIN_EXCEPTION_KEYS)
+            for start, end in _word_runs(text)
+            if text[start:end].casefold() in self.keys
+            and all(unchanged[start:end])
+            and _stands_alone(text, start, end)
+            and _stands_alone(value, origin[start], origin[end - 1] + 1)
+        ]
+
+    def part_runs(self, value: str) -> list[tuple[int, int, bool]]:
+        """Return the exception runs of one field value as spans of the value
+        itself (before NFKC); none when tracing is not certain."""
+        if not self.keys:
+            return []
+        traced = _nfkc_traced(value)
+        if traced is None:
+            return []
+        text, unchanged, origin = traced
+        return [
+            (origin[start], origin[end - 1] + 1, builtin)
+            for start, end, builtin in self._runs(value, text, unchanged, origin)
+        ]
+
+
+def _nfkc_traced(value: str) -> tuple[str, list[bool], list[int]] | None:
+    """Return the NFKC of `value` with, per character, whether NFKC left its
+    source character unchanged and the index of that source character; None
+    when NFKC of the characters one by one differs from NFKC of the whole."""
+    chars: list[str] = []
+    unchanged: list[bool] = []
+    origin: list[int] = []
+    for index, char in enumerate(value):
+        mapped = unicodedata.normalize("NFKC", char)
+        chars.extend(mapped)
+        unchanged.extend([mapped == char] * len(mapped))
+        origin.extend([index] * len(mapped))
+    text = "".join(chars)
+    if text != unicodedata.normalize("NFKC", value):
+        return None
+    return text, unchanged, origin
+
+
+class _Joined:
+    """The joined text of several field values, matched with exceptions.
+
+    An exception may excuse a hit only when the hit and the exception word
+    around it both lie inside the value of one field, and the exception word
+    is a whole word there (`_Excuser`) with real boundaries in the joined
+    text too (`_alone_in_join`: the neighbouring value's adjacent visible
+    character is not a letter, digit or combining mark). Hits are found in
+    two readings, the values joined by one space and the tight reading
+    (`_tight_separators`), and traced back to the characters of the values;
+    a hit that spans two values, or one that cannot be traced, counts. A
+    hit found in either reading counts unless it is excused there.
+    """
+
+    def __init__(self, parts: Sequence[str], excuser: _Excuser) -> None:
+        self._parts = tuple(parts)
+        self._excuser = excuser
+        # The exception spans, as (part, start, end, builtin) in the part's own
+        # text; found on the first hit, so a text without hits costs nothing
+        # more than the matching without exceptions.
+        self._spans: list[tuple[int, int, int, bool]] | None = None
+        # Per reading: its forms, where each part starts in it, and its traced
+        # forms (built only when a hit there needs an exception span).
+        self._readings: list[tuple[str, tuple[str, ...], list[int]]] = []
+        self._traced: dict[str, list[tuple[str, list[int]]] | None] = {}
+        seen: set[str] = set()
+        for separators in ([" "] * len(parts), _tight_separators(parts)):
+            separators[0] = ""
+            text, starts = _join(parts, separators)
+            if text in seen:
+                continue
+            seen.add(text)
+            self._readings.append((text, _forms(text), starts))
+
+    def _exception_spans(self) -> list[tuple[int, int, int, bool]]:
+        if self._spans is None:
+            parts = self._parts
+            raw, raw_starts = _join(parts, [""] * len(parts))
+            spans: list[tuple[int, int, int, bool]] = []
+            for index, part in enumerate(parts):
+                for start, end, builtin in self._excuser.part_runs(part):
+                    offset = raw_starts[index]
+                    bounds = (offset, offset + len(part))
+                    if _alone_in_join(raw, offset + start, offset + end, bounds):
+                        spans.append((index, start, end, builtin))
+            self._spans = spans
+        return self._spans
+
+    def counts(self, word_forms: tuple[str, ...], *, builtin: bool) -> bool:
+        """Return True when a hit of the word counts in either reading."""
+        for text, field_forms, starts in self._readings:
+            if not _forms_match(word_forms, field_forms):
+                continue
+            usable = [
+                (starts[i] + a, starts[i] + b)
+                for i, a, b, own in self._exception_spans()
+                if builtin or not own
+            ]
+            if not usable:
+                return True
+            if text not in self._traced:
+                self._traced[text] = _original_forms(text)
+            traced = self._traced[text]
+            if traced is None:
+                return True
+            for form, sources in traced:
+                for word_form in word_forms:
+                    if word_form and _hit_outside(form, sources, word_form, usable):
+                        return True
+        return False
+
+
+def _original_forms(value: str) -> list[tuple[str, list[int]]] | None:
+    """Return the three forms of `value`, each character with the index of the
+    character of `value` (before NFKC) it comes from; None when not certain."""
+    traced = _nfkc_traced(value)
+    if traced is None:
+        return None
+    text, _, origin = traced
+    forms = _traced_forms(text)
+    if forms is None:
+        return None
+    return [(form, [origin[i] for i in sources]) for form, sources in forms]
 
 
 def _id_name(resource_id: str) -> str:
@@ -672,36 +1334,72 @@ def _fields(element: Element) -> tuple[tuple[str, str], ...]:
 
 
 class _Matcher:
-    """Deny words with their forms computed once."""
+    """Deny words with their forms computed once, and the exception words."""
 
-    def __init__(self, words: Iterable[str]) -> None:
-        self._words = tuple((word, _forms(word)) for word in words)
+    def __init__(self, words: Iterable[str], exceptions: Iterable[str] = ()) -> None:
+        self._words = tuple(
+            (word, _forms(word), _is_builtin_word(word)) for word in words
+        )
+        self._excuser = _Excuser(_exception_keys(exceptions))
         self._cache: dict[str, str | None] = {}
+        self._plain_cache: dict[str, str | None] = {}
+
+    @property
+    def excuses(self) -> bool:
+        """True when there are exception words."""
+        return bool(self._excuser.keys)
+
+    def match_joined(self, parts: Sequence[str]) -> str | None:
+        """Return the first deny word that counts in the joined text of the
+        field values `parts` (see `_Joined`), or None."""
+        joined = _Joined(parts, self._excuser)
+        return next(
+            (
+                word
+                for word, word_forms, builtin in self._words
+                if joined.counts(word_forms, builtin=builtin)
+            ),
+            None,
+        )
 
     def match(self, element: Element) -> tuple[str, str] | None:
-        """Return ``(word, field)`` of the first match in the element."""
+        """Return ``(word, field)`` of the first match in the element.
+
+        The resource id is matched without the exception words.
+        """
         for field, value in _fields(element):
             if value:
-                word = self.match_text(value)
+                word = self.match_text(value, excuse=field != "resource_id")
                 if word is not None:
                     return word, field
         return None
 
-    def match_text(self, value: str) -> str | None:
-        """Return the first deny word found in one string, or None."""
-        if value in self._cache:
-            return self._cache[value]
+    def match_text(self, value: str, *, excuse: bool = True) -> str | None:
+        """Return the first deny word found in one string, or None.
+
+        With `excuse` (the default), a word whose every hit lies inside an
+        exception word of the string that applies to it does not count
+        (`_Excuser`).
+        """
+        excuse = excuse and bool(self._excuser.keys)
+        cache = self._cache if excuse else self._plain_cache
+        if value in cache:
+            return cache[value]
         field_forms = _forms(value)
         found = next(
             (
                 w
-                for w, word_forms in self._words
+                for w, word_forms, builtin in self._words
                 if _forms_match(word_forms, field_forms)
+                and (
+                    not excuse
+                    or self._excuser.counts(value, word_forms, builtin=builtin)
+                )
             ),
             None,
         )
         if len(value) <= _CACHED_VALUE_LENGTH:
-            self._cache[value] = found
+            cache[value] = found
         return found
 
 
@@ -731,13 +1429,26 @@ class _PhraseMatcher:
         return None
 
 
-def deny_word_in(element: Element, words: Iterable[str]) -> tuple[str, str] | None:
+def deny_word_in(
+    element: Element, words: Iterable[str], *, exceptions: Iterable[str] = ()
+) -> tuple[str, str] | None:
     """Return ``(word, field)`` of the first deny word found in the element.
 
     The fields are ``text``, ``content_desc``, ``hint`` and the part of
     ``resource_id`` after ``:id/``. Only the element itself is looked at.
+    `exceptions` are exception words (see `word_matches`); they apply to the
+    text, content description and hint, not to the resource id.
+
+    Raises:
+        TypeError: `exceptions` is one string, not a collection of words.
+        ValueError: An exception word is not one word of letters and digits
+            (or holds an invisible character), or equals a deny word.
     """
-    return _Matcher(words).match(element)
+    words = tuple(words)
+    exceptions = tuple(_check_collection(exceptions))
+    matcher = _Matcher(words, exceptions)
+    _check_no_conflict(exceptions, words)
+    return matcher.match(element)
 
 
 # -- policy ----------------------------------------------------------------------
@@ -804,6 +1515,16 @@ class Policy:
     ``skip_irreversible`` (default True) applies the ``irreversible_screen``
     reason with the phrases of ``irreversible_phrases``; False turns it off.
 
+    ``deny_exceptions`` (default `DEFAULT_DENY_EXCEPTIONS`, which is ``()``)
+    are the exception words: a deny-word hit in a text, content description
+    or hint (or in a joined text) that lies completely inside a whole word
+    equal to one of them does not count (see `word_matches`), so an element
+    holding the word is pressed unless something else refuses it. They
+    excuse every deny word (a built-in exception word, of which there are
+    none, would excuse only built-in deny words). The screen-wide search
+    behind ``confirm_button`` never uses them. An exception word must not
+    equal a deny word (any of its forms).
+
     ``back_on_other_screens`` (default False) is read by the pressing crawl
     only, not by `judge`. True lets the crawl press BACK while a screen of
     another app is in front (up to 2 in a row, then a relaunch), and that BACK
@@ -832,11 +1553,13 @@ class Policy:
         ValueError: A deny word, confirm word or irreversible phrase is empty
             after normalization, or a confirm word is empty after the label
             cleaning (invisible characters, normalization, surrounding
-            punctuation), or
+            punctuation), or an exception word is not one word of letters and
+            digits or equals a deny word, or
             ``edges`` is not four non-negative integers, or ``min_visible_px``
             is not an integer of at least 1.
-        TypeError: ``edges`` is not a sequence, or ``back_on_other_screens``
-            or ``check_tap_window`` is not a bool.
+        TypeError: ``edges`` is not a sequence, ``deny_exceptions`` is one
+            string, or ``back_on_other_screens`` or ``check_tap_window`` is
+            not a bool.
     """
 
     deny_words: tuple[str, ...] = DEFAULT_DENY_WORDS
@@ -852,6 +1575,7 @@ class Policy:
     skip_irreversible: bool = True
     back_on_other_screens: bool = False
     check_tap_window: bool = True
+    deny_exceptions: tuple[str, ...] = DEFAULT_DENY_EXCEPTIONS
 
     def __post_init__(self) -> None:
         if type(self.back_on_other_screens) is not bool:
@@ -862,6 +1586,8 @@ class Policy:
             raise TypeError(msg)
         for word in (*self.deny_words, *self.confirm_words, *self.irreversible_phrases):
             _check_word(word)
+        _exception_keys(self.deny_exceptions)
+        _check_no_conflict(self.deny_exceptions, self.deny_words)
         if self.edges is not None and (
             len(self.edges) != _EDGE_SIDES
             or any(type(size) is not int or size < 0 for size in self.edges)
@@ -879,6 +1605,9 @@ class Policy:
     def with_deny_words(self, extra: Iterable[str]) -> Policy:
         """Return a copy with `extra` words (for example ``--deny``) added.
 
+        An exception word that equals an added word is dropped from the copy,
+        so the added word blocks as given.
+
         Raises:
             TypeError: `extra` is one string, not a collection of words.
             ValueError: A word is empty after normalization.
@@ -888,6 +1617,12 @@ class Policy:
             raise TypeError(msg)
         added = tuple(_check_word(word) for word in extra)
         merged = tuple(dict.fromkeys((*self.deny_words, *added)))
+        added_forms = _deny_forms(added)
+        exceptions = tuple(
+            exception
+            for exception in self.deny_exceptions
+            if _exception_conflict(exception, added_forms) is None
+        )
         return Policy(
             deny_words=merged,
             confirm_words=self.confirm_words,
@@ -902,6 +1637,7 @@ class Policy:
             skip_irreversible=self.skip_irreversible,
             back_on_other_screens=self.back_on_other_screens,
             check_tap_window=self.check_tap_window,
+            deny_exceptions=exceptions,
         )
 
 
@@ -982,6 +1718,20 @@ class Detail:
     word: str = ""
     field: str = ""
     element_id: str = ""
+
+    def to_dict(self) -> dict[str, str]:
+        """Return the JSON form: ``reason``, then ``word``, ``field``,
+        ``element_id`` and ``note`` when set (the form of ``crawl --json`` and
+        of ``skipped.jsonl``)."""
+        optional = {
+            "word": self.word,
+            "field": self.field,
+            "element_id": self.element_id,
+            "note": self.note,
+        }
+        entry: dict[str, str] = {"reason": self.reason}
+        entry.update({key: value for key, value in optional.items() if value})
+        return entry
 
 
 @dataclass(frozen=True)
@@ -1259,7 +2009,7 @@ class _Judge:
         self.policy = policy
         self.tree = _Tree(screen)
         self.elements = screen.elements
-        self.matcher = _Matcher(policy.deny_words)
+        self.matcher = _Matcher(policy.deny_words, policy.deny_exceptions)
         self.confirm = frozenset(_confirm_form(w) for w in policy.confirm_words)
         # The lengths of the confirm words, shortest first: only a start of a
         # label of one of these lengths can be a confirm word.
@@ -1289,6 +2039,9 @@ class _Judge:
         self._irreversible: Detail | Literal[False] | None = False
         self._summarize()
         self._joined_hit: dict[int, str | None] = {}
+        # Per clickable root: the first clickable element below it whose own
+        # joined text holds a deny word (only used with exception words).
+        self._joined_below: dict[int, int] = {}
         self._labels: dict[int, str] = {}
         self._contrib: dict[int, _Agg] = {}
         self._everywhere: _Agg | None = None
@@ -1376,9 +2129,10 @@ class _Judge:
                 self.above_deny[i] = self.above_deny[up]
                 if self.clickable[up]:
                     self.above_deny[i] = min(self.above_deny[i], self.sub_deny[up])
-        # The highest clickable element at or above each element. A deny word
-        # in the joined text of a clickable subtree is also in the joined text
-        # of every clickable ancestor, so only this one is ever matched.
+        # The highest clickable element at or above each element. Without
+        # exception words, a deny word in the joined text of a clickable
+        # subtree is also in the joined text of every clickable ancestor, so
+        # only this one is matched (see `joined_root` for exception words).
         self.top = [-1] * count
         for i in self.tree.pre:
             up = parent[i]
@@ -1451,10 +2205,18 @@ class _Judge:
         none matches, the texts, the content_descs and the text and
         content_desc sequence of the whole screen in document order, each
         joined by one space, are matched (field ``joined``, no element).
+        The exception words are not used here: a deny word anywhere on the
+        screen counts, even inside an exception word.
         """
         if self._screen_hit is False:
             self._screen_hit = None
-            for i, hit in enumerate(self.own_hit):
+            plain = self._plain_matcher()
+            hits = (
+                self.own_hit
+                if plain is self.matcher
+                else [plain.match(e) for e in self.elements]
+            )
+            for i, hit in enumerate(hits):
                 if hit:
                     self._screen_hit = Detail(
                         "confirm_button",
@@ -1464,14 +2226,26 @@ class _Judge:
                     )
                     break
             else:
-                word = self._joined_word([self.elements[i] for i in self.tree.pre])
+                word = self._joined_word(
+                    [self.elements[i] for i in self.tree.pre], plain
+                )
                 if word is not None:
                     self._screen_hit = Detail(
                         "confirm_button", word=word, field="joined"
                     )
         return self._screen_hit
 
-    def _joined_word(self, elements: Iterable[Element]) -> str | None:
+    def _plain_matcher(self) -> _Matcher:
+        """Return the deny words without exceptions (the matcher itself when
+        the policy has no exception words).
+        """
+        if not self.policy.deny_exceptions:
+            return self.matcher
+        return _Matcher(self.policy.deny_words)
+
+    def _joined_word(
+        self, elements: Iterable[Element], matcher: _Matcher | None = None
+    ) -> str | None:
         """Return the deny word found in the joined text of the elements.
 
         Three strings are matched, each joined by one space: the text and
@@ -1488,8 +2262,12 @@ class _Judge:
             if element.content_desc:
                 parts.append(element.content_desc)
                 descs.append(element.content_desc)
+        matcher = matcher or self.matcher
         for joined in (parts, texts, descs):
-            word = self.matcher.match_text(" ".join(joined))
+            if not matcher.excuses:
+                word = matcher.match_text(" ".join(joined))
+            else:
+                word = matcher.match_joined(joined) if joined else None
             if word is not None:
                 return word
         return None
@@ -1505,13 +2283,33 @@ class _Judge:
 
     def joined_root(self, i: int) -> int:
         """Return the clickable root whose joined subtree text holds a deny
-        word and whose subtree holds the element (the highest clickable element
-        at or above it), or ``_NONE``.
+        word and whose subtree holds the element, or ``_NONE``.
+
+        The scope is the subtree of the highest clickable element at or above
+        it. Without exception words its joined text is enough: a deny word in
+        the joined text of a subtree is also in that of every clickable
+        ancestor. With exception words that does not hold (a longer exception
+        word can form in the ancestor's text), so the joined text of every
+        clickable element in that subtree is matched as well, the root first,
+        then in document order; the first one with a hit is returned.
         """
         root = self.top[i]
-        if root != -1 and self.joined_hit(root) is not None:
+        if root == -1:
+            return _NONE
+        if self.joined_hit(root) is not None:
             return root
-        return _NONE
+        if not self.matcher.excuses:
+            return _NONE
+        if root not in self._joined_below:
+            self._joined_below[root] = next(
+                (
+                    j
+                    for j in self.tree.subtree(root)[1:]
+                    if self.clickable[j] and self.joined_hit(j) is not None
+                ),
+                _NONE,
+            )
+        return self._joined_below[root]
 
     # -- confirm labels ------------------------------------------------------------
 
@@ -1919,9 +2717,17 @@ def judge(
       (nested rows and cards are all in scope), and, for every hit target, its
       own fields, its whole subtree when it is clickable, and the subtrees of
       its clickable ancestors. Each field is matched alone, then the joined
-      subtree text (field ``joined``) of the candidate, its clickable
-      ancestors and the clickable hit targets: the text and content_desc
-      sequence, the texts alone and the content_descs alone.
+      subtree text (field ``joined``) of the highest clickable element in
+      scope above the candidate and above each clickable hit target: the
+      text and content_desc sequence, the texts alone and the content_descs
+      alone. With exception words, the joined text of every clickable
+      element in that highest subtree is matched as well, siblings of the
+      candidate included, and the detail's ``element_id`` names the clickable
+      element whose joined text held the hit. A hit inside an exception word
+      of ``policy.deny_exceptions`` that stands whole in a text, content_desc
+      or hint, or in one field's value inside a joined text with real
+      boundaries around it, does not count (see the module docstring); the
+      resource id has no exceptions.
     * ``irreversible_screen``: the text, content description or hint of any
       element of the screen holds a phrase of ``policy.irreversible_phrases``
       (unless ``skip_irreversible`` is False). Every candidate gets it. The
@@ -1932,7 +2738,7 @@ def judge(
       those of any descendant, or the joined descendant texts or
       content_descs) and a deny word is found anywhere on the screen, alone in
       a field or in the joined texts, content_descs or text and content_desc
-      sequence of the whole screen.
+      sequence of the whole screen (without the exception words).
     * ``dialog_confirm_button``: a confirm word is the label (same sources) and
       the screen is
       a dialog (its first top-level element is smaller than the display; the first

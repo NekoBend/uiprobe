@@ -151,6 +151,8 @@ def test_a_missing_parent_is_not_created(tmp_path):
         {"limits": {"depth": 1}},
         {"limits": {"depth": 0, "actions": 1, "minutes": 1}},
         {"deny_words": ["a\ud800"]},
+        {"deny_exceptions": "border"},
+        {"deny_exceptions": [1]},
         {"package": "p\ud800"},
         {"started_at": datetime(2026, 1, 1)},  # noqa: DTZ001
         {"started_at": NO_OFFSET},
@@ -173,9 +175,16 @@ def test_run_start_json(tmp_path):
         "package": "com.example.app",
         "limits": {"depth": 5, "actions": 300, "minutes": 30},
         "deny": ["delete", "pay"],
+        "deny_except": [],
         "back_on_other_screens": False,
         "device": {"serial": "emulator-5554"},
     }
+
+
+def test_run_start_json_lists_the_exception_words(tmp_path):
+    make(tmp_path, deny_exceptions=("border", "automatically"))
+    data = json.loads((tmp_path / "run" / "run-start.json").read_bytes())
+    assert data["deny_except"] == ["border", "automatically"]
 
 
 def test_limits_may_be_a_plain_dict_and_the_time_defaults_to_now(tmp_path):
@@ -1082,6 +1091,7 @@ def test_keys_are_written_in_a_fixed_order(tmp_path):
         "package",
         "limits",
         "deny",
+        "deny_except",
         "back_on_other_screens",
         "device",
     ]
@@ -1953,3 +1963,111 @@ def test_the_writer_counts_complete_start_lines(tmp_path):
     writer.write_transition_end(1, not_sent="stopped")
     writer.write_transition_start(2, "back", ID_A)
     assert writer.starts_written == 2
+
+
+# --- skip details ---
+
+DENY_DETAIL = {
+    "reason": "deny_word",
+    "word": "delete",
+    "field": "text",
+    "element_id": "e3",
+}
+
+
+def test_a_skip_line_carries_its_details_between_reasons_and_element(tmp_path):
+    writer = make(tmp_path)
+    confirm = {
+        "reason": "confirm_button",
+        "note": "OK",
+        "word": "pay",
+        "field": "joined",
+    }
+    element = {"id": "e3", "class": "android.widget.Button"}
+    assert writer.write_skip(
+        ID_A, "fp1", ["deny_word", "confirm_button"], element, [DENY_DETAIL, confirm]
+    )
+    line = lines_of(tmp_path / "run" / "skipped.jsonl")[0]
+    assert list(line) == [
+        "schema",
+        "recorded_at",
+        "screen_id",
+        "fingerprint",
+        "reasons",
+        "details",
+        "element",
+    ]
+    assert line["details"] == [
+        DENY_DETAIL,
+        {"reason": "confirm_button", "word": "pay", "field": "joined", "note": "OK"},
+    ]
+    assert list(line["details"][1]) == ["reason", "word", "field", "note"]
+
+
+def test_a_skip_line_without_details_has_no_details_key(tmp_path):
+    writer = make(tmp_path)
+    assert writer.write_skip(ID_A, "fp1", ["unlabeled"], {}, [])
+    assert writer.write_skip(ID_A, "fp2", ["unlabeled"], {})
+    for line in lines_of(tmp_path / "run" / "skipped.jsonl"):
+        assert "details" not in line
+
+
+def test_a_repeated_skip_keeps_the_first_details(tmp_path):
+    writer = make(tmp_path)
+    assert writer.write_skip(ID_A, "fp1", ["deny_word"], {}, [DENY_DETAIL])
+    other = {**DENY_DETAIL, "word": "remove"}
+    assert not writer.write_skip(ID_A, "fp1", ["deny_word"], {}, [other])
+    found = lines_of(tmp_path / "run" / "skipped.jsonl")
+    assert [line["details"] for line in found] == [[DENY_DETAIL]]
+
+
+def test_device_text_in_skip_details_is_escaped_like_element_text(tmp_path):
+    writer = make(tmp_path)
+    text = "Delete\x1b[2J\u202e\u2028all"
+    element = {"id": "e3", "text": text}
+    detail = {"reason": "irreversible_screen", "word": "permanently", "note": text}
+    assert writer.write_skip(ID_A, "fp1", ["irreversible_screen"], element, [detail])
+    raw = (tmp_path / "run" / "skipped.jsonl").read_text(encoding="utf-8")
+    for char in ("\x1b", "\u202e", "\u2028"):
+        assert char not in raw
+    line = json.loads(raw)
+    assert line["details"][0]["note"] == text == line["element"]["text"]
+
+
+@pytest.mark.parametrize(
+    "details",
+    [
+        "deny_word",
+        {"reason": "deny_word"},
+        [("reason", "deny_word")],
+        [{"word": "delete"}],
+        [{"reason": "deny_word", "colour": "red"}],
+        [{"reason": "deny_word", "word": 3}],
+        [{"reason": "deny_word", "word": "a\ud800"}],
+        None,
+    ],
+)
+def test_bad_skip_details_write_nothing(tmp_path, details):
+    writer = make(tmp_path)
+    with pytest.raises((TypeError, ValueError)):
+        writer.write_skip(ID_A, "fp1", ["deny_word"], {}, details)
+    assert names(tmp_path / "run") == ["run-start.json"]
+
+
+@pytest.mark.parametrize(
+    ("reasons", "detail"),
+    [
+        # The detail's reason is not one of the line's reasons.
+        (["deny_word"], {"reason": "confirm_button", "word": "pay"}),
+        # Not a word reason, even when the line has it.
+        (["number_only"], {"reason": "number_only", "word": "42"}),
+        (["toggle", "deny_word"], {"reason": "toggle", "element_id": "e4"}),
+    ],
+)
+def test_a_skip_detail_must_belong_to_a_word_reason_of_the_line(
+    tmp_path, reasons, detail
+):
+    writer = make(tmp_path)
+    with pytest.raises(ValueError, match="one of the line's reasons"):
+        writer.write_skip(ID_A, "fp1", reasons, {}, [detail])
+    assert names(tmp_path / "run") == ["run-start.json"]

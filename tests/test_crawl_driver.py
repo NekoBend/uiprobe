@@ -44,7 +44,7 @@ from uiprobe.errors import (
     LaunchFailedError,
     NotEmulatorError,
 )
-from uiprobe.guards import Policy
+from uiprobe.guards import DEFAULT_DENY_EXCEPTIONS, Policy
 from uiprobe.runlog import RunFolderError, RunWriter
 
 if TYPE_CHECKING:
@@ -211,6 +211,7 @@ def test_a_small_app_is_crawled_end_to_end(tmp_path, device, android, clock):
     assert start["package"] == SHOP
     assert start["device"] == {"serial": SERIAL}
     assert "delete" in start["deny"]
+    assert start["deny_except"] == list(DEFAULT_DENY_EXCEPTIONS)
 
     transitions = lines(out / "transitions.jsonl")
     starts = transitions[0::2]
@@ -2020,3 +2021,71 @@ def test_nothing_is_hashed_between_the_last_clock_read_and_a_tap(
         sleep=clock.sleep,
     )
     assert "tap" in events
+
+
+# --- skip details: the matched word in skipped.jsonl ---
+
+WORD_SCREENS = (
+    Screen("home", "com.example.launcher/.Home", (El((0, 0, 320, 640)),)),
+    Screen(
+        "main",
+        f"{SHOP}/.Main",
+        (
+            El((0, 0, 320, 100), text="Shop"),
+            button(200, "Browse", "warn"),
+            button(260, "Delete account", "main"),
+            button(320, "Automatically", "main"),
+            El((20, 380, 300, 420), cls=BUTTON, go="main"),
+        ),
+    ),
+    Screen(
+        "warn",
+        f"{SHOP}/.Warn",
+        (
+            El((0, 0, 320, 100), text="You can't undo this"),
+            El((0, 100, 320, 150), text="Delete files?"),
+            button(200, "Cancel", "main"),
+            button(260, "OK", "main"),
+        ),
+    ),
+)
+
+
+def test_skip_lines_carry_the_details_of_word_reasons(tmp_path, fake_adb, clock):
+    FakeAndroid(fake_adb, SERIAL, WORD_SCREENS, start="home", transport_id=TRANSPORT)
+    out = tmp_path / "run"
+    policy = Policy(deny_exceptions=("automatically",))
+    run(Device(adb_server=fake_adb.address), clock, out, policy=policy)
+    rows = lines(out / "skipped.jsonl")
+    by_text = {r["element"].get("text", ""): r for r in rows}
+    delete = by_text["Delete account"]
+    assert delete["reasons"] == ["deny_word"]
+    assert delete["details"] == [
+        {
+            "reason": "deny_word",
+            "word": "delete",
+            "field": "text",
+            "element_id": delete["element"]["id"],
+        }
+    ]
+    cancel = by_text["Cancel"]
+    assert cancel["reasons"] == ["irreversible_screen"]
+    assert [(d["reason"], d["word"], d["field"]) for d in cancel["details"]] == [
+        ("irreversible_screen", "can't undo", "text")
+    ]
+    assert cancel["details"][0]["element_id"] != cancel["element"]["id"]
+    ok = by_text["OK"]
+    assert ok["reasons"] == ["irreversible_screen", "confirm_button"]
+    assert [d["reason"] for d in ok["details"]] == [
+        "irreversible_screen",
+        "confirm_button",
+    ]
+    # The first deny word on the screen, "undo" in "You can't undo this".
+    assert (ok["details"][1]["word"], ok["details"][1]["note"]) == ("undo", "ok")
+    # Other reasons carry no details.
+    unlabeled = by_text[""]
+    assert unlabeled["reasons"] == ["unlabeled"]
+    assert "details" not in unlabeled
+    # The word excused by the exception is not refused and named nowhere.
+    assert "Automatically" not in by_text
+    assert all(d.get("word") != "call" for r in rows for d in r.get("details", []))

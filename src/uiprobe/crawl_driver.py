@@ -109,7 +109,7 @@ from uiprobe.errors import (
     ScreenshotFailedError,
     UiprobeError,
 )
-from uiprobe.guards import Policy, judge
+from uiprobe.guards import _WORD_REASONS, Policy, judge
 from uiprobe.inputwindows import ROTATION, Unreadable
 from uiprobe.runlog import RunFolderError, RunWriter
 
@@ -972,7 +972,10 @@ class _Run:
             body = _skipped_element(
                 item, screens, found, package=self.package, policy=self.policy, tap=tap
             )
-            self.writer.write_skip(item.screen_id, item.fingerprint, item.reasons, body)
+            details = [d.to_dict() for d in item.details if d.reason in _WORD_REASONS]
+            self.writer.write_skip(
+                item.screen_id, item.fingerprint, item.reasons, body, details
+            )
 
 
 def _kind(action: Action) -> str:
@@ -1218,6 +1221,7 @@ def _crawl_on(
         package=package,
         limits=limits,
         deny_words=policy.deny_words,
+        deny_exceptions=policy.deny_exceptions,
         serial=device.serial,
         back_on_other_screens=policy.back_on_other_screens,
         repin=device.can_repin,

@@ -263,7 +263,8 @@ import hashlib
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Final
 
-from uiprobe.guards import MAX_ELEMENTS, judge
+# Detail at runtime too, so that typing.get_type_hints(SkippedElement) works.
+from uiprobe.guards import _WORD_REASONS, MAX_ELEMENTS, Detail, judge
 from uiprobe.model import Screen
 
 if TYPE_CHECKING:
@@ -520,11 +521,17 @@ class SkippedElement:
     """An element that was not pressed, and why (reasons of judge,
     ``changed_before_press``, ``label_changes`` or ``tap_not_sent``). A screen
     judge does not judge (``screen_too_large``) has one row for the whole
-    screen, with the screen id as its fingerprint."""
+    screen, with the screen id as its fingerprint. ``details`` are the
+    `Detail` objects of judge's decision for ``deny_word``,
+    ``irreversible_screen`` and ``confirm_button`` (the matched word or
+    phrase), from the first element seen with this fingerprint and these
+    reasons; empty for every other reason, so such a record equals the one
+    built from the first three fields alone."""
 
     screen_id: str
     fingerprint: str
     reasons: tuple[str, ...]
+    details: tuple[Detail, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -1305,7 +1312,10 @@ class CrawlEngine:
             prints = _Prints(screen)
             for decision in judgement.skipped:
                 self._add_skip(
-                    sid, prints.of(decision.element), tuple(decision.reasons)
+                    sid,
+                    prints.of(decision.element),
+                    tuple(decision.reasons),
+                    tuple(d for d in decision.details if d.reason in _WORD_REASONS),
                 )
         refused_out = (
             self._refused >= MAX_REFUSALS
@@ -1348,10 +1358,16 @@ class CrawlEngine:
         self._planned = plan
         return tap
 
-    def _add_skip(self, sid: str, fingerprint: str, reasons: tuple[str, ...]) -> None:
+    def _add_skip(
+        self,
+        sid: str,
+        fingerprint: str,
+        reasons: tuple[str, ...],
+        details: tuple[Detail, ...] = (),
+    ) -> None:
         key = (sid, fingerprint, reasons)
         if key not in self._skipped:
-            self._skipped[key] = SkippedElement(sid, fingerprint, reasons)
+            self._skipped[key] = SkippedElement(sid, fingerprint, reasons, details)
 
     def _only_labels_changed(self, plan: _Plan, observation: Observation) -> bool:
         """Whether the fresh screen has the planned element's structure and

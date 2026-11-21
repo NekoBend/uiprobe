@@ -28,6 +28,7 @@ Details: [Commands](commands.md).
 - Deny words see only the text, description, hint and resource id that uiautomator reports. An icon-only button without them (a trash can, a send arrow) has no words to match.
 - `--tap-unlabeled` allows pressing elements that have no text, description or hint. This also allows icon-only buttons that deny words cannot see, such as a trash can.
 - Substring matching also over-blocks (`Posture` contains `post`); a miss is worse than an over-block. The known limits are listed in [Crawling an app](crawl.md).
+- There are no exception words by default. A word you list under `[deny] except` in the settings file stops a deny word found inside it from counting where the word stands whole inside one element's text with real separators around it, so an element whose only hit was there is pressed: with `automatically` listed, `Bill my card automatically` is pressed by `crawl --press`. You take that on when you add the word. A label split across child elements (`Turn on` + `automatically`) or text that normalization changes may still be refused; the exact condition and its limits are in [Crawling an app](crawl.md). Exception words never weaken the screen-wide check behind `confirm_button`.
 
 ## Device-wide keys are refused
 

@@ -1251,15 +1251,7 @@ def _preview_text(result: Preview, settings_path: str, *, dry_run: bool) -> str:
 
 
 def _detail_json(detail: Detail) -> dict[str, object]:
-    optional = {
-        "word": detail.word,
-        "field": detail.field,
-        "element_id": detail.element_id,
-        "note": detail.note,
-    }
-    entry: dict[str, object] = {"reason": detail.reason}
-    entry.update({key: value for key, value in optional.items() if value})
-    return entry
+    return dict(detail.to_dict())
 
 
 def _preview_json(result: Preview, settings_path: str) -> dict[str, object]:
