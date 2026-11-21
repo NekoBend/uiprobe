@@ -5,19 +5,19 @@ from __future__ import annotations
 import io
 import json
 import re
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pytest
 
 from tests.fake_device import FakeAndroid
-from tests.test_crawl_driver import SCREENS, SERIAL, SHOP, TRANSPORT
+from tests.test_crawl_driver import OTHER, SCREENS, SERIAL, SHOP, TRANSPORT
 from uiprobe import cli
+from uiprobe.crawl_driver import CrawlResult
 from uiprobe.device import Device
 from uiprobe.settings import SETTINGS_FILE, render_default_settings
 
 if TYPE_CHECKING:
-    from pathlib import Path
-
     from tests.fake_adb_server import FakeAdbServer
 
 
@@ -553,3 +553,74 @@ def test_a_changing_identity_answer_cannot_undo_the_refusal(
     )
     assert not out.exists()
     assert device_writes(fake_adb) == []
+
+
+# --- the hint when restarts keep meeting another app ---
+
+
+def _launch_into_other_app(monkeypatch, android: FakeAndroid) -> None:
+    original = Device._launch_component
+
+    def launch_then_cover(self: Device, *args: object, **kwargs: object) -> None:
+        original(self, *args, **kwargs)  # ty: ignore[invalid-argument-type]
+        android.show("ext1")  # every start ends on a screen of another app
+
+    monkeypatch.setattr(Device, "_launch_component", launch_then_cover)
+
+
+@pytest.mark.usefixtures("here")
+def test_a_relaunch_limit_on_another_app_points_to_back(
+    fake_adb, android, capsys, tmp_path, monkeypatch
+):
+    _launch_into_other_app(monkeypatch, android)
+    code, text, err = press(capsys, fake_adb, "--press", "--out", str(tmp_path / "r"))
+    assert (code, err) == (0, "")  # the stop reason and exit code are unchanged
+    assert "stopped: relaunch_limit" in text
+    [note] = [line for line in text.splitlines() if "--back-on-other-screens" in line]
+    assert note.startswith("note: ")
+    assert f"(the last one: {OTHER})" in note
+    assert "reaches whichever window has the input focus" in note
+    assert android.inputs == []  # no tap or key: only the launch and restarts
+
+
+@pytest.mark.usefixtures("here")
+def test_the_relaunch_limit_hint_is_in_the_json_notes(
+    fake_adb, android, capsys, tmp_path, monkeypatch
+):
+    _launch_into_other_app(monkeypatch, android)
+    code, text, _err = press(
+        capsys, fake_adb, "--press", "--out", str(tmp_path / "r"), "--json"
+    )
+    assert code == 0
+    result = json.loads(text)
+    assert result["stop_reason"] == "relaunch_limit"
+    assert len([n for n in result["notes"] if "--back-on-other-screens" in n]) == 1
+
+
+def _result(stop_reason: str, front: str | None) -> CrawlResult:
+    return CrawlResult(Path("r"), stop_reason, 0, 4, repin=True, last_foreground=front)
+
+
+@pytest.mark.parametrize(
+    ("stop_reason", "front", "back", "shown"),
+    [
+        ("relaunch_limit", OTHER, False, True),
+        ("relaunch_limit", OTHER, True, False),  # BACK was already allowed
+        ("relaunch_limit", SHOP, False, False),  # the app itself was in front
+        ("relaunch_limit", None, False, False),  # unknown
+        ("exhausted", OTHER, False, False),
+        ("max_actions", OTHER, False, False),
+    ],
+)
+def test_the_relaunch_limit_hint_only_when_it_applies(stop_reason, front, back, shown):
+    hints = cli._press_hints(_result(stop_reason, front), package=SHOP, back=back)
+    assert any("--back-on-other-screens" in h for h in hints) is shown
+
+
+def test_the_relaunch_limit_hint_escapes_the_package():
+    hints = cli._press_hints(
+        _result("relaunch_limit", "com.evil\x1b[2J"), package=SHOP, back=False
+    )
+    hint = next(h for h in hints if "--back-on-other-screens" in h)
+    assert "\x1b" not in hint
+    assert "com.evil\\x1b[2J" in hint

@@ -1449,7 +1449,9 @@ def _cmd_crawl_press(args: argparse.Namespace, policy: Policy) -> int:
             exc.details.setdefault("out", out)
         raise
     moves = result.repins  # as run.json counts them
-    hints = _press_hints(result)
+    hints = _press_hints(
+        result, package=args.package, back=policy.back_on_other_screens
+    )
     if args.json:
         _emit(dumps(_press_json(plan, result, hints, moves), indent=2))
     else:
@@ -1525,8 +1527,12 @@ def _press_plan_text(plan: dict[str, object]) -> str:
     )
 
 
-def _press_hints(result: CrawlResult) -> list[str]:
-    """Advice for the endings a real device runs into; only those that apply."""
+def _press_hints(result: CrawlResult, *, package: str, back: bool) -> list[str]:
+    """Advice for the endings a real device runs into; only those that apply.
+
+    `package` is the target app and `back` whether BACK was allowed on
+    screens of other apps.
+    """
     hints: list[str] = []
     refused = dict(result.not_sent)
     if refused.get("cover_unknown"):
@@ -1550,8 +1556,21 @@ def _press_hints(result: CrawlResult) -> list[str]:
             " does any failed adb exchange with the device, even on the same"
             " connection"
         )
+    front = result.last_foreground
+    if (
+        result.stop_reason == "relaunch_limit"
+        and not back
+        and front is not None
+        and front != package
+    ):
+        hints.append(
+            "the restarts kept ending on screens of other apps (the last one:"
+            f" {_printable(front)}); --back-on-other-screens presses BACK on such"
+            " a screen (up to twice before it restarts the app), and that BACK"
+            " reaches whichever window has the input focus, not the app being"
+            " crawled"
+        )
     if result.stop_reason == "dump_failed_repeatedly":
-        front = result.last_foreground
         hints.append(
             "uiautomator dump kept failing; a screen that never settles (a value"
             " that changes every second, an animation) makes it fail, so avoid"
