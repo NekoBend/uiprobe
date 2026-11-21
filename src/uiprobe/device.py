@@ -913,26 +913,6 @@ def _spellings(component: str) -> frozenset[str]:
     return frozenset({component})
 
 
-def _check_activity(activity: object, package: str) -> str:
-    """Return `activity` as a plain str when it is a component of `package`.
-
-    Raises:
-        TypeError: `activity` is not a str.
-        ValueError: It is not ``PACKAGE/CLASS`` of `package`.
-    """
-    if not isinstance(activity, str):
-        msg = f"activity must be a str, not {type(activity).__name__}"
-        raise TypeError(msg)
-    activity = str.__str__(activity)  # a plain str, whatever the subclass
-    if not _is_component(activity, package):
-        msg = (
-            f"activity must be {package}/CLASS (CLASS made of letters, digits,"
-            f" _ and $ joined by dots), not '{_escaped(activity)}'"
-        )
-        raise ValueError(msg)
-    return activity
-
-
 class _StartFailure(NamedTuple):
     """Why ``am start -W`` output is not a success.
 
@@ -2556,7 +2536,6 @@ class Device:
         *,
         restart: bool = False,
         timeout: float = DEFAULT_LAUNCH_TIMEOUT,
-        activity: str | None = None,
         _send_by: float | None = None,
         _epoch: int | None = None,
     ) -> None:
@@ -2570,8 +2549,8 @@ class Device:
 
         First the launcher activity is read with ``cmd package
         resolve-activity --brief -c android.intent.category.LAUNCHER PACKAGE;
-        echo uiprobe-exit:$?`` (see `launcher_activity`; skipped when
-        `activity` is given). The read goes out only to a device that needs no
+        echo uiprobe-exit:$?`` (see `launcher_activity`), before every start.
+        The read goes out only to a device that needs no
         new proof, as a request that changes it would, and when anything
         happened to the pin during it (`pin_epoch` moved) nothing more is sent
         (`DeviceNotFoundError` with ``pin_not_proven``). When the activity
@@ -2604,10 +2583,11 @@ class Device:
         counts, so the wait can run past the timeout by the time of that read,
         and by how late a pause ends when the system wakes it late.
 
-        `activity` is a launcher activity read earlier with
-        `launcher_activity` for the same package, so that nothing is read
-        between the caller's last check and the start (the crawl reads it once
-        per run). A str subclass is used as a plain str with the same text.
+        A start whose reply names an activity of another app (or of the
+        system) is waited on in the same way: when the app comes to the front
+        within `timeout`, the launch succeeds; otherwise it fails with
+        ``other_activity``. A str subclass is used as a plain str with the
+        same text.
 
         No request of a launch starts an adb server: it uses only the server
         that is already there (`AdbServerUnavailableError`, ``start_skipped``
@@ -2629,13 +2609,12 @@ class Device:
         reads after the start are bounded by `timeout` only.
 
         Raises:
-            TypeError: `package` or `activity` is not a str, `restart` is not
-                a bool, or `timeout` is not a number (a bool is not).
+            TypeError: `package` is not a str, `restart` is not a bool, or
+                `timeout` is not a number (a bool is not).
             ValueError: `package` does not follow the Android package rule
-                (see `uiprobe.crawl_preview.PACKAGE_PATTERN`), `activity` is
-                not ``PACKAGE/CLASS`` of `package`, or `timeout` is not from 0
-                to 600 seconds. All are raised before the adb server is
-                contacted.
+                (see `uiprobe.crawl_preview.PACKAGE_PATTERN`), or `timeout` is
+                not from 0 to 600 seconds. Both are raised before the adb
+                server is contacted.
             LaunchFailedError: ``details`` hold ``package`` and ``reason``:
                 ``launcher_unreadable`` (the launcher activity could not be
                 read; ``output`` is the first line that is not blank, stripped,
@@ -2648,8 +2627,9 @@ class Device:
                 ``Error``, or ended with an exit status other than 0, then in
                 ``exit_status``), ``other_activity`` (a reply that is a
                 success in every other way named an activity of another app
-                or of the system (``android``, its chooser), which is then in
-                front; ``activity`` is that component, escaped),
+                or of the system (``android``, its chooser), and the app was
+                still not in front after the wait; ``activity`` is that
+                component, escaped),
                 ``unexpected_output`` (``am start`` did not report the success
                 described above), these three with ``output``, the
                 line at fault or else the first line that is not blank, cut to
@@ -2676,15 +2656,12 @@ class Device:
             msg = f"restart must be a bool, not {type(restart).__name__}"
             raise TypeError(msg)
         limit = _check_launch_timeout(timeout)
-        if activity is not None:
-            activity = _check_activity(activity, package)
         dispatch = _dispatch(_send_by, _epoch)
-        self._launch(package, activity, limit, restart=restart, dispatch=dispatch)
+        self._launch(package, limit, restart=restart, dispatch=dispatch)
 
     def _launch(
         self,
         package: str,
-        activity: str | None,
         limit: float,
         *,
         restart: bool,
@@ -2700,9 +2677,7 @@ class Device:
         failed = self._failed_requests
         self._launch_holds += 1
         try:
-            self._launch_steps(
-                package, activity, limit, restart=restart, dispatch=dispatch
-            )
+            self._launch_steps(package, limit, restart=restart, dispatch=dispatch)
         finally:
             self._launch_holds -= 1
         self._check_no_failure(failed)
@@ -2719,30 +2694,33 @@ class Device:
     def _launch_steps(
         self,
         package: str,
-        activity: str | None,
         limit: float,
         *,
         restart: bool,
         dispatch: _Dispatch | None,
     ) -> None:
         """The launcher read, the stop, the start and the foreground reads."""
-        if activity is None:
-            # The read goes out only to a device proven now, as a start would,
-            # and nothing follows it when anything happened to the pin.
-            epoch = self._epoch
-            activity = self._launcher_activity(package, strict=True)
-            if self._epoch != epoch:
-                msg = (
-                    f"{self.serial} has to be proven again before an input"
-                    f" (transport {self._transport_id}); nothing was sent"
-                )
-                details = {"serial": self.serial, "reason": PIN_NOT_PROVEN}
-                raise DeviceNotFoundError(msg, details=details)
+        # The launcher is read before every start; the read goes out only to
+        # a device proven now, as a start would, and nothing follows it when
+        # anything happened to the pin.
+        epoch = self._epoch
+        activity = self._launcher_activity(package, strict=True)
+        if self._epoch != epoch:
+            msg = (
+                f"{self.serial} has to be proven again before an input"
+                f" (transport {self._transport_id}); nothing was sent"
+            )
+            details = {"serial": self.serial, "reason": PIN_NOT_PROVEN}
+            raise DeviceNotFoundError(msg, details=details)
         failed = self._failed_requests
         if restart:
             self._force_stop(package, dispatch)
         self._check_no_failure(failed)
-        self._start(package, activity, limit, force_stopped=restart, dispatch=dispatch)
+        # A start that named an activity of another app is waited on like
+        # any other: the app may come to the front in time.
+        other = self._start(
+            package, activity, limit, force_stopped=restart, dispatch=dispatch
+        )
         details: dict[str, object] = {"package": package}
         deadline = self._clock() + limit
         while True:
@@ -2755,6 +2733,8 @@ class Device:
             self._sleep(max(0.0, min(LAUNCH_POLL_INTERVAL, deadline - self._clock())))
             if self._clock() > deadline:
                 break  # no read starts after the deadline
+        if other is not None:
+            raise other
         shown = None if seen is None else _shown_foreground(seen)
         details.update(reason="not_in_front", foreground=shown, timeout=limit)
         last = "unknown" if shown is None else shown
@@ -2830,8 +2810,13 @@ class Device:
         *,
         force_stopped: bool,
         dispatch: _Dispatch | None = None,
-    ) -> None:
-        """Send ``am start -W`` of `activity` once and require it to succeed."""
+    ) -> LaunchFailedError | None:
+        """Send ``am start -W`` of `activity` once and require it to succeed.
+
+        Return the ``other_activity`` error, not raised, when a reply that is
+        a success in every other way named an activity of another app: the
+        caller waits for the app to come to the front first.
+        """
         command = (
             quote_args(
                 "am",
@@ -2874,7 +2859,7 @@ class Device:
             raise LaunchFailedError(msg, details=details) from None
         failure = _start_failure(output, package, activity)
         if failure is None:
-            return
+            return None
         line = _escaped_line(output) if failure.line is None else _escaped(failure.line)
         details.update(reason=failure.reason, output=line)
         if failure.exit_status is not None:
@@ -2883,7 +2868,7 @@ class Device:
         if failure.other is not None:
             # A complete, well-formed reply: nothing about the pin is in doubt.
             details["activity"] = _escaped(failure.other, _FOREGROUND_LIMIT)
-            raise LaunchFailedError(msg, details=details)
+            return LaunchFailedError(msg, details=details)
         raise self._doubt(LaunchFailedError(msg, details=details))
 
     def stop_app(

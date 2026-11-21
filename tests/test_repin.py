@@ -274,8 +274,6 @@ def test_a_boot_id_that_can_no_longer_be_read_is_a_change(fake_adb, android):
         (lambda d: d.launch(SHOP), "am start"),
         (lambda d: d.launch(SHOP, restart=True), "am "),
         (lambda d: d.launch(SHOP), "cmd package"),
-        # the launcher activity given: no read comes before the start
-        (lambda d: d.launch(SHOP, activity=f"{SHOP}/.Main"), "am start"),
     ],
 )
 def test_an_input_never_follows_a_renumbered_transport(

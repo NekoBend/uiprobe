@@ -387,7 +387,6 @@ def test_an_unreadable_launcher_activity_starts_nothing(
     error = json.loads(text)["error"]
     assert error["code"] == "launch_failed"
     assert error["details"]["reason"] == "launcher_unreadable"
-    assert not out.exists()
     assert device_writes(fake_adb) == []
     assert android.inputs == []
 

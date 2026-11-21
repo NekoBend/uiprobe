@@ -11,7 +11,7 @@ What is sent. Only what the engine returned, and for a tap only what
 `CrawlEngine.recheck` allowed for that very `Tap` object, in the gate right
 before it is sent: the first launch, a
 relaunch (``force-stop`` then start; a launch is ``am start -W`` of the
-launcher activity read once before the run, never ``monkey``), a tap at the
+launcher activity, read right before each start, never ``monkey``), a tap at the
 point judge gave, and the BACK key. Text, long presses, swipes and other keys
 are never sent. By default the engine never returns BACK for a screen of another app (it
 relaunches instead); ``Policy.back_on_other_screens`` allows it. A BACK or
@@ -41,12 +41,13 @@ The gate (`_Run.gate`) is the one place every action passes right before it is
 sent. In order: `stop` and the time limit; the pin (`Device.check_pin`: the
 same transport, serial and identity with its boot id, a renumbered transport
 followed only as `Device.can_repin` allows, else an error); `stop` again;
-then fresh reads, for a tap the dump first; last the comparison of the pin.
-No code of the caller runs after the reads: `stop`, `clock`, `sleep` and the
-run folder writes all come before them or after the input. The time limit is
-turned into a value of uiprobe's own clock (`_Run.now`) and checked by
-the device, with the pin, on the request's own connection right before it is
-written. It refuses, with a ``not_sent`` end line and nothing
+then fresh reads, for a tap the dump first; then the clock again (the
+caller's code, as on main); last the comparison of the pin. No code of the
+caller runs between that comparison and the input: `stop`, `sleep` and the
+run folder writes all come before the reads or after the input. The time
+limit is also turned into a value of uiprobe's own clock (`_Run.now`) and
+checked by the device, with the pin, on the request's own connection right
+before it is written. It refuses, with a ``not_sent`` end line and nothing
 sent, when anything it needs cannot be read or has changed: for a tap the
 engine's `CrawlEngine.recheck` on the fresh dump, a keyboard known to be hidden
 and a focused window owned by the app; for BACK and relaunch the same
@@ -386,7 +387,6 @@ class _Run:
         policy: Policy,
         *,
         emulator: bool,
-        launcher: str,
         app_uid: PackageUid | None = None,
         screenshots: bool,
         settle: float,
@@ -403,8 +403,6 @@ class _Run:
         self.engine = engine
         self.policy = policy
         self.emulator = emulator
-        # The launcher activity (PACKAGE/CLASS), read once before the run.
-        self.launcher = launcher
         self.app_uid = app_uid  # read once at the start (check_tap_window)
         self.gate_details: dict[str, str | int] | None = None  # why, for cover
         self.not_sent: dict[str, int] = {}  # not_sent end lines by reason
@@ -560,6 +558,19 @@ class _Run:
                 self.withdraw(action)
             return NOT_SENT_RECONNECTED
         return None
+
+    def close_failed_launch(
+        self, action: Action, action_id: int, error: Exception
+    ) -> None:
+        """Close a launch or relaunch whose sending failed and ends the run."""
+        if not _unreadable_launcher(error):
+            self.end_failed(action_id, error)
+        elif isinstance(action, Launch):
+            # The launcher read failed: the start was not sent.
+            self._open = None
+            self.end_not_sent(action_id, "launcher_unreadable")
+        else:
+            self.half_sent(action_id, "launcher_unreadable")
 
     def end_failed(self, action_id: int, error: Exception) -> None:
         """Close a launch or relaunch whose sending failed and ends the run.
@@ -741,8 +752,8 @@ class _Run:
             if seen is not None and isinstance(action, Tap):
                 return reason, self.refused_tap(action, screen, seen)
             return reason, None
-        # Nothing runs between the gate's last read and the input: no user
-        # code (stop() and the clock were asked first), no other read, no write.
+        # Nothing of the caller's runs between the gate's last comparison and
+        # the input; the launch reads the launcher right before its start.
         self._open = action_id
         self.sent_epoch = self.device.pin_epoch
         try:
@@ -753,7 +764,7 @@ class _Run:
             # A launch or relaunch that failed ends the run; its end line says
             # so (a tap or BACK keeps a start line alone: result unknown).
             if isinstance(action, Launch | Relaunch) and self._open == action_id:
-                self.end_failed(action_id, error)
+                self.close_failed_launch(action, action_id, error)
             raise
         if refused is not None:
             return refused, None
@@ -1006,9 +1017,12 @@ class _Run:
         # here), then nothing but one integer comparison follows.
         why = next((reason for failed, reason in checks if bool(failed)), None)
         self.gate_screen_id = None if screen is None else screen.screen_id
-        # No caller code after the reads: the time limit is checked by the
-        # device with its own clock right before the input goes out
-        # (`now`), and the pin last, here and there.
+        # The time again, after the reads (they can take long) and before the
+        # last comparison, as on main: the clock, which may be the caller's
+        # code, runs before the comparison and nothing runs after it. The
+        # device also checks the time with uiprobe's own clock right before
+        # the input goes out.
+        late = self.now() >= self.deadline
         path = (
             "tap"
             if isinstance(action, Tap)
@@ -1018,6 +1032,8 @@ class _Run:
         )
         if not self.final_check(path, self.epoch_seen):
             return NOT_SENT_RECONNECTED, seen
+        if late:
+            return NOT_SENT_TIME_LIMIT, None
         return why, seen
 
     def launch_gate(self) -> str | None:
@@ -1059,13 +1075,17 @@ class _Run:
     def launch(self) -> None:
         """Start the app; an app that is not in front afterwards is not fatal.
 
-        The start is ``am start -W`` of the launcher activity read once at the
-        start of the run (`launcher`), so nothing is read between the gate
-        and the start. ``not_in_front`` means the start reported success, but
+        The device reads the launcher activity right before the start (no
+        component is kept between launches), then starts it with ``am start
+        -W`` and waits for the app to come to the front. No code of the
+        caller runs in that call; the start goes out only while the pin epoch
+        is still the one the gate approved and the time limit has not passed.
+        ``not_in_front`` means the start reported success, but
         another package (a permission dialog, a splash screen) holds the
         focus; ``other_activity`` means the start reported success with an
         activity of another app (on API 36, Settings' search screen of
-        another package stays on top of its task after a force-stop). The
+        another package stays on top of its task after a force-stop) and the
+        app was not in front after the same wait either. The
         engine handles an off-target screen, so the crawl observes and goes
         on. The action stays counted as sent. Any other launch failure,
         ``start_timeout`` included (whether the app started is unknown), is
@@ -1073,10 +1093,7 @@ class _Run:
         """
         try:
             self.device.launch(
-                self.package,
-                activity=self.launcher,
-                _send_by=self.send_by,
-                _epoch=self.approved,
+                self.package, _send_by=self.send_by, _epoch=self.approved
             )
         except LaunchFailedError as error:
             reason = error.details.get("reason")
@@ -1303,6 +1320,14 @@ class _Run:
             )
 
 
+def _unreadable_launcher(error: Exception) -> bool:
+    """Whether `error` is a launch that stopped at its launcher read."""
+    return (
+        isinstance(error, LaunchFailedError)
+        and error.details.get("reason") == "launcher_unreadable"
+    )
+
+
 def _kind(action: Action) -> str:
     """The ``kind`` of an action in its start line."""
     if isinstance(action, Launch):
@@ -1401,14 +1426,13 @@ def crawl(
     ``policy.back_on_other_screens`` is True. It is alpha;
     ``uiprobe crawl --press`` runs it from the command line.
 
-    The order is: check the arguments, check the device, read the app's
-    launcher activity, make the run folder, run. Nothing is written and no
-    input is sent before the first three have passed (the device check itself
-    reads one property). The launcher activity is read once with ``cmd package
-    resolve-activity`` (`Device.launcher_activity`) and every launch and
-    relaunch starts it with ``am start -W`` (`Device.launch`); when it cannot
-    be read, `LaunchFailedError` (``launcher_unreadable``) is raised and
-    nothing is written. Unless
+    The order is: check the arguments, check the device, make the run folder,
+    run. Nothing is written and no input is sent before the first two have
+    passed (the device check itself reads one property). Every launch and
+    relaunch reads the app's launcher activity with ``cmd package
+    resolve-activity`` right before its start and starts it with ``am start
+    -W`` (`Device.launch`); when it cannot be read, the start is not sent and
+    the run ends with `LaunchFailedError` (``launcher_unreadable``). Unless
     `allow_real_device` is True, the device must answer that it is an
     emulator; an answer that cannot be read counts as a real device.
 
@@ -1450,10 +1474,9 @@ def crawl(
             be read) and `allow_real_device` is False. Nothing was written.
         AdbError: The adb server reported no transport id for the device, so
             it cannot be pinned. Nothing was written.
-        LaunchFailedError: The app's launcher activity cannot be read
-            (``launcher_unreadable``); nothing was written or sent. Raised
-            later as well when a launch fails other than by not coming to
-            the front (or not finishing) in time.
+        LaunchFailedError: A launch failed other than by not coming to the
+            front in time (``launcher_unreadable`` among them: the start was
+            not sent).
         RunFolderError: `out` exists, its parent is missing, or a file cannot
             be written.
         UiprobeError: A device or adb error that prevents going on.
@@ -1548,10 +1571,6 @@ def _crawl_on(
     # and whether other packages share it; None when it cannot be read: then
     # every tap is refused (cover_unknown) before any window is read.
     app_uid = device.package_uid(package) if policy.check_tap_window else None
-    # Read once, before the run folder: an app whose launcher activity cannot
-    # be read is not crawled, and no launch or relaunch reads it again, so
-    # nothing but the start follows the last pin comparison.
-    launcher = device.launcher_activity(package)
     # The run's end by uiprobe's own clock, set once. With uiprobe's own
     # clock (the default) it is read once, for both. With a clock of the
     # caller's, uiprobe's is read before the caller's first value, and a
@@ -1583,7 +1602,6 @@ def _crawl_on(
             engine,
             policy,
             emulator=not allow_real_device,
-            launcher=launcher,
             app_uid=app_uid,
             screenshots=screenshots,
             settle=settle,

@@ -22,13 +22,18 @@ The test logs one ordered list of events:
 
 Each send must be paired with its own decision (the last event of either
 kind before it is that decision, of the path whose command it is), and no
-``caller`` event may lie between them. The rows are the sending paths, each
-checked on its own; the set of rows must equal the paths the crawl declares
-(`crawl_driver._SEND_PATHS`), and a send without a decision fails, so a new
-sending path cannot be added without a row. Meta-tests show that the test
-fails, for every path, when a clock call is inserted into the production
-`_Run.final_check` right after its comparison or into `_Run.epoch_is` right
-after the equality, and when the row of a path is removed.
+``caller`` event may lie between them. Between the gate's reads and the
+decision the caller's clock does run, once, as on main: the time is checked
+again after the reads (limit L1 in docs/safety.md). The rows are scenarios,
+each with the sending path it must send and checked on its own (BACK has two:
+on a screen of the app, and on a screen of another app with
+``back_on_other_screens``); the set of the rows' paths must equal the paths
+the crawl declares (`crawl_driver._SEND_PATHS`), and a send without a
+decision fails, so a new sending path cannot be added without a row.
+Meta-tests show that the test fails, for every row, when a clock call is
+inserted into the production `_Run.final_check` right after its comparison
+or into `_Run.epoch_is` right after the equality, and when the row of a path
+is removed.
 """
 
 from __future__ import annotations
@@ -37,7 +42,7 @@ import ast
 import inspect
 import re
 import textwrap
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NamedTuple
 
 import pytest
 
@@ -66,8 +71,6 @@ FAMILY = {
     "launch": "am start",
     "start": "am start",
 }
-# The paths whose gate reads the screen right before the decision.
-UI_READ_PATHS = frozenset({"tap", "back"})
 # Changing command families the strict fake admits that the crawl never
 # sends, with the reason.
 NOT_SENT_BY_CRAWL = {
@@ -105,13 +108,45 @@ def plain(device: Device, android: FakeAndroid, monkeypatch) -> None:
     del device, android, monkeypatch
 
 
-# One row per sending path, with the scenario that makes the crawl send it.
-ROWS: dict[str, Callable[..., None]] = {
-    "tap": plain,
-    "back": plain,
-    "launch": plain,
-    "force-stop": cover_after_browse,
-    "start": cover_after_browse,
+# The package in front at each BACK of the off-target row.
+OFF_TARGET_BACKS: list[str] = []
+
+
+def off_target_back(device: Device, android: FakeAndroid, monkeypatch) -> None:
+    """As `cover_after_browse`, and BACK is sent to the other app's screens
+    (the row's policy has ``back_on_other_screens``)."""
+    cover_after_browse(device, android, monkeypatch)
+    OFF_TARGET_BACKS.clear()
+    original = device.key
+
+    def key(
+        name: str,
+        refused: object = None,
+        _send_by: float | None = None,
+        _epoch: int | None = None,
+    ) -> object:
+        OFF_TARGET_BACKS.append(android.screen.package)
+        return original(name, refused=refused, _send_by=_send_by, _epoch=_epoch)  # ty: ignore[invalid-argument-type]
+
+    monkeypatch.setattr(device, "key", key)
+
+
+class Row(NamedTuple):
+    """A scenario, the sending path it must send, and its policy options."""
+
+    path: str
+    scenario: Callable[..., None]
+    options: dict[str, bool]
+
+
+# The rows: every sending path has at least one.
+ROWS: dict[str, Row] = {
+    "tap": Row("tap", plain, {}),
+    "back": Row("back", plain, {}),
+    "back-off-target": Row("back", off_target_back, {"back_on_other_screens": True}),
+    "launch": Row("launch", plain, {}),
+    "force-stop": Row("force-stop", cover_after_browse, {}),
+    "start": Row("start", cover_after_browse, {}),
 }
 
 
@@ -155,7 +190,7 @@ def hooked_seconds(log: _Log) -> type[float]:
     return Seconds
 
 
-def hooked_policy(log: _Log) -> Policy:
+def hooked_policy(log: _Log, **options: bool) -> Policy:
     """A `Policy` subclass whose field reads, and whose words' methods, log
     as caller code."""
 
@@ -184,6 +219,7 @@ def hooked_policy(log: _Log) -> Policy:
     return Hooked(
         deny_words=tuple(Word(w) for w in base.deny_words),
         confirm_words=tuple(Word(w) for w in base.confirm_words),
+        **options,  # ty: ignore[invalid-argument-type]
     )
 
 
@@ -232,7 +268,7 @@ def instrumented_run(
     tmp_path: Path,
     fake_adb: FakeAdbServer,
     monkeypatch: pytest.MonkeyPatch,
-    scenario: Callable[..., None],
+    row: Row,
 ) -> list[Event]:
     """Run a crawl with caller code, decisions and sends logged in order."""
     log = _Log()
@@ -240,7 +276,7 @@ def instrumented_run(
         fake_adb, SERIAL, SCREENS, start="home", transport_id=TRANSPORT
     )
     device = Device(adb_server=fake_adb.address)
-    scenario(device, android, monkeypatch)
+    row.scenario(device, android, monkeypatch)
 
     def received(command: str):
         log.events.append(("send", command))
@@ -296,7 +332,7 @@ def instrumented_run(
         device,
         SHOP,
         tmp_path / "run",
-        policy=hooked_policy(log),
+        policy=hooked_policy(log, **row.options),
         limits=Limits(),
         settle=0.0,
         stop=caller_stop,
@@ -311,10 +347,8 @@ def check_rule(events: list[Event]) -> dict[str, int]:
 
     Every send must follow its own decision directly (no other decision or
     send between), of the path whose command family it is, and no caller
-    event may lie between the decision and the send, whatever the path. For a
-    tap and BACK, whose gate reads the screen, none may lie between the last
-    of those reads and the send either (the caller's clock and `stop` come
-    before the reads; the policy is a plain copy).
+    event may lie between the decision and the send, whatever the path. A
+    tap and BACK must also have a screen read before their decision.
     """
     sends: dict[str, int] = {}
     last: tuple[int, str] | None = None  # the open decision: index, path
@@ -330,23 +364,19 @@ def check_rule(events: list[Event]) -> dict[str, int]:
             window = events[decided_at + 1 : index]
             callers = [w for k, w in window if k == "caller"]
             assert callers == [], f"{path}: {callers} ran before {what!r}"
-            if path in UI_READ_PATHS:
+            if path in {"tap", "back"}:
                 reads = [i for i in range(decided_at) if events[i][0] == "read"]
                 assert reads, f"{path}: no screen read before {what!r}"
-                window = events[reads[-1] + 1 : index]
-                callers = [w for k, w in window if k == "caller"]
-                assert callers == [], (
-                    f"{path}: {callers} ran after the last read before {what!r}"
-                )
             sends[path] = sends.get(path, 0) + 1
             last = None  # one decision, one send
     return sends
 
 
-def check_complete(rows: dict[str, Callable[..., None]]) -> None:
-    """Every sending path the crawl declares has its own row, and no more."""
+def check_complete(rows: dict[str, Row]) -> None:
+    """Every sending path the crawl declares has a row, and no row more."""
     declared = set(crawl_driver._SEND_PATHS)
-    assert set(rows) == declared, f"rows {sorted(rows)} != paths {sorted(declared)}"
+    paths = {row.path for row in rows.values()}
+    assert paths == declared, f"rows {sorted(paths)} != paths {sorted(declared)}"
     assert set(FAMILY) == declared
 
 
@@ -391,7 +421,11 @@ def test_no_caller_code_runs_between_the_final_comparison_and_the_send(
     assert any(kind == "caller" and what == "clock.__float__" for kind, what in events)
     assert any(kind == "caller" and what.endswith("__del__") for kind, what in events)
     sends = check_rule(events)  # every send of the run, whatever its path
-    assert sends.get(path, 0) > 0, f"the scenario sent no {path}"  # the row's own
+    row = ROWS[path]
+    assert sends.get(row.path, 0) > 0, f"the scenario sent no {row.path}"
+    if row.scenario is off_target_back:
+        # Some of its BACKs went to the other app's screens.
+        assert any(package != SHOP for package in OFF_TARGET_BACKS)
 
 
 # --- tests of the test ---
@@ -476,6 +510,6 @@ def test_the_rule_test_fails_on_a_clock_call_before_the_tap_after_a_relaunch(
 
 
 def test_the_completeness_test_fails_without_the_relaunch_start_row():
-    rows = {path: scenario for path, scenario in ROWS.items() if path != "start"}
+    rows = {name: row for name, row in ROWS.items() if row.path != "start"}
     with pytest.raises(AssertionError, match="rows"):
         check_complete(rows)

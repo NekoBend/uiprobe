@@ -1079,7 +1079,9 @@ def test_a_nested_class_is_declared_and_started_end_to_end(fake_adb):
     device = Device(adb_server=fake_adb.address)
     assert device.launcher_activity(SHOP) == f"{SHOP}/.Outer$Inner"
     device.launch(SHOP)
-    device.launch(SHOP, activity=f"{SHOP}/{SHOP}.Outer$Inner", restart=True)
+    full = f"{SHOP}/{SHOP}.Outer$Inner\nuiprobe-exit:0\n".encode()
+    phone.override(re.compile(r"^cmd package"), full)  # a full spelling read
+    device.launch(SHOP, restart=True)
     assert phone.screen.name == "inner"
     starts = [c for _, _, c in fake_adb.commands if c.startswith("am start")]
     assert starts == [

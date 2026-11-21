@@ -205,54 +205,6 @@ def test_launcher_activity_is_read_with_resolve_activity(device, fake_adb):
     assert sent(fake_adb) == [RESOLVE]
 
 
-def test_a_given_activity_is_started_without_a_read(device, android, fake_adb):
-    device.launch(SHOP, activity=f"{SHOP}/.Main")
-    assert sent(fake_adb) == [START]
-    android.show("launcher")
-    device.launch(SHOP, restart=True, activity=f"{SHOP}/{SHOP}.Main")
-    assert sent(fake_adb)[1:] == [STOP, start_of(f"{SHOP}/{SHOP}.Main")]
-
-
-@pytest.mark.parametrize(
-    ("activity", "error"),
-    [
-        (5, TypeError),
-        (b"com.example.shop/.Main", TypeError),
-        ("com.example.other/.Main", ValueError),
-        ("com.example.sho/.Main", ValueError),
-        ("com.example.shopx/.Main", ValueError),
-        (f"{SHOP}/", ValueError),
-        (f"{SHOP}/.Main;reboot", ValueError),
-        (f"{SHOP}/.Main reboot", ValueError),
-        (f"{SHOP}/..Main", ValueError),
-        (f"{SHOP}/.Main.", ValueError),
-        (f"{SHOP}/.M\u00e4in", ValueError),
-        (f"{SHOP}/." + "a" * 255, ValueError),
-        (f"{SHOP}/.Main/x", ValueError),
-        (SHOP, ValueError),
-        ("android/com.android.internal.app.ResolverActivity", ValueError),
-    ],
-)
-def test_a_given_activity_is_checked_before_any_request(
-    device, fake_adb, activity, error
-):
-    before = list(fake_adb.requests)
-    with pytest.raises(error):
-        device.launch(SHOP, activity=activity)
-    assert fake_adb.requests == before
-
-
-def test_a_given_activity_subclass_is_used_as_plain_text(device, fake_adb):
-    class Odd(str):
-        __hash__ = str.__hash__
-
-        def __str__(self) -> str:
-            return "com.attacker/.X"
-
-    device.launch(SHOP, activity=Odd(f"{SHOP}/.Main"))
-    assert sent(fake_adb) == [START]
-
-
 # --- the launcher activity read ---
 
 
@@ -487,12 +439,12 @@ def test_a_start_that_names_another_apps_activity_fails_a_launch(
 ):
     # Captured on an API 36 emulator: Settings' search screen (another
     # package) stayed on top of the task after am force-stop.
+    # The app does not come to the front during the wait that follows.
     android.override(
         re.compile(r"^am start"), capture("emu36-start-other-activity.txt")
     )
-    android.show("settings")
     with pytest.raises(LaunchFailedError) as info:
-        device.launch(SETTINGS, activity=f"{SETTINGS}/.Settings")
+        device.launch(SETTINGS, timeout=1)
     assert info.value.details == {
         "package": SETTINGS,
         "reason": "other_activity",
@@ -502,7 +454,55 @@ def test_a_start_that_names_another_apps_activity_fails_a_launch(
         "/.modules.search.activity.SearchActivity",
     }
     assert info.value.exit_code == 15
-    assert sent(fake_adb) == [start_of(f"{SETTINGS}/.Settings")]
+    assert sent(fake_adb) == [
+        RESOLVE_PREFIX + SETTINGS + MARK,
+        start_of(f"{SETTINGS}/.Settings"),
+    ]
+
+
+def test_a_start_that_names_another_apps_activity_waits_for_the_app(
+    device, android, fake_adb, clock, monkeypatch
+):
+    # The same reply, but the app comes to the front after 2 s: as with any
+    # start, the launch waits for it and succeeds.
+    android.override(
+        re.compile(r"^am start"), capture("emu36-start-other-activity.txt")
+    )
+    original = device.foreground
+
+    def comes_back() -> str | None:
+        if clock.now >= 1002.0:
+            android.show("settings")
+        return original()
+
+    monkeypatch.setattr(device, "foreground", comes_back)
+    assert device.launch(SETTINGS) is None
+    assert clock.pauses == [0.5, 0.5, 0.5, 0.5]
+    assert sent(fake_adb) == [
+        RESOLVE_PREFIX + SETTINGS + MARK,
+        start_of(f"{SETTINGS}/.Settings"),
+    ]
+
+
+@pytest.mark.parametrize(
+    "activity",
+    [
+        "com.example.other/.Main",
+        "com.example.shopx/.Main",
+        "android/com.android.internal.app.ResolverActivity",
+    ],
+)
+def test_a_start_naming_another_app_fails_only_when_the_app_stays_behind(
+    device, android, activity
+):
+    output = OK_36.replace("{activity}", activity).encode()
+    android.override(re.compile(r"^am start"), output)
+    with pytest.raises(LaunchFailedError) as info:
+        device.launch(SHOP, timeout=1)  # the app never comes to the front
+    assert info.value.details["reason"] == "other_activity"
+    assert info.value.details["output"] == f"Activity: {activity}"
+    android.show("main")
+    assert device.launch(SHOP) is None  # in front: a success like any start
 
 
 # --- the start: the success rule ---
@@ -525,25 +525,6 @@ def test_the_reported_activity_may_have_another_class(device, android, activity)
 @pytest.mark.parametrize(
     ("output", "reason", "shown"),
     [
-        # another package: a launch alone fails (the crawl goes on)
-        (
-            OK_36.replace("{activity}", "com.example.other/.Main"),
-            "other_activity",
-            "Activity: com.example.other/.Main",
-        ),
-        (
-            OK_36.replace("{activity}", "com.example.shopx/.Main"),
-            "other_activity",
-            "Activity: com.example.shopx/.Main",
-        ),
-        # the system's chooser (owner "android", no dot)
-        (
-            OK_36.replace(
-                "{activity}", "android/com.android.internal.app.ResolverActivity"
-            ),
-            "other_activity",
-            "Activity: android/com.android.internal.app.ResolverActivity",
-        ),
         # not a component of any package
         (
             OK_36.replace("{activity}", "shop/.Main"),
@@ -793,11 +774,17 @@ def test_the_echo_may_name_the_full_spelling_sent(device, android, fake_adb):
     # A full class name sent is echoed in the short form, and the reverse.
     output = OK_36.replace("{activity}", f"{SHOP}/.Main")
     scripted_start(android, output.encode())
-    device.launch(SHOP, activity=f"{SHOP}/{SHOP}.Main")
+    full_read = f"{SHOP}/{SHOP}.Main\nuiprobe-exit:0\n".encode()
+    android.override(re.compile(r"^cmd package"), full_read)
+    device.launch(SHOP)  # the launcher read gave the full spelling
     full = output.replace(f"cmp={SHOP}/.Main", f"cmp={SHOP}/{SHOP}.Main")
     scripted_start(android, full.encode())
-    device.launch(SHOP, activity=f"{SHOP}/.Main")
-    assert sent(fake_adb) == [start_of(f"{SHOP}/{SHOP}.Main"), START]
+    android.override(
+        re.compile(r"^cmd package"), f"{SHOP}/.Main\nuiprobe-exit:0\n".encode()
+    )
+    device.launch(SHOP)
+    starts = [c for c in sent(fake_adb) if c.startswith("am start")]
+    assert starts == [start_of(f"{SHOP}/{SHOP}.Main"), START]
 
 
 def test_a_non_zero_exit_status_is_reported(device, android):
@@ -1554,7 +1541,7 @@ def test_a_launch_ends_when_a_read_swallows_a_failure(
     assert len(fake_adb.requests) == after[0]  # no request after the failure
 
 
-def test_a_launch_with_a_given_activity_on_a_stopped_server_says_what_happened(
+def test_a_launch_on_a_stopped_server_says_what_happened(
     fake_adb,
 ):
     # No request of a launch starts a server; the refusal says so (it does
@@ -1565,15 +1552,13 @@ def test_a_launch_with_a_given_activity_on_a_stopped_server_says_what_happened(
     device = Device(adb_server=fake_adb.address)
     fake_adb.stop()
     with pytest.raises(AdbServerUnavailableError) as info:
-        device.launch(SHOP, activity=f"{SHOP}/.Main")
+        device.launch(SHOP)
     assert info.value.details["start_skipped"] == "in_launch"
     assert "a launch never starts an adb server" in info.value.message
     assert "already sent" not in info.value.message
 
 
-def test_a_launch_with_a_given_activity_never_reaches_a_server_started_for_it(
-    tmp_path, monkeypatch, clock
-):
+def test_a_launch_never_reaches_a_server_started_for_it(tmp_path, monkeypatch, clock):
     # The Device chose its device on server 1, which then stops. A launch
     # with the activity given and restart=True would make the client start a
     # server (here server 2, the same serial on transport 8 with another
@@ -1609,10 +1594,10 @@ def test_a_launch_with_a_given_activity_never_reaches_a_server_started_for_it(
     script, _ = recording_adb(tmp_path)
     try:
         device = Device(adb=script)
-        activity = device.launcher_activity(SHOP)
+        device.launcher_activity(SHOP)  # a request on server 1 first
         first.stop()
         with pytest.raises(AdbServerUnavailableError) as info:
-            device.launch(SHOP, activity=activity, restart=True)
+            device.launch(SHOP, restart=True)
         assert info.value.details["start_skipped"] == "in_launch"
         assert started == []
         assert second.requests == []
