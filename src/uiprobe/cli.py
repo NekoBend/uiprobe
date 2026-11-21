@@ -1563,12 +1563,12 @@ def _press_hints(result: CrawlResult, *, package: str, back: bool) -> list[str]:
         and front is not None
         and front != package
     ):
-        other = _printable(front)
         hints.append(
-            f"the app came back on a screen of {other} after each restart;"
-            " --back-on-other-screens presses BACK there instead of restarting,"
-            f" and that BACK reaches {other}, the app in front, not the app"
-            " being crawled"
+            "the restarts kept ending on screens of other apps (the last one:"
+            f" {_printable(front)}); --back-on-other-screens presses BACK on such"
+            " a screen (up to twice before it restarts the app), and that BACK"
+            " reaches whichever window has the input focus, not the app being"
+            " crawled"
         )
     if result.stop_reason == "dump_failed_repeatedly":
         hints.append(

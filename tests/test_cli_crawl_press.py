@@ -576,11 +576,11 @@ def test_a_relaunch_limit_on_another_app_points_to_back(
     code, text, err = press(capsys, fake_adb, "--press", "--out", str(tmp_path / "r"))
     assert (code, err) == (0, "")  # the stop reason and exit code are unchanged
     assert "stopped: relaunch_limit" in text
-    note = next(line for line in text.splitlines() if "--back-on-other-screens" in line)
+    [note] = [line for line in text.splitlines() if "--back-on-other-screens" in line]
     assert note.startswith("note: ")
-    assert f"a screen of {OTHER} after each restart" in note
-    assert f"that BACK reaches {OTHER}, the app in front" in note
-    assert [i for i in android.inputs if i.kind == "key"] == []  # nothing new sent
+    assert f"(the last one: {OTHER})" in note
+    assert "reaches whichever window has the input focus" in note
+    assert android.inputs == []  # no tap or key: only the launch and restarts
 
 
 @pytest.mark.usefixtures("here")
@@ -594,7 +594,7 @@ def test_the_relaunch_limit_hint_is_in_the_json_notes(
     assert code == 0
     result = json.loads(text)
     assert result["stop_reason"] == "relaunch_limit"
-    assert any("--back-on-other-screens" in n for n in result["notes"])
+    assert len([n for n in result["notes"] if "--back-on-other-screens" in n]) == 1
 
 
 def _result(stop_reason: str, front: str | None) -> CrawlResult:
