@@ -1356,7 +1356,7 @@ def test_the_crawl_hint_names_diagnose_only_with_a_reader_rule(unknown, rule, na
         cover_unknown=unknown,
         cover_rule=rule,
     )
-    [hint] = cli._press_hints(result)
+    [hint] = cli._press_hints(result, package="com.example.shop", back=False)
     assert ("diagnose tap-window" in hint) is named
     assert (f"rule {rule}" in hint) is named
 
