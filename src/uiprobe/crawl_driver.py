@@ -362,6 +362,7 @@ def _plain_policy(policy: Policy) -> Policy:
             "back_on_other_screens", policy.back_on_other_screens
         ),
         check_tap_window=_flag("check_tap_window", policy.check_tap_window),
+        deny_exceptions=_words("deny_exceptions", policy.deny_exceptions),
     )
 
 
