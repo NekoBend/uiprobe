@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import contextlib
 import json
+import re
 from typing import TYPE_CHECKING, Any
 
 import pytest
 
+from tests.fake_adb_server import Reset
 from tests.fake_device import FakeAndroid
 from tests.test_crawl_driver import (
     SCREENS,
@@ -42,7 +44,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable
     from pathlib import Path
 
-    from tests.fake_adb_server import FakeAdbServer
+    from tests.fake_adb_server import FakeAdbServer, Reply
 
 OTHER_BOOT = "0f1e2d3c-4b5a-4968-8778-695a4b3c2d1e"
 
@@ -1427,3 +1429,100 @@ def test_after_a_withdrawal_the_engine_and_the_run_folder_keep_their_landing(
     browse = end["to_screen_id"]
     engine_tap = next(t for t in engines[0].records.transitions if t.kind == "tap")
     assert engine_tap.to_screen_id != browse  # the engine took the fresh read
+
+
+# --- a failed identity read in a wait ends a launch, not a crawl ---
+
+
+def _identity_fails_once_after(
+    monkeypatch: pytest.MonkeyPatch,
+    fake_adb: FakeAdbServer,
+    android: FakeAndroid,
+    device: Device,
+    method: str,
+    calls: int,
+    failure: Reply,
+) -> list[str]:
+    """Renumber the transport right after the `calls`-th call of `method`, and
+    make the first identity read after that fail (`failure`); later reads
+    answer as before. Returns the identity reads made after the renumbering."""
+    reads: list[str] = []
+    armed = [False]
+
+    def identity(command: str) -> Reply:
+        if not armed[0]:
+            return android._shell(command)
+        reads.append(command)
+        return failure if len(reads) == 1 else android._shell(command)
+
+    android.override(re.compile(re.escape(IDENTITY_COMMAND)), identity)
+    original = getattr(device, method)
+    count = [0]
+
+    def wrapped(*args: object, **kwargs: object) -> object:
+        result = original(*args, **kwargs)
+        count[0] += 1
+        if count[0] == calls:
+            listing(fake_adb, (TRANSPORT + 1, "device"))
+            armed[0] = True
+        return result
+
+    monkeypatch.setattr(device, method, wrapped)
+    return reads
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [Reset(), b"not an identity\n"],
+    ids=["device_error", "unreadable_reply"],
+)
+def test_a_failed_identity_read_in_a_wait_ends_the_launch(
+    fake_adb, android, monkeypatch, failure
+):
+    device = pinned(fake_adb)
+    waits = Waits(device, [])
+    reads = _identity_fails_once_after(
+        monkeypatch, fake_adb, android, device, "_start", 1, failure
+    )
+    with pytest.raises(AdbError) as caught:
+        device.launch(SHOP)
+    assert caught.value.details["reason"] == "launch_interrupted"
+    # the wait read the identity again and followed the device, but the
+    # launch did not report success after the failure
+    assert len(reads) == 2
+    assert device.repins == ((TRANSPORT, TRANSPORT + 1),)
+    assert waits.pauses == [REPIN_POLL]
+    starts = [c for _, _, c in fake_adb.commands if c.startswith("am start")]
+    assert len(starts) == 1  # nothing was sent again
+    assert android.stopped == []
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [Reset(), b"not an identity\n"],
+    ids=["device_error", "unreadable_reply"],
+)
+def test_a_failed_identity_read_in_a_wait_outside_a_launch_is_waited_on(
+    tmp_path: Path, fake_adb, android, clock, monkeypatch, failure
+):
+    device = pinned(fake_adb)
+    reads = _identity_fails_once_after(
+        monkeypatch, fake_adb, android, device, "foreground", 2, failure
+    )
+    out = tmp_path / "run"
+    result = run(device, clock, out, limits=Limits(actions=6))
+    assert result.stop_reason == "max_actions"  # the crawl goes on, as before
+    assert device.repins == ((TRANSPORT, TRANSPORT + 1),)
+    assert len(reads) >= 2
+
+
+def test_another_device_behind_the_new_number_ends_the_wait_at_once(fake_adb, android):
+    # Not retried: an identity that was read and differs fails the pin.
+    device = pinned(fake_adb)
+    waits = Waits(device, [])
+    listing(fake_adb, (TRANSPORT + 1, "device"))
+    android.boot_id = OTHER_BOOT
+    with pytest.raises(DeviceNotFoundError) as caught:
+        device.foreground()
+    assert caught.value.details["reason"] == "device_changed"
+    assert waits.pauses == []

@@ -1848,7 +1848,11 @@ class Device:
                 new = self._candidate(old)
                 if new is not None and self._clock() < deadline:
                     found = self._identity_through(new)
-                    if found is not None:
+                    if found is None:
+                        # A failed or unreadable identity read is waited on,
+                        # but counted: a launch in progress ends on it.
+                        self._failed_requests += 1
+                    else:
                         if not self._same_device(found):
                             raise self._fail(
                                 self._changed("came back as another device")
