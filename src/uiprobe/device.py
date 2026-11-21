@@ -206,10 +206,10 @@ _START_WARNINGS: Final = frozenset(
         "Warning: Activity not started, its current task has been brought to the front",
     }
 )
-# LaunchState only as captured (API 36): COLD, WARM, UNKNOWN (0); another
+# LaunchState only as seen (API 36): COLD, WARM, HOT, UNKNOWN (0); another
 # value is unknown output until it is seen. ThisTime only on API 24.
 _START_INFO = re.compile(
-    r"(LaunchState): (?:COLD|WARM|UNKNOWN \(0\))"
+    r"(LaunchState): (?:COLD|WARM|HOT|UNKNOWN \(0\))"
     r"|(ThisTime|TotalTime|WaitTime): -?[0-9]{1,10}"
 )
 _START_OK: Final = "Status: ok"
@@ -994,7 +994,12 @@ def _start_report_failure(
     for line in lines:
         kind = _start_line_kind(line, echoes)
         if kind is None:
-            return _StartFailure("unexpected_output", "printed an unknown line", line)
+            what = (
+                "printed a LaunchState value it does not know"
+                if line.startswith("LaunchState:")
+                else "printed an unknown line"
+            )
+            return _StartFailure("unexpected_output", what, line)
         if kind in kinds:
             return _StartFailure("unexpected_output", "printed a line twice", line)
         kinds.append(kind)

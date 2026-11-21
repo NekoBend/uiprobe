@@ -743,11 +743,13 @@ def test_the_captured_warnings_are_accepted(device, android, warning):
 @pytest.mark.parametrize(
     ("state", "ok"),
     [
-        # only the captured values
+        # only the values seen
         ("COLD", True),
         ("WARM", True),
+        ("HOT", True),
         ("UNKNOWN (0)", True),
-        ("HOT", False),
+        ("RELAUNCH", False),
+        ("hot", False),
         ("FAILED", False),
         ("UNKNOWN (-1)", False),
         ("UNKNOWN (1)", False),
@@ -769,6 +771,37 @@ def test_the_launch_state_line_has_one_shape(device, android, state, ok):
     with pytest.raises(LaunchFailedError) as info:
         device.launch(SHOP)
     assert info.value.details["reason"] == "unexpected_output"
+
+
+def test_an_unknown_launch_state_names_the_value(device, android):
+    output = OK_36.replace("{activity}", f"{SHOP}/.Main").replace(
+        "LaunchState: COLD", "LaunchState: RELAUNCH"
+    )
+    scripted_start(android, output.encode())
+    with pytest.raises(LaunchFailedError) as info:
+        device.launch(SHOP)
+    assert info.value.details["output"] == "LaunchState: RELAUNCH"
+    assert "LaunchState value it does not know" in str(info.value)
+
+
+def test_the_hot_start_of_settings_on_api_36_is_a_success(device, android):
+    # The line "LaunchState: HOT" is verbatim from the reply of a settings36
+    # emulator (API 36) on 2026-11-21, when Settings' task was already on top;
+    # the other lines follow the captured API 36 shape.
+    activity = f"{SETTINGS}/.homepage.SettingsHomepageActivity"
+    output = (
+        "Starting: Intent { act=android.intent.action.MAIN"
+        f" cat=[{LAUNCHER}] cmp={SETTINGS}/.Settings }}\n"
+        f"Status: ok\nLaunchState: HOT\nActivity: {activity}\n"
+        "TotalTime: 0\nWaitTime: 3\nComplete\nuiprobe-exit:0\n"
+    )
+    android.override(re.compile(r"^am start"), output.encode())
+    android.override(
+        re.compile(r"^cmd package"),
+        f"{SETTINGS}/.Settings\nuiprobe-exit:0\n".encode(),
+    )
+    android.show("homepage")
+    device.launch(SETTINGS)
 
 
 def test_the_echo_may_name_the_full_spelling_sent(device, android, fake_adb):
