@@ -12,6 +12,7 @@ from __future__ import annotations
 import itertools
 import json
 import re
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -1577,6 +1578,7 @@ def test_there_is_no_public_send_check():
 # --- a launch never goes on after an observed failure ---
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="uses a shell script")
 def test_a_launch_never_goes_on_through_a_server_started_again(
     tmp_path, monkeypatch, clock
 ):
@@ -1673,6 +1675,7 @@ def test_a_launch_on_a_stopped_server_says_what_happened(
     assert "already sent" not in info.value.message
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="uses a shell script")
 def test_a_launch_never_reaches_a_server_started_for_it(tmp_path, monkeypatch, clock):
     # The Device chose its device on server 1, which then stops. A launch
     # with the activity given and restart=True would make the client start a
