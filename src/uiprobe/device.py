@@ -2729,8 +2729,8 @@ class Device:
         return activity
 
     def _start_component_after_stop(self, package: str) -> str:
-        """`_start_component` after the app was force-stopped: a failure says
-        so (``force_stopped``: stopped, not started)."""
+        """`_start_component` after the app was force-stopped: every failure
+        says so (``force_stopped``: stopped, not started)."""
         try:
             return self._start_component(package)
         except LaunchFailedError as error:
@@ -2746,6 +2746,11 @@ class Device:
             )
             details = {**error.details, "force_stopped": True}
             raise DeviceNotFoundError(msg, details=details) from None
+        except UiprobeError as error:
+            # Any other failure of the read (a transport error, a timeout)
+            # also says that the app was stopped and not started.
+            error.details = {**error.details, "force_stopped": True}
+            raise
 
     def _check_no_failure(self, failed: int) -> None:
         """Raise when a request failed since `failed` was taken in a launch."""

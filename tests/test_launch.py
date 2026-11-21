@@ -1228,6 +1228,26 @@ def test_a_restart_whose_second_read_fails_says_stopped_not_started(
     assert android.stopped == [SHOP]
 
 
+def test_a_restart_whose_second_read_fails_in_transport_says_stopped(
+    device, android, fake_adb, monkeypatch
+):
+    real = device._launcher_activity
+    calls: list[str] = []
+
+    def read(package: str, *, strict: bool) -> str:
+        calls.append(package)
+        if len(calls) == 1:
+            return real(package, strict=strict)
+        raise AdbError("the reply did not come", details={"reason": "timeout"})
+
+    monkeypatch.setattr(device, "_launcher_activity", read)
+    with pytest.raises(AdbError) as info:
+        device.launch(SHOP, restart=True)
+    assert info.value.details == {"reason": "timeout", "force_stopped": True}
+    assert sent(fake_adb) == [RESOLVE, STOP]
+    assert android.stopped == [SHOP]
+
+
 def test_launch_takes_no_activity_argument(device, fake_adb):
     loose: Any = device.launch
     with pytest.raises(TypeError, match="activity"):
