@@ -11,7 +11,7 @@ import contextlib
 import json
 import re
 import time
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, fields, replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, cast
@@ -50,6 +50,7 @@ from uiprobe.errors import (
     NotEmulatorError,
 )
 from uiprobe.guards import DEFAULT_DENY_EXCEPTIONS, Policy
+from uiprobe.model import Bounds
 from uiprobe.runlog import RunFolderError, RunWriter
 
 if TYPE_CHECKING:
@@ -377,7 +378,7 @@ def test_the_start_line_is_on_disk_before_the_input_is_sent(
 
     taps = spy(monkeypatch, device, "tap", check("tap"))
     keys = spy(monkeypatch, device, "key", check("key"))
-    launches = spy(monkeypatch, device, "launch", check("launch"))
+    launches = spy(monkeypatch, device, "_launch_component", check("launch"))
     result = run(device, clock, out)
     assert len(seen) == len(taps) + len(keys) + len(launches) == result.actions
     ids = []
@@ -436,7 +437,7 @@ def test_a_relaunch_restarts_the_app(tmp_path, device, android, monkeypatch, clo
         return result
 
     monkeypatch.setattr(device, "tap", tap_then_cover)
-    launches = spy(monkeypatch, device, "launch", crowd)
+    launches = spy(monkeypatch, device, "_launch_component", crowd)
     out = tmp_path / "run"
     result = run(device, clock, out)
     assert result.stop_reason in STOP_REASONS
@@ -444,10 +445,9 @@ def test_a_relaunch_restarts_the_app(tmp_path, device, android, monkeypatch, clo
         r["action"]["kind"] for r in lines(out / "transitions.jsonl") if "action" in r
     ]
     assert "relaunch" in kinds
-    # A relaunch is a force-stop, then a plain launch, sent one after the other.
-    assert all(kwargs.get("restart", False) is False for _, kwargs in launches)
-    # No component is passed in: every launch reads the launcher itself.
-    assert all("activity" not in kwargs for _, kwargs in launches)
+    # A relaunch is a force-stop, then a plain start of the launcher activity
+    # its gate read, sent one after the other.
+    assert all(args == (SHOP, f"{SHOP}/.Main") for args, _ in launches)
     assert len(launches) == 1 + kinds.count("relaunch")
     assert android.stopped == [SHOP] * kinds.count("relaunch")
     for name in (out / "screens").iterdir():
@@ -1161,7 +1161,6 @@ def test_a_clock_value_too_large_for_a_float_is_a_range_error(tmp_path, device):
 
 
 def test_a_policy_with_avoided_areas_crawls_as_before(tmp_path, device, android, clock):
-    from uiprobe.model import Bounds
 
     policy = Policy(avoid=(Bounds(0, 0, 10, 10),))
     result = run(device, clock, tmp_path / "run", policy=policy)
@@ -1304,6 +1303,91 @@ def test_the_time_budget_starts_before_the_launcher_read(
     result = run(device, clock, tmp_path / "run", limits=Limits(minutes=1))
     assert result.stop_reason == "max_duration"
     assert not [c for _, _, c in fake_adb.commands if c.startswith("am start")]
+
+
+def test_a_start_whose_launcher_read_ends_past_the_limit_is_not_sent(
+    tmp_path, device, android, clock, fake_adb
+):
+    # The injected clock moves only during the first launch's launcher read,
+    # past the 1-minute limit (uiprobe's own clock does not move). The gate
+    # reads the clock after that read, before its last comparison: no start.
+    def slow_read(command: str):
+        clock.now += 61.0
+        return android._shell(command)
+
+    android.override(re.compile(r"^cmd package"), slow_read)
+    out = tmp_path / "run"
+    run(device, clock, out, limits=Limits(minutes=1))
+    assert not [c for _, _, c in fake_adb.commands if c.startswith("am start")]
+    records = lines(out / "transitions.jsonl")
+    assert (records[-1]["not_sent"], records[-1]["reason"]) == (True, "time_limit")
+
+
+def test_a_relaunch_whose_launcher_read_ends_past_the_limit_sends_no_start(
+    tmp_path, device, android, clock, fake_adb, monkeypatch
+):
+    # The same for a relaunch: force-stop, launcher read (the injected clock
+    # crosses the limit during it), the clock, and no start.
+    original = device.tap
+
+    def tap_then_cover(
+        point: tuple[int, int], _send_by: float | None = None, _epoch: int | None = None
+    ) -> tuple[int, int]:
+        result = original(point, _send_by=_send_by, _epoch=_epoch)
+        if not android.stopped and android.screen.name == "browse":
+            for name in ("ext1", "ext2", "ext3"):
+                android.show(name)
+        return result
+
+    reads: list[float] = []
+
+    def slow_second_read(command: str):
+        reads.append(clock.now)
+        if len(reads) == 2:
+            clock.now += 10_000.0  # far past the run's limit
+        return android._shell(command)
+
+    monkeypatch.setattr(device, "tap", tap_then_cover)
+    android.override(re.compile(r"^cmd package"), slow_second_read)
+    out = tmp_path / "run"
+    result = run(device, clock, out)
+    assert result.stop_reason == "max_duration"
+    assert android.stopped == [SHOP]  # the relaunch's force-stop went out
+    starts = [c for _, _, c in fake_adb.commands if c.startswith("am start")]
+    assert len(starts) == 1  # the first launch only
+    records = lines(out / "transitions.jsonl")
+    relaunch = [r for r in records if r.get("action", {}).get("kind") == "relaunch"]
+    end = [r for r in records if r.get("action_id") == relaunch[0]["action_id"]][-1]
+    assert (end["not_sent"], end["reason"]) == (True, "start_not_sent")
+
+
+def test_the_policy_copy_keeps_every_field():
+    # One value per Policy field, none of them the default: a field added to
+    # Policy fails here until it is listed, and a field the crawl's copy
+    # leaves out comes back as its default and fails below.
+    values = {
+        "deny_words": ("zap",),
+        "confirm_words": ("yes please",),
+        "tap_unlabeled": True,
+        "avoid": (Bounds(1, 2, 3, 4),),
+        "skip_number_only": False,
+        "skip_toggles": False,
+        "refuse_dialog_confirm": False,
+        "edges": (5, 6, 7, 8),
+        "min_visible_px": 9,
+        "irreversible_phrases": ("for good",),
+        "skip_irreversible": False,
+        "back_on_other_screens": True,
+        "check_tap_window": False,
+        "deny_exceptions": ("automatically",),
+    }
+    assert set(values) == {f.name for f in fields(Policy)}
+    default = Policy()
+    original = Policy(**values)
+    copy = crawl_driver._plain_policy(original)
+    for name, value in values.items():
+        assert getattr(default, name) != value, name
+        assert getattr(copy, name) == value, name
 
 
 # --- a start that went out is recorded as sent ---
@@ -1522,7 +1606,7 @@ def test_a_relaunch_start_is_not_sent_once_the_time_limit_passed(
 def test_a_launch_that_is_not_in_front_does_not_end_the_crawl(
     tmp_path, device, android, monkeypatch, clock
 ):
-    # `Device.launch` waits with the device's own clock; keep it off real time.
+    # A launch waits with the device's own clock; keep it off real time.
     monkeypatch.setattr(device, "_clock", clock.monotonic)
     monkeypatch.setattr(device, "_sleep", clock.sleep)
     android.launch_in_front = False
@@ -1550,7 +1634,7 @@ def test_a_launch_that_cannot_find_the_app_still_ends_with_error(
             "no launcher", details={"package": SHOP, "reason": "unexpected_output"}
         )
 
-    monkeypatch.setattr(device, "launch", refuse)
+    monkeypatch.setattr(device, "_launch_component", refuse)
     out = tmp_path / "run"
     with pytest.raises(LaunchFailedError):
         run(device, clock, out)
@@ -2392,7 +2476,7 @@ def test_a_stop_between_force_stop_and_start_sends_no_start(
         stopping.append(True)
 
     monkeypatch.setattr(device, "stop_app", stop_then_ask)
-    launches = spy(monkeypatch, device, "launch", lambda *_a, **_k: None)
+    launches = spy(monkeypatch, device, "_launch_component", lambda *_a, **_k: None)
     out = tmp_path / "run"
     result = run(device, clock, out, stop=lambda: bool(stopping))
     assert result.stop_reason == "interrupted"
@@ -2409,13 +2493,13 @@ def test_a_stop_between_force_stop_and_start_sends_no_start(
 def test_a_back_that_is_not_sent_ends_the_run(
     tmp_path, device, android, clock, monkeypatch
 ):
-    original_launch = device.launch
+    original_launch = device._launch_component
 
     def launch_into_another_app(*args, **kwargs):
         original_launch(*args, **kwargs)
         android.show("ext1")  # the engine will want BACK
 
-    monkeypatch.setattr(device, "launch", launch_into_another_app)
+    monkeypatch.setattr(device, "_launch_component", launch_into_another_app)
     monkeypatch.setattr(device, "keyboard_shown", lambda: None)
     out = tmp_path / "run"
     result = run(device, clock, out, policy=BACK_POLICY)
@@ -2551,7 +2635,7 @@ def test_a_changed_identity_after_the_force_stop_sends_no_start(
         android.props["ro.build.fingerprint"] = "other/build:36/X/9:user/k"
 
     monkeypatch.setattr(device, "stop_app", stop_then_swap)
-    launches = spy(monkeypatch, device, "launch", lambda *_a, **_k: None)
+    launches = spy(monkeypatch, device, "_launch_component", lambda *_a, **_k: None)
     with pytest.raises(DeviceNotFoundError) as info:
         run(device, clock, tmp_path / "run")
     assert info.value.details["reason"] == "device_changed"
@@ -2566,13 +2650,13 @@ def test_a_stop_seen_in_the_pause_sends_no_further_request(
     stopping = []
     marks: list[int] = []
     if kind == "back":
-        original_launch = device.launch
+        original_launch = device._launch_component
 
         def launch_into_another_app(*args, **kwargs):
             original_launch(*args, **kwargs)
             android.show("ext1")  # the engine will press BACK
 
-        monkeypatch.setattr(device, "launch", launch_into_another_app)
+        monkeypatch.setattr(device, "_launch_component", launch_into_another_app)
     sender = device.tap if kind == "tap" else device.key
 
     def send_then_stop(*args, **kwargs):
@@ -2602,14 +2686,14 @@ def test_a_stop_seen_in_the_pause_sends_no_further_request(
 
 def _launch_under(monkeypatch, device, android, *names):
     """Make every launch end with `names` (screens of another app) in front."""
-    original_launch = device.launch
+    original_launch = device._launch_component
 
     def launch_then_cover(*args, **kwargs):
         original_launch(*args, **kwargs)
         for name in names:
             android.show(name)
 
-    monkeypatch.setattr(device, "launch", launch_then_cover)
+    monkeypatch.setattr(device, "_launch_component", launch_then_cover)
 
 
 def _inputs_sent(fake_adb: FakeAdbServer) -> list[str]:

@@ -299,14 +299,14 @@ def test_the_plan_is_out_before_the_app_is_started(
     fake_adb, capsys, tmp_path, monkeypatch, as_json
 ):
     seen: list[tuple[str, str]] = []
-    original = Device.launch
+    original = Device._launch_component
 
     def launch_after_reading(self: Device, *args: object, **kwargs: object) -> object:
         captured = capsys.readouterr()
         seen.append((captured.out, captured.err))
         return original(self, *args, **kwargs)  # ty: ignore[invalid-argument-type]
 
-    monkeypatch.setattr(Device, "launch", launch_after_reading)
+    monkeypatch.setattr(Device, "_launch_component", launch_after_reading)
     out = tmp_path / "run"
     argv = ["--press", "--out", str(out), "--actions", "2"]
     code, _text, _err = press(capsys, fake_adb, *argv, *(["--json"] if as_json else []))

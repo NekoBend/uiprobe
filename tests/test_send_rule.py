@@ -373,10 +373,15 @@ def check_rule(events: list[Event]) -> dict[str, int]:
 
 
 def check_complete(rows: dict[str, Row]) -> None:
-    """Every sending path the crawl declares has a row, and no row more."""
+    """Every sending path the crawl declares has a row, and no row more; BACK
+    also has its row on another app's screen."""
     declared = set(crawl_driver._SEND_PATHS)
     paths = {row.path for row in rows.values()}
     assert paths == declared, f"rows {sorted(paths)} != paths {sorted(declared)}"
+    off_target = rows.get("back-off-target")
+    assert off_target == Row(
+        "back", off_target_back, {"back_on_other_screens": True}
+    ), "rows: no BACK row on another app's screen"
     assert set(FAMILY) == declared
 
 
@@ -507,6 +512,12 @@ def test_the_rule_test_fails_on_a_clock_call_before_the_tap_after_a_relaunch(
     assert injected
     with pytest.raises(AssertionError, match=r"tap: .* ran before"):
         check_rule(events)
+
+
+def test_the_completeness_test_fails_without_the_off_target_back_row():
+    rows = {name: row for name, row in ROWS.items() if name != "back-off-target"}
+    with pytest.raises(AssertionError, match="rows"):
+        check_complete(rows)
 
 
 def test_the_completeness_test_fails_without_the_relaunch_start_row():

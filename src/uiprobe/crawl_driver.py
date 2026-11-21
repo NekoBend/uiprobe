@@ -404,6 +404,9 @@ class _Run:
         self.policy = policy
         self.emulator = emulator
         self.app_uid = app_uid  # read once at the start (check_tap_window)
+        # The launcher activity read in the gate of the start about to go
+        # out (the first launch or a relaunch), used by that start only.
+        self.start_component: str | None = None
         self.gate_details: dict[str, str | int] | None = None  # why, for cover
         self.not_sent: dict[str, int] = {}  # not_sent end lines by reason
         self.cover_unknown: str | None = None  # what the first cover_unknown missed
@@ -558,19 +561,6 @@ class _Run:
                 self.withdraw(action)
             return NOT_SENT_RECONNECTED
         return None
-
-    def close_failed_launch(
-        self, action: Action, action_id: int, error: Exception
-    ) -> None:
-        """Close a launch or relaunch whose sending failed and ends the run."""
-        if not _unreadable_launcher(error):
-            self.end_failed(action_id, error)
-        elif isinstance(action, Launch):
-            # The launcher read failed: the start was not sent.
-            self._open = None
-            self.end_not_sent(action_id, "launcher_unreadable")
-        else:
-            self.half_sent(action_id, "launcher_unreadable")
 
     def end_failed(self, action_id: int, error: Exception) -> None:
         """Close a launch or relaunch whose sending failed and ends the run.
@@ -753,7 +743,7 @@ class _Run:
                 return reason, self.refused_tap(action, screen, seen)
             return reason, None
         # Nothing of the caller's runs between the gate's last comparison and
-        # the input; the launch reads the launcher right before its start.
+        # the input; a start uses the launcher activity its gate read.
         self._open = action_id
         self.sent_epoch = self.device.pin_epoch
         try:
@@ -764,7 +754,7 @@ class _Run:
             # A launch or relaunch that failed ends the run; its end line says
             # so (a tap or BACK keeps a start line alone: result unknown).
             if isinstance(action, Launch | Relaunch) and self._open == action_id:
-                self.close_failed_launch(action, action_id, error)
+                self.end_failed(action_id, error)
             raise
         if refused is not None:
             return refused, None
@@ -1037,19 +1027,48 @@ class _Run:
         return why, seen
 
     def launch_gate(self) -> str | None:
-        """The end of the first launch's gate, after the pin check: `stop` and
-        the time again (the check can take long), then the last comparison."""
+        """The end of the first launch's gate, after the pin check: `stop`
+        again (the check can take long), the launcher read, the time again
+        (the read can take long too), then the last comparison."""
         epoch = self.device.pin_epoch
         stopped = self.stopped()  # asked again after the pin check
+        read = stopped or self.read_start_component(None)
         now = self.now()
         late = now >= self.deadline or self.past()
-        if not self.final_check("launch", epoch):
+        if not read or not self.final_check("launch", epoch):
             return NOT_SENT_RECONNECTED
         if stopped:
             return NOT_SENT_STOPPED
         if late:
             return NOT_SENT_TIME_LIMIT
         return None
+
+    def read_start_component(self, relaunch_id: int | None) -> bool:
+        """Read the launcher activity for the start about to go out; False
+        when the device had to be proven again during the read.
+
+        When it cannot be read, the start is not sent: the action is closed
+        (a first launch as not sent, a relaunch with `relaunch_id` as
+        ``start_not_sent``) and `LaunchFailedError` (``launcher_unreadable``)
+        ends the run.
+        """
+        self.start_component = None
+        try:
+            read = self.device._start_component  # noqa: SLF001 - internal to uiprobe
+            self.start_component = read(self.package)
+        except DeviceNotFoundError as error:
+            if error.details.get("reason") != PIN_NOT_PROVEN:
+                raise
+            return False
+        except LaunchFailedError as error:
+            if _unreadable_launcher(error):
+                if relaunch_id is not None:
+                    self.half_sent(relaunch_id, "launcher_unreadable")
+                elif self.unsent is not None:
+                    self.end_not_sent(self.unsent, "launcher_unreadable")
+                    self.unsent = None
+            raise
+        return True
 
     def halt(self, now: float | None = None) -> str | None:
         """The reason not to send that does not depend on the screen, if any."""
@@ -1075,11 +1094,12 @@ class _Run:
     def launch(self) -> None:
         """Start the app; an app that is not in front afterwards is not fatal.
 
-        The device reads the launcher activity right before the start (no
-        component is kept between launches), then starts it with ``am start
-        -W`` and waits for the app to come to the front. No code of the
-        caller runs in that call; the start goes out only while the pin epoch
-        is still the one the gate approved and the time limit has not passed.
+        It starts the launcher activity its gate read (before the gate's last
+        clock read and comparison; no component is kept between starts) with
+        ``am start -W`` and waits for the app to come to the front. No code of
+        the caller runs in that call; the start goes out only while the pin
+        epoch is still the one the gate approved and the time limit has not
+        passed.
         ``not_in_front`` means the start reported success, but
         another package (a permission dialog, a splash screen) holds the
         focus; ``other_activity`` means the start reported success with an
@@ -1091,9 +1111,13 @@ class _Run:
         ``start_timeout`` included (whether the app started is unknown), is
         raised and ends the run.
         """
+        component, self.start_component = self.start_component, None
+        if component is None:  # every gate of a start reads it first
+            msg = "no launcher activity was read for this start"
+            raise RuntimeError(msg)
         try:
-            self.device.launch(
-                self.package, _send_by=self.send_by, _epoch=self.approved
+            self.device._launch_component(  # noqa: SLF001 - internal to uiprobe
+                self.package, component, _send_by=self.send_by, _epoch=self.approved
             )
         except LaunchFailedError as error:
             reason = error.details.get("reason")
@@ -1120,7 +1144,9 @@ class _Run:
         if unsent is not None:
             return unsent
         reason = self.relaunch_halt(action_id)
-        if reason is None and not self.final_check("start", self.sent_epoch):
+        if reason == NOT_SENT_RECONNECTED or (
+            reason is None and not self.final_check("start", self.sent_epoch)
+        ):
             # The device had to be proven again after the force-stop: the
             # start is not sent on the earlier decision.
             return self.half_sent(action_id, NOT_SENT_RECONNECTED)
@@ -1164,7 +1190,8 @@ class _Run:
 
     def relaunch_halt(self, action_id: int) -> str | None:
         """Between the force-stop and the start: `stop`, the time, the pin
-        check, `stop` and the time again; why not to start, or None."""
+        check, `stop`, the launcher read and the time again; why not to start,
+        or None."""
         try:
             # stop() may read the device, so it is inside the handler too.
             reason = self.halt()
@@ -1175,6 +1202,8 @@ class _Run:
                 self.device.check_pin(emulator=self.emulator)
                 if self.stopped():
                     reason = NOT_SENT_STOPPED
+                elif not self.read_start_component(action_id):
+                    reason = NOT_SENT_RECONNECTED
                 elif self.now() >= self.deadline or self.past():
                     reason = NOT_SENT_TIME_LIMIT
         except DeviceNotFoundError as error:

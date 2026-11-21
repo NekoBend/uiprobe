@@ -672,14 +672,14 @@ def test_the_check_before_the_run_does_not_ask_stop_and_restores_the_watch(
 def _covered_after_launch(monkeypatch, device, android) -> None:
     """Every launch ends with a screen of another app in front (a relaunch
     follows by default)."""
-    original_launch = device.launch
+    original_launch = device._launch_component
 
     def launch_under(*args: object, **kwargs: object) -> object:
         result = original_launch(*args, **kwargs)
         android.show("ext1")
         return result
 
-    monkeypatch.setattr(device, "launch", launch_under)
+    monkeypatch.setattr(device, "_launch_component", launch_under)
 
 
 def test_the_time_limit_inside_the_wait_after_force_stop_is_recorded(

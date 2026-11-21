@@ -14,6 +14,7 @@ import json
 import re
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
@@ -166,11 +167,11 @@ def test_launch_reads_the_launcher_then_sends_one_am_start(device, android, fake
     assert device.foreground() == SHOP
 
 
-def test_restart_sends_the_read_then_force_stop_then_the_start(
+def test_restart_reads_before_and_after_the_force_stop_then_starts(
     device, android, fake_adb
 ):
     device.launch(SHOP, restart=True)
-    assert sent(fake_adb) == [RESOLVE, STOP, START]
+    assert sent(fake_adb) == [RESOLVE, STOP, RESOLVE, START]
     assert android.stopped == [SHOP]
     assert no_monkey(fake_adb)
 
@@ -1173,12 +1174,73 @@ class _OddText(str):
         return ""
 
 
+def test_a_restart_starts_the_launcher_read_after_the_stop(device, android, fake_adb):
+    # The launcher changes from .Main to .Detail while the app stops: the
+    # start names .Detail, as monkey on main picked the launcher after the
+    # stop.
+    reads: list[str] = []
+
+    def launcher(command: str):
+        reads.append(command)
+        name = ".Main" if len(reads) == 1 else ".Detail"
+        return f"{SHOP}/{name}\nuiprobe-exit:0\n".encode()
+
+    android.override(re.compile(r"^cmd package"), launcher)
+    device.launch(SHOP, restart=True)
+    assert sent(fake_adb) == [RESOLVE, STOP, RESOLVE, start_of(f"{SHOP}/.Detail")]
+
+
+def test_a_restart_whose_first_read_fails_stops_nothing(device, android, fake_adb):
+    android.override(re.compile(r"^cmd package"), b"No activity found\n")
+    with pytest.raises(LaunchFailedError) as info:
+        device.launch(SHOP, restart=True)
+    assert info.value.details == {
+        "package": SHOP,
+        "reason": "launcher_unreadable",
+        "output": "No activity found",
+    }
+    assert sent(fake_adb) == [RESOLVE]
+    assert android.stopped == []
+
+
+def test_a_restart_whose_second_read_fails_says_stopped_not_started(
+    device, android, fake_adb
+):
+    reads: list[str] = []
+
+    def launcher(command: str):
+        reads.append(command)
+        if len(reads) == 1:
+            return android._shell(command)
+        return b"No activity found\n"
+
+    android.override(re.compile(r"^cmd package"), launcher)
+    with pytest.raises(LaunchFailedError) as info:
+        device.launch(SHOP, restart=True)
+    assert info.value.details == {
+        "package": SHOP,
+        "reason": "launcher_unreadable",
+        "output": "No activity found",
+        "force_stopped": True,
+    }
+    assert "force-stopped but not started again" in str(info.value)
+    assert sent(fake_adb) == [RESOLVE, STOP, RESOLVE]
+    assert android.stopped == [SHOP]
+
+
+def test_launch_takes_no_activity_argument(device, fake_adb):
+    loose: Any = device.launch
+    with pytest.raises(TypeError, match="activity"):
+        loose(SHOP, activity=f"{SHOP}/.Main")
+    assert sent(fake_adb) == []
+
+
 def test_a_str_subclass_is_used_as_plain_text(device, android, fake_adb, monkeypatch):
     android.launch_in_front = False
     monkeypatch.setattr(device, "foreground", lambda: SHOP.upper())
     with pytest.raises(LaunchFailedError) as info:
         device.launch(_OddText(SHOP), restart=True, timeout=0)
-    assert sent(fake_adb) == [RESOLVE, STOP, START]
+    assert sent(fake_adb) == [RESOLVE, STOP, RESOLVE, START]
     assert type(info.value.details["package"]) is str
     assert info.value.details["package"] == SHOP
 
@@ -1242,7 +1304,7 @@ def test_launch_does_not_resend_after_an_error_while_waiting(device, android, fa
     android.override(re.compile(r"^dumpsys"), Reset())
     with pytest.raises(AdbError):
         device.launch(SHOP, restart=True)
-    assert sent(fake_adb) == [RESOLVE, STOP, START]
+    assert sent(fake_adb) == [RESOLVE, STOP, RESOLVE, START]
 
 
 # --- uiprobe launch ---
@@ -1280,7 +1342,7 @@ def test_cli_launch_restart_json_and_commands(capsys, fake_adb):
     code, out, _ = invoke(capsys, fake_adb, "launch", "--restart", SHOP, "--json")
     assert code == 0
     assert json.loads(out)["restart"] is True
-    assert sent(fake_adb) == [RESOLVE, STOP, START]
+    assert sent(fake_adb) == [RESOLVE, STOP, RESOLVE, START]
 
 
 @pytest.mark.usefixtures("android", "clock")
@@ -1450,7 +1512,7 @@ def test_an_unpinned_launch_selects_the_device_by_serial_for_every_request(
         for i, r in enumerate(requests)
         if r in (f"shell:{RESOLVE}", f"shell:{STOP}", f"shell:{START}")
     ]
-    assert selectors == [f"host:transport:{SERIAL}"] * 3
+    assert selectors == [f"host:transport:{SERIAL}"] * 4  # read, stop, read, start
     assert not [r for r in requests if r.startswith("host:transport-id:")]
 
 

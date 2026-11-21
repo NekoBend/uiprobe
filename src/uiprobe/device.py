@@ -2559,7 +2559,10 @@ class Device:
         uiprobe-exit:$?`` is sent next. It stops the app, so the next launch
         starts a fresh task; state the app has not saved is lost. It must
         report exit status 0 and print nothing else (empty lines are ignored),
-        or nothing more is sent.
+        or nothing more is sent. The launcher activity is then read again in
+        the same way, and the start uses that second read (the launcher can
+        change while the app stops); when it cannot be read, the start is not
+        sent and the error says ``force_stopped`` (stopped, not started).
         Then exactly ``am start -W -a android.intent.action.MAIN -c
         android.intent.category.LAUNCHER -n PACKAGE/CLASS; echo
         uiprobe-exit:$?`` is sent. It succeeds only when no line holds a
@@ -2618,7 +2621,9 @@ class Device:
             LaunchFailedError: ``details`` hold ``package`` and ``reason``:
                 ``launcher_unreadable`` (the launcher activity could not be
                 read; ``output`` is the first line that is not blank, stripped,
-                cut to 200 characters and escaped; nothing was sent),
+                cut to 200 characters and escaped; nothing was sent, or, with
+                ``force_stopped`` True, the read after the force-stop failed:
+                the app was stopped and not started),
                 ``stop_failed`` (``am force-stop`` did not report success;
                 ``exit_status`` when it reported a status other than 0,
                 ``output`` when it printed something else, escaped; with no
@@ -2666,6 +2671,7 @@ class Device:
         *,
         restart: bool,
         dispatch: _Dispatch | None,
+        activity: str | None = None,
     ) -> None:
         """`launch` after its arguments were checked.
 
@@ -2673,14 +2679,73 @@ class Device:
         that is already there, so a server that went away cannot be replaced
         by one that lists another device under the serial. After the first
         request, a request that fails (also one a read swallows) ends it.
+        `activity`, when given, is a launcher activity the caller read with
+        `_start_component` right before (the crawl: then its last checks,
+        then the start, with nothing read in between).
         """
         failed = self._failed_requests
         self._launch_holds += 1
         try:
-            self._launch_steps(package, limit, restart=restart, dispatch=dispatch)
+            self._launch_steps(
+                package, limit, restart=restart, dispatch=dispatch, activity=activity
+            )
         finally:
             self._launch_holds -= 1
         self._check_no_failure(failed)
+
+    def _launch_component(
+        self,
+        package: str,
+        activity: str,
+        *,
+        _send_by: float | None = None,
+        _epoch: int | None = None,
+    ) -> None:
+        """`launch` of `package` (checked by the caller) that starts
+        `activity`, read by the caller with `_start_component` right before,
+        without reading it again (the crawl's first launch and relaunch)."""
+        dispatch = _dispatch(_send_by, _epoch)
+        self._launch(
+            package,
+            DEFAULT_LAUNCH_TIMEOUT,
+            restart=False,
+            dispatch=dispatch,
+            activity=activity,
+        )
+
+    def _start_component(self, package: str) -> str:
+        """The launcher read before a start: `launcher_activity` sent only to
+        a device proven now, as a start would be, and refused
+        (``pin_not_proven``) when anything happened to the pin during it."""
+        epoch = self._epoch
+        activity = self._launcher_activity(package, strict=True)
+        if self._epoch != epoch:
+            msg = (
+                f"{self.serial} has to be proven again before an input"
+                f" (transport {self._transport_id}); nothing was sent"
+            )
+            details = {"serial": self.serial, "reason": PIN_NOT_PROVEN}
+            raise DeviceNotFoundError(msg, details=details)
+        return activity
+
+    def _start_component_after_stop(self, package: str) -> str:
+        """`_start_component` after the app was force-stopped: a failure says
+        so (``force_stopped``: stopped, not started)."""
+        try:
+            return self._start_component(package)
+        except LaunchFailedError as error:
+            msg = f"{package} was force-stopped but not started again: {error}"
+            details = {**error.details, "force_stopped": True}
+            raise LaunchFailedError(msg, details=details) from None
+        except DeviceNotFoundError as error:
+            if error.details.get("reason") != PIN_NOT_PROVEN:
+                raise
+            msg = (
+                f"{package} was force-stopped, but the start was not sent: the"
+                f" device has to be proven again"
+            )
+            details = {**error.details, "force_stopped": True}
+            raise DeviceNotFoundError(msg, details=details) from None
 
     def _check_no_failure(self, failed: int) -> None:
         """Raise when a request failed since `failed` was taken in a launch."""
@@ -2698,22 +2763,22 @@ class Device:
         *,
         restart: bool,
         dispatch: _Dispatch | None,
+        activity: str | None = None,
     ) -> None:
-        """The launcher read, the stop, the start and the foreground reads."""
-        # The launcher is read before every start; the read goes out only to
-        # a device proven now, as a start would, and nothing follows it when
-        # anything happened to the pin.
-        epoch = self._epoch
-        activity = self._launcher_activity(package, strict=True)
-        if self._epoch != epoch:
-            msg = (
-                f"{self.serial} has to be proven again before an input"
-                f" (transport {self._transport_id}); nothing was sent"
-            )
-            details = {"serial": self.serial, "reason": PIN_NOT_PROVEN}
-            raise DeviceNotFoundError(msg, details=details)
+        """The launcher reads, the stop, the start and the foreground reads."""
         failed = self._failed_requests
-        if restart:
+        if activity is None:
+            # The launcher is read before every start. With a restart it is
+            # read before the stop (an app whose launcher cannot be read is
+            # not stopped) and again after it, and the start uses the second
+            # read: the launcher can change while the app stops.
+            activity = self._start_component(package)
+            failed = self._failed_requests
+            if restart:
+                self._force_stop(package, dispatch)
+                self._check_no_failure(failed)
+                activity = self._start_component_after_stop(package)
+        elif restart:
             self._force_stop(package, dispatch)
         self._check_no_failure(failed)
         # A start that named an activity of another app is waited on like
