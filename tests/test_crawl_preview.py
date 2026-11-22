@@ -1231,3 +1231,114 @@ def test_an_exception_also_excuses_a_deny_word(fake_adb, capsys, settings_dir):
     payload = crawl_json(capsys, fake_adb, "--deny", "matic")
     assert "Automatically" in [e["text"] for e in payload["press"]]
     assert _words(payload)["Automatically pay"] == "pay"
+
+
+# --- rows with a second target ---
+
+ROWS_SCREEN = Screen(
+    "rows",
+    f"{SHOP}/.Rows",
+    # The fake renders its elements flat; `rows_xml` gives the nested tree.
+    (El((232, 206, 304, 285), desc="Settings", cls="android.widget.ImageView"),),
+)
+
+
+def rows_xml(android: FakeAndroid) -> bytes:
+    """A dump of two rows: the "T-Mobile" row of AOSP Settings (a two-target
+    row: a divider, then the gear) and a mail row with a star button and no
+    divider, each a clickable row with nested children."""
+    node = android._node
+    gear = node(
+        0,
+        6,
+        El(
+            (232, 206, 304, 285),
+            desc="Settings",
+            rid="com.android.settings:id/settings_button",
+            cls="android.widget.ImageView",
+            go="rows",
+        ),
+        SHOP,
+    )
+    frame = El(
+        (232, 206, 304, 285),
+        rid="android:id/widget_frame",
+        cls="android.widget.LinearLayout",
+    )
+    divider = El(
+        (215, 206, 232, 285),
+        rid="com.android.settings:id/two_target_divider",
+        cls="android.widget.LinearLayout",
+    )
+    title = El((72, 222, 148, 250), text="T-Mobile", rid="android:id/title")
+    summary = El((72, 250, 90, 269), text="5G", rid="android:id/summary")
+    row = El((0, 206, 320, 285), cls="android.widget.LinearLayout", go="rows")
+    first = node(
+        0,
+        1,
+        row,
+        SHOP,
+        node(0, 2, title, SHOP)
+        + node(1, 3, summary, SHOP)
+        + node(2, 4, divider, SHOP)
+        + node(3, 5, frame, SHOP, gear),
+    )
+    mail = El((0, 300, 320, 380), cls="android.widget.LinearLayout", go="rows")
+    subject = El((24, 320, 200, 360), text="Inbox: hello")
+    star = El(
+        (250, 310, 310, 370), desc="Star", cls="android.widget.ImageView", go="rows"
+    )
+    second = node(1, 7, mail, SHOP, node(0, 8, subject, SHOP) + node(1, 9, star, SHOP))
+    root = El((0, 0, 320, 640), cls="android.widget.FrameLayout")
+    return (
+        "<?xml version='1.0' encoding='UTF-8' standalone='yes' ?>"
+        f'<hierarchy rotation="0">{node(0, 0, root, SHOP, first + second)}</hierarchy>'
+    ).encode()
+
+
+def rows_device(
+    fake_adb: FakeAdbServer, monkeypatch: pytest.MonkeyPatch
+) -> FakeAndroid:
+    android = FakeAndroid(fake_adb, SERIAL, (ROWS_SCREEN,), start="rows")
+    monkeypatch.setattr(android, "render_xml", lambda: rows_xml(android))
+    return android
+
+
+def test_row_reasons_in_json(fake_adb, capsys, monkeypatch):
+    android = rows_device(fake_adb, monkeypatch)
+    payload = crawl_json(capsys, fake_adb)
+    skipped = skipped_by_text(payload)
+    row = next(e for e in payload["skip"] if e["id"] == "e2")
+    assert row["reasons"] == ["two_target_row"]
+    assert row["details"] == [{"reason": "two_target_row", "element_id": "e5"}]
+    # The gear inside it and the mail row (no divider) are pressed by default.
+    assert {e["id"] for e in payload["press"]} == {"e7", "e8", "e10"}
+    assert "Inbox: hello" not in skipped
+    assert_read_only(fake_adb, android)
+
+
+def test_row_with_button_in_json_when_turned_on(
+    fake_adb, capsys, monkeypatch, settings_dir
+):
+    rows_device(fake_adb, monkeypatch)
+    text = render_default_settings().replace(
+        "skip_rows_with_buttons = false", "skip_rows_with_buttons = true"
+    )
+    (settings_dir / SETTINGS_FILE).write_text(text, encoding="utf-8")
+    payload = crawl_json(capsys, fake_adb)
+    by_id = {e["id"]: e for e in payload["skip"]}
+    assert by_id["e2"]["reasons"] == ["two_target_row"]  # only the narrow reason
+    assert by_id["e8"]["reasons"] == ["row_with_button"]
+    assert by_id["e8"]["details"] == [
+        {"reason": "row_with_button", "element_id": "e10"}
+    ]
+    assert {e["id"] for e in payload["press"]} == {"e7", "e10"}
+
+
+def test_row_reasons_in_text(fake_adb, capsys, monkeypatch):
+    rows_device(fake_adb, monkeypatch)
+    code, out, err = crawl(capsys, fake_adb)
+    assert (code, err) == (0, "")
+    refused = [line for line in out.splitlines() if line.startswith("  e2 ")]
+    assert len(refused) == 1
+    assert refused[0].endswith(": two_target_row")

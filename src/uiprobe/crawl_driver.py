@@ -366,6 +366,10 @@ def _plain_policy(policy: Policy) -> Policy:
         ),
         check_tap_window=_flag("check_tap_window", policy.check_tap_window),
         deny_exceptions=_words("deny_exceptions", policy.deny_exceptions),
+        skip_two_target_rows=_flag("skip_two_target_rows", policy.skip_two_target_rows),
+        skip_rows_with_buttons=_flag(
+            "skip_rows_with_buttons", policy.skip_rows_with_buttons
+        ),
     )
 
 

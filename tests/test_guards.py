@@ -158,6 +158,8 @@ def test_with_deny_words_copies_every_other_field() -> None:
         min_visible_px=3,
         back_on_other_screens=True,
         check_tap_window=False,
+        skip_two_target_rows=False,
+        skip_rows_with_buttons=True,
     )
     copy = original.with_deny_words(["rent"])
     assert copy is not original
@@ -807,9 +809,14 @@ def test_every_reason_together_in_the_fixed_order() -> None:
     )
     fifth = run([warned, note])
     assert reasons(fifth, "e2") == ("irreversible_screen",)
+    sixth = run(t_mobile_row())
+    assert reasons(sixth, "e2") == ("two_target_row",)
+    wide = Policy(skip_rows_with_buttons=True)
+    seventh = run(t_mobile_row(divider=False), policy=wide)
+    assert reasons(seventh, "e2") == ("row_with_button",)
     seen = {
         r
-        for j in (first, second, third, fourth, huge, fifth)
+        for j in (first, second, third, fourth, huge, fifth, sixth, seventh)
         for d in j.decisions
         for r in d.reasons
     }
@@ -819,7 +826,7 @@ def test_every_reason_together_in_the_fixed_order() -> None:
 
 def test_reasons_follow_the_order_of_reasons_constant() -> None:
     assert get_args(guards.Reason) == REASONS
-    assert len(set(REASONS)) == len(REASONS) == 16
+    assert len(set(REASONS)) == len(REASONS) == 18
     order = {reason: index for index, reason in enumerate(REASONS)}
     policy = Policy(avoid=edge_areas(DISPLAY))
     elements = [
@@ -2724,7 +2731,7 @@ def test_both_rules_off_leave_the_old_outcome() -> None:
 def test_number_only_and_toggle_follow_unlabeled_and_precede_deny_word() -> None:
     assert REASONS.index("number_only") == REASONS.index("unlabeled") + 1
     assert REASONS.index("toggle") == REASONS.index("number_only") + 1
-    assert REASONS[REASONS.index("toggle") + 1] == "deny_word"
+    assert REASONS[REASONS.index("toggle") + 1] == "two_target_row"
     both = el("e2", text="5", flags=SWITCH, bounds=(0, 0, 320, 40))
     other = el("e3", text="Delete", bounds=(50, 300, 250, 350))
     found = run([both, other], policy=Policy(avoid=edge_areas(DISPLAY)))
@@ -3959,3 +3966,157 @@ def test_source_maps_are_built_only_for_a_hit_with_an_exception(monkeypatch) -> 
     found = run(_fragment_row(("Voice recorder", "!")), policy=policy)
     assert reasons(found, "e2") == ()
     assert traced
+
+
+# -- two-target rows and rows with buttons --------------------------------------------
+
+
+def t_mobile_row(*, divider: bool = True, gear: bool = True) -> list[Element]:
+    """The "T-Mobile" row of AOSP Settings' Internet screen (API 36), as
+    recorded: a clickable row with a title, a summary, the two-target divider
+    and a widget frame that holds the clickable gear."""
+    row = el("e2", cls="android.widget.LinearLayout", bounds=(0, 206, 320, 285))
+    texts = el(
+        "e3",
+        parent="e2",
+        cls="android.widget.RelativeLayout",
+        bounds=(72, 206, 215, 285),
+        flags=(),
+    )
+    title = el(
+        "e4",
+        parent="e3",
+        cls="android.widget.TextView",
+        rid="android:id/title",
+        text="T-Mobile",
+        bounds=(72, 222, 148, 250),
+        flags=(),
+    )
+    summary = el(
+        "e5",
+        parent="e3",
+        cls="android.widget.TextView",
+        rid="android:id/summary",
+        text="5G",
+        bounds=(72, 250, 90, 269),
+        flags=(),
+    )
+    middle = el(
+        "e6",
+        parent="e2",
+        cls="android.widget.LinearLayout",
+        rid=(
+            "com.android.settings:id/two_target_divider"
+            if divider
+            else "com.android.settings:id/spacer"
+        ),
+        bounds=(215, 206, 232, 285),
+        flags=(),
+    )
+    frame = el(
+        "e7",
+        parent="e2",
+        cls="android.widget.LinearLayout",
+        rid="android:id/widget_frame",
+        bounds=(232, 206, 304, 285),
+        flags=(),
+    )
+    button = el(
+        "e8",
+        parent="e7",
+        cls="android.widget.ImageView",
+        rid="com.android.settings:id/settings_button",
+        desc="Settings",
+        bounds=(232, 206, 304, 285),
+        flags=CLICK if gear else (),
+    )
+    return [row, texts, title, summary, middle, frame, button]
+
+
+def test_the_t_mobile_row_is_a_two_target_row() -> None:
+    found = decision(run(t_mobile_row()), "e2")
+    assert found.reasons == ("two_target_row",)
+    assert [(d.reason, d.element_id) for d in found.details] == [
+        ("two_target_row", "e6")
+    ]
+
+
+def test_the_gear_inside_a_two_target_row_is_judged_on_its_own() -> None:
+    judgement = run(t_mobile_row())
+    assert reasons(judgement, "e8") == ()
+    with_deny = run(t_mobile_row(), policy=Policy(deny_words=("settings",)))
+    assert reasons(with_deny, "e8") == ("deny_word",)
+
+
+def test_a_row_without_the_divider_is_not_a_two_target_row() -> None:
+    assert reasons(run(t_mobile_row(divider=False)), "e2") == ()
+
+
+def test_a_divider_outside_the_row_does_not_count() -> None:
+    # Ancestors are not looked at: a row inside a container that holds a
+    # divider somewhere else is pressable.
+    box = el(
+        "e2", cls="android.widget.LinearLayout", bounds=(0, 100, 320, 400), flags=()
+    )
+    row = el("e3", parent="e2", text="Wi-Fi", bounds=(0, 100, 320, 200))
+    divider = el(
+        "e4",
+        parent="e2",
+        cls="android.widget.LinearLayout",
+        rid="com.android.settings:id/two_target_divider",
+        bounds=(0, 300, 320, 310),
+        flags=(),
+    )
+    assert reasons(run([box, row, divider]), "e3") == ()
+
+
+def test_the_row_rules_have_their_defaults() -> None:
+    policy = Policy()
+    assert policy.skip_two_target_rows is True
+    assert policy.skip_rows_with_buttons is False
+
+
+def test_the_two_target_rule_can_be_switched_off() -> None:
+    off = Policy(skip_two_target_rows=False)
+    assert reasons(run(t_mobile_row(), policy=off), "e2") == ()
+
+
+def test_a_row_with_a_button_is_pressable_by_default() -> None:
+    assert reasons(run(t_mobile_row(divider=False)), "e2") == ()
+
+
+def test_with_the_wide_rule_a_row_with_a_clickable_descendant_is_refused() -> None:
+    wide = Policy(skip_rows_with_buttons=True)
+    found = decision(run(t_mobile_row(divider=False), policy=wide), "e2")
+    assert found.reasons == ("row_with_button",)
+    assert [(d.reason, d.element_id) for d in found.details] == [
+        ("row_with_button", "e8")
+    ]
+    # The button itself has no clickable descendant: judged as before.
+    assert reasons(run(t_mobile_row(divider=False), policy=wide), "e8") == ()
+
+
+def test_when_both_row_rules_match_only_two_target_row_is_given() -> None:
+    wide = Policy(skip_rows_with_buttons=True)
+    found = decision(run(t_mobile_row(), policy=wide), "e2")
+    assert found.reasons == ("two_target_row",)
+    assert [d.reason for d in found.details] == ["two_target_row"]
+    # With the narrow rule off, the wide rule gives its own reason.
+    only_wide = Policy(skip_two_target_rows=False, skip_rows_with_buttons=True)
+    assert reasons(run(t_mobile_row(), policy=only_wide), "e2") == ("row_with_button",)
+
+
+def test_a_non_clickable_descendant_does_not_make_a_row_with_a_button() -> None:
+    wide = Policy(skip_rows_with_buttons=True)
+    found = run(t_mobile_row(divider=False, gear=False), policy=wide)
+    assert reasons(found, "e2") == ()
+
+
+def test_the_row_reasons_follow_toggle_and_precede_deny_word() -> None:
+    assert REASONS.index("two_target_row") == REASONS.index("toggle") + 1
+    assert REASONS.index("row_with_button") == REASONS.index("two_target_row") + 1
+    assert REASONS[REASONS.index("row_with_button") + 1] == "deny_word"
+    # A two-target row that holds a switch and a deny word.
+    elements = t_mobile_row()
+    elements[3] = replace(elements[3], text="Delete", flags=("checkable",))
+    assert reasons(run(elements), "e2") == ("toggle", "two_target_row", "deny_word")
