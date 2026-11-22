@@ -2037,14 +2037,28 @@ def test_a_phrase_of_only_separators_is_refused_in_a_version_1_file(
     )
 
 
-@pytest.mark.parametrize("index", [2, None])
-def test_a_phrase_of_only_separators_is_refused_in_a_version_2_file(tmp_path, index):
-    if index is None:
-        path = edited(tmp_path, '    "permanently",\n', '    "-",\n')
-        key = "phrases"
+def separator_phrase(text: str, key: str) -> str:
+    """`text` with one separator-only entry in `[irreversible]` `key`."""
+    head, marker, table = text.partition("[irreversible]\n")
+    assert marker
+    if key == "phrases":
+        old, new = '    "permanently",\n', '    "-",\n'
     else:
-        path = with_remove(tmp_path, index, '["_"]')
-        key = "remove"
+        old, new = "remove = []", 'remove = ["_"]'
+    assert old in table.split("\n[", 1)[0]
+    return head + marker + table.replace(old, new, 1)
+
+
+@pytest.mark.parametrize("key", ["phrases", "remove"])
+def test_a_phrase_of_only_separators_is_refused_in_a_version_2_file(tmp_path, key):
+    # The pinned file that `uiprobe init` wrote at defaults version 2.
+    path = write(tmp_path, separator_phrase(v2_text(), key))
+    refused(path, f"[irreversible] {key}", "is empty after removing spaces")
+
+
+@pytest.mark.parametrize("key", ["phrases", "remove"])
+def test_a_phrase_of_only_separators_is_refused_in_a_version_3_file(tmp_path, key):
+    path = write(tmp_path, separator_phrase(render_default_settings(), key))
     refused(path, f"[irreversible] {key}", "is empty after removing spaces")
 
 

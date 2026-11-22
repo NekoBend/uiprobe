@@ -4052,6 +4052,26 @@ def test_a_row_without_the_divider_is_not_a_two_target_row() -> None:
     assert reasons(run(t_mobile_row(divider=False)), "e2") == ()
 
 
+@pytest.mark.parametrize(
+    "rid",
+    [
+        "com.example:id/not_two_target_divider",
+        "two_target_divider",
+        "com.android.settings:id/two_target_divider_line",
+    ],
+)
+def test_a_near_miss_divider_id_is_not_a_two_target_row(rid) -> None:
+    elements = t_mobile_row()
+    elements[4] = replace(elements[4], resource_id=rid)
+    assert reasons(run(elements), "e2") == ()
+
+
+def test_a_two_target_row_does_not_need_a_clickable_gear() -> None:
+    found = decision(run(t_mobile_row(gear=False)), "e2")
+    assert found.reasons == ("two_target_row",)
+    assert found.details[0].element_id == "e6"
+
+
 def test_a_divider_outside_the_row_does_not_count() -> None:
     # Ancestors are not looked at: a row inside a container that holds a
     # divider somewhere else is pressable.

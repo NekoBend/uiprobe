@@ -3154,7 +3154,7 @@ def test_skip_lines_name_the_row_reasons(tmp_path, fake_adb, clock, monkeypatch)
     # Not word reasons: the lines carry no details.
     assert "details" not in rows["e2"]
     assert "details" not in rows["e8"]
-    # The gear and the star were pressed, the rows were not.
+    # Exactly the gear (232..304 x 206..285) and the star (250..310 x
+    # 310..370) were tapped; neither row.
     taps = {i.point for i in android.inputs if i.kind == "tap"}
-    assert (268, 245) in taps
-    assert (160, 245) not in taps
+    assert taps == {(268, 245), (280, 340)}
