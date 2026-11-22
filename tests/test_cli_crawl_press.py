@@ -597,8 +597,18 @@ def test_the_relaunch_limit_hint_is_in_the_json_notes(
     assert len([n for n in result["notes"] if "--back-on-other-screens" in n]) == 1
 
 
-def _result(stop_reason: str, front: str | None) -> CrawlResult:
-    return CrawlResult(Path("r"), stop_reason, 0, 4, repin=True, last_foreground=front)
+def _result(
+    stop_reason: str, front: str | None, focus: str | None = None
+) -> CrawlResult:
+    return CrawlResult(
+        Path("r"),
+        stop_reason,
+        0,
+        4,
+        repin=True,
+        last_foreground=front,
+        last_focus=focus,
+    )
 
 
 @pytest.mark.parametrize(
@@ -624,3 +634,48 @@ def test_the_relaunch_limit_hint_escapes_the_package():
     hint = next(h for h in hints if "--back-on-other-screens" in h)
     assert "\x1b" not in hint
     assert "com.evil\\x1b[2J" in hint
+
+
+# --- the hint when System UI held the focus (locked or dark screen) ---
+
+SYSTEM_UI = "com.android.systemui"
+
+
+@pytest.mark.parametrize(
+    ("stop_reason", "front", "focus", "shown"),
+    [
+        ("relaunch_limit", SHOP, SYSTEM_UI, True),
+        ("relaunch_limit", SHOP, SHOP, False),  # the app had the focus
+        ("relaunch_limit", SHOP, None, False),  # unknown
+        ("relaunch_limit", SHOP, OTHER, False),  # another app, not System UI
+        ("relaunch_limit", OTHER, SYSTEM_UI, False),  # the app was not in front
+        ("relaunch_limit", None, SYSTEM_UI, False),
+        ("exhausted", SHOP, SYSTEM_UI, False),
+    ],
+)
+def test_the_locked_screen_hint_only_when_it_applies(stop_reason, front, focus, shown):
+    for back in (False, True):
+        hints = cli._press_hints(
+            _result(stop_reason, front, focus), package=SHOP, back=back
+        )
+        assert len([h for h in hints if "unlock it" in h]) == int(shown)
+
+
+def test_the_locked_screen_hint_says_what_to_do():
+    [hint] = [
+        h
+        for h in cli._press_hints(
+            _result("relaunch_limit", SHOP, SYSTEM_UI), package=SHOP, back=False
+        )
+        if "unlock" in h
+    ]
+    assert f"a window of {SYSTEM_UI} had the input focus" in hint
+    assert "if the screen is off or locked, turn it on and unlock it" in hint
+    assert "if the notification shade or another System UI window is open" in hint
+    # the BACK hint does not apply: the app itself was in front
+    assert not any(
+        "--back-on-other-screens" in h
+        for h in cli._press_hints(
+            _result("relaunch_limit", SHOP, SYSTEM_UI), package=SHOP, back=False
+        )
+    )
