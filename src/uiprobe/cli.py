@@ -1581,8 +1581,9 @@ def _press_hints(result: CrawlResult, *, package: str, back: bool) -> list[str]:
     ):
         hints.append(
             f"the app was in front, but a window of {_SYSTEM_UI} had the input"
-            " focus (the lock screen, a screen that is off, or the notification"
-            " shade); turn the screen on and unlock the device, then run again"
+            " focus: if the screen is off or locked, turn it on and unlock it;"
+            " if the notification shade or another System UI window is open,"
+            " close it; then run again"
         )
     if result.stop_reason == "dump_failed_repeatedly":
         hints.append(

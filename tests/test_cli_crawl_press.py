@@ -658,7 +658,7 @@ def test_the_locked_screen_hint_only_when_it_applies(stop_reason, front, focus, 
         hints = cli._press_hints(
             _result(stop_reason, front, focus), package=SHOP, back=back
         )
-        assert len([h for h in hints if "unlock the device" in h]) == int(shown)
+        assert len([h for h in hints if "unlock it" in h]) == int(shown)
 
 
 def test_the_locked_screen_hint_says_what_to_do():
@@ -670,7 +670,8 @@ def test_the_locked_screen_hint_says_what_to_do():
         if "unlock" in h
     ]
     assert f"a window of {SYSTEM_UI} had the input focus" in hint
-    assert "turn the screen on and unlock the device" in hint
+    assert "if the screen is off or locked, turn it on and unlock it" in hint
+    assert "if the notification shade or another System UI window is open" in hint
     # the BACK hint does not apply: the app itself was in front
     assert not any(
         "--back-on-other-screens" in h

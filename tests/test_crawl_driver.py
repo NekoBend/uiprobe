@@ -3114,3 +3114,23 @@ def test_the_result_names_the_app_as_the_last_focus_when_it_had_it(
 ):
     result = run(device, clock, tmp_path / "run", limits=Limits(actions=4))
     assert result.last_focus == SHOP
+
+
+@pytest.mark.parametrize("last_is_system_ui", [True, False])
+def test_the_result_names_the_focus_of_the_last_observation_only(
+    tmp_path, device, clock, monkeypatch, last_is_system_ui
+):
+    # The owner changes during the run: the result names the last one read,
+    # not the first.
+    app = FocusedWindow(SHOP, f"{SHOP}/.Main", "1a2b3c4")
+    first, last = (app, SHADE) if last_is_system_ui else (SHADE, app)
+    calls = [0]
+
+    def focus() -> FocusedWindow:
+        calls[0] += 1
+        return first if calls[0] <= 2 else last
+
+    monkeypatch.setattr(device, "focused_window", focus)
+    result = run(device, clock, tmp_path / "run", limits=Limits(actions=4))
+    assert calls[0] > 2
+    assert result.last_focus == last.owner

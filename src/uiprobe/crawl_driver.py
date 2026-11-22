@@ -165,8 +165,8 @@ class CrawlResult:
     cover_unknown: str | None = None
     last_screen_id: str | None = None
     last_foreground: str | None = None
-    last_focus: str | None = None
     cover_rule: str | None = None
+    last_focus: str | None = None
 
 
 def _check_flag(name: str, value: object) -> None:
