@@ -1380,6 +1380,8 @@ def test_the_policy_copy_keeps_every_field():
         "back_on_other_screens": True,
         "check_tap_window": False,
         "deny_exceptions": ("automatically",),
+        "skip_two_target_rows": False,
+        "skip_rows_with_buttons": True,
     }
     assert set(values) == {f.name for f in fields(Policy)}
     default = Policy()
@@ -3134,3 +3136,25 @@ def test_the_result_names_the_focus_of_the_last_observation_only(
     result = run(device, clock, tmp_path / "run", limits=Limits(actions=4))
     assert calls[0] > 2
     assert result.last_focus == last.owner
+
+
+def test_skip_lines_name_the_row_reasons(tmp_path, fake_adb, clock, monkeypatch):
+    from tests.test_crawl_preview import ROWS_SCREEN, rows_xml
+
+    android = FakeAndroid(
+        fake_adb, SERIAL, (ROWS_SCREEN,), start="rows", transport_id=TRANSPORT
+    )
+    monkeypatch.setattr(android, "render_xml", lambda: rows_xml(android))
+    device = Device(adb_server=fake_adb.address)
+    out = tmp_path / "run"
+    run(device, clock, out, policy=Policy(skip_rows_with_buttons=True))
+    rows = {r["element"]["id"]: r for r in lines(out / "skipped.jsonl")}
+    assert rows["e2"]["reasons"] == ["two_target_row"]
+    assert rows["e8"]["reasons"] == ["row_with_button"]
+    # Not word reasons: the lines carry no details.
+    assert "details" not in rows["e2"]
+    assert "details" not in rows["e8"]
+    # Exactly the gear (232..304 x 206..285) and the star (250..310 x
+    # 310..370) were tapped; neither row.
+    taps = {i.point for i in android.inputs if i.kind == "tap"}
+    assert taps == {(268, 245), (280, 340)}

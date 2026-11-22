@@ -13,7 +13,8 @@ and ``press = true`` only makes ``crawl`` refuse to run unless ``--press`` or
 What the file holds: the deny words and their exception words, the confirm
 words, the phrases that mark a
 screen as irreversible, the rules (unlabeled,
-number-only and toggle elements, confirm buttons in dialogs, irreversible
+number-only and toggle elements, two-target rows and rows with buttons,
+confirm buttons in dialogs, irreversible
 screens, the screen-edge
 sizes, the smallest visible size), the crawl limits, ``press`` and the
 device-wide keys that ``uiprobe key`` refuses. What it never holds: the
@@ -32,7 +33,11 @@ A file written at an older defaults version may leave out the tables and
 rules that a later version added (`_LATER_TABLES`, `_LATER_RULES`): a missing
 table counts as empty, so all of its defaults apply, and a missing rule takes
 its default. Version 2 added the ``[irreversible]`` table, the rule
-``refuse_irreversible_screens`` and four deny words.
+``refuse_irreversible_screens`` and four deny words. Version 3 added the
+rules ``skip_two_target_rows`` (a missing one reads True) and
+``skip_rows_with_buttons`` (a missing one reads False); a file written at
+version 3 must have both, and an older uiprobe refuses a version 3 file
+(its ``defaults_version`` is out of range there).
 
 ``[deny] except`` holds exception words (see `uiprobe.guards.word_matches`): a
 deny-word hit that lies completely inside one of them, where it stands as a
@@ -132,7 +137,7 @@ __all__ = [
 
 SETTINGS_FILE: Final = "uiprobe.toml"
 FORMAT_VERSION: Final = 1
-DEFAULTS_VERSION: Final = 2
+DEFAULTS_VERSION: Final = 3
 MAX_SETTINGS_BYTES: Final = 1024 * 1024
 
 # Every default list item with the defaults version that introduced it. Each
@@ -148,7 +153,8 @@ MAX_SETTINGS_BYTES: Final = 1024 * 1024
 # or rule also goes into `_LATER_TABLES` or `_LATER_RULES` (with the value of a
 # missing rule in `_LATER_RULE_VALUES`), so that older files still load.
 # Version 2 added the start-over deny words, the [irreversible] table with all
-# of its phrases and the rule refuse_irreversible_screens.
+# of its phrases and the rule refuse_irreversible_screens. Version 3 added the
+# rules skip_two_target_rows and skip_rows_with_buttons (no list items).
 _LATER_DENY: Final[dict[str, int]] = {
     "やり直": 2,
     "元に戻": 2,
@@ -158,7 +164,7 @@ _LATER_DENY: Final[dict[str, int]] = {
 # The [deny] except list has no built-in words. One added later starts at the
 # next defaults version (raise DEFAULTS_VERSION with it); before that, the
 # test that no default is tagged beyond the current version fails.
-_FIRST_EXCEPT: Final = 3
+_FIRST_EXCEPT: Final = 4
 _LATER_EXCEPT: Final[dict[str, int]] = {}
 _LATER_CONFIRM: Final[dict[str, int]] = {}
 # The [irreversible] table came with version 2, so its items start there.
@@ -202,6 +208,8 @@ _BOOL_RULES: Final = (
     "skip_toggles",
     "refuse_dialog_confirm",
     "refuse_irreversible_screens",
+    "skip_two_target_rows",
+    "skip_rows_with_buttons",
 )
 # table -> key -> (lowest, highest) allowed value
 _INT_RANGES: Final[dict[str, dict[str, tuple[int, int]]]] = {
@@ -223,8 +231,16 @@ _INT_RANGES: Final[dict[str, dict[str, tuple[int, int]]]] = {
 # missing rule takes the value in `_LATER_RULE_VALUES`. When present they are
 # checked like every other table and key.
 _LATER_TABLES: Final[dict[str, int]] = {"irreversible": 2}
-_LATER_RULES: Final[dict[str, int]] = {"refuse_irreversible_screens": 2}
-_LATER_RULE_VALUES: Final[dict[str, bool]] = {"refuse_irreversible_screens": True}
+_LATER_RULES: Final[dict[str, int]] = {
+    "refuse_irreversible_screens": 2,
+    "skip_two_target_rows": 3,
+    "skip_rows_with_buttons": 3,
+}
+_LATER_RULE_VALUES: Final[dict[str, bool]] = {
+    "refuse_irreversible_screens": True,
+    "skip_two_target_rows": True,
+    "skip_rows_with_buttons": False,
+}
 _TABLE_KEYS: Final[dict[str, frozenset[str]]] = {
     "deny": frozenset({"words", "except", "remove"}),
     "confirm": frozenset({"words", "remove"}),
@@ -260,7 +276,9 @@ class Settings:
     holds every key of `FIXED_DEVICE_KEYS`. ``deny_exceptions`` holds the
     exception words of ``[deny] except``; it is the last field and defaults to
     ``()``, so a Settings built with the fields of an earlier version, by
-    keyword or by position, still works.
+    keyword or by position, still works. ``skip_two_target_rows`` (default
+    True) and ``skip_rows_with_buttons`` (default False), added with defaults
+    version 3, follow it for the same reason.
     """
 
     source: Path
@@ -288,6 +306,8 @@ class Settings:
     # Last and with a default, so that callers that build a Settings from the
     # fields of earlier versions (by keyword or position) keep working.
     deny_exceptions: tuple[str, ...] = ()
+    skip_two_target_rows: bool = True
+    skip_rows_with_buttons: bool = False
 
 
 def policy_from_settings(
@@ -299,7 +319,7 @@ def policy_from_settings(
     """Return the `Policy` that the effective `settings` describe.
 
     The deny words, their exception words and the confirm words, the
-    unlabeled, number-only, toggle and dialog-confirm rules, the edge sizes
+    unlabeled, number-only, toggle, row and dialog-confirm rules, the edge sizes
     and the smallest visible size come from the settings. `extra_deny` adds
     deny words for this policy only (for example ``--deny``); an exception
     word equal to one of them is dropped, so the added word blocks as given.
@@ -326,6 +346,8 @@ def policy_from_settings(
         else tap_unlabeled,
         skip_number_only=settings.skip_number_only,
         skip_toggles=settings.skip_toggles,
+        skip_two_target_rows=settings.skip_two_target_rows,
+        skip_rows_with_buttons=settings.skip_rows_with_buttons,
         refuse_dialog_confirm=settings.refuse_dialog_confirm,
         edges=(
             settings.edge_top_px,
@@ -424,6 +446,14 @@ def render_default_settings() -> str:
         "skip_toggles = true",
         "refuse_dialog_confirm = true",
         "refuse_irreversible_screens = true",
+        "# Do not press an Android Settings row that has a second button (such as",
+        "# the gear of a network row): pressing the row itself changes the",
+        "# setting, for example the active network.",
+        "skip_two_target_rows = true",
+        "# Do not press any row that holds its own button. Turn on for vendor",
+        "# Settings apps whose rows have no divider id; it also refuses list",
+        "# rows of ordinary apps that hold a button (a star, a menu).",
+        "skip_rows_with_buttons = false",
         f"min_visible_px = {MIN_VISIBLE_PX}",
         f"edge_top_px = {API36_TOP_PX}",
         f"edge_bottom_px = {API36_BOTTOM_PX}",
@@ -1069,6 +1099,8 @@ def load_settings(path: str | os.PathLike[str]) -> Settings:
         skip_toggles=flags["skip_toggles"],
         refuse_dialog_confirm=flags["refuse_dialog_confirm"],
         refuse_irreversible_screens=flags["refuse_irreversible_screens"],
+        skip_two_target_rows=flags["skip_two_target_rows"],
+        skip_rows_with_buttons=flags["skip_rows_with_buttons"],
         min_visible_px=sizes["min_visible_px"],
         edge_top_px=sizes["edge_top_px"],
         edge_bottom_px=sizes["edge_bottom_px"],

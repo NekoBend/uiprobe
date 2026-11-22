@@ -98,8 +98,8 @@ A label made only of whitespace, format or control characters, or of private
 use characters (icon fonts, Unicode category ``Co``) counts as empty, so an
 element with only such a label is unlabeled.
 
-Two crawl rules, each a separate check that a
-`Policy` field turns off:
+Four crawl rules, each a separate check that a
+`Policy` field turns on or off:
 
 * ``number_only`` (``Policy.skip_number_only``): the label of the candidate is
   made only of numerals and of whitespace, punctuation and symbols (Unicode
@@ -120,9 +120,28 @@ Two crawl rules, each a separate check that a
   toggle buttons), because pressing one changes an app setting. Known
   over-block: a Settings row whose main press opens a sub-screen but which
   also holds a switch is not pressed either.
+* ``two_target_row`` (``Policy.skip_two_target_rows``, on by default): the
+  candidate's subtree (its descendants) holds an element whose resource id
+  ends with ``:id/two_target_divider``. AOSP Settings draws that divider
+  between the main area of a two-target row and its second button: on the
+  Internet screen, pressing the main area of the "T-Mobile" row switches the
+  active network, and the gear next to it opens the details. Only the row is
+  refused; the elements inside it (the gear) are judged on their own.
+* ``row_with_button`` (``Policy.skip_rows_with_buttons``, off by default):
+  the candidate has a clickable descendant. It catches two-target rows that
+  have no divider id, which is expected on vendor Settings apps such as
+  Samsung's One UI (not confirmed: only its home page was recorded). It also
+  refuses list rows of ordinary apps that hold their own button (a mail row
+  with a star, a song row with a menu). When both match, only
+  ``two_target_row`` is given.
 
-Both rules only add refusals. In `REASONS` they come right after
-``unlabeled``: ``number_only`` first, then ``toggle``.
+Neither row rule sees a row with no structural sign: a saved Wi-Fi network
+row whose press reconnects, with no divider and no button inside, is still
+pressed.
+
+These rules only add refusals. In `REASONS` they come right after
+``unlabeled``: ``number_only``, ``toggle``, ``two_target_row``, then
+``row_with_button``.
 
 A third rule works on the whole screen: ``irreversible_screen``
 (``Policy.skip_irreversible``). When the text, content_desc or hint of any
@@ -193,8 +212,9 @@ its descendants. This is the rule of ``Screen.tap_point``. The reasons come in
 the order of `REASONS`: ``screen_too_large``, ``outside_target_app``,
 ``permission_screen``, ``not_visible``, ``covered``, ``disabled``,
 ``text_input``, ``password_field``, ``unlabeled``, ``number_only``,
-``toggle``, ``deny_word``, ``irreversible_screen``, ``confirm_button``,
-``dialog_confirm_button``, ``screen_edge``.
+``toggle``, ``two_target_row``, ``row_with_button``, ``deny_word``,
+``irreversible_screen``, ``confirm_button``, ``dialog_confirm_button``,
+``screen_edge``.
 
 Hit targets: the hit targets of a candidate are the elements whose visible part
 holds its press point (the candidate, its ancestors and every overlay). A
@@ -352,6 +372,8 @@ Reason = Literal[
     "unlabeled",
     "number_only",
     "toggle",
+    "two_target_row",
+    "row_with_button",
     "deny_word",
     "irreversible_screen",
     "confirm_button",
@@ -593,6 +615,9 @@ _CLICKABLE: Final = "clickable"
 _DISABLED: Final = "disabled"
 _PASSWORD: Final = "password"  # noqa: S105
 _CHECKABLE: Final = "checkable"
+# The resource id suffix of the divider AOSP Settings draws between the two
+# targets of a two-target row (the row and its gear).
+_TWO_TARGET_DIVIDER: Final = ":id/two_target_divider"
 _NUMBER_CATEGORIES: Final = frozenset({"Nd", "Nl", "No"})
 _ID_SEPARATOR: Final = ":id/"
 _UTF16_BOMS: Final = (b"\xff\xfe", b"\xfe\xff")
@@ -1496,8 +1521,8 @@ def api36_fallback_areas(display: tuple[int, int]) -> tuple[Bounds, ...]:
 @dataclass(frozen=True)
 class Policy:
     """What the caller allows: the word lists, the unlabeled, number-only,
-    toggle and edge rules, and whether a crawl may press BACK on a screen of
-    another app.
+    toggle, row and edge rules, and whether a crawl may press BACK on a screen
+    of another app.
 
     ``avoid`` holds the screen-edge rectangles (see `edge_areas`) that a press
     point must not fall in. The default None is the safe default: `judge` uses
@@ -1508,6 +1533,14 @@ class Policy:
     candidate whose label is only a number is not pressed. ``skip_toggles``
     (default True) applies the ``toggle`` rule: a candidate that is, or
     holds, a checkable element is not pressed. False turns the rule off.
+    ``skip_two_target_rows`` (default True) applies the ``two_target_row``
+    rule: a candidate whose descendants hold an element with a resource id
+    ending in ``:id/two_target_divider`` (the divider of an AOSP Settings
+    two-target row) is not pressed. ``skip_rows_with_buttons`` (default
+    False) applies the ``row_with_button`` rule: a candidate with a clickable
+    descendant is not pressed (it also refuses ordinary list rows with their
+    own button). When both match, only ``two_target_row`` is given. Only the
+    row is refused; its descendants are judged on their own.
     ``refuse_dialog_confirm`` (default True) applies the ``dialog_confirm_button``
     reason; False drops only that reason (the ``confirm_button`` reason, a deny
     word on the screen, stays).
@@ -1576,6 +1609,8 @@ class Policy:
     back_on_other_screens: bool = False
     check_tap_window: bool = True
     deny_exceptions: tuple[str, ...] = DEFAULT_DENY_EXCEPTIONS
+    skip_two_target_rows: bool = True
+    skip_rows_with_buttons: bool = False
 
     def __post_init__(self) -> None:
         if type(self.back_on_other_screens) is not bool:
@@ -1638,6 +1673,8 @@ class Policy:
             back_on_other_screens=self.back_on_other_screens,
             check_tap_window=self.check_tap_window,
             deny_exceptions=exceptions,
+            skip_two_target_rows=self.skip_two_target_rows,
+            skip_rows_with_buttons=self.skip_rows_with_buttons,
         )
 
 
@@ -1709,7 +1746,9 @@ class Detail:
     ``element_id`` is the element on top of the press point. For
     ``number_only``, ``note`` and ``word`` both hold the cleaned label; for
     ``toggle``, ``element_id`` is the first checkable element in document
-    order. For ``irreversible_screen``, ``word`` is the phrase, ``field`` the
+    order; for ``two_target_row``, the first divider element in document
+    order; for ``row_with_button``, the first clickable descendant in
+    document order. For ``irreversible_screen``, ``word`` is the phrase, ``field`` the
     field and ``element_id`` the element where it was found.
     """
 
@@ -2090,6 +2129,19 @@ class _Judge:
             self.tree.tin[i] if _CHECKABLE in e.flags else _NONE
             for i, e in enumerate(self.elements)
         ]
+        # The document position of the first two-target divider and of the
+        # first clickable element among the descendants (the element itself
+        # not counted).
+        own_divider = [
+            self.tree.tin[i] if e.resource_id.endswith(_TWO_TARGET_DIVIDER) else _NONE
+            for i, e in enumerate(self.elements)
+        ]
+        own_clickable = [
+            self.tree.tin[i] if _CLICKABLE in e.flags else _NONE
+            for i, e in enumerate(self.elements)
+        ]
+        self.below_divider = [_NONE] * count
+        self.below_clickable = [_NONE] * count
         # The first text or content_desc with content among the descendants of
         # each element in document order (None when there is none).
         self.below_label: list[str | None] = [None] * count
@@ -2113,6 +2165,12 @@ class _Judge:
                 self.sub_labeled[up] |= self.sub_labeled[i]
                 self.sub_checkable[up] = min(
                     self.sub_checkable[up], self.sub_checkable[i]
+                )
+                self.below_divider[up] = min(
+                    self.below_divider[up], own_divider[i], self.below_divider[i]
+                )
+                self.below_clickable[up] = min(
+                    self.below_clickable[up], own_clickable[i], self.below_clickable[i]
                 )
                 first = self._own_label(self.elements[i]) or self.below_label[i]
                 if first is not None:
@@ -2553,7 +2611,9 @@ class _Judge:
     def _crawl_rules(
         self, i: int, reasons: list[Reason], details: list[Detail]
     ) -> None:
-        """Add the ``number_only`` and ``toggle`` reasons, each its own check."""
+        """Add the ``number_only``, ``toggle`` and row reasons, each its own
+        check (of the two row reasons, only ``two_target_row`` when both
+        match)."""
         if self.policy.skip_number_only:
             label = self._number_label(i)
             if _is_number_only(label):
@@ -2564,6 +2624,14 @@ class _Judge:
             reasons.append("toggle")
             checkable = self.elements[self.tree.pre[self.sub_checkable[i]]]
             details.append(Detail("toggle", element_id=checkable.id))
+        if self.policy.skip_two_target_rows and self.below_divider[i] != _NONE:
+            reasons.append("two_target_row")
+            divider = self.elements[self.tree.pre[self.below_divider[i]]]
+            details.append(Detail("two_target_row", element_id=divider.id))
+        elif self.policy.skip_rows_with_buttons and self.below_clickable[i] != _NONE:
+            reasons.append("row_with_button")
+            button = self.elements[self.tree.pre[self.below_clickable[i]]]
+            details.append(Detail("row_with_button", element_id=button.id))
 
     def _word_rules(
         self, found: _Agg, reasons: list[Reason], details: list[Detail]
@@ -2712,6 +2780,14 @@ def judge(
       (unless ``skip_toggles`` is False). The detail's ``element_id`` is the
       first checkable element in document order. A row that holds a switch is
       refused even when pressing the row opens a sub-screen.
+    * ``two_target_row``: a descendant of the element has a resource id
+      ending in ``:id/two_target_divider`` (unless ``skip_two_target_rows`` is
+      False). The detail's ``element_id`` is the first such element in
+      document order. The elements inside the row are judged on their own.
+    * ``row_with_button``: the element has a clickable descendant (only when
+      ``skip_rows_with_buttons`` is True, and not given when
+      ``two_target_row`` is). The detail's ``element_id`` is the first
+      clickable descendant in document order.
     * ``deny_word``: a deny word is found in the deny scope: the element and
       its descendants, the whole subtree of every clickable ancestor
       (nested rows and cards are all in scope), and, for every hit target, its
