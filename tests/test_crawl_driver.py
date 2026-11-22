@@ -3097,3 +3097,20 @@ def test_skip_lines_carry_the_details_of_word_reasons(tmp_path, fake_adb, clock)
     # The word excused by the exception is not refused and named nowhere.
     assert "Automatically" not in by_text
     assert all(d.get("word") != "call" for r in rows for d in r.get("details", []))
+
+
+def test_the_result_names_the_owner_of_the_last_focus(
+    tmp_path, device, clock, monkeypatch
+):
+    # A window of System UI holds the focus throughout (as a lock screen
+    # would): the result says so, for the CLI's note.
+    monkeypatch.setattr(device, "focused_window", lambda: SHADE)
+    result = run(device, clock, tmp_path / "run", limits=Limits(actions=4))
+    assert result.last_focus == SHADE.owner == "com.android.systemui"
+
+
+def test_the_result_names_the_app_as_the_last_focus_when_it_had_it(
+    tmp_path, device, clock
+):
+    result = run(device, clock, tmp_path / "run", limits=Limits(actions=4))
+    assert result.last_focus == SHOP

@@ -151,7 +151,8 @@ class CrawlResult:
     rule of the window list reader that made it (None when the reader did
     not refuse it, see `uiprobe.inputwindows.RULES`); ``last_screen_id`` the
     last screen that was read and ``last_foreground`` the app in front at the
-    last read (None when unknown).
+    last read (None when unknown); ``last_focus`` the package that owned the
+    window with input focus at the last observation (None when unknown).
     """
 
     out: Path
@@ -164,6 +165,7 @@ class CrawlResult:
     cover_unknown: str | None = None
     last_screen_id: str | None = None
     last_foreground: str | None = None
+    last_focus: str | None = None
     cover_rule: str | None = None
 
 
@@ -1745,4 +1747,5 @@ def _result(run: _Run, writer: RunWriter, reason: str) -> CrawlResult:
         cover_rule=run.cover_rule,
         last_screen_id=run.last_screen_id,
         last_foreground=run.last_foreground,
+        last_focus=None if run.focus is None else run.focus.owner,
     )

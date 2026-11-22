@@ -24,7 +24,7 @@ import sys
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, NoReturn, TextIO, override
+from typing import TYPE_CHECKING, Final, NoReturn, TextIO, override
 
 from uiprobe import __version__
 from uiprobe._json import dumps
@@ -1527,6 +1527,10 @@ def _press_plan_text(plan: dict[str, object]) -> str:
     )
 
 
+# The package of the system's lock screen and notification shade.
+_SYSTEM_UI: Final = "com.android.systemui"
+
+
 def _press_hints(result: CrawlResult, *, package: str, back: bool) -> list[str]:
     """Advice for the endings a real device runs into; only those that apply.
 
@@ -1569,6 +1573,16 @@ def _press_hints(result: CrawlResult, *, package: str, back: bool) -> list[str]:
             " a screen (up to twice before it restarts the app), and that BACK"
             " reaches whichever window has the input focus, not the app being"
             " crawled"
+        )
+    if (
+        result.stop_reason == "relaunch_limit"
+        and front == package
+        and result.last_focus == _SYSTEM_UI
+    ):
+        hints.append(
+            f"the app was in front, but a window of {_SYSTEM_UI} had the input"
+            " focus (the lock screen, a screen that is off, or the notification"
+            " shade); turn the screen on and unlock the device, then run again"
         )
     if result.stop_reason == "dump_failed_repeatedly":
         hints.append(
