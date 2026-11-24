@@ -74,18 +74,21 @@ limit): the lowest window of the list, when no window above it takes the
 point, can fake a whole row in its name, and the real rest of its line then
 reads as one more row below it.
 
-Flag names of another display's list: in a list per display (API 29 on) the
-rows of the display asked for must name only known flags (``inputConfig=``,
-and ``flags=`` of API 31 and 32), but the rows of another display's list may
-name unknown ones, each one upper-case word (`_NAME_SHAPE`); everything else
-in those rows is read as strictly as in the display's own list, so where the
-lists begin and end stays known. A two-display Samsung foldable (Android 17)
-printed its cover screen's list (``Display: 1``, off while the phone is open)
-above display 0's, with ``SKIP_UNTRUSTED_TOUCH_TOAST``, a name not known here.
-This rests on an assumption that was not checked on a device: that a touch
-injected on display 0 is delivered only to display 0's windows (recalled
-Android behaviour). In the one list of every display (API 24 to 28) the rows
-of other displays are skipped before their flags are read, as before.
+Flag names of another display's list: in a list per display the rows of the
+display asked for must name only known flags, but the ``inputConfig=`` of a
+row of another display's list (the forms of API 33 on) may name unknown ones,
+each one upper-case word (`_NAME_SHAPE`); everything else in those rows is
+read as strictly as in the display's own list, so where the lists begin and
+end stays known. Rows of the ``flags=`` forms (API 24 to 32) are read exactly
+as before in every list: a name there could also stand for a hex value of
+another form (``flags=DEAD`` on an API 30 row), so it is not let through. A
+two-display Samsung foldable (Android 17) printed its cover screen's list
+(``Display: 1``, off while the phone is open) above display 0's, with
+``SKIP_UNTRUSTED_TOUCH_TOAST``, a name not known here. This rests on an
+assumption that was not checked on a device: that a touch injected on display
+0 is delivered only to display 0's windows (recalled Android behaviour). In
+the one list of every display (API 24 to 28) the rows of other displays are
+skipped before their flags are read, as before.
 
 The legacy dispatcher (API 24 to 32) gives a touch anywhere on the display to
 a visible touchable window that is "touch modal", one with neither
@@ -807,7 +810,8 @@ def _touch(line: str, *, checked: bool = True) -> tuple[bool, bool, bool] | str:
     """Whether the window takes touches, whether it is touch modal and whether
     its form prints ``portalToDisplayId`` (API 29 to 32); the rule that
     refuses the line when it has no known form. Without `checked` (a row of
-    another display's list) flag names need not be known (see `_names`)."""
+    another display's list) the ``inputConfig=`` names need not be known
+    (see `_names`); the ``flags=`` forms are always read whole."""
     config = _INPUT_CONFIG.search(line)
     visible = _VISIBLE.search(line)
     named = _NAMED_FLAGS.search(line)
@@ -829,11 +833,11 @@ def _touch(line: str, *, checked: bool = True) -> tuple[bool, bool, bool] | str:
     if visible is None:
         return "field_missing"
     shown = visible["visible"] == "true"
-    return _flags_touch(line, named, shown=shown, checked=checked)
+    return _flags_touch(line, named, shown=shown)
 
 
 def _flags_touch(
-    line: str, named: re.Match[str] | None, *, shown: bool, checked: bool = True
+    line: str, named: re.Match[str] | None, *, shown: bool
 ) -> tuple[bool, bool, bool] | str:
     """`_touch` for the forms with ``visible=`` and ``flags=`` (API 24 to
     32), `shown` being the visible field and `named` the flags field."""
@@ -848,7 +852,7 @@ def _flags_touch(
         return takes, takes and not not_modal, newer
     if named is None:  # neither form
         return "field_missing"
-    names = _names(named["names"], _FLAG_NAMES, checked=checked)
+    names = _names(named["names"], _FLAG_NAMES)
     if names is None:
         return "unknown_flag"
     takes = shown and "NOT_TOUCHABLE" not in names  # API 31 and 32
@@ -881,7 +885,8 @@ def _window(
     line: str, name: str, at: int, *, checked: bool = True
 ) -> InputWindow | _Refusal:
     """Read one window line (stripped, at index `at`) whose name field is
-    `name`; without `checked` its flag names need not be known (`_names`)."""
+    `name`; without `checked` its ``inputConfig=`` names need not be known
+    (`_names`)."""
     touch = _touch(line, checked=checked)
     if isinstance(touch, str):
         return _Refusal(LINE_FORMAT, touch, at)
@@ -985,7 +990,7 @@ def _row(
 ) -> InputWindow | _Refusal | None:
     """Read the window line of row `index` of `found`; None when it is of
     another display than `display_id` (only in a list of every display).
-    Without `checked` its flag names need not be known (`_names`)."""
+    Without `checked` its ``inputConfig=`` names need not be known (`_names`)."""
     line, at = group.line, group.at
     match = _LINE.match(line)
     if match is None:
@@ -1025,9 +1030,9 @@ def _parse(
             reading = other
             shown = display_id if other.display is None else other.display
             # A touch on the display is taken to reach only that display's
-            # windows (recalled, not checked on a device), so the flag names
-            # of another display's rows need not be known; the rest of their
-            # lines is read as strictly as the display's own.
+            # windows (recalled, not checked on a device), so the inputConfig
+            # names of another display's rows need not be known; the rest of
+            # their lines is read as strictly as the display's own.
             read = _read(other, shown, trace, checked=False)
             if isinstance(read, _Refusal) and read.reason in {
                 LINE_FORMAT,
@@ -1146,8 +1151,8 @@ def _read(
 ) -> tuple[InputWindow, ...] | _Refusal:
     """Read the windows of `display_id` in the list `found` (see
     `parse_input_windows`), noting in `trace` what it read. Without
-    `checked` (the list of another display than the one asked for) flag
-    names need not be known (`_names`)."""
+    `checked` (the list of another display than the one asked for) the
+    ``inputConfig=`` names need not be known (`_names`)."""
     _note_rows(trace, found)  # entered, also when it refuses right away
     groups = _group(found)
     if isinstance(groups, _Refusal):

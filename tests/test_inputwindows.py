@@ -1590,9 +1590,9 @@ def _cover_first(base: str, cover: str, config: str = COVER_NAME) -> str:
     return base.replace("  Display: 0\n", block + "  Display: 0\n")
 
 
-@pytest.mark.parametrize(("base", "cover"), [(API36, COVER36), (API32, COVER32)])
-def test_an_unknown_flag_name_on_another_display_lets_display_0_be_read(base, cover):
-    text = _cover_first(base, cover)
+def test_an_unknown_flag_name_on_another_display_lets_display_0_be_read():
+    base = API36
+    text = _cover_first(base, COVER36)
     assert parse_input_windows(text) == parse_input_windows(base)
     found = read_window_at(text, (160, 320))
     assert isinstance(found, InputWindow), found
@@ -1631,7 +1631,7 @@ def test_the_same_unknown_name_on_display_0_still_refuses(
     assert explain_input_windows(text).rule == "unknown_flag"
 
 
-@pytest.mark.parametrize(("base", "cover"), [(API36, COVER36), (API32, COVER32)])
+@pytest.mark.parametrize(("base", "cover"), [(API36, COVER36)])
 @pytest.mark.parametrize(
     ("config", "old", "new", "rule"),
     [
@@ -1653,9 +1653,6 @@ def test_the_same_unknown_name_on_display_0_still_refuses(
 def test_a_format_error_on_another_display_still_refuses(
     base, cover, config, old, new, rule
 ):
-    if "visible=" in new and base is API32:
-        new, rule = "alpha=1.00, inputConfig=0x0", "mixed_flags"
-        old = "alpha=1.00"
     edited = cover.replace(old, new, 1) if old else cover
     assert edited != cover or not old
     text = _cover_first(base, edited, config)
@@ -1666,3 +1663,45 @@ def test_a_format_error_on_another_display_still_refuses(
     else:
         assert refused == LINE_FORMAT
         assert getattr(refused, "rule", None) == rule
+
+
+# The flags= forms (API 24 to 32) are read as before in every list: a name
+# there could stand for a hex value of another form. Made-up row in the API
+# 30 form (a row of api30.txt).
+COVER30 = (
+    "  Display: 1\n"
+    "    Windows:\n"
+    "      0: name='Window{abc123 u0 com.example.app/com.example.app.CoverActivity}',"
+    " displayId=1, portalToDisplayId=-1, paused=false, hasFocus=false,"
+    " hasWallpaper=false, visible=true, canReceiveKeys=false, flags={config},"
+    " type=0x00000001, frame=[0,0][100,100], globalScale=1.000000,"
+    " windowScale=(1.000000,1.000000), touchableRegion=[0,0][100,100],"
+    " inputFeatures=0x00000000, ownerPid=1, ownerUid=10123, dispatchingTimeout=5000ms\n"
+)
+NO_WINDOW_SCALE = " windowScale=(1.000000,1.000000),"
+
+
+@pytest.mark.parametrize(
+    ("base", "cover", "config", "drop", "rule"),
+    [
+        # rules as origin/main gives them for the same text
+        (API32, COVER32, COVER_NAME, "", "unknown_flag"),
+        (API30, COVER30, "DEAD", "", "unknown_flag"),
+        (API30, COVER30, "DEAD", NO_WINDOW_SCALE, "unknown_flag"),
+        (API30, COVER30, "0xDEAD", NO_WINDOW_SCALE, "hex_form"),
+    ],
+    ids=["api32_name", "api30_dead", "api30_dead_no_scale", "api30_hex_no_scale"],
+)
+def test_the_flags_forms_on_another_display_are_read_as_before(
+    base, cover, config, drop, rule
+):
+    edited = cover.replace(drop, "", 1) if drop else cover
+    assert edited != cover or not drop
+    text = _cover_first(base, edited, config)
+    refused = read_window_at(text, (160, 320))
+    assert refused == LINE_FORMAT
+    assert getattr(refused, "rule", None) == rule
+    assert explain_input_windows(text).rule == rule
+    # The same row with a hex value the form knows lets display 0 be read.
+    fine = _cover_first(base, cover, "0x81800008" if base is API30 else "SPLIT_TOUCH")
+    assert read_window_at(fine, (160, 320)) == read_window_at(base, (160, 320))
