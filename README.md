@@ -8,7 +8,7 @@ uiprobe saves the screen structure of an Android app and sends taps, swipes and 
 
 uiprobe is alpha software: the command line, the JSON formats and the Python API may change in any later version. This is a development snapshot, version 0.1.0a1.dev0; no alpha is tagged yet.
 
-Eleven commands exist: `devices`, `dump`, `screenshot`, `find`, `tap`, `swipe`, `key`, `type`, `launch`, `crawl` and `init`. By default `crawl` previews: it shows what a crawl would press on the screen showing now and presses nothing. `crawl --press --out DIR` crawls for real: it presses on an emulator only (unless `--allow-real-device`), stops after 30 sent actions or 5 minutes and taps at most 3 screens deep on one path unless told otherwise, and records every step in a new folder. Other ways of operating the app are planned. The guards have been checked only on Android emulators; real devices and other Android versions may behave differently.
+Eleven commands exist: `devices`, `dump`, `screenshot`, `find`, `tap`, `swipe`, `key`, `type`, `launch`, `crawl` and `init`. By default `crawl` previews: it shows what a crawl would press on the screen showing now and presses nothing. `crawl --press --out DIR` crawls for real, and so does `crawl --out DIR` when the settings file says `press = true`: it presses on an emulator only (unless `--allow-real-device` is given, on every run), stops at the settings file's `[limits]` (300 sent actions, 30 minutes and 5 screens deep on one path in the file `uiprobe init` writes) unless told otherwise, and records every step in a new folder. Other ways of operating the app are planned. The guards have been checked only on Android emulators; real devices and other Android versions may behave differently.
 
 ## Safety
 
@@ -79,7 +79,7 @@ Add `--json` to get JSON instead of text (`uiprobe dump --json`), or `--brief` f
 | `key` | Presses one key. | [Pressing keys](docs/commands.md#pressing-keys) |
 | `type` | Types ASCII text into the focused field. | [Typing text](docs/commands.md#typing-text) |
 | `launch` | Starts an app and waits until it is in front. | [Launching an app](docs/commands.md#launching-an-app) |
-| `crawl` | Previews what a crawl would press, using the settings file; with `--press`, crawls for real into a run folder. | [Crawling an app](docs/crawl.md) |
+| `crawl` | Previews what a crawl would press, using the settings file; with `--press` (or `press = true` in the file), crawls for real into a run folder. | [Crawling an app](docs/crawl.md) |
 | `diagnose tap-window` | Tells why the crawl's tap window check cannot read a device, in a report with no device values; presses nothing. | [Diagnosing the tap window check](docs/commands.md#diagnosing-the-tap-window-check) |
 | `init` | Creates the settings file `uiprobe.toml`; no device needed. | [Settings file](docs/settings.md) |
 
