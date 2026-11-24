@@ -15,6 +15,7 @@ from tests.test_crawl_driver import SCREENS, SERIAL, SHOP, TRANSPORT
 from uiprobe import cli
 from uiprobe.crawl import Limits
 from uiprobe.settings import (
+    DEFAULTS_VERSION,
     SETTINGS_FILE,
     load_settings,
     render_default_settings,
@@ -180,6 +181,7 @@ def test_dry_run_wins_over_press_true(fake_adb, android, capsys, here, as_json):
         ["--screenshots"],
         ["--allow-real-device"],
         ["--no-tap-window-check"],
+        ["--no-restart"],
     ],
 )
 def test_press_true_with_dry_run_still_refuses_press_options(
@@ -196,8 +198,7 @@ def test_press_true_with_dry_run_still_refuses_press_options(
     assert android.inputs == []
 
 
-@pytest.mark.usefixtures("android")
-def test_press_true_allows_the_press_options(fake_adb, capsys, here):
+def test_press_true_allows_the_press_options(fake_adb, android, capsys, here):
     write_settings(here, settings_text(press=True))
     out = here / "run"
     argv = [
@@ -214,6 +215,7 @@ def test_press_true_allows_the_press_options(fake_adb, capsys, here):
         "--screenshots",
         "--back-on-other-screens",
         "--no-tap-window-check",
+        "--no-restart",
         "--json",
     ]
     code, text, _err = crawl(capsys, fake_adb, *argv)
@@ -225,6 +227,8 @@ def test_press_true_allows_the_press_options(fake_adb, capsys, here):
     assert result["back_on_other_screens"] is True
     assert result["check_tap_window"] is False
     assert result["screenshots"] is True
+    assert result["restart"] is False
+    assert android.stopped == []  # --no-restart: no force-stop before the start
 
 
 @pytest.mark.parametrize("as_json", [False, True])
@@ -431,7 +435,8 @@ def test_the_help_states_the_defaults(capsys):
 
 
 def _old_file(version: int) -> str:
-    if version == 3:
+    """The file `uiprobe init` wrote at `version`; the current one is rendered."""
+    if version == DEFAULTS_VERSION:
         text = render_default_settings()
     else:
         text = (DATA / f"settings_v{version}.toml").read_text(encoding="utf-8")
@@ -439,8 +444,18 @@ def _old_file(version: int) -> str:
     return text
 
 
+# Every defaults version: the files kept under tests/data and the current one.
+VERSIONS = list(range(1, DEFAULTS_VERSION + 1))
+
+
+def test_every_older_version_has_a_kept_file():
+    for version in VERSIONS[:-1]:
+        assert (DATA / f"settings_v{version}.toml").is_file(), version
+    assert DEFAULTS_VERSION >= 4
+
+
 @pytest.mark.usefixtures("android")
-@pytest.mark.parametrize("version", [1, 2, 3])
+@pytest.mark.parametrize("version", VERSIONS)
 def test_older_files_use_their_written_limits(fake_adb, capsys, here, version):
     write_settings(here, edited(_old_file(version), limits=(3, 5, 7)))
     code, text, _err = crawl(
@@ -453,7 +468,7 @@ def test_older_files_use_their_written_limits(fake_adb, capsys, here, version):
 
 
 @pytest.mark.usefixtures("android")
-@pytest.mark.parametrize("version", [1, 2, 3])
+@pytest.mark.parametrize("version", VERSIONS)
 def test_older_files_unchanged_give_the_generated_limits(
     fake_adb, capsys, here, version
 ):
@@ -468,7 +483,7 @@ def test_older_files_unchanged_give_the_generated_limits(
     )
 
 
-@pytest.mark.parametrize("version", [1, 2, 3])
+@pytest.mark.parametrize("version", VERSIONS)
 def test_older_files_do_not_start_pressing(fake_adb, android, capsys, here, version):
     write_settings(here, _old_file(version))
     code, text, err = crawl(capsys, fake_adb)

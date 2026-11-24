@@ -1026,6 +1026,42 @@ def test_run_start_and_run_json_record_the_repins(tmp_path):
         make(tmp_path, "fourth").finish("done", screens=0, actions=0, repins=-1)
 
 
+def test_run_start_and_the_first_start_line_record_the_restart(tmp_path):
+    writer = make(tmp_path, restart=True)
+    writer.write_transition_start(1, "launch", restart=True)
+    writer.write_transition_start(2, "tap", ID_A, point=(1, 2))
+    start = json.loads((tmp_path / "run" / "run-start.json").read_bytes())
+    assert start["restart"] is True
+    first, second = lines_of(tmp_path / "run" / "transitions.jsonl")
+    assert first["restart"] is True
+    assert first["action"] == {"kind": "launch"}
+    assert "restart" not in second  # absent unless the launch force-stopped
+    assert (
+        json.loads(
+            (make(tmp_path, "kept", restart=False).path / "run-start.json").read_bytes()
+        )["restart"]
+        is False
+    )
+    assert "restart" not in json.loads(
+        (make(tmp_path, "older").path / "run-start.json").read_bytes()
+    )
+    loose: Any = writer.write_transition_start
+    with pytest.raises(TypeError, match="restart must be a bool"):
+        loose(3, "launch", restart=1)
+    assert len(lines_of(tmp_path / "run" / "transitions.jsonl")) == 2
+    create: Any = RunWriter.create
+    with pytest.raises(TypeError, match="restart must be a bool or None"):
+        create(
+            tmp_path / "third",
+            package="com.example.app",
+            limits=Limits(),
+            deny_words=[],
+            serial="emulator-5554",
+            restart="yes",
+        )
+    assert not (tmp_path / "third").exists()
+
+
 def test_a_not_sent_end_line_can_say_why_in_details(tmp_path):
     writer = make(tmp_path, check_tap_window=True)
     writer.write_transition_start(1, "tap", ID_A)

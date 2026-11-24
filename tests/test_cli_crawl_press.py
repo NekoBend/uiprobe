@@ -63,14 +63,21 @@ def test_press_runs_a_short_crawl_on_an_emulator(fake_adb, android, capsys, tmp_
     assert lines[3] == f"run folder: {out}"
     assert lines[4] == "BACK on screens of other apps: no (restart the app)"
     assert lines[5] == "check the window at each tap point: yes"
-    assert lines[6].startswith("stopped: ")
+    assert lines[6] == (
+        "start: the app is stopped first (am force-stop), then its launcher"
+        " activity is started; what it had not saved is lost (--no-restart"
+        " starts from the screen it shows now)"
+    )
+    assert lines[7].startswith("stopped: ")
     assert any(line.startswith("actions: ") for line in lines)
-    assert f"run folder: {out}" in lines[7:]
+    assert f"run folder: {out}" in lines[8:]
     assert [i for i in android.inputs if i.kind == "tap"]
     begin = json.loads((out / "run-start.json").read_bytes())
     assert begin["limits"] == {"depth": 5, "actions": 300, "minutes": 30}
     assert begin["check_tap_window"] is True
     assert begin["back_on_other_screens"] is False
+    assert begin["restart"] is True
+    assert android.stopped == [SHOP]  # the first launch's force-stop
     assert (out / "run.json").exists()
 
 
@@ -87,6 +94,7 @@ def test_press_in_json(fake_adb, capsys, tmp_path):
         "4",
         "--back-on-other-screens",
         "--no-tap-window-check",
+        "--no-restart",
         "--json",
     )
     assert code == 0
@@ -105,6 +113,7 @@ def test_press_in_json(fake_adb, capsys, tmp_path):
     }
     assert result["back_on_other_screens"] is True
     assert result["check_tap_window"] is False
+    assert result["restart"] is False
     assert result["out"] == str(out)
     assert result["stop_reason"] == "max_actions"
     assert result["actions"] == 4
@@ -114,6 +123,7 @@ def test_press_in_json(fake_adb, capsys, tmp_path):
     begin = json.loads((out / "run-start.json").read_bytes())
     assert begin["check_tap_window"] is False
     assert begin["back_on_other_screens"] is True
+    assert begin["restart"] is False
 
 
 @pytest.mark.usefixtures("here")
@@ -150,9 +160,11 @@ def test_a_real_device_runs_with_the_option(fake_adb, android, capsys, tmp_path)
         (["--actions", "3"], f"--actions {NOT_PRESSING}"),
         (["--allow-real-device"], f"--allow-real-device {NOT_PRESSING}"),
         (["--no-tap-window-check"], f"--no-tap-window-check {NOT_PRESSING}"),
+        (["--no-restart"], f"--no-restart {NOT_PRESSING}"),
         (["--dry-run", "--out", "x"], f"--out {DRY_RUN_PRESS_ONLY}"),
         (["--dry-run", "--minutes", "3"], f"--minutes {DRY_RUN_PRESS_ONLY}"),
         (["--dry-run", "--screenshots"], f"--screenshots {DRY_RUN_PRESS_ONLY}"),
+        (["--dry-run", "--no-restart"], f"--no-restart {DRY_RUN_PRESS_ONLY}"),
         (["--press"], "--press needs --out DIR, the new folder to record the run into"),
         (
             ["--press", "--out", "x", "--actions", "0"],
@@ -321,15 +333,20 @@ def device_writes(fake_adb: FakeAdbServer) -> list[str]:
 def test_the_plan_is_out_before_the_app_is_started(
     fake_adb, capsys, tmp_path, monkeypatch, as_json
 ):
+    # The first request that changes the device is the force-stop of the
+    # first launch (the default), then its start.
     seen: list[tuple[str, str]] = []
-    original = Device._launch_component
+    for name in ("stop_app", "_launch_component"):
+        original = getattr(Device, name)
 
-    def launch_after_reading(self: Device, *args: object, **kwargs: object) -> object:
-        captured = capsys.readouterr()
-        seen.append((captured.out, captured.err))
-        return original(self, *args, **kwargs)  # ty: ignore[invalid-argument-type]
+        def after_reading(
+            self: Device, *args: object, _original=original, **kwargs: object
+        ) -> object:
+            captured = capsys.readouterr()
+            seen.append((captured.out, captured.err))
+            return _original(self, *args, **kwargs)
 
-    monkeypatch.setattr(Device, "_launch_component", launch_after_reading)
+        monkeypatch.setattr(Device, name, after_reading)
     out = tmp_path / "run"
     argv = ["--press", "--out", str(out), "--actions", "2"]
     code, _text, _err = press(capsys, fake_adb, *argv, *(["--json"] if as_json else []))
@@ -339,6 +356,7 @@ def test_the_plan_is_out_before_the_app_is_started(
     plan = plan_err if as_json else plan_out
     assert plan.splitlines()[0] == f"pressing on {SERIAL} (emulator): {SHOP}"
     assert "check the window at each tap point: yes" in plan
+    assert "start: the app is stopped first (am force-stop)" in plan
     if as_json:
         assert plan_out == ""
 
@@ -410,8 +428,15 @@ def test_an_unreadable_launcher_activity_starts_nothing(
     error = json.loads(text)["error"]
     assert error["code"] == "launch_failed"
     assert error["details"]["reason"] == "launcher_unreadable"
+    # The launcher is read before the first launch's force-stop: nothing was
+    # stopped, started or pressed.
     assert device_writes(fake_adb) == []
     assert android.inputs == []
+    records = [
+        json.loads(line)
+        for line in (out / "transitions.jsonl").read_text("utf-8").splitlines()
+    ]
+    assert records[-1]["reason"] == "launcher_unreadable"
 
 
 @pytest.mark.usefixtures("here", "android")
@@ -702,3 +727,108 @@ def test_the_locked_screen_hint_says_what_to_do():
             _result("relaunch_limit", SHOP, SYSTEM_UI), package=SHOP, back=False
         )
     )
+
+
+# --- the first launch stops the app first (--no-restart keeps the screen) ---
+
+
+def _first_start_line(out: Path) -> dict[str, object]:
+    first = (out / "transitions.jsonl").read_text("utf-8").splitlines()[0]
+    return json.loads(first)
+
+
+@pytest.mark.usefixtures("here")
+def test_by_default_the_app_is_stopped_before_the_first_start(
+    fake_adb, android, capsys, tmp_path
+):
+    android.show("browse")  # the app is open on a screen below its first one
+    out = tmp_path / "run"
+    argv = ["--press", "--out", str(out), "--actions", "1", "--json"]
+    code, text, err = press(capsys, fake_adb, *argv)
+    assert code == 0
+    assert "start: the app is stopped first (am force-stop)" in err
+    result = json.loads(text)
+    assert result["restart"] is True
+    assert result["actions"] == 1  # force-stop and start are one action
+    writes = device_writes(fake_adb)
+    assert [w.split(";")[0] for w in writes] == [
+        f"shell:am force-stop {SHOP}",
+        f"shell:am start -W -a android.intent.action.MAIN -c"
+        f" android.intent.category.LAUNCHER -n {SHOP}/.Main",
+    ]
+    assert android.screen.name == "main"  # the app's first screen
+    first = _first_start_line(out)
+    assert first["action"] == {"kind": "launch"}
+    assert first["restart"] is True
+    assert json.loads((out / "run-start.json").read_bytes())["restart"] is True
+
+
+@pytest.mark.usefixtures("here")
+def test_no_restart_starts_from_the_screen_the_app_shows(
+    fake_adb, android, capsys, tmp_path
+):
+    android.show("browse")
+    out = tmp_path / "run"
+    argv = ["--press", "--out", str(out), "--actions", "1", "--no-restart"]
+    code, text, _err = press(capsys, fake_adb, *argv)
+    assert code == 0
+    assert text.splitlines()[6] == (
+        "start: the app is not stopped first; the crawl starts from the screen"
+        " the app shows now"
+    )
+    assert not [w for w in device_writes(fake_adb) if "force-stop" in w]
+    assert android.stopped == []
+    assert android.screen.name == "browse"  # brought to the front as it was
+    first = _first_start_line(out)
+    assert first["action"] == {"kind": "launch"}
+    assert "restart" not in first
+    assert json.loads((out / "run-start.json").read_bytes())["restart"] is False
+
+
+@pytest.mark.usefixtures("here", "android")
+def test_the_driver_gets_the_restart_choice(fake_adb, capsys, tmp_path, monkeypatch):
+    import uiprobe.cli as cli_module
+
+    seen: list[object] = []
+    original = cli_module.crawl_run
+
+    def spy(*args: object, **kwargs: object) -> object:
+        seen.append(kwargs.get("restart"))
+        return original(*args, **kwargs)  # ty: ignore[invalid-argument-type]
+
+    monkeypatch.setattr(cli_module, "crawl_run", spy)
+    argv = ["--press", "--out", str(tmp_path / "a"), "--actions", "2"]
+    assert press(capsys, fake_adb, *argv)[0] == 0
+    argv = ["--press", "--out", str(tmp_path / "b"), "--actions", "2", "--no-restart"]
+    assert press(capsys, fake_adb, *argv)[0] == 0
+    assert seen == [True, False]
+
+
+def test_the_plan_text_names_the_start_choice():
+    plan: dict[str, object] = {
+        "package": SHOP,
+        "device": {"serial": SERIAL, "emulator": True},
+        "press_source": "option",
+        "limits": {"depth": 5, "actions": 30, "minutes": 30},
+        "limits_source": {"depth": "file", "actions": "option", "minutes": "file"},
+        "out": "run",
+        "back_on_other_screens": False,
+        "check_tap_window": True,
+        "screenshots": False,
+    }
+    settings = SETTINGS_FILE
+    restart = cli._press_plan_text(
+        {**plan, "restart": True}, settings=settings
+    ).splitlines()
+    kept = cli._press_plan_text({**plan, "restart": False}, settings=settings)
+    kept = kept.splitlines()
+    assert restart[-1] == (
+        "start: the app is stopped first (am force-stop), then its launcher"
+        " activity is started; what it had not saved is lost (--no-restart"
+        " starts from the screen it shows now)"
+    )
+    assert kept[-1] == (
+        "start: the app is not stopped first; the crawl starts from the screen"
+        " the app shows now"
+    )
+    assert restart[:-1] == kept[:-1]

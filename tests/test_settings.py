@@ -280,6 +280,9 @@ V2_IRREVERSIBLE = (
 # revision ff6f5f0, before version 2 existed), unchanged.
 V1_FILE = DATA / "settings_v1.toml"
 V2_FILE = DATA / "settings_v2.toml"
+# The file that `uiprobe init` wrote at defaults version 3 (rendered at
+# revision a7e8052, before version 4 existed), unchanged.
+V3_FILE = DATA / "settings_v3.toml"
 
 
 def write(tmp_path: Path, text: str | bytes, name: str = SETTINGS_FILE) -> Path:
@@ -309,7 +312,7 @@ def test_the_defaults_round_trip(tmp_path):
     loaded = load_settings(default_file(tmp_path))
     assert loaded.source == tmp_path / SETTINGS_FILE
     assert loaded.format_version == 1
-    assert loaded.defaults_version == CURRENT == 3
+    assert loaded.defaults_version == CURRENT == 4
     assert loaded.press is False
     assert loaded.deny_words == DEFAULT_DENY_WORDS
     assert loaded.deny_exceptions == DEFAULT_DENY_EXCEPTIONS
@@ -322,6 +325,8 @@ def test_the_defaults_round_trip(tmp_path):
     assert loaded.refuse_dialog_confirm is True
     assert loaded.skip_two_target_rows is True
     assert loaded.skip_rows_with_buttons is False
+    assert loaded.skip_navigate_up is True
+    assert loaded.skip_sliders is True
     assert loaded.min_visible_px == MIN_VISIBLE_PX == 8
     assert loaded.edge_top_px == API36_TOP_PX
     assert loaded.edge_bottom_px == API36_BOTTOM_PX
@@ -337,7 +342,7 @@ def test_the_rendered_file_layout():
     assert text.startswith("# uiprobe settings")
     assert text.endswith("\n")
     assert "\r" not in text
-    assert "format_version = 1\ndefaults_version = 3\n" in text
+    assert "format_version = 1\ndefaults_version = 4\n" in text
     assert "press = false\n" in text
     for table in (
         "[deny]",
@@ -1013,8 +1018,8 @@ def test_numbers_at_the_limits_are_accepted(tmp_path, old, new):
     [
         ("format_version = 1", "format_version = 2", "format_version"),
         ("format_version = 1", "format_version = 0", "format_version"),
-        ("defaults_version = 3", "defaults_version = 0", "defaults_version"),
-        ("defaults_version = 3", "defaults_version = 4", "defaults_version"),
+        ("defaults_version = 4", "defaults_version = 0", "defaults_version"),
+        ("defaults_version = 4", "defaults_version = 5", "defaults_version"),
     ],
 )
 def test_versions_out_of_range_are_refused(tmp_path, old, new, key):
@@ -1812,7 +1817,7 @@ def _digit_limit() -> Iterator[None]:
 def _huge_cases() -> list[tuple[str, str, str]]:
     cases = [
         ("format_version = 1", f"format_version = {HUGE}", "format_version"),
-        ("defaults_version = 3", f"defaults_version = {HUGE}", "defaults_version"),
+        ("defaults_version = 4", f"defaults_version = {HUGE}", "defaults_version"),
     ]
     for old, key in [
         ("min_visible_px = 8", "min_visible_px"),
@@ -2100,12 +2105,15 @@ def test_the_generated_file_has_an_empty_except_list():
 def test_the_generated_file_holds_the_version_2_values_plus_the_later_keys():
     # The values are those `uiprobe init` wrote at defaults version 2
     # (tests/data/settings_v2.toml), plus the empty except list and, with
-    # version 3, the two row rules.
+    # version 3, the two row rules and, with version 4, the up-button and
+    # slider rules.
     current = tomllib.loads(render_default_settings())
     assert current["deny"].pop("except") == []
-    assert current.pop("defaults_version") == 3
+    assert current.pop("defaults_version") == 4
     assert current["rules"].pop("skip_two_target_rows") is True
     assert current["rules"].pop("skip_rows_with_buttons") is False
+    assert current["rules"].pop("skip_navigate_up") is True
+    assert current["rules"].pop("skip_sliders") is True
     older = tomllib.loads(v2_text())
     assert older.pop("defaults_version") == 2
     assert current == older
@@ -2256,6 +2264,8 @@ def test_settings_built_with_the_earlier_fields_still_work(tmp_path):
         "deny_exceptions",
         "skip_two_target_rows",
         "skip_rows_with_buttons",
+        "skip_navigate_up",
+        "skip_sliders",
     ]
 
 
@@ -2288,21 +2298,21 @@ def test_an_older_file_may_set_the_row_rules(tmp_path, version):
     assert (loaded.skip_two_target_rows, loaded.skip_rows_with_buttons) == (False, True)
 
 
-def test_a_version_3_file_gives_the_row_rules_as_written(tmp_path):
+def test_a_current_file_gives_the_row_rules_as_written(tmp_path):
     text = (
         render_default_settings()
         .replace("skip_two_target_rows = true", "skip_two_target_rows = false")
         .replace("skip_rows_with_buttons = false", "skip_rows_with_buttons = true")
     )
     loaded = load_settings(write(tmp_path, text))
-    assert loaded.defaults_version == 3
+    assert loaded.defaults_version == 4
     assert (loaded.skip_two_target_rows, loaded.skip_rows_with_buttons) == (False, True)
     policy = settings.policy_from_settings(loaded)
     assert (policy.skip_two_target_rows, policy.skip_rows_with_buttons) == (False, True)
 
 
 @pytest.mark.parametrize("key", ["skip_two_target_rows", "skip_rows_with_buttons"])
-def test_a_version_3_file_needs_the_row_rules(tmp_path, key):
+def test_a_current_file_needs_the_row_rules(tmp_path, key):
     text = render_default_settings()
     line = next(
         line for line in text.splitlines(keepends=True) if line.startswith(f"{key} =")
@@ -2310,9 +2320,9 @@ def test_a_version_3_file_needs_the_row_rules(tmp_path, key):
     refused(write(tmp_path, text.replace(line, "")), f"[rules] {key}", "is missing")
 
 
-def test_the_generated_file_writes_version_3_with_both_row_rules():
+def test_the_generated_file_writes_both_row_rules():
     text = render_default_settings()
-    assert "defaults_version = 3\n" in text
+    assert "defaults_version = 4\n" in text
     rules = text.split("[rules]\n")[1].split("[limits]")[0]
     assert "skip_two_target_rows = true\n" in rules
     assert "skip_rows_with_buttons = false\n" in rules
@@ -2323,9 +2333,9 @@ def test_a_newer_defaults_version_is_refused_with_its_number(tmp_path):
     # What an older uiprobe says about a file that `uiprobe init` writes now
     # (the message of the defaults_version range check names both numbers).
     text = render_default_settings().replace(
-        "defaults_version = 3", "defaults_version = 4"
+        "defaults_version = 4", "defaults_version = 5"
     )
-    refused(write(tmp_path, text), "defaults_version", "must be from 1 to 3, not 4")
+    refused(write(tmp_path, text), "defaults_version", "must be from 1 to 4, not 5")
 
 
 def test_version_3_added_no_list_defaults():
@@ -2342,3 +2352,101 @@ def test_version_3_added_no_list_defaults():
         ] == []
     assert settings._LATER_RULES["skip_two_target_rows"] == 3
     assert settings._LATER_RULES["skip_rows_with_buttons"] == 3
+
+
+# -- the up-button and slider rules (defaults version 4) -----------------------------
+
+V4_RULES = ["skip_navigate_up", "skip_sliders"]
+
+
+def v3_text() -> str:
+    text = V3_FILE.read_text(encoding="utf-8")
+    assert "defaults_version = 3\n" in text
+    assert "skip_two_target_rows = true\n" in text
+    assert "skip_navigate_up" not in text
+    assert "skip_sliders" not in text
+    return text
+
+
+def test_the_version_3_file_loads_as_the_current_defaults(tmp_path):
+    loaded = load_settings(write(tmp_path, v3_text()))
+    assert loaded.defaults_version == 3
+    assert loaded.warnings == ()
+    (tmp_path / "now").mkdir()
+    current = load_settings(default_file(tmp_path / "now"))
+    assert (
+        dataclasses.replace(loaded, source=current.source, defaults_version=4)
+        == current
+    )
+
+
+@pytest.mark.parametrize("version", [1, 2, 3])
+def test_an_older_file_without_the_version_4_rules_loads_them_on(tmp_path, version):
+    text = (v1_text, v2_text, v3_text)[version - 1]()
+    loaded = load_settings(write(tmp_path, text))
+    assert loaded.defaults_version == version
+    assert (loaded.skip_navigate_up, loaded.skip_sliders) == (True, True)
+    assert loaded.warnings == ()
+    policy = settings.policy_from_settings(loaded)
+    assert (policy.skip_navigate_up, policy.skip_sliders) == (True, True)
+
+
+@pytest.mark.parametrize("key", V4_RULES)
+@pytest.mark.parametrize("version", [1, 2, 3])
+def test_an_older_file_may_turn_a_version_4_rule_off(tmp_path, version, key):
+    text = (v1_text, v2_text, v3_text)[version - 1]()
+    text = text.replace("[rules]\n", f"[rules]\n{key} = false\n", 1)
+    loaded = load_settings(write(tmp_path, text))
+    assert getattr(loaded, key) is False
+    assert getattr(settings.policy_from_settings(loaded), key) is False
+    other = next(k for k in V4_RULES if k != key)
+    assert getattr(loaded, other) is True
+
+
+@pytest.mark.parametrize("key", V4_RULES)
+def test_a_version_4_file_needs_each_version_4_rule(tmp_path, key):
+    text = render_default_settings()
+    assert f"{key} = true\n" in text
+    refused(
+        write(tmp_path, text.replace(f"{key} = true\n", "")),
+        f"[rules] {key}",
+        "is missing",
+    )
+
+
+@pytest.mark.parametrize("key", V4_RULES)
+def test_a_version_4_file_gives_each_version_4_rule_as_written(tmp_path, key):
+    text = render_default_settings().replace(f"{key} = true", f"{key} = false")
+    loaded = load_settings(write(tmp_path, text))
+    assert getattr(loaded, key) is False
+    assert getattr(settings.policy_from_settings(loaded), key) is False
+
+
+@pytest.mark.parametrize("key", V4_RULES)
+def test_a_version_4_rule_must_be_a_bool(tmp_path, key):
+    text = render_default_settings().replace(f"{key} = true", f"{key} = 1")
+    refused(write(tmp_path, text), f"[rules] {key}")
+
+
+def test_the_generated_file_writes_the_version_4_rules_in_the_rules_table():
+    text = render_default_settings()
+    rules = text.split("[rules]\n")[1].split("[limits]")[0]
+    assert "skip_navigate_up = true\n" in rules
+    assert "skip_sliders = true\n" in rules
+
+
+def test_version_4_added_no_list_defaults():
+    for table in (
+        "_DENY_WORDS",
+        "_DENY_EXCEPTIONS",
+        "_CONFIRM_WORDS",
+        "_IRREVERSIBLE_PHRASES",
+        "_REFUSE_KEYS",
+        "_REFUSE_PREFIXES",
+    ):
+        assert [
+            item for version, item in getattr(settings, table) if version == 4
+        ] == []
+    for key in V4_RULES:
+        assert settings._LATER_RULES[key] == 4
+        assert settings._LATER_RULE_VALUES[key] is True
