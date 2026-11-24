@@ -1190,14 +1190,24 @@ _ABSENT: Final = object()
 # On a device with several displays (a foldable's cover screen), `dumpsys
 # window` prints a block per display, each with its own ``mCurrentFocus`` and
 # ``mFocusedApp``, in no fixed order, and one ``mTopFocusedDisplayId`` further
-# on names the focused display.
+# on names the focused display. Whether a dump has several displays is decided
+# by the header lines of the narrow form ``\s*Display: mDisplayId=`` (so a dump
+# with no or one such line reads exactly as before display blocks were told
+# apart); once it has, every line that names one of these fields in any
+# spacing counts as a claim and must have its exact shape.
 _DISPLAY_HEADER_CLAIM: Final = re.compile(r"\s*Display: mDisplayId=")
+_DISPLAY_HEADER_FIELD: Final = re.compile(r"Display:\s*mDisplayId")
 _DISPLAY_HEADER: Final = re.compile(
     r"  Display: mDisplayId=(0|[1-9][0-9]{0,9})(?: \(organized\))?"
 )
-_TOP_FOCUSED_DISPLAY_CLAIM: Final = re.compile(r"\s*mTopFocusedDisplayId=")
+_TOP_FOCUSED_DISPLAY_FIELD: Final = "mTopFocusedDisplayId"
 _TOP_FOCUSED_DISPLAY: Final = re.compile(
     r"  mTopFocusedDisplayId=(-1|0|[1-9][0-9]{0,9})"
+)
+_FOCUS_FIELD: Final = re.compile(r"(?<![A-Za-z0-9_])(mCurrentFocus|mFocusedApp)\s*[=:]")
+_FOCUS_NULL: Final = frozenset({"  mCurrentFocus=null", "  mFocusedApp=null"})
+_CURRENT_FOCUS_EXACT: Final = re.compile(
+    r"  mCurrentFocus=Window\{[0-9a-f]{1,16} u[0-9]{1,3} [^\r\n]{1,512}\}"
 )
 
 
@@ -1212,39 +1222,73 @@ def _well_formed(lines: list[str], shape: re.Pattern[str]) -> list[str] | None:
     return found
 
 
-def _focus_part(text: str) -> str | None:
+def _focus_claim_well_formed(line: str) -> bool:
+    """Whether a line that names a focus field has the exact shape of one."""
+    if line in _FOCUS_NULL:
+        return True
+    if len(line) > _MAX_DUMPSYS_LINE:
+        return False
+    return (
+        _CURRENT_FOCUS_EXACT.fullmatch(line) is not None
+        or _FOCUSED_APP_SOURCE.shape.fullmatch(line) is not None
+    )
+
+
+class _FocusPart(NamedTuple):
+    """The part of `dumpsys window` to read the focus from."""
+
+    text: str
+    several_displays: bool  # display 0's part of a dump with several displays
+
+
+def _focus_part(text: str) -> _FocusPart | None:
     """The part of a `dumpsys window` output that tells the focus, or None.
 
-    With no or one line that claims a display header, this is the whole text,
-    read as before. With several, it is display 0's block and everything
-    after it, and only while display 0 has the focus; None otherwise. Every
-    line that claims a header must be well formed, the ids unique and display
-    0 among them, and every line that claims ``mTopFocusedDisplayId`` well
-    formed and saying 0 (at least one such line). Any line can be forged
-    (window titles hold newlines), but a genuine one cannot be removed: a
-    forged second header for display 0 is a duplicate, and the part runs to
-    the end of the text rather than to the next header, so a forged header or
-    section title inside display 0's block cannot cut its genuine lines off.
-    A display printed after display 0 is in the part too, so its focus lines
-    must then agree with display 0's (they name another window, so they give
-    None).
+    With no or one line that claims a display header in the narrow form
+    (``\\s*Display: mDisplayId=``), this is the whole text, read exactly as
+    before display blocks were told apart.
+    With several, it is display 0's block and everything after it, and only
+    while display 0 has the focus; None otherwise. Then:
+
+    - every line that holds ``Display:`` then ``mDisplayId`` (any spacing)
+      must be an exact header, the ids unique and display 0 among them;
+    - every line that holds ``mTopFocusedDisplayId`` must be exact, at least
+      one, and all say 0;
+    - every line that names ``mCurrentFocus`` or ``mFocusedApp`` as a field
+      (any indentation and spacing) must be exact (``null`` allowed), and none
+      may come before the first header.
+
+    Any line can be forged (window titles hold newlines), but a genuine one
+    cannot be removed. A forged second header for display 0 is a duplicate.
+    The part runs to the end of the text rather than to the next header, so a
+    forged header or section title inside display 0's block cannot cut its
+    genuine lines off; and since genuine focus lines before the first header
+    give None, headers forged into a dump without genuine ones cannot leave
+    the genuine focus lines out either. A display printed after display 0 is
+    in the part too, so its focus lines must then agree with display 0's
+    (they name another window, so they give None).
     """
     lines = [line.rstrip("\r") for line in text.split("\n")]
+    if sum(1 for line in lines if _DISPLAY_HEADER_CLAIM.match(line)) < 2:
+        return _FocusPart(text, several_displays=False)
     heads = [
-        index for index, line in enumerate(lines) if _DISPLAY_HEADER_CLAIM.match(line)
+        index for index, line in enumerate(lines) if _DISPLAY_HEADER_FIELD.search(line)
     ]
-    if len(heads) < 2:
-        return text
     ids = _well_formed([lines[index] for index in heads], _DISPLAY_HEADER)
     if ids is None or len(set(ids)) != len(ids) or "0" not in ids:
         return None
     tops = _well_formed(
-        [line for line in lines if _TOP_FOCUSED_DISPLAY_CLAIM.match(line)],
+        [line for line in lines if _TOP_FOCUSED_DISPLAY_FIELD in line],
         _TOP_FOCUSED_DISPLAY,
     )
     if tops is None or set(tops) != {"0"}:
         return None
-    return "\n".join(lines[heads[ids.index("0")] :])
+    for index, line in enumerate(lines):
+        if _FOCUS_FIELD.search(line) is not None and (
+            index < heads[0] or not _focus_claim_well_formed(line)
+        ):
+            return None
+    return _FocusPart("\n".join(lines[heads[ids.index("0")] :]), several_displays=True)
 
 
 def _read_source(text: str, source: _Source) -> tuple[str, str] | object | None:
@@ -1305,7 +1349,7 @@ def _read_current_focus(text: str) -> tuple[str, str, str] | None:
         return None
     lines = {
         line.rstrip("\r")
-        for line in part.split("\n")
+        for line in part.text.split("\n")
         if _CURRENT_FOCUS_CLAIM.match(line)
     }
     windows: set[tuple[str, str, str]] = set()
@@ -3479,12 +3523,16 @@ class Device:
         be trusted gives None with no fallback. On a device with several
         displays only display 0's part of ``dumpsys window`` is read, and only
         while display 0 has the focus; otherwise the result is None, with no
-        fallback (see `_focus_part`). Device errors propagate.
+        fallback (see `_focus_part`). There, display 0's part without an
+        activity is None too: the activity dump's resumed activity names no
+        display. Device errors propagate.
         """
         part = _focus_part(self._shell("dumpsys window"))
         if part is None:
             return None
-        found = _read_source(part, _FOCUSED_APP_SOURCE)
+        found = _read_source(part.text, _FOCUSED_APP_SOURCE)
+        if found is _ABSENT and part.several_displays:
+            return None
         if found is _ABSENT:
             found = _read_source(
                 self._shell("dumpsys activity activities"), _RESUMED_SOURCE
