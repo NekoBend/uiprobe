@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import ntpath
 import os
+import posixpath
 import re
 import stat
 from pathlib import Path
@@ -27,6 +28,7 @@ from uiprobe.errors import AdbError
 from uiprobe.settings import (
     SETTINGS_FILE,
     SettingsError,
+    _shown,
     load_settings,
     render_default_settings,
 )
@@ -312,7 +314,7 @@ def test_an_out_without_a_parent_folder_is_refused_before_the_device(
     assert code == 1
     error = error_of(text)
     assert error["code"] == "run_folder_error"
-    assert str(here / "parent") in error["message"]
+    assert _shown(str(here / "parent")) in error["message"]
     assert "out" not in error["details"]
     assert fake_adb.requests == []
     assert connections == []
@@ -564,6 +566,52 @@ def test_trailing_separators_by_windows_rules(given, kept):
     assert strip(given, windows=True, splitdrive=ntpath.splitdrive) == kept
 
 
+POSIX_PARENTS = [
+    ("/work/runs/new", "/work/runs"),
+    ("/work/runs/new/", "/work/runs"),
+    ("/work/runs/new//", "/work/runs"),
+    ("/new/", "/"),
+    ("//new/", "//"),
+]
+WINDOWS_PARENTS = [
+    ("C:\\work\\runs\\new\\", "C:\\work\\runs"),
+    ("C:\\work\\runs\\new/", "C:\\work\\runs"),
+    ("C:\\new\\", "C:\\"),
+    ("\\\\server\\share\\new\\", "\\\\server\\share\\"),
+]
+
+
+@pytest.mark.parametrize(("folder", "parent"), POSIX_PARENTS)
+def test_the_run_folder_parent_by_posix_rules(folder, parent):
+    found = cli._run_folder_parent(
+        folder,
+        windows=False,
+        splitdrive=posixpath.splitdrive,
+        dirname=posixpath.dirname,
+    )
+    assert found == parent
+
+
+@pytest.mark.parametrize(("folder", "parent"), WINDOWS_PARENTS)
+def test_the_run_folder_parent_by_windows_rules(folder, parent):
+    found = cli._run_folder_parent(
+        folder, windows=True, splitdrive=ntpath.splitdrive, dirname=ntpath.dirname
+    )
+    assert found == parent
+
+
+@pytest.mark.usefixtures("android")
+def test_an_out_with_a_trailing_separator_is_accepted(fake_adb, capsys, here):
+    (here / "runs").mkdir()
+    write_settings(here, settings_text(press=True))
+    sep = os.sep
+    code, _text, _err = crawl(
+        capsys, fake_adb, *FAST, "--out", f"runs{sep}new{sep}", "--actions", "2"
+    )
+    assert code == 0
+    assert (here / "runs" / "new" / "run.json").exists()
+
+
 def test_the_ending_is_scanned_once():
     long = "a" + "/." * 200_000 + "/" * 200_000
     assert settings_module._folder_form_base(long) == "a"
@@ -617,26 +665,66 @@ def test_a_folder_made_by_another_program_during_an_interrupt_is_not_named(
 
 
 @pytest.mark.usefixtures("android")
-@pytest.mark.parametrize("wrote_start", [False, True])
-def test_a_failed_run_names_only_a_folder_it_wrote_into(
-    fake_adb, capsys, here, monkeypatch, wrote_start
+@pytest.mark.parametrize("ending", ["interrupt", "error"])
+def test_a_folder_another_run_made_and_wrote_is_not_named(
+    fake_adb, capsys, here, monkeypatch, ending
+):
+    # Two runs chose the same folder: the other one made it and wrote its
+    # run-start.json; this one ended before it made its own.
+    write_settings(here, settings_text(press=True))
+    out = here / "run"
+
+    def the_other_run_was_first(*_args: object, **_kwargs: object) -> object:
+        out.mkdir()
+        (out / "run-start.json").write_text("{}", encoding="utf-8")
+        if ending == "interrupt":
+            raise KeyboardInterrupt
+        raise AdbError("the device went away")
+
+    monkeypatch.setattr(cli, "crawl_run", the_other_run_was_first)
+    code, text, _err = crawl(capsys, fake_adb, "--out", str(out), "--json")
+    assert code != 0
+    assert "out" not in error_of(text).get("details", {})
+
+
+@pytest.mark.usefixtures("android")
+def test_a_child_file_collision_in_the_runs_own_folder_names_it(
+    fake_adb, capsys, here, monkeypatch
 ):
     write_settings(here, settings_text(press=True))
     out = here / "run"
 
-    def fails_after(*_args: object, **_kwargs: object) -> object:
-        out.mkdir()
-        if wrote_start:  # as the run does right after making its folder
-            (out / "run-start.json").write_text("{}", encoding="utf-8")
-        raise AdbError("the device went away")
+    def taken(self: runlog.RunWriter, _screen: object) -> bool:
+        path = str(self.path / "screens" / "s-000000000000.json")
+        error = FileExistsError(17, "File exists", path)
+        msg = f"cannot create {path}: File exists"
+        raise runlog.RunFolderError(msg, details={"path": path}) from error
 
-    monkeypatch.setattr(cli, "crawl_run", fails_after)
-    code, text, _err = crawl(capsys, fake_adb, "--out", str(out), "--json")
-    assert code != 0
-    details = error_of(text).get("details", {})
-    assert ("out" in details) is wrote_start
-    if wrote_start:
-        assert details["out"] == str(out)
+    monkeypatch.setattr(runlog.RunWriter, "write_screen", taken)
+    code, text, _err = crawl(capsys, fake_adb, *FAST, "--out", str(out), "--json")
+    assert code == 1
+    error = error_of(text)
+    assert error["code"] == "run_folder_error"
+    assert error["details"]["out"] == str(out)  # this run made it and wrote into it
+
+
+@pytest.mark.usefixtures("android")
+def test_a_partial_run_start_is_not_named(fake_adb, capsys, here, monkeypatch):
+    # A full disk: the run made its folder but could not complete run-start.json.
+    write_settings(here, settings_text(press=True))
+    out = here / "run"
+
+    def disk_full(_self: runlog.RunWriter, path: Path, text: str, **_kwargs: object):
+        path.write_text(text[:5], encoding="utf-8")
+        error = OSError(28, "No space left on device")
+        msg = f"cannot complete {path}: No space left on device"
+        raise runlog.RunFolderError(msg, details={"path": str(path)}) from error
+
+    monkeypatch.setattr(runlog.RunWriter, "_write_new", disk_full)
+    code, text, _err = crawl(capsys, fake_adb, *FAST, "--out", str(out), "--json")
+    assert code == 1
+    assert "out" not in error_of(text)["details"]
+    assert (out / "run-start.json").exists()  # the partial file stays
 
 
 # --- the package name ---------------------------------------------------------------

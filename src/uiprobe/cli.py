@@ -23,7 +23,6 @@ import stat
 import sys
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
-from pathlib import Path
 from typing import TYPE_CHECKING, Final, Literal, NoReturn, TextIO, override
 
 from uiprobe import __version__
@@ -80,6 +79,7 @@ from uiprobe.settings import (
     SettingsError,
     _folder_form_base,
     _shown,
+    _without_trailing_separators,
     load_settings,
     policy_from_settings,
     write_default_settings,
@@ -1283,13 +1283,32 @@ def _file_press_out(
     raise RunFolderError(msg, details={"path": parent})
 
 
+def _run_folder_parent(
+    folder: str,
+    *,
+    windows: bool | None = None,
+    splitdrive: Callable[[str], tuple[str, str]] = os.path.splitdrive,
+    dirname: Callable[[str], str] = os.path.dirname,
+) -> str:
+    """Return the folder that `folder` goes in, ignoring trailing separators.
+
+    ``runs/new/`` goes in ``runs``; a root stays a root. `windows`,
+    `splitdrive` and `dirname` default to this platform's rules (tests pass
+    the other platform's).
+    """
+    stripped = _without_trailing_separators(
+        folder, windows=windows, splitdrive=splitdrive
+    )
+    return dirname(stripped)
+
+
 def _check_run_folder_parent(folder: str) -> None:
     """Refuse the run folder `folder` when its parent is missing or no folder.
 
     `folder` is absolute (as `_new_folder` returns it). Links above it are
     followed, as when the run makes the folder. Nothing is created.
     """
-    parent = os.path.dirname(folder)  # noqa: PTH120 - kept as given
+    parent = _run_folder_parent(folder)
     try:
         info = os.stat(parent)  # noqa: PTH116 - the path as given
     except (FileNotFoundError, NotADirectoryError):
@@ -1765,7 +1784,6 @@ def _cmd_crawl_press(args: argparse.Namespace, setup: _CrawlSetup) -> int:
         stream=plan_stream,
     )
     _flush(plan_stream)
-    existed = Path(out).exists() or Path(out).is_symlink()
     try:
         result = crawl_run(
             device,
@@ -1783,7 +1801,7 @@ def _cmd_crawl_press(args: argparse.Namespace, setup: _CrawlSetup) -> int:
         )
     except KeyboardInterrupt as exc:
         # crawl_run wrote run.json with "interrupted" when it still could.
-        if not _made_by_this_run(out, existed=existed, error=exc):
+        if not _made_by_this_run(exc):
             return _fail(INTERRUPTED, "interrupted", as_json=args.json)
         msg = f"interrupted; the run so far is in {shown_out}"
         return _fail(INTERRUPTED, msg, as_json=args.json, details={"out": out})
@@ -1792,7 +1810,7 @@ def _cmd_crawl_press(args: argparse.Namespace, setup: _CrawlSetup) -> int:
         # nothing was written or sent; say it in the command's words.
         raise _cli_not_emulator(device, exc) from None
     except UiprobeError as exc:
-        if _made_by_this_run(out, existed=existed, error=exc):
+        if _made_by_this_run(exc):
             exc.details.setdefault("out", out)
         raise
     moves = result.repins  # as run.json counts them
@@ -1806,24 +1824,15 @@ def _cmd_crawl_press(args: argparse.Namespace, setup: _CrawlSetup) -> int:
     return 0
 
 
-def _made_by_this_run(out: str, *, existed: bool, error: BaseException) -> bool:
-    """Whether a failed run may name `out` as its run folder.
+def _made_by_this_run(error: BaseException) -> bool:
+    """Whether a failed run may name its run folder in the error.
 
-    `crawl_run` does not say whether it made the folder, so the folder is
-    named only when nothing was at `out` before the run, the run did not
-    find the name taken (a `RunFolderError` caused by `FileExistsError`),
-    and ``run-start.json``, the first file the run writes right after making
-    the folder, is there. A folder that appeared while the run had not made
-    its own (an interrupt or an error before that point) is never named; a
-    folder this run made but could not write into is not named either.
+    Only when `crawl_run` itself made the folder and wrote ``run-start.json``
+    completely: it then sets ``_uiprobe_own_run_folder`` on the error it
+    raises (see `uiprobe.crawl_driver._crawl_on`). Nothing is inferred from
+    what is on the disk, which another program can change.
     """
-    if existed:
-        return False
-    if isinstance(error, RunFolderError) and isinstance(
-        error.__cause__, FileExistsError
-    ):
-        return False
-    return os.path.lexists(os.path.join(out, "run-start.json"))  # noqa: PTH118
+    return getattr(error, "_uiprobe_own_run_folder", False) is True
 
 
 def _flush(stream: TextIO) -> None:
