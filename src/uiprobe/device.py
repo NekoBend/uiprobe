@@ -1395,6 +1395,9 @@ _WINDOW_HEAD: Final = re.compile(
 # there counts as a header of that hash (a title that holds ``Window{<hash>``
 # further on does not).
 _WINDOW_HEAD_HASH: Final = re.compile(r"  Window #[0-9]+ Window\{([0-9a-f]+) ")
+# A display's section in `dumpsys input` (API 29 and later); a forged one can
+# only add a display.
+_INPUT_DISPLAY: Final = re.compile(r"\s*Display: (-?[0-9]{1,10})")
 # The line below a window block's header names the window's display.
 _WINDOW_DISPLAY: Final = re.compile(r"    mDisplayId=(0|[1-9][0-9]{0,9}) ")
 # The system writes this line; 24 has mShowToOwnerOnly, 30 and 36 showForAllUsers.
@@ -3425,6 +3428,8 @@ class Device:
         that does not accept it raises `TypeError` on the first guarded tap;
         one that accepts it but does not forward it makes the app's own
         windows with ``samsungFlags=0x1`` refuse the tap (``samsung_flags``).
+        ``Display: N`` sections of two or more numbers in the read count as
+        several displays for `displays_seen`.
 
         Raises:
             AdbError: The adb protocol or the command failed.
@@ -3433,7 +3438,15 @@ class Device:
             DeviceOfflineError: The device is offline.
             DeviceUnauthorizedError: The device has not authorized this host.
         """
-        return read_window_at(self._shell("dumpsys input"), point, owned=owned)
+        text = self._shell("dumpsys input")
+        sections = {
+            int(match[1])
+            for line in _dump_lines(text)
+            if (match := _INPUT_DISPLAY.fullmatch(line)) is not None
+        }
+        if len(sections) > 1:
+            self._several_seen = True
+        return read_window_at(text, point, owned=owned)
 
     def diagnose_tap_window(
         self, *, show_device_text: bool = False

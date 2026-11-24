@@ -966,3 +966,22 @@ def test_a_new_run_starts_without_the_displays_seen(tmp_path, fake_adb):
     run(device, Clock(), tmp_path / "two", limits=Limits(actions=3), policy=policy)
     assert not displays_seen(device)
     assert android.inputs  # the second run, on one display, pressed
+
+
+@pytest.mark.parametrize(
+    ("extra", "several"),
+    [
+        ("", False),
+        ("  Display: 1\n", True),  # a second section
+        ("  Display: 00\n", False),  # display 0 again, in another spelling
+    ],
+    ids=["one-display", "two-displays", "zero-twice"],
+)
+def test_input_display_sections_count_as_displays(fake_adb, extra, several):
+    from tests.test_inputwindows import API36
+
+    android, device = make(fake_adb, GENUINE, windows=ONE_BLOCKS)
+    text = API36.replace("  Display: 0\n", extra + "  Display: 0\n")
+    android.override(re.compile(r"^dumpsys input\Z"), text.encode())
+    device.window_at((10, 10))
+    assert displays_seen(device) is several
