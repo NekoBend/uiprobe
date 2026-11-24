@@ -108,6 +108,7 @@ Limits that are known and accepted:
 - The irreversibility phrases over-block: `permanently` matches `Permanently moved` and a settings text such as `Permanently allowed`, and a screen with one such text is refused as a whole, even its harmless buttons. The reverse is also true: a warning worded in another way (`This is final`, `No going back`) is not recognised.
 - Katakana `ハイ` (or half-width `ﾊｲ`) is not a confirm word; only hiragana `はい` is.
 - The preview judges one screen as it is. It cannot see what a press would lead to, and it does not look at the pixels, only at what `uiautomator` reports.
+- On a device with several displays (a foldable with a cover screen), only display 0 is read for the foreground, and only while it is the focused display; while the cover screen has the focus, the foreground is unknown and every element is skipped as `outside_target_app` (see [Python API](python.md)).
 
 The output with `--json` is a `uiprobe.crawl_preview/1` object (see [Output formats](output.md)).
 

@@ -27,6 +27,7 @@ Details: [Commands](commands.md).
 - Use an emulator, or a test device with test accounts. Do not run uiprobe on a phone that holds your own accounts, payment methods or messages.
 - uiprobe uses the device given with `-s`, else the one named in `ANDROID_SERIAL`, else the only ready device. Run `uiprobe devices` first.
 - The guards have been checked only on Android emulators; real devices and other Android versions may behave differently.
+- On a device with several displays (a foldable with a cover screen), the foreground app and the focused window are read only from display 0, and only while it is the focused display. Otherwise they are unknown, so `launch` fails with `not_in_front` and the crawl presses nothing.
 
 ## What deny words cannot see
 
