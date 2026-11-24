@@ -114,6 +114,7 @@ def _press_only(args: argparse.Namespace) -> list[tuple[str, bool]]:
         ("--allow-real-device", args.allow_real_device),
         ("--back-on-other-screens", args.back_on_other_screens),
         ("--no-tap-window-check", args.no_tap_window_check),
+        ("--no-restart", args.no_restart),
     ]
 
 
@@ -644,6 +645,15 @@ def _add_press_options(crawl: argparse.ArgumentParser) -> None:
         help=(
             "with --press: do not read which window takes a tap at its point (by"
             " default a tap goes out only when a window of the app takes it)"
+        ),
+    )
+    crawl.add_argument(
+        "--no-restart",
+        action="store_true",
+        help=(
+            "with --press: start from the screen the app shows now (by default"
+            " the app is stopped first with am force-stop, then started on its"
+            " first screen; what it had not saved is lost)"
         ),
     )
 
@@ -1410,6 +1420,7 @@ def _cmd_crawl_press(args: argparse.Namespace, policy: Policy) -> int:
         "back_on_other_screens": policy.back_on_other_screens,
         "check_tap_window": policy.check_tap_window,
         "screenshots": args.screenshots,
+        "restart": not args.no_restart,
     }
     # The plan is out (and flushed) before the first request that changes the
     # device; with --json it goes to stderr, so stdout stays one JSON document.
@@ -1433,6 +1444,7 @@ def _cmd_crawl_press(args: argparse.Namespace, policy: Policy) -> int:
             # emulator unless --allow-real-device was given.
             allow_real_device=args.allow_real_device,
             settle=settle,
+            restart=not args.no_restart,
         )
     except KeyboardInterrupt:
         # crawl_run wrote run.json with "interrupted" when it still could.
@@ -1523,8 +1535,23 @@ def _press_plan_text(plan: dict[str, object]) -> str:
             + ("yes" if plan["back_on_other_screens"] else "no (restart the app)"),
             "check the window at each tap point: "
             + ("yes" if plan["check_tap_window"] else "no"),
+            _RESTART_PLAN[bool(plan["restart"])],
         ]
     )
+
+
+# The plan line about the first action, by whether it force-stops the app.
+_RESTART_PLAN: Final = {
+    True: (
+        "start: the app is stopped first (am force-stop), then started on its"
+        " first screen; what it had not saved is lost (--no-restart starts from"
+        " the screen it shows now)"
+    ),
+    False: (
+        "start: the app is not stopped first; the crawl starts from the screen"
+        " the app shows now"
+    ),
+}
 
 
 # The package of the system's lock screen and notification shade.

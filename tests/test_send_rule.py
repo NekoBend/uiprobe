@@ -29,7 +29,13 @@ each with the sending path it must send and checked on its own (BACK has two:
 on a screen of the app, and on a screen of another app with
 ``back_on_other_screens``); the set of the rows' paths must equal the paths
 the crawl declares (`crawl_driver._SEND_PATHS`), and a send without a
-decision fails, so a new sending path cannot be added without a row.
+decision fails, so a new sending path cannot be added without a row. The
+first launch force-stops the app by default (``restart=True``), through the
+``force-stop`` and ``start`` paths of a relaunch: every row but ``launch``
+runs with it, so each of them checks that force-stop and start as well, and
+the ``first-force-stop`` row checks that they are the first two sends. The
+``launch`` row runs with ``restart=False``, whose first launch is a start
+alone.
 Meta-tests show that the test fails, for every row, when a clock call is
 inserted into the production `_Run.final_check` right after its comparison
 or into `_Run.epoch_is` right after the equality, and when the row of a path
@@ -49,7 +55,7 @@ import pytest
 from tests.fake_device import FakeAndroid
 from tests.test_crawl_driver import SCREENS, SERIAL, SHOP, TRANSPORT, Clock
 from uiprobe import crawl_driver
-from uiprobe.crawl import Limits, Tap
+from uiprobe.crawl import Limits, Relaunch, Tap
 from uiprobe.crawl_driver import crawl
 from uiprobe.device import _CHANGING_COMMANDS, Device
 from uiprobe.guards import Policy
@@ -95,7 +101,9 @@ def cover_after_browse(device: Device, android: FakeAndroid, monkeypatch) -> Non
         _epoch: int | None = None,
     ) -> tuple[int, int]:
         result = original(point, _send_by=_send_by, _epoch=_epoch)
-        if not android.stopped and android.screen.name == "browse":
+        # Until the first relaunch: the first launch's own force-stop is the
+        # only one before it (its rows run with restart).
+        if len(android.stopped) <= 1 and android.screen.name == "browse":
             for name in ("ext1", "ext2", "ext3"):
                 android.show(name)
         return result
@@ -132,11 +140,13 @@ def off_target_back(device: Device, android: FakeAndroid, monkeypatch) -> None:
 
 
 class Row(NamedTuple):
-    """A scenario, the sending path it must send, and its policy options."""
+    """A scenario, the sending path it must send, its policy options, and
+    whether the first launch force-stops the app (`crawl`'s ``restart``)."""
 
     path: str
     scenario: Callable[..., None]
     options: dict[str, bool]
+    restart: bool = True
 
 
 # The rows: every sending path has at least one.
@@ -144,7 +154,8 @@ ROWS: dict[str, Row] = {
     "tap": Row("tap", plain, {}),
     "back": Row("back", plain, {}),
     "back-off-target": Row("back", off_target_back, {"back_on_other_screens": True}),
-    "launch": Row("launch", plain, {}),
+    "launch": Row("launch", plain, {}, restart=False),
+    "first-force-stop": Row("force-stop", plain, {}),
     "force-stop": Row("force-stop", cover_after_browse, {}),
     "start": Row("start", cover_after_browse, {}),
 }
@@ -338,6 +349,7 @@ def instrumented_run(
         stop=caller_stop,
         clock=caller_clock,
         sleep=caller_sleep,
+        restart=row.restart,
     )
     return log.events
 
@@ -374,7 +386,8 @@ def check_rule(events: list[Event]) -> dict[str, int]:
 
 def check_complete(rows: dict[str, Row]) -> None:
     """Every sending path the crawl declares has a row, and no row more; BACK
-    also has its row on another app's screen."""
+    also has its row on another app's screen, and the first launch has a row
+    with its force-stop and one without."""
     declared = set(crawl_driver._SEND_PATHS)
     paths = {row.path for row in rows.values()}
     assert paths == declared, f"rows {sorted(paths)} != paths {sorted(declared)}"
@@ -382,6 +395,12 @@ def check_complete(rows: dict[str, Row]) -> None:
     assert off_target == Row(
         "back", off_target_back, {"back_on_other_screens": True}
     ), "rows: no BACK row on another app's screen"
+    assert rows.get("first-force-stop") == Row("force-stop", plain, {}), (
+        "rows: no row of the first launch's force-stop"
+    )
+    assert rows.get("launch") == Row("launch", plain, {}, restart=False), (
+        "rows: no row of a first launch without a force-stop"
+    )
     assert set(FAMILY) == declared
 
 
@@ -431,6 +450,16 @@ def test_no_caller_code_runs_between_the_final_comparison_and_the_send(
     if row.scenario is off_target_back:
         # Some of its BACKs went to the other app's screens.
         assert any(package != SHOP for package in OFF_TARGET_BACKS)
+    # The first two sends are the first launch: force-stop and start, each
+    # on its own decision, with restart; a start alone without it.
+    decided = [w for k, w in events if k == "decided"][:2]
+    sent = [family(w) for k, w in events if k == "send"][:2]
+    if row.restart:
+        assert decided == ["force-stop", "start"]
+        assert sent == ["am force-stop", "am start"]
+    else:
+        assert decided[0] == "launch"
+        assert sent[0] == "am start"
 
 
 # --- tests of the test ---
@@ -497,7 +526,8 @@ def test_the_rule_test_fails_on_a_clock_call_before_the_tap_after_a_relaunch(
 
     def mark(self, action_id, action):
         result = relaunch(self, action_id, action)
-        relaunched[0] = True
+        # A relaunch, not the first launch (which goes through it too).
+        relaunched[0] = relaunched[0] or isinstance(action, Relaunch)
         return result
 
     def clock_then_send(self, action, action_id):
@@ -517,6 +547,12 @@ def test_the_rule_test_fails_on_a_clock_call_before_the_tap_after_a_relaunch(
 def test_the_completeness_test_fails_without_the_off_target_back_row():
     rows = {name: row for name, row in ROWS.items() if name != "back-off-target"}
     with pytest.raises(AssertionError, match="rows"):
+        check_complete(rows)
+
+
+def test_the_completeness_test_fails_without_the_first_force_stop_row():
+    rows = {name: row for name, row in ROWS.items() if name != "first-force-stop"}
+    with pytest.raises(AssertionError, match="first launch's force-stop"):
         check_complete(rows)
 
 

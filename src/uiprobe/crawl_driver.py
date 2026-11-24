@@ -9,12 +9,14 @@ clock or file), and the writer imports it, so the driver sits above both.
 
 What is sent. Only what the engine returned, and for a tap only what
 `CrawlEngine.recheck` allowed for that very `Tap` object, in the gate right
-before it is sent: the first launch, a
-relaunch (``force-stop`` then start; a launch is ``am start -W`` of the
-launcher activity, read right before each start, never ``monkey``), a tap at the
-point judge gave, and the BACK key. Text, long presses, swipes and other keys
-are never sent. By default the engine never returns BACK for a screen of another app (it
-relaunches instead); ``Policy.back_on_other_screens`` allows it. A BACK or
+before it is sent: the first launch (by default ``force-stop`` then
+start, so the run begins on the app's first screen; with ``restart=False``
+only the start), a relaunch (``force-stop`` then start; a launch is ``am
+start -W`` of the launcher activity, read right before each start, never
+``monkey``), a tap at the point judge gave, and the BACK key. Text, long
+presses, swipes and other keys are never sent. By default the engine never
+returns BACK for a screen of another app (it relaunches instead);
+``Policy.back_on_other_screens`` allows it. A BACK or
 relaunch decided on such a screen names its package (and the foreground) as
 ``off_target`` in the start line. Every
 action is sent once and never retried. A tap is reported to the engine with
@@ -25,7 +27,7 @@ next `CrawlEngine.next` with a ``tap_not_sent`` skip row.
 The loop (the protocol of the `CrawlEngine` docstring)::
 
     pin the device's transport; check it is an emulator (through that pin)
-    launch; observe
+    launch (by default force-stop, then start, as one action); observe
     repeat:
         if stop() is true: end with "interrupted"
         action = engine.next(observation)
@@ -44,7 +46,12 @@ followed only as `Device.can_repin` allows, else an error); `stop` again;
 then fresh reads, for a tap the dump first; then the clock again (the
 caller's code, as on main); last the comparison of the pin. No code of the
 caller runs between that comparison and the input: `stop`, `sleep` and the
-run folder writes all come before the reads or after the input. The time
+run folder writes all come before the reads or after the input. The
+force-stop of the first launch (the default, ``restart=True``) has the gate
+of a relaunch's force-stop without the screen reads, as there is no
+observation yet (`_Run.restart_gate`); then the first launch goes on exactly
+as a relaunch (`_Run.relaunch`): `stop`, the time, the pin check, `stop`,
+the launcher read, the time, the last comparison, the start. The time
 limit is also turned into a value of uiprobe's own clock (`_Run.now`) and
 checked by the device, with the pin, on the request's own connection right
 before it is written. It refuses, with a ``not_sent`` end line and nothing
@@ -242,6 +249,8 @@ _FIRST_APP_UID: Final = 10000
 # What `_Run.relaunch` returns when it force-stopped the app and then did not
 # start it because the device had to be proven again (not an end-line reason).
 _HALF_RELAUNCH: Final = "relaunch_half_sent"
+# The action id of the first launch: the run's first start line.
+_FIRST_ACTION: Final = 1
 # The stop reason of a run that ended because BACK or a relaunch was not sent.
 STOP_NOT_SENT: Final = "not_sent"
 MAX_DURATION: Final = "max_duration"  # the engine's reason for the time limit
@@ -260,8 +269,10 @@ class _Ended(Exception):  # noqa: N818 - a signal inside the driver, not an erro
 
 
 # The requests that change the device, each passing `_Run.final_check` right
-# before it is sent: a tap, BACK, the force-stop of a relaunch, the first
-# launch's start and a relaunch's start.
+# before it is sent: a tap, BACK, the force-stop of a relaunch (and of the
+# first launch, by default), the first launch's start without a force-stop
+# and the start after a force-stop (a relaunch's, and the first launch's by
+# default).
 _SEND_PATHS: Final = ("tap", "back", "force-stop", "launch", "start")
 # The default clock of `crawl`: uiprobe's own (`time.monotonic`).
 _OWN_CLOCK: Final = time.monotonic
@@ -403,6 +414,7 @@ class _Run:
         sleep: Callable[[float], None],
         send_limit: float | None = None,
         own_clock: bool = False,
+        restart: bool = False,
     ) -> None:
         self.device = device
         self.package = package
@@ -411,6 +423,8 @@ class _Run:
         self.policy = policy
         self.emulator = emulator
         self.app_uid = app_uid  # read once at the start (check_tap_window)
+        # Whether the first launch force-stops the app before it starts it.
+        self.restart = restart
         # The launcher activity read in the gate of the start about to go
         # out (the first launch or a relaunch), used by that start only.
         self.start_component: str | None = None
@@ -522,6 +536,8 @@ class _Run:
         if refused == NOT_SENT_RECONNECTED:
             self.notes.append(f"launch was not sent: {refused}")
             return STOP_NOT_SENT
+        if refused == _HALF_RELAUNCH:
+            return STOP_NOT_SENT  # the summary already says what happened
         if refused is not None:  # otherwise only stop() or the time limit
             return INTERRUPTED if self._stop_seen else MAX_DURATION
         return None
@@ -754,7 +770,9 @@ class _Run:
         self._open = action_id
         self.sent_epoch = self.device.pin_epoch
         try:
-            if isinstance(action, Relaunch):
+            if isinstance(action, Relaunch) or (
+                isinstance(action, Launch) and self.restart
+            ):
                 return self.relaunch(action_id, action), None
             refused = self.send_input(action, action_id)
         except Exception as error:
@@ -815,6 +833,7 @@ class _Run:
             off_target_package=other,
             off_target_foreground=foreground,
             off_target_focus=focus,
+            restart=isinstance(action, Launch) and self.restart,
         )
 
     def cover(
@@ -947,7 +966,7 @@ class _Run:
             return reason, None
         self.device.check_pin(emulator=self.emulator)
         if isinstance(action, Launch):
-            return self.launch_gate(), None
+            return (self.restart_gate() if self.restart else self.launch_gate()), None
         # Asked again after the pin check, which can block for long (a wait
         # for the device); after it only the reads run before the input.
         if self.stopped():
@@ -1064,6 +1083,28 @@ class _Run:
             return NOT_SENT_TIME_LIMIT
         return None
 
+    def restart_gate(self) -> str | None:
+        """The end of the gate of the first launch's force-stop, after the
+        pin check: `stop` again (the check can take long), the time again,
+        then the last comparison.
+
+        It is the gate of a relaunch's force-stop without the reads of the
+        screen, which compare it with the observation it was chosen on: the
+        first launch has none. The launcher activity is read after the
+        force-stop, right before the start, as for a relaunch.
+        """
+        epoch = self.device.pin_epoch
+        stopped = self.stopped()  # asked again after the pin check
+        now = self.now()
+        late = now >= self.deadline or self.past()
+        if not self.final_check("force-stop", epoch):
+            return NOT_SENT_RECONNECTED
+        if stopped:
+            return NOT_SENT_STOPPED
+        if late:
+            return NOT_SENT_TIME_LIMIT
+        return None
+
     def read_start_component(self, relaunch_id: int | None) -> bool:
         """Read the launcher activity for the start about to go out; False
         when the device had to be proven again during the read.
@@ -1152,10 +1193,11 @@ class _Run:
                 raise
             self.notes.append(f"{self.package} was not in front after launch ({seen})")
 
-    def relaunch(self, action_id: int, action: Relaunch) -> str | None:
+    def relaunch(self, action_id: int, action: Launch | Relaunch) -> str | None:
         """Force-stop the app, then, unless told to stop meanwhile, start it.
 
-        The two commands are sent one after the other, and `stop` and the time
+        A relaunch, and the first launch when `restart` is set. The two
+        commands are sent one after the other, and `stop` and the time
         limit are looked at again between them. When they end the run there,
         only the force-stop was sent: the start line gets a ``not_sent`` end
         (``start_not_sent``) and the summary says so. Returns that reason, or
@@ -1188,8 +1230,11 @@ class _Run:
             return self.half_sent(action_id, NOT_SENT_RECONNECTED)
         return None
 
-    def relaunch_stop(self, action_id: int, action: Relaunch) -> str | None:
-        """Send the force-stop of a relaunch; why it was not sent, or None."""
+    def relaunch_stop(self, action_id: int, action: Launch | Relaunch) -> str | None:
+        """Send the force-stop of a relaunch or of the first launch; why it
+        was not sent, or None. A relaunch not sent because the device had to
+        be proven again is taken back by the engine; the first launch is not
+        (the run ends, as for a first launch without the force-stop)."""
         try:
             self.device.stop_app(
                 self.package, _send_by=self.send_by, _epoch=self.approved
@@ -1205,7 +1250,8 @@ class _Run:
                 raise
             self._open = None  # nothing was sent
             self.end_not_sent(action_id, NOT_SENT_RECONNECTED)
-            self.withdraw(action)
+            if isinstance(action, Relaunch):
+                self.withdraw(action)
             return NOT_SENT_RECONNECTED
         return None
 
@@ -1238,13 +1284,17 @@ class _Run:
         return reason
 
     def half_sent(self, action_id: int, why: str) -> str:
-        """Close a relaunch whose force-stop went out and whose start did not;
-        return `_HALF_RELAUNCH`."""
+        """Close a relaunch, or the first launch, whose force-stop went out
+        and whose start did not; return `_HALF_RELAUNCH`."""
         self._open = None
         self.end_not_sent(action_id, NOT_SENT_START)
-        self.notes.append(
-            f"{self.package} was force-stopped but not started again ({why})"
+        # The first launch is always the run's first action.
+        what = (
+            "at the start of the run but not started"
+            if action_id == _FIRST_ACTION
+            else "but not started again"
         )
+        self.notes.append(f"{self.package} was force-stopped {what} ({why})")
         return _HALF_RELAUNCH
 
     def dump(self) -> Screen | None:
@@ -1466,19 +1516,33 @@ def crawl(
     stop: Callable[[], bool] | None = None,
     clock: Callable[[], float] = time.monotonic,
     sleep: Callable[[float], None] = time.sleep,
+    restart: bool = True,
 ) -> CrawlResult:
     """Crawl `package` on `device`, pressing what the guards allow, into `out`.
 
-    This presses on the selected device. It starts the app, taps elements that
-    `policy` allows, presses BACK and relaunches the app, and records every
-    step in the new run folder `out` (see the run folder page). A screen of
+    This presses on the selected device. It stops and starts the app (see
+    `restart`), taps elements that `policy` allows, presses BACK and
+    relaunches the app, and records every step in the new run folder `out`
+    (see the run folder page). A screen of
     another app gets a relaunch, not BACK, unless
     ``policy.back_on_other_screens`` is True. It is alpha;
     ``uiprobe crawl --press`` runs it from the command line.
 
     The order is: check the arguments, check the device, make the run folder,
     run. Nothing is written and no input is sent before the first two have
-    passed (the device check itself reads one property). Every launch and
+    passed (the device check itself reads one property).
+
+    `restart` (the default True) makes the first action force-stop the app
+    (``am force-stop``) and then start it, so every run begins on the app's
+    first screen; what the app had not saved is lost. It is one action of
+    kind ``launch``, counted once, whose start line has ``restart: true``,
+    and it passes the checks of a relaunch: the force-stop goes out only
+    after `stop`, the time limit and the pin were checked, and the start
+    only after they were checked again. When `stop` or the time limit ends
+    the run between the two, the start is not sent (``start_not_sent``) and
+    the summary says the app was stopped but not started. ``restart=False``
+    sends only the start, so the crawl begins on the screen the app shows
+    now. Earlier versions behaved as ``restart=False``. Every launch and
     relaunch reads the app's launcher activity with ``cmd package
     resolve-activity`` right before its start and starts it with ``am start
     -W`` (`Device.launch`); when it cannot be read, the start is not sent and
@@ -1555,6 +1619,7 @@ def crawl(
         raise TypeError(msg)
     _check_flag("screenshots", screenshots)
     _check_flag("allow_real_device", allow_real_device)
+    _check_flag("restart", restart)
     _check_clock("settle", settle)
     settle = (
         float.__float__(settle)
@@ -1594,6 +1659,7 @@ def crawl(
             clock=clock,
             sleep=sleep,
             repins_before=repins_before,
+            restart=restart,
         )
     finally:
         device.set_pin_watch(caller_watch)
@@ -1613,6 +1679,7 @@ def _crawl_on(
     clock: Callable[[], float],
     sleep: Callable[[float], None],
     repins_before: int,
+    restart: bool,
 ) -> CrawlResult:
     """`crawl` after its arguments were checked: pin, check, run."""
     device.pin_transport()
@@ -1643,6 +1710,7 @@ def _crawl_on(
         back_on_other_screens=policy.back_on_other_screens,
         repin=device.can_repin,
         check_tap_window=policy.check_tap_window,
+        restart=restart,
     )
     try:
         run = _Run(
@@ -1661,6 +1729,7 @@ def _crawl_on(
             sleep=sleep,
             send_limit=send_limit,
             own_clock=own_clock,
+            restart=restart,
         )
         run.repins_before = repins_before  # moves made before this call
         # Asked only while the device waits for a renumbered transport.

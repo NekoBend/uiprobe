@@ -414,6 +414,7 @@ class RunWriter:
         repin: bool | None = None,
         check_tap_window: bool | None = None,
         deny_exceptions: Iterable[str] = (),
+        restart: bool | None = None,
     ) -> RunWriter:
         """Make the run folder `out` and write ``run-start.json`` into it.
 
@@ -427,7 +428,9 @@ class RunWriter:
         ``repin``: whether a renumbered transport may be followed in this run
         (the device's boot id could be read). `check_tap_window`, when
         given, is written as ``check_tap_window`` (the crawl's
-        ``Policy.check_tap_window``).
+        ``Policy.check_tap_window``). `restart`, when given, is written as
+        ``restart``: whether the crawl force-stops the app before its first
+        start.
 
         Before anything is made, `out` gets the checks of
         `uiprobe.pngfile.check_new_path`: it must not be empty, hold a null
@@ -465,6 +468,9 @@ class RunWriter:
         if check_tap_window is not None and not isinstance(check_tap_window, bool):
             msg = "check_tap_window must be a bool or None"
             raise TypeError(msg)
+        if restart is not None and not isinstance(restart, bool):
+            msg = "restart must be a bool or None"
+            raise TypeError(msg)
         words = _check_texts("deny_words", deny_words)
         exceptions = _check_texts("deny_exceptions", deny_exceptions)
         limit_values = _limits_dict(limits)
@@ -484,6 +490,8 @@ class RunWriter:
             record["repin"] = repin
         if check_tap_window is not None:
             record["check_tap_window"] = check_tap_window
+        if restart is not None:
+            record["restart"] = restart
         text = _json_text(record, indent=2) + "\n"
         try:
             _make_dir(folder)  # the very str that was checked
@@ -553,6 +561,7 @@ class RunWriter:
         off_target_package: str | None = None,
         off_target_foreground: str | None = None,
         off_target_focus: str | None = None,
+        restart: bool = False,
     ) -> None:
         """Write the line that says an action is about to be sent.
 
@@ -567,7 +576,12 @@ class RunWriter:
         `off_target_focus` (the owner of the window with input focus, where a
         BACK goes) as ``focus``.
 
+        `restart` is True for a launch that force-stops the app before it
+        starts it: the line then has ``restart: true`` (the key is absent
+        otherwise).
+
         Raises:
+            TypeError: `restart` is not a bool.
             ValueError: `off_target_foreground` or `off_target_focus` is given
                 without `off_target_package`.
         """
@@ -599,6 +613,11 @@ class RunWriter:
         elif off_target_foreground is not None or off_target_focus is not None:
             msg = "off_target_foreground and off_target_focus need off_target_package"
             raise ValueError(msg)
+        if not isinstance(restart, bool):
+            msg = "restart must be a bool"
+            raise TypeError(msg)
+        if restart:
+            line["restart"] = True
         self._append("transitions.jsonl", _json_text(line) + "\n", start=True)
 
     def write_transition_end(
