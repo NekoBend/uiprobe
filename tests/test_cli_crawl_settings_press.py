@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -14,9 +15,11 @@ from tests.fake_device import FakeAndroid
 from tests.test_crawl_driver import SCREENS, SERIAL, SHOP, TRANSPORT
 from uiprobe import cli
 from uiprobe.crawl import Limits
+from uiprobe.device import Device
 from uiprobe.settings import (
     DEFAULTS_VERSION,
     SETTINGS_FILE,
+    SettingsError,
     load_settings,
     render_default_settings,
 )
@@ -496,7 +499,10 @@ def test_older_files_do_not_start_pressing(fake_adb, android, capsys, here, vers
 # --- guidance after a preview -------------------------------------------------
 
 LAST = "nothing was pressed: this was a preview (the default)"
-TO_PRESS = f"to press this time: uiprobe crawl {SHOP} --press --out DIR"
+TO_PRESS = "to press this time: add --press --out DIR to the same command"
+TO_PRESS_DRY = (
+    "to press this time: remove --dry-run and add --press --out DIR to the same command"
+)
 TO_ALWAYS = f"to always press: set press = true in {SETTINGS_FILE}"
 REAL = "on a real device also add --allow-real-device"
 
@@ -533,13 +539,13 @@ def test_a_preview_with_dry_run_and_press_false_says_how_to_press(
     lines = text.splitlines()
     assert lines[-3:] == [
         "nothing was pressed: this was a preview (--dry-run)",
-        TO_PRESS,
+        TO_PRESS_DRY,
         TO_ALWAYS,
     ]
 
 
 @pytest.mark.usefixtures("android")
-def test_the_guidance_keeps_the_named_file(fake_adb, capsys, here):
+def test_the_guidance_names_the_file_that_was_used(fake_adb, capsys, here):
     folder = here / "ci"
     folder.mkdir()
     path = write_settings(folder, settings_text())
@@ -547,19 +553,34 @@ def test_the_guidance_keeps_the_named_file(fake_adb, capsys, here):
     assert code == 0
     assert _ending(text) == [
         LAST,
-        f"{TO_PRESS} --config {path}",
+        TO_PRESS,
         f"to always press: set press = true in {path}",
     ]
 
 
-@pytest.mark.usefixtures("android")
-def test_the_guidance_does_not_print_a_path_that_needs_quoting(fake_adb, capsys, here):
-    folder = here / "my settings"
+@pytest.mark.parametrize("dry_run", [False, True])
+def test_following_the_guidance_keeps_the_other_options(
+    fake_adb, android, capsys, here, dry_run
+):
+    folder = here / "ci"
     folder.mkdir()
     path = write_settings(folder, settings_text())
-    code, text, _err = crawl(capsys, fake_adb, "--config", str(path))
+    argv = ["-s", SERIAL, "--deny", "browse", "--config", str(path)]
+    code, text, _err = crawl(capsys, fake_adb, *argv, *(["--dry-run"] * dry_run))
     assert code == 0
-    assert _ending(text)[1] == f"{TO_PRESS} --config PATH"
+    assert text.splitlines()[-2:] == [
+        TO_PRESS_DRY if dry_run else TO_PRESS,
+        TO_ALWAYS.replace(SETTINGS_FILE, str(path)),
+    ]
+    assert android.inputs == []
+    # What the line says: the same command, plus --press --out DIR.
+    out = here / "run"
+    code, text, _err = crawl(
+        capsys, fake_adb, *argv, "--press", "--out", str(out), *FAST, "--json"
+    )
+    assert code == 0
+    assert json.loads(text)["device"]["serial"] == SERIAL
+    assert (out / "run.json").exists()
 
 
 @pytest.mark.usefixtures("android")
@@ -572,3 +593,132 @@ def test_the_json_preview_has_no_guidance(fake_adb, capsys, here):
     assert payload["mode"] == "preview"
     # The emulator check is made only for the text guidance.
     assert not any("ro.kernel.qemu" in r for r in fake_adb.requests)
+
+
+# --- the settings path as given -----------------------------------------------
+
+posix_only = pytest.mark.skipif(
+    os.name == "nt", reason="Windows itself drops a trailing '.' component"
+)
+
+
+@posix_only
+def test_the_loader_opens_the_path_as_given(here):
+    path = write_settings(here, settings_text(press=True))
+    with pytest.raises(SettingsError, match=re.escape(f"{path}/.: ")):
+        load_settings(f"{path}/.")
+
+
+@posix_only
+@pytest.mark.parametrize("switch", [[], ["--dry-run"], ["--press"]])
+def test_a_config_path_past_a_file_reads_nothing(
+    fake_adb, android, capsys, here, connections, switch
+):
+    path = write_settings(here, settings_text(press=True))
+    given = f"{path}/."
+    pressing = ["--out", str(here / "run")] if switch == ["--press"] else []
+    code, text, err = crawl(capsys, fake_adb, *switch, *pressing, "--config", given)
+    assert (code, text) == (2, "")
+    # The same guidance as for any --config path that names no file.
+    assert f"none was found (looked for {given})" in err
+    assert fake_adb.requests == []
+    assert connections == []
+    assert android.inputs == []
+    assert not (here / "run").exists()
+
+
+@posix_only
+@pytest.mark.usefixtures("android")
+def test_key_reads_no_settings_past_a_file(fake_adb, capsys, here):
+    path = write_settings(here, settings_text())
+    code = cli.run(
+        ["--adb-server", fake_adb.address, "key", "back", "--config", f"{path}/."]
+    )
+    captured = capsys.readouterr()
+    assert (code, captured.out) == (2, "")
+    assert captured.err.startswith(f"uiprobe: error: {path}/.: ")
+    assert fake_adb.requests == []
+
+
+# --- the emulator check comes before the pin ----------------------------------
+
+IDENTITY_WORDS = ("ro.serialno", "ro.build.fingerprint", "boot_id")
+
+
+def shell_requests(fake_adb: FakeAdbServer) -> list[str]:
+    return [r for r in fake_adb.requests if r.startswith(("shell:", "exec:"))]
+
+
+@pytest.mark.parametrize("from_file", [False, True])
+def test_a_real_device_gets_only_the_emulator_check(
+    fake_adb, android, capsys, here, from_file
+):
+    android.props["ro.kernel.qemu"] = "0"
+    write_settings(here, settings_text(press=from_file))
+    out = here / "run"
+    switch = [] if from_file else ["--press"]
+    code, text, err = crawl(capsys, fake_adb, *switch, "--out", str(out))
+    assert (code, text) == (17, "")
+    assert "--allow-real-device" in err
+    assert shell_requests(fake_adb) == ["shell:getprop ro.kernel.qemu"]
+    assert not any(w in r for r in fake_adb.requests for w in IDENTITY_WORDS)
+    assert android.inputs == []
+    assert not out.exists()
+
+
+@pytest.mark.usefixtures("android")
+@pytest.mark.parametrize("from_file", [False, True])
+def test_an_emulator_is_checked_then_pinned(fake_adb, capsys, here, from_file):
+    write_settings(here, settings_text(press=from_file))
+    switch = [] if from_file else ["--press"]
+    code, _text, _err = crawl(
+        capsys, fake_adb, *switch, *FAST, "--out", str(here / "run"), "--actions", "1"
+    )
+    assert code == 0
+    shells = shell_requests(fake_adb)
+    assert shells[0] == "shell:getprop ro.kernel.qemu"
+    assert "ro.serialno" in shells[1]  # the pin's identity read comes second
+
+
+@pytest.mark.parametrize("from_file", [False, True])
+def test_a_device_swapped_after_the_check_is_refused_at_the_pin(
+    fake_adb, android, capsys, here, monkeypatch, from_file
+):
+    original = Device.is_emulator
+
+    def then_swap(self: Device) -> bool:
+        answer = original(self)
+        android.props["ro.kernel.qemu"] = "0"  # another device from here on
+        return answer
+
+    monkeypatch.setattr(Device, "is_emulator", then_swap)
+    write_settings(here, settings_text(press=from_file))
+    out = here / "run"
+    switch = [] if from_file else ["--press"]
+    code, text, err = crawl(capsys, fake_adb, *switch, "--out", str(out))
+    assert (code, text) == (17, "")
+    assert "--allow-real-device" in err
+    assert device_writes(fake_adb) == []
+    assert android.inputs == []
+    assert not out.exists()
+
+
+# --- settings warnings and a closed plan stream -------------------------------
+
+
+def test_a_warning_does_not_reach_stdout_before_the_plan_refusal(
+    fake_adb, android, capsys, here, monkeypatch
+):
+    text = settings_text(press=True)
+    head, _, tail = text.rpartition("remove = []")
+    write_settings(here, head + 'remove = ["KEYCODE_POWER"]' + tail)
+    monkeypatch.setattr("sys.stderr", None)
+    code = cli.run(
+        ["--adb-server", fake_adb.address, "crawl", SHOP, "--out", "run", "--json"]
+    )
+    captured = capsys.readouterr()
+    assert code == 2
+    error = json.loads(captured.out)["error"]  # stdout is the JSON alone
+    assert "stderr is closed" in error["message"]
+    assert fake_adb.requests == []
+    assert android.inputs == []

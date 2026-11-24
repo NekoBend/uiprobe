@@ -662,14 +662,17 @@ DEFAULT_LAST = "nothing was pressed: this was a preview (the default)"
 DRY_RUN_LAST = "nothing was pressed: this was a preview (--dry-run)"
 # The switch lines after a preview on an emulator with the file's press = false.
 GUIDANCE = [
-    f"to press this time: uiprobe crawl {SHOP} --press --out DIR",
+    "to press this time: add --press --out DIR to the same command",
     f"to always press: set press = true in {SETTINGS_FILE}",
 ]
 
 
 def pop_ending(lines: list[str], last: str = DRY_RUN_LAST) -> None:
     """Check and remove the closing line and the switch lines of a preview."""
-    assert lines[-3:] == [last, *GUIDANCE]
+    to_press, to_always = GUIDANCE
+    if last == DRY_RUN_LAST:
+        to_press = to_press.replace("add --press", "remove --dry-run and add --press")
+    assert lines[-3:] == [last, to_press, to_always]
     del lines[-3:]
 
 

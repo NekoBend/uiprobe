@@ -85,7 +85,9 @@ Reading is race-resistant (`_read_bytes`): the path is opened once, read-only
 every check and every byte comes from that descriptor: regular file, size at most
 `MAX_SETTINGS_BYTES`, at most `MAX_SETTINGS_BYTES` + 1 bytes read, size and
 times unchanged after the read, and the path still naming the same file
-(st_dev, st_ino). A symbolic link is followed at the open. What remains: a path
+(st_dev, st_ino). The path is opened as given, not as `pathlib` normalises
+it, so ``rules.toml/.`` fails on POSIX as it does for any program instead of
+reading ``rules.toml``. A symbolic link is followed at the open. What remains: a path
 switched before the open names another file, which is then fully checked; on
 Windows st_ctime is the creation time, so a same-size rewrite that restores the
 modification time is not detected there.
@@ -873,12 +875,13 @@ def _close_quietly(fd: int) -> None:
         return  # nothing is lost by failing to close a read-only descriptor
 
 
-def _read_bytes(path: Path, shown: str) -> bytes:
+def _read_bytes(path: str | os.PathLike[str], shown: str) -> bytes:
     """Read the settings file `path` (at most one byte more than the limit).
 
-    The path is opened once; every check and every byte comes from that
-    descriptor, never from the path again (the path is only stat-ed at the end
-    to see that it still names the opened file).
+    The path is opened once, as given (a str is not normalised, so a trailing
+    ``/.`` after a file fails as it does for any program); every check and
+    every byte comes from that descriptor, never from the path again (the path
+    is only stat-ed at the end to see that it still names the opened file).
     """
 
     def fail(text: str) -> SettingsError:
@@ -894,7 +897,7 @@ def _read_bytes(path: Path, shown: str) -> bytes:
         # Windows cannot open a directory (PermissionError): name it as POSIX
         # does. Only the message is chosen here; no byte is read.
         try:
-            kind = path.stat().st_mode
+            kind = os.stat(path).st_mode  # noqa: PTH116 - the path as given
         except (OSError, ValueError):
             kind = stat.S_IFREG
         if not stat.S_ISREG(kind):
@@ -907,7 +910,7 @@ def _read_bytes(path: Path, shown: str) -> bytes:
 
 
 def _read_descriptor(
-    fd: int, path: Path, fail: Callable[[str], SettingsError]
+    fd: int, path: str | os.PathLike[str], fail: Callable[[str], SettingsError]
 ) -> bytes:
     changed = "the file changed while it was read; try again"
     try:
@@ -935,7 +938,7 @@ def _read_descriptor(
     if total != before.st_size or _file_identity(after) != _file_identity(before):
         raise fail(changed)
     try:
-        named = path.stat()
+        named = os.stat(path)  # noqa: PTH116 - the path as given, not Path()
     except FileNotFoundError:
         raise fail(changed) from None
     except (OSError, ValueError) as error:
@@ -994,7 +997,10 @@ def load_settings(path: str | os.PathLike[str]) -> Settings:
     """
     location = Path(path)
     reader = _Reader(location)
-    data = _read_bytes(location, reader.shown)
+    # Open the path as given: Path() drops a trailing "/." (and "."
+    # components), so "rules.toml/." would read rules.toml, which no other
+    # program would. Messages about the read name the path as given.
+    data = _read_bytes(os.fspath(path), _shown(os.fspath(path)))
     text = _decode(data, reader.shown)
     try:
         parsed = tomllib.loads(text)

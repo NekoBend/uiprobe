@@ -977,21 +977,35 @@ def _cmd_swipe(args: argparse.Namespace) -> int:
     return 0
 
 
-def _load_settings(path: str) -> Settings:
-    """Read the settings file `path`; warnings go to stderr, errors are usage errors."""
+def _load_settings(path: str, *, warn: bool = True) -> Settings:
+    """Read the settings file `path`; warnings go to stderr, errors are usage errors.
+
+    With `warn` False the caller writes the warnings (`_settings_warnings`).
+    """
     try:
         settings = load_settings(path)
     except SettingsError as exc:
         raise _UsageError(_printable(str(exc))) from None
-    for warning in settings.warnings:
-        _emit(f"uiprobe: warning: {_printable(warning)}", stream=sys.stderr)
+    if warn:
+        _settings_warnings(settings)
     return settings
 
 
+def _settings_warnings(settings: Settings) -> None:
+    """Write the warnings about the settings file to stderr."""
+    for warning in settings.warnings:
+        _emit(f"uiprobe: warning: {_printable(warning)}", stream=sys.stderr)
+
+
 def _is_missing(path: str) -> bool:
-    """Tell whether nothing is at `path`; a broken link or entry counts as there."""
+    """Tell whether nothing is at `path`; a broken link or entry counts as there.
+
+    The path is looked up as given, not normalised by `Path` (which drops a
+    trailing ``/.``), so ``rules.toml/.`` after a file is missing, as the
+    settings reader, which opens it as given, would find it.
+    """
     try:
-        Path(path).lstat()
+        os.lstat(path)
     except (FileNotFoundError, NotADirectoryError):
         return True
     except (OSError, ValueError):
@@ -1023,17 +1037,12 @@ def _key_settings(args: argparse.Namespace) -> Settings | None:
     return _load_settings(SETTINGS_FILE)
 
 
-def _command_path(path: str) -> str:
-    """Return `path` for a printed command; one that needs quoting gives PATH."""
-    pattern = _PLAIN_WINDOWS_PATH_RE if _ON_WINDOWS else _PLAIN_PATH_RE
-    if pattern.fullmatch(str(path)) is None:
-        return "PATH"
-    return path
-
-
 def _create_line(path: str) -> str:
     """Return the command that creates ``path``; a path needing quoting gives PATH."""
-    return f"uiprobe init {_command_path(path)}"
+    pattern = _PLAIN_WINDOWS_PATH_RE if _ON_WINDOWS else _PLAIN_PATH_RE
+    if pattern.fullmatch(str(path)) is None:
+        return "uiprobe init PATH"
+    return f"uiprobe init {path}"
 
 
 def _crawl_settings(args: argparse.Namespace) -> Settings:
@@ -1068,7 +1077,8 @@ def _crawl_settings(args: argparse.Namespace) -> Settings:
             ),
             {"looked_for": looked, "create": create, "name_one": name},
         )
-    return _load_settings(path)
+    # The caller writes the warnings once it knows whether the run presses.
+    return _load_settings(path, warn=False)
 
 
 def _cmd_key(args: argparse.Namespace) -> int:
@@ -1239,6 +1249,12 @@ def _crawl_policy(args: argparse.Namespace) -> _CrawlSetup:
         press_source = "option"
     elif settings.press and not args.dry_run:
         press_source = "file"
+    if press_source is not None:
+        # Before the settings warnings: a pressing run whose plan cannot be
+        # shown is refused before anything is written, as with --press, where
+        # this was checked before the file was read.
+        _check_plan_stream(args)
+    _settings_warnings(settings)
     if press_source is None and not args.dry_run:
         _refuse_press_only(
             args,
@@ -1344,18 +1360,19 @@ def _preview_guidance(
     """How to switch from this preview to a pressing run; empty when none applies.
 
     A file that says press = true was overridden by --dry-run, so dropping
-    that option is the switch and nothing is printed. Otherwise the lines name
-    --press for this run and press = true for every run, and, unless the
-    device answers that it is an emulator, --allow-real-device.
+    that option is the switch and nothing is printed. Otherwise the lines say
+    what to add to the same command for this run (so its other options, such
+    as -s, --deny and --config, stay as they were) and press = true for every
+    run, and, unless the device answers that it is an emulator,
+    --allow-real-device.
     """
     if settings.press:
         return []
-    config = ""
-    if args.config is not None:
-        config = f" --config {_command_path(args.config)}"
+    this_time = "add --press --out DIR to the same command"
+    if args.dry_run:
+        this_time = "remove --dry-run and " + this_time
     lines = [
-        f"to press this time: uiprobe crawl {_printable(args.package)}"
-        f" --press --out DIR{config}",
+        f"to press this time: {this_time}",
         "to always press: set press = true in"
         f" {_printable(_shown(str(settings.source)))}",
     ]
@@ -1414,10 +1431,8 @@ def _cmd_crawl(args: argparse.Namespace) -> int:
     if args.press:
         # Before anything else writes (a settings warning would go to stdout).
         _check_plan_stream(args)
-    setup = _crawl_policy(args)
+    setup = _crawl_policy(args)  # checks the plan stream of press = true too
     if setup.press_source is not None:
-        # press = true is known only now, after the file was read.
-        _check_plan_stream(args)
         return _cmd_crawl_press(args, setup)
     settings_path = str(setup.settings.source)
     device = Device(
@@ -1533,15 +1548,26 @@ def _cmd_crawl_press(args: argparse.Namespace, setup: _CrawlSetup) -> int:
     assert setup.out is not None  # noqa: S101 - _crawl_policy sets it to press
     out: str = setup.out
     shown_out = _shown(out)
-    device = Device(
+    # First the emulator check alone, with the read a dry run makes (getprop
+    # ro.kernel.qemu), so that a real device refused without
+    # --allow-real-device gets no other read (no serial number, build
+    # fingerprint or boot id). Then the pin, on the serial checked here.
+    checked = Device(
         _single_serial(args),
+        adb_server=args.adb_server,
+        adb=args.adb,
+        start_server=args.start_server,
+    )
+    emulator = _press_device_check(checked, allow_real_device=args.allow_real_device)
+    device = Device(
+        checked.serial,
         adb_server=args.adb_server,
         adb=args.adb,
         start_server=args.start_server,
         pin=True,
     )
-    emulator = _press_device_check(device, allow_real_device=args.allow_real_device)
-    # The identity read through the pin must agree before anything is shown
+    # The device may have been swapped between that check and the pin, so
+    # the identity read through the pin must agree before anything is shown
     # or written: first that it is still the same device, then (without
     # --allow-real-device) that this identity also says emulator, which every
     # later pin check requires.
