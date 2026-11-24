@@ -1060,7 +1060,7 @@ def test_crawl_missing_config_create_line_names_the_path(
 def test_create_line_follows_the_platform_rule(
     monkeypatch, given, windows, create
 ) -> None:
-    monkeypatch.setattr(cli, "_ON_WINDOWS", windows)
+    monkeypatch.setattr(cli.crawl_dry, "_ON_WINDOWS", windows)
     assert cli._create_line(given) == create
 
 

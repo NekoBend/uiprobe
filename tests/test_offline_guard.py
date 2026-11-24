@@ -53,7 +53,7 @@ well when ``y`` is a submodule. Add a regression vector to
 `test_file_changes_are_found` or `test_a_never_approved_import_is_flagged`.
 
 How to allow a call site: add an entry to ALLOWED_CALLS, keyed by the path
-relative to src/uiprobe (`cli.py`, `sub/cli.py`), holding the call exactly as
+relative to src/uiprobe (`cli/__init__.py`, `sub/cli.py`), holding the call exactly as
 `ast.unparse` prints it (so quotes, spacing and argument order must match;
 an alias, an extra argument or other flags no longer match). The entry
 exempts only that call's function reference; its arguments are checked as
@@ -390,7 +390,7 @@ PNGFILE_CALLS = (RUNLOG_OPEN_BINARY, RUNLOG_WRITE)
 # prints them. Each has a reason; keep the list short.
 ALLOWED_CALLS: dict[str, frozenset[str]] = {
     # Discard output after a broken pipe: only the null device, write-only.
-    "cli.py": frozenset({"os.open(os.devnull, os.O_WRONLY)"}),
+    "cli/__init__.py": frozenset({"os.open(os.devnull, os.O_WRONLY)"}),
     # Not files: `datetime.replace` and `bytes.replace`.
     "device.py": frozenset({"datetime.now(UTC).astimezone().replace(microsecond=0)"}),
     # Not files: `bytes.replace`, and `getattr(element, field)` in `find`, which
@@ -1009,7 +1009,7 @@ DEVNULL_VARIANTS = [
 
 
 @pytest.mark.parametrize("source", DEVNULL_VARIANTS)
-@pytest.mark.parametrize("filename", ["cli.py", "other.py"])
+@pytest.mark.parametrize("filename", ["cli/__init__.py", "other.py"])
 def test_a_changed_devnull_call_is_flagged_in_every_file(source, filename):
     assert file_changes(source, filename)
 
@@ -1022,17 +1022,18 @@ def test_a_changed_devnull_call_is_flagged_in_every_file(source, filename):
     ],
 )
 def test_the_allowed_call_is_accepted_only_in_its_file(source):
-    assert not file_changes(source, "cli.py")
+    assert not file_changes(source, "cli/__init__.py")
     assert file_changes(source, "device.py")
-    assert file_changes(source, "sub/cli.py")  # the key is the whole relative path
+    assert file_changes(source, "cli/commands.py")  # the key is the whole path
+    assert file_changes(source, "sub/cli/__init__.py")
     assert file_changes(source)
 
 
 def test_an_allowed_call_still_has_its_arguments_checked():
     source = "import os\nos.open(os.devnull, os.O_WRONLY)\nopen('x', 'w')"
-    assert file_changes(source, "cli.py") == [3]
+    assert file_changes(source, "cli/__init__.py") == [3]
     nested = "import os\nos.open(os.devnull, os.O_WRONLY or os.remove('x'))"
-    assert file_changes(nested, "cli.py") == [2]
+    assert file_changes(nested, "cli/__init__.py") == [2]
 
 
 # The settings file's create-only open, with anything different.

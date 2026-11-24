@@ -259,7 +259,9 @@ def test_the_out_choice_is_made_in_one_place(fake_adb, capsys, here, monkeypatch
     # run folder of the run.
     write_settings(here, settings_text(press=True))
     chosen = here / "chosen"
-    monkeypatch.setattr(cli, "_file_press_out", lambda *_args: (str(chosen), "option"))
+    monkeypatch.setattr(
+        cli.crawl_dry, "_file_press_out", lambda *_args: (str(chosen), "option")
+    )
     code, text, _err = crawl(capsys, fake_adb, *FAST, "--actions", "3")
     assert code == 0
     assert f"run folder: {chosen} (--out)" in text.splitlines()
@@ -743,7 +745,7 @@ def test_a_stream_closed_by_the_warnings_is_refused_before_the_device(
     def close_stderr(_settings: object) -> None:
         monkeypatch.setattr("sys.stderr", None)  # as a caller's writer might
 
-    monkeypatch.setattr(cli, "_settings_warnings", close_stderr)
+    monkeypatch.setattr(cli.crawl_dry, "_settings_warnings", close_stderr)
     code = cli.run(
         ["--adb-server", fake_adb.address, "crawl", SHOP, "--out", "run", "--json"]
     )

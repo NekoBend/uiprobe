@@ -497,7 +497,7 @@ def test_every_pin_check_still_requires_an_emulator(
 def test_the_driver_gets_the_callers_own_real_device_choice(
     fake_adb, capsys, tmp_path, monkeypatch
 ):
-    import uiprobe.cli as cli_module
+    import uiprobe.cli.crawl_press as cli_module
 
     seen: list[object] = []
     original = cli_module.crawl_run
@@ -789,7 +789,7 @@ def test_no_restart_starts_from_the_screen_the_app_shows(
 
 @pytest.mark.usefixtures("here", "android")
 def test_the_driver_gets_the_restart_choice(fake_adb, capsys, tmp_path, monkeypatch):
-    import uiprobe.cli as cli_module
+    import uiprobe.cli.crawl_press as cli_module
 
     seen: list[object] = []
     original = cli_module.crawl_run

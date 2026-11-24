@@ -95,7 +95,9 @@ ignore = [
     "RUF029",  # async test functions may not await
 ]
 # The command-line entry point writes its results to stdout.
-"src/uiprobe/cli.py" = ["T20"]
+"src/uiprobe/cli/*.py" = ["T20"]
+# The package __init__ re-exports every name the former cli.py module had.
+"src/uiprobe/cli/__init__.py" = ["T20", "F401"]
 # Only this module runs the adb binary (to start the adb server), always with
 # list-form arguments and never through a shell.
 "src/uiprobe/adb.py" = ["S603"]
