@@ -370,6 +370,7 @@ def _plain_policy(policy: Policy) -> Policy:
         skip_rows_with_buttons=_flag(
             "skip_rows_with_buttons", policy.skip_rows_with_buttons
         ),
+        skip_navigate_up=_flag("skip_navigate_up", policy.skip_navigate_up),
     )
 
 
