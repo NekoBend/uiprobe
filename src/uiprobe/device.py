@@ -1195,12 +1195,17 @@ _ABSENT: Final = object()
 # window` prints a block per display, each with its own ``mCurrentFocus`` and
 # ``mFocusedApp``, in no fixed order, and one ``mTopFocusedDisplayId`` names
 # the focused display. A dump is read that way when more than one line holds
-# ``Display:`` then ``mDisplayId`` (any spacing), or any line holds
-# ``mTopFocusedDisplayId``; otherwise it is read as on a single display. No
-# line counts or is dropped because of where a header sits: an app can forge
-# headers in a window title, so a header's position proves nothing.
+# ``Display:`` then ``mDisplayId`` (any spacing), or any line that holds
+# ``mTopFocusedDisplayId`` is not exactly ``  mTopFocusedDisplayId=0``;
+# otherwise it is read as on a single display (an API 37 emulator prints one
+# header and that exact line, API 24 a header and no such line). A forged
+# header makes two, and a forged or malformed top line is not that exact
+# line, so forgeries land on the stricter reading. No line counts or is
+# dropped because of where a header sits: an app can forge headers in a
+# window title, so a header's position proves nothing.
 _DISPLAY_HEADER_FIELD: Final = re.compile(r"Display:\s*mDisplayId")
 _TOP_FOCUSED_DISPLAY_FIELD: Final = "mTopFocusedDisplayId"
+_TOP_FOCUSED_DISPLAY_ZERO: Final = "  mTopFocusedDisplayId=0"
 _TOP_FOCUSED_DISPLAY: Final = re.compile(
     r"  mTopFocusedDisplayId=(-1|0|[1-9][0-9]{0,9})"
 )
@@ -1212,9 +1217,16 @@ _CURRENT_FOCUS_EXACT: Final = re.compile(
 
 
 def _several_displays(lines: list[str]) -> bool:
-    """Whether a `dumpsys window` dump is read as one with several displays."""
+    """Whether a `dumpsys window` dump is read as one with several displays.
+
+    More than one header line, or a top line other than the exact
+    ``  mTopFocusedDisplayId=0`` that single-display devices print.
+    """
     headers = sum(1 for line in lines if _DISPLAY_HEADER_FIELD.search(line))
-    return headers > 1 or any(_TOP_FOCUSED_DISPLAY_FIELD in line for line in lines)
+    return headers > 1 or any(
+        _TOP_FOCUSED_DISPLAY_FIELD in line and line != _TOP_FOCUSED_DISPLAY_ZERO
+        for line in lines
+    )
 
 
 def _display_zero_focused(lines: list[str]) -> bool:

@@ -389,14 +389,24 @@ def test_a_focused_app_record_with_wrong_braces_is_not_read(fake_adb, line):
     assert device.foreground() is None
 
 
-# Dumps with no display header lines and no mTopFocusedDisplayId (single
-# displays, older versions, the fakes) read exactly as before display blocks
+# Dumps of a single display (no or one header line, and no
+# mTopFocusedDisplayId line or only exact ``  mTopFocusedDisplayId=0`` ones,
+# as API 24 and API 37 emulators print) read exactly as before display blocks
 # were told apart: these results were checked against that earlier reader
 # (a7e8052), and must not change.
 GENUINE = (
     "WINDOW MANAGER WINDOWS (dumpsys window windows)\n"
     f"  mCurrentFocus={APP_FOCUS}\n"
     f"  mFocusedApp={APP_RECORD}\n"
+)
+# A single display at API 37: one header and the exact top line.
+SINGLE = (
+    "WINDOW MANAGER DISPLAY CONTENTS (dumpsys window displays)\n"
+    "  Display: mDisplayId=0 (organized)\n"
+    f"  mCurrentFocus={APP_FOCUS}\n"
+    f"  mFocusedApp={APP_RECORD}\n"
+    "WINDOW MANAGER WINDOWS (dumpsys window windows)\n"
+    "  mTopFocusedDisplayId=0\n"
 )
 TOKEN_RECORD = f"Token{{2 ActivityRecord{{3 u0 {APP}/.MainActivity t14}}}}"
 AS_BEFORE = [
@@ -426,6 +436,13 @@ AS_BEFORE = [
         APP_WINDOW,
     ),
     (BOTH_SIDES.split("  mInputMethodTarget")[0], LAUNCHER, None),
+    (SINGLE, APP, APP_WINDOW),
+    (SINGLE.replace("\n", "\r\n"), APP, APP_WINDOW),
+    (SINGLE + "  mTopFocusedDisplayId=0\n", APP, APP_WINDOW),
+    (SINGLE + f"  mFocusedApp={FORGED_RECORD}\n", None, APP_WINDOW),
+    (SINGLE + "  mCurrentFocus=Window{1 u0 y}\n", APP, None),
+    (SINGLE + "  mCurrentFocus=null\n", APP, None),
+    (SINGLE.replace(f"  mFocusedApp={APP_RECORD}\n", ""), APP, APP_WINDOW),
 ]
 
 
@@ -436,3 +453,31 @@ def test_dumps_without_display_headers_read_as_before(
     _, device = make(fake_adb, window)
     assert device.foreground() == foreground
     assert device.focused_window() == focus
+
+
+FORGED_FOCUS = "Window{ffff u0 com.example.forged/com.example.forged.Fake}"
+
+
+@pytest.mark.parametrize(
+    "forged",
+    [
+        "  Display: mDisplayId=1 (organized)\n"
+        f"  mCurrentFocus={FORGED_FOCUS}\n"
+        f"  mFocusedApp={FORGED_RECORD}\n",
+        "  Display: mDisplayId=0 (organized)\n"
+        f"  mCurrentFocus={FORGED_FOCUS}\n"
+        f"  mFocusedApp={FORGED_RECORD}\n",
+        "  Display: mDisplayId=1 (organized)\n  mCurrentFocus=null\n",
+        f"  mTopFocusedDisplayId=0 \n  mFocusedApp={FORGED_RECORD}\n",
+        f"  mTopFocusedDisplayId=1\n  mCurrentFocus={FORGED_FOCUS}\n",
+    ],
+    ids=["header-1-and-focus", "header-0-and-focus", "header-only", "top-bad", "top-1"],
+)
+def test_forgeries_on_a_single_display_never_give_a_forged_answer(fake_adb, forged):
+    # SINGLE and the activity dump name the app; the forged lines another.
+    android, device = make(fake_adb, SINGLE + forged)
+    assert device.foreground() in {APP, None}
+    assert device.focused_window() in {APP_WINDOW, None}
+    # They take the reading of several displays: mFocusedApp is not used.
+    android.override(ACTIVITIES, b"nothing\n")
+    assert device.foreground() is None
