@@ -1283,6 +1283,32 @@ def _file_press_out(
     raise RunFolderError(msg, details={"path": parent})
 
 
+def _check_run_folder_parent(folder: str) -> None:
+    """Refuse the run folder `folder` when its parent is missing or no folder.
+
+    `folder` is absolute (as `_new_folder` returns it). Links above it are
+    followed, as when the run makes the folder. Nothing is created.
+    """
+    parent = os.path.dirname(folder)  # noqa: PTH120 - kept as given
+    try:
+        info = os.stat(parent)  # noqa: PTH116 - the path as given
+    except (FileNotFoundError, NotADirectoryError):
+        msg = (
+            f"cannot make the run folder {_shown(folder)}: the folder it goes in,"
+            f" {_shown(parent)}, does not exist; create it, or name another one"
+        )
+        raise RunFolderError(msg, details={"path": folder}) from None
+    except (OSError, ValueError) as error:
+        msg = f"cannot check the folder {_shown(parent)}: {error}"
+        raise RunFolderError(msg, details={"path": folder}) from None
+    if not stat.S_ISDIR(info.st_mode):
+        msg = (
+            f"cannot make the run folder {_shown(folder)}: {_shown(parent)} is not"
+            " a folder"
+        )
+        raise RunFolderError(msg, details={"path": folder})
+
+
 def _run_stamp() -> str:
     """The local time for a run folder name: YYYYMMDD-HHMMSS, no zone."""
     return f"{datetime.now().astimezone():%Y%m%d-%H%M%S}"
@@ -1321,7 +1347,14 @@ def _runs_dir_parent(args: argparse.Namespace, runs_dir: str, shown_file: str) -
     # and junctions) as links, and other reparse points, such as cloud-file
     # placeholders, are resolved by the system, so refusing on the reparse
     # point attribute alone would refuse ordinary synced folders.
-    if stat.S_ISLNK(info.st_mode) or os.path.isjunction(parent):
+    # The lstat result decides first (a junction is a mount point reparse
+    # point), so a swap after it cannot pass; isjunction is a second check.
+    mount_point = getattr(stat, "IO_REPARSE_TAG_MOUNT_POINT", object())
+    if (
+        stat.S_ISLNK(info.st_mode)
+        or getattr(info, "st_reparse_tag", 0) == mount_point
+        or os.path.isjunction(parent)
+    ):
         msg = (
             f"the folder for run folders {where} is a link or junction; give"
             " the folder it points to in runs_dir, or add --out DIR"
@@ -1346,7 +1379,9 @@ def _crawl_policy(args: argparse.Namespace) -> _CrawlSetup:
     if args.press and args.dry_run:
         msg = "--press and --dry-run cannot be combined"
         raise _UsageError(msg)
-    args.package = str(args.package)  # a plain str for the check and the names
+    # A plain str, whatever the subclass (as crawl_run does), for the check,
+    # the run folder's name and the run itself.
+    args.package = str.__str__(args.package)
     try:
         check_package(args.package)
     except ValueError as exc:
@@ -1383,9 +1418,10 @@ def _crawl_policy(args: argparse.Namespace) -> _CrawlSetup:
         # --out, else runs_dir, else a usage error: only _file_press_out decides.
         out, out_source = _file_press_out(args, settings, press_source)
         # Refusal only, before the device is contacted: the same checks the
-        # run makes before it creates the folder (nothing is created here;
-        # those checks and the create-only mkdir still follow in the run).
-        _new_folder(out)
+        # run makes before it creates the folder, and that its parent is an
+        # existing folder (nothing is created here; the run's own checks and
+        # its create-only mkdir still follow).
+        _check_run_folder_parent(_new_folder(out))
     policy = policy_from_settings(
         settings,
         extra_deny=args.deny,
@@ -1745,9 +1781,9 @@ def _cmd_crawl_press(args: argparse.Namespace, setup: _CrawlSetup) -> int:
             settle=settle,
             restart=not args.no_restart,
         )
-    except KeyboardInterrupt:
+    except KeyboardInterrupt as exc:
         # crawl_run wrote run.json with "interrupted" when it still could.
-        if existed or not Path(out).exists():
+        if not _made_by_this_run(out, existed=existed, error=exc):
             return _fail(INTERRUPTED, "interrupted", as_json=args.json)
         msg = f"interrupted; the run so far is in {shown_out}"
         return _fail(INTERRUPTED, msg, as_json=args.json, details={"out": out})
@@ -1756,12 +1792,7 @@ def _cmd_crawl_press(args: argparse.Namespace, setup: _CrawlSetup) -> int:
         # nothing was written or sent; say it in the command's words.
         raise _cli_not_emulator(device, exc) from None
     except UiprobeError as exc:
-        # A folder found at the chosen name when the run went to make it
-        # (another program made it first) is not this run's: never name it.
-        taken = isinstance(exc, RunFolderError) and isinstance(
-            exc.__cause__, FileExistsError
-        )
-        if not existed and not taken and Path(out).exists():  # made by this run
+        if _made_by_this_run(out, existed=existed, error=exc):
             exc.details.setdefault("out", out)
         raise
     moves = result.repins  # as run.json counts them
@@ -1773,6 +1804,26 @@ def _cmd_crawl_press(args: argparse.Namespace, setup: _CrawlSetup) -> int:
     else:
         _emit(_press_result_text(result, hints, moves))
     return 0
+
+
+def _made_by_this_run(out: str, *, existed: bool, error: BaseException) -> bool:
+    """Whether a failed run may name `out` as its run folder.
+
+    `crawl_run` does not say whether it made the folder, so the folder is
+    named only when nothing was at `out` before the run, the run did not
+    find the name taken (a `RunFolderError` caused by `FileExistsError`),
+    and ``run-start.json``, the first file the run writes right after making
+    the folder, is there. A folder that appeared while the run had not made
+    its own (an interrupt or an error before that point) is never named; a
+    folder this run made but could not write into is not named either.
+    """
+    if existed:
+        return False
+    if isinstance(error, RunFolderError) and isinstance(
+        error.__cause__, FileExistsError
+    ):
+        return False
+    return os.path.lexists(os.path.join(out, "run-start.json"))  # noqa: PTH118
 
 
 def _flush(stream: TextIO) -> None:

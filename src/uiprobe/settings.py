@@ -361,13 +361,25 @@ def _folder_form_base(path: str) -> str | None:
     return None if end == len(path) else path[:end]
 
 
-def _without_trailing_separators(path: str) -> str:
+def _without_trailing_separators(
+    path: str,
+    *,
+    windows: bool | None = None,
+    splitdrive: Callable[[str], tuple[str, str]] = os.path.splitdrive,
+) -> str:
     """Return `path` without trailing separators, keeping a root (``/``, ``C:\\``).
 
-    The end is scanned by index, once.
+    A path made only of separators is kept exactly as written: on POSIX
+    ``//`` can be a root of its own, and on Windows it starts a UNC name.
+    `windows` and `splitdrive` default to this platform's rules (tests pass
+    Windows ones). The end is scanned by index, once.
     """
-    separators = _separators()
-    drive = os.path.splitdrive(path)[0]  # "" where there are no drives
+    if windows is None:
+        windows = sys.platform == "win32"
+    separators = "/\\" if windows else "/"
+    if all(char in separators for char in path):
+        return path
+    drive = splitdrive(path)[0] if windows else ""
     keep = len(drive) + 1  # the drive and one separator: the root
     end = len(path)
     while end > keep and path[end - 1] in separators:

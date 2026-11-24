@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import ntpath
 import os
 import re
 import stat
@@ -22,6 +23,7 @@ from tests.test_crawl_driver import SCREENS, SERIAL, SHOP, TRANSPORT
 from uiprobe import cli, runlog
 from uiprobe import settings as settings_module
 from uiprobe.device import IDENTITY_COMMAND
+from uiprobe.errors import AdbError
 from uiprobe.settings import (
     SETTINGS_FILE,
     SettingsError,
@@ -33,6 +35,7 @@ if TYPE_CHECKING:
     from tests.fake_adb_server import FakeAdbServer
 
 STAMP = "20261125-101500"
+MOUNT_POINT = 0xA0000003  # IO_REPARSE_TAG_MOUNT_POINT: a junction
 NAME = f"{SHOP}-{STAMP}"
 PRESS_NEEDS_OUT = "--press needs --out DIR, the new folder to record the run into"
 
@@ -252,6 +255,7 @@ def test_another_reparse_point_is_accepted(fake_adb, capsys, here, monkeypatch):
     class Placeholder:
         st_mode = stat.S_IFDIR | 0o700
         st_file_attributes = stat.FILE_ATTRIBUTE_REPARSE_POINT
+        st_reparse_tag = 0x9000001A  # a cloud-file tag, not a mount point
 
     def placeholder_at_runs(path: str, *args: object, **kwargs: object) -> object:
         if path == "runs":
@@ -262,6 +266,58 @@ def test_another_reparse_point_is_accepted(fake_adb, capsys, here, monkeypatch):
     code, _text, _err = crawl(capsys, fake_adb, *FAST, "--actions", "2")
     assert code == 0
     assert (runs / NAME / "run.json").exists()
+
+
+@pytest.mark.usefixtures("android")
+def test_a_mount_point_in_the_first_lstat_is_refused(
+    fake_adb, capsys, here, monkeypatch
+):
+    # One read decides: a junction seen by lstat is refused even when
+    # isjunction, asked afterwards, says no (the folder was swapped back).
+    (here / "runs").mkdir()
+    write_settings(here, with_runs_dir("runs"))
+    original = os.lstat
+
+    class Junction:
+        st_mode = stat.S_IFDIR | 0o700
+        st_file_attributes = stat.FILE_ATTRIBUTE_REPARSE_POINT
+        st_reparse_tag = MOUNT_POINT
+
+    def junction_at_runs(path: str, *args: object, **kwargs: object) -> object:
+        if path == "runs":
+            return Junction()
+        return original(path, *args, **kwargs)  # ty: ignore[invalid-argument-type]
+
+    monkeypatch.setattr(os, "lstat", junction_at_runs)
+    monkeypatch.setattr(os.path, "isjunction", lambda _path: False)
+    # The constant exists only on Windows; give it its Windows value here.
+    monkeypatch.setattr(stat, "IO_REPARSE_TAG_MOUNT_POINT", MOUNT_POINT, raising=False)
+    code, _text, err = crawl(capsys, fake_adb)
+    assert code == 1
+    assert "is a link or junction" in err
+    assert fake_adb.requests == []
+
+
+@pytest.mark.parametrize("from_file", [False, True])
+@pytest.mark.parametrize("parent_kind", ["missing", "file"])
+def test_an_out_without_a_parent_folder_is_refused_before_the_device(
+    fake_adb, android, capsys, here, connections, from_file, parent_kind
+):
+    write_settings(here, settings_text(press=from_file))
+    if parent_kind == "file":
+        (here / "parent").write_text("x", encoding="utf-8")
+    out = here / "parent" / "child"
+    switch = [] if from_file else ["--press"]
+    code, text, _err = crawl(capsys, fake_adb, *switch, "--out", str(out), "--json")
+    assert code == 1
+    error = error_of(text)
+    assert error["code"] == "run_folder_error"
+    assert str(here / "parent") in error["message"]
+    assert "out" not in error["details"]
+    assert fake_adb.requests == []
+    assert connections == []
+    assert android.inputs == []
+    assert not out.exists()
 
 
 @pytest.mark.parametrize("from_file", [False, True])
@@ -463,7 +519,8 @@ def test_runs_dir_is_read(here):
         ("runs/", "runs"),
         ("runs//", "runs"),
         ("/", "/"),
-        ("//", "/"),
+        ("//", "//"),
+        ("///", "///"),
         (".", "."),
         ("runs/..", "runs/.."),
     ],
@@ -473,10 +530,45 @@ def test_trailing_separators_of_runs_dir_are_dropped(here, value, read):
     assert load_settings(path).runs_dir == read
 
 
+POSIX_ENDINGS = [
+    ("/", "/"),
+    ("//", "//"),
+    ("///", "///"),
+    ("/runs/", "/runs"),
+    ("runs//", "runs"),
+    ("runs\\", "runs\\"),  # a backslash is no separator here
+]
+WINDOWS_ENDINGS = [
+    ("C:\\", "C:\\"),
+    ("C:\\\\", "C:\\"),
+    ("C:\\runs\\", "C:\\runs"),
+    ("C:runs\\", "C:runs"),
+    ("\\\\", "\\\\"),
+    ("//", "//"),
+    ("/\\/", "/\\/"),
+    ("runs/\\", "runs"),
+    ("\\\\server\\share\\", "\\\\server\\share\\"),
+    ("\\\\server\\share\\runs\\", "\\\\server\\share\\runs"),
+]
+
+
+@pytest.mark.parametrize(("given", "kept"), POSIX_ENDINGS)
+def test_trailing_separators_by_posix_rules(given, kept):
+    strip = settings_module._without_trailing_separators
+    assert strip(given, windows=False) == kept
+
+
+@pytest.mark.parametrize(("given", "kept"), WINDOWS_ENDINGS)
+def test_trailing_separators_by_windows_rules(given, kept):
+    strip = settings_module._without_trailing_separators
+    assert strip(given, windows=True, splitdrive=ntpath.splitdrive) == kept
+
+
 def test_the_ending_is_scanned_once():
     long = "a" + "/." * 200_000 + "/" * 200_000
     assert settings_module._folder_form_base(long) == "a"
     assert settings_module._without_trailing_separators("b" + "/" * 400_000) == "b"
+    assert settings_module._without_trailing_separators("/" * 400_000) == "/" * 400_000
 
 
 @pytest.mark.parametrize(
@@ -500,3 +592,72 @@ def test_invalid_runs_dir_values_are_refused(here, value, message):
     with pytest.raises(SettingsError) as caught:
         load_settings(path)
     assert str(caught.value) == f"{path}: {message}"
+
+
+# --- naming the run folder only when it is this run's ----------------------------
+
+
+@pytest.mark.usefixtures("android")
+def test_a_folder_made_by_another_program_during_an_interrupt_is_not_named(
+    fake_adb, capsys, here, monkeypatch
+):
+    write_settings(here, settings_text(press=True))
+    out = here / "run"
+
+    def interrupted_before_the_folder(*_args: object, **_kwargs: object) -> object:
+        out.mkdir()  # another program, while the run had not made its own
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(cli, "crawl_run", interrupted_before_the_folder)
+    code, text, _err = crawl(capsys, fake_adb, "--out", str(out), "--json")
+    assert code == 130
+    error = error_of(text)
+    assert error["message"] == "interrupted"
+    assert "out" not in error.get("details", {})
+
+
+@pytest.mark.usefixtures("android")
+@pytest.mark.parametrize("wrote_start", [False, True])
+def test_a_failed_run_names_only_a_folder_it_wrote_into(
+    fake_adb, capsys, here, monkeypatch, wrote_start
+):
+    write_settings(here, settings_text(press=True))
+    out = here / "run"
+
+    def fails_after(*_args: object, **_kwargs: object) -> object:
+        out.mkdir()
+        if wrote_start:  # as the run does right after making its folder
+            (out / "run-start.json").write_text("{}", encoding="utf-8")
+        raise AdbError("the device went away")
+
+    monkeypatch.setattr(cli, "crawl_run", fails_after)
+    code, text, _err = crawl(capsys, fake_adb, "--out", str(out), "--json")
+    assert code != 0
+    details = error_of(text).get("details", {})
+    assert ("out" in details) is wrote_start
+    if wrote_start:
+        assert details["out"] == str(out)
+
+
+# --- the package name ---------------------------------------------------------------
+
+
+def test_a_str_subclass_cannot_change_the_package(fake_adb, android, here):
+    (here / "runs").mkdir()
+    write_settings(here, with_runs_dir("runs"))
+
+    class Other(str):
+        __slots__ = ()
+
+        def __str__(self) -> str:
+            return "com.other.app"
+
+    args = cli._parse(["--adb-server", fake_adb.address, "crawl", SHOP])
+    args.package = Other(SHOP)
+    setup = cli._crawl_policy(args)
+    assert type(args.package) is str
+    assert args.package == SHOP
+    assert setup.out is not None
+    assert Path(setup.out).name == NAME
+    assert fake_adb.requests == []
+    assert android.inputs == []
