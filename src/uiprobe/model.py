@@ -230,10 +230,18 @@ class Screen:
         Built from the package, the activity, and the class and resource id of
         every element in order. Text and bounds are left out, so a changing
         clock keeps the same id. The number of elements counts: a list that
-        gains or loses rows gets another id.
+        gains or loses rows gets another id. An element whose resource id
+        contains ``badge`` (any case) is left out with everything inside it,
+        so a notice badge that appears or goes away (a "New" mark) does not
+        change the id.
         """
         parts = [self.package, self.activity or ""]
+        badges: set[str] = set()
         for element in self.elements:
+            # Document pre-order: a parent comes before its children.
+            if element.parent in badges or "badge" in element.resource_id.lower():
+                badges.add(element.id)
+                continue
             parts.append(element.class_name)
             parts.append(element.resource_id)
         digest = hashlib.sha256("\n".join(parts).encode("utf-8", "replace"))

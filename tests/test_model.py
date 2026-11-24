@@ -1107,6 +1107,95 @@ def test_screen_id_changes_with_the_number_of_elements():
     assert one.screen_id != two.screen_id
 
 
+def _settings_top(*, badge: bool) -> Screen:
+    """The shape of a Samsung Settings top page with and without its "New"
+    badge: a row whose badge frame (with a view inside) comes and goes."""
+    row = [
+        make_element("e1", class_name="android.widget.FrameLayout"),
+        make_element(
+            "e2",
+            parent="e1",
+            class_name="android.widget.LinearLayout",
+            resource_id="com.android.settings:id/row",
+        ),
+        make_element(
+            "e3",
+            parent="e2",
+            class_name="android.widget.TextView",
+            resource_id="android:id/title",
+        ),
+    ]
+    frame = [
+        make_element(
+            "e4",
+            parent="e2",
+            class_name="android.widget.LinearLayout",
+            resource_id="com.android.settings:id/badge_frame",
+        ),
+        make_element("e5", parent="e4", class_name="android.view.View"),
+    ]
+    after = [
+        make_element(
+            "e6",
+            parent="e1",
+            class_name="android.widget.LinearLayout",
+            resource_id="com.android.settings:id/row",
+        ),
+    ]
+    return make_screen([*row, *(frame if badge else []), *after], activity=".Settings")
+
+
+def test_a_badge_that_comes_and_goes_keeps_the_screen_id():
+    assert _settings_top(badge=True).screen_id == _settings_top(badge=False).screen_id
+
+
+@pytest.mark.parametrize("resource_id", ["x:id/BADGE", "x:id/new_badge", "badge"])
+def test_any_resource_id_holding_badge_is_left_out(resource_id):
+    plain = make_screen([make_element("e1", class_name="c", resource_id="r")])
+    marked = make_screen(
+        [
+            make_element("e1", class_name="c", resource_id="r"),
+            make_element("e2", class_name="d", resource_id=resource_id),
+            make_element("e3", parent="e2", class_name="v"),
+            make_element("e4", parent="e3", class_name="w"),
+        ]
+    )
+    assert plain.screen_id == marked.screen_id
+
+
+def test_elements_after_a_badge_still_count():
+    with_sibling = make_screen(
+        [
+            make_element("e1", class_name="c", resource_id="r"),
+            make_element("e2", class_name="d", resource_id="x:id/badge"),
+            make_element("e3", class_name="v"),  # a sibling, not inside it
+        ]
+    )
+    without = make_screen([make_element("e1", class_name="c", resource_id="r")])
+    assert with_sibling.screen_id != without.screen_id
+
+
+def test_other_differences_still_change_the_screen_id():
+    base = _settings_top(badge=False)
+    changed = make_screen(
+        [*base.elements, make_element("e7", class_name="android.widget.Switch")],
+        activity=".Settings",
+    )
+    other_id = make_screen(
+        [
+            *base.elements[:-1],
+            make_element(
+                "e6",
+                parent="e1",
+                class_name="android.widget.LinearLayout",
+                resource_id="com.android.settings:id/other_row",
+            ),
+        ],
+        activity=".Settings",
+    )
+    assert len({base.screen_id, changed.screen_id, other_id.screen_id}) == 3
+
+
 # --- shorten_activity ---
 
 
