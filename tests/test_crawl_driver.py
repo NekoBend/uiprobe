@@ -2723,9 +2723,14 @@ def test_a_stop_refusal_ends_the_run_without_another_read(
 # --- the two last gaps ---
 
 
+@pytest.mark.parametrize("restart", [False, True], ids=["relaunch", "first-launch"])
 def test_a_changed_identity_after_the_force_stop_sends_no_start(
-    tmp_path, device, android, monkeypatch, clock
+    tmp_path, device, android, monkeypatch, clock, restart
 ):
+    # The identity changes right after the force-stop (of a relaunch, or of
+    # the first launch with restart): the pin check before the start raises
+    # device_changed. The start was not sent, so the action is closed as
+    # start_not_sent (not failed, not left open), then the error is raised.
     original = device.tap
 
     def tap_then_cover(
@@ -2748,12 +2753,100 @@ def test_a_changed_identity_after_the_force_stop_sends_no_start(
 
     monkeypatch.setattr(device, "stop_app", stop_then_swap)
     launches = spy(monkeypatch, device, "_launch_component", lambda *_a, **_k: None)
+    out = tmp_path / "run"
     with pytest.raises(DeviceNotFoundError) as info:
         # restart=False: android.stopped then counts relaunches only.
-        run(device, clock, tmp_path / "run", restart=False)
+        run(device, clock, out, restart=restart)
     assert info.value.details["reason"] == "device_changed"
     assert android.stopped == [SHOP]
-    assert len(launches) == 1  # the first launch only, no start after the stop
+    # No start after the force-stop (without restart, the first launch's).
+    assert len(launches) == (0 if restart else 1)
+    records = lines(out / "transitions.jsonl")
+    started = [r for r in records if "action" in r]
+    assert started[-1]["action"]["kind"] == ("launch" if restart else "relaunch")
+    assert records[-1] == {
+        "schema": "uiprobe.transition_end/1",
+        "recorded_at": records[-1]["recorded_at"],
+        "action_id": started[-1]["action_id"],
+        "not_sent": True,
+        "reason": "start_not_sent",
+    }
+    summary = (out / "summary.txt").read_text(encoding="utf-8")
+    what = (
+        "at the start of the run but not started"
+        if restart
+        else "but not started again"
+    )
+    assert f"{SHOP} was force-stopped {what} (device_changed)" in summary
+    assert json.loads((out / "run.json").read_bytes())["stop_reason"] == "error"
+
+
+@pytest.mark.parametrize("restart", [False, True], ids=["relaunch", "first-launch"])
+def test_an_interrupt_after_the_force_stop_closes_the_start_as_not_sent(
+    tmp_path, device, android, monkeypatch, clock, fake_adb, restart
+):
+    # Ctrl+C arrives in the pin check between the force-stop and the start:
+    # the start was not sent, the action is closed as start_not_sent, then
+    # the interrupt is raised again (stop() does not ask to return).
+    # Without restart the first force-stop is the relaunch's (the cover
+    # brings it); with restart it is the first launch's.
+    cover_after_browse(monkeypatch, device, android)
+    original = Device.check_pin
+    interrupted: list[bool] = []
+
+    def check_then_interrupt(self: Device, **kwargs: object) -> None:
+        original(self, **kwargs)  # ty: ignore[invalid-argument-type]
+        if android.stopped and not interrupted:
+            interrupted.append(True)
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr(Device, "check_pin", check_then_interrupt)
+    out = tmp_path / "run"
+    with pytest.raises(KeyboardInterrupt):
+        run(device, clock, out, restart=restart)
+    assert interrupted
+    assert len(start_requests(fake_adb)) == (0 if restart else 1)
+    records = lines(out / "transitions.jsonl")
+    started = [r for r in records if "action" in r]
+    assert started[-1]["action"]["kind"] == ("launch" if restart else "relaunch")
+    assert (records[-1]["action_id"], records[-1]["reason"]) == (
+        started[-1]["action_id"],
+        "start_not_sent",
+    )
+    assert records[-1]["not_sent"] is True
+    summary = (out / "summary.txt").read_text(encoding="utf-8")
+    assert "force-stopped" in summary
+    assert "(interrupted)" in summary
+    assert json.loads((out / "run.json").read_bytes())["stop_reason"] == "interrupted"
+
+
+@pytest.mark.parametrize("restart", [False, True], ids=["no-restart", "restart"])
+def test_a_lost_connection_in_the_first_launcher_read_closes_the_launch(
+    tmp_path, device, android, monkeypatch, clock, fake_adb, restart
+):
+    # The adb connection is lost in the first launcher read, before anything
+    # was sent: the launch is closed as not sent (adb_error), then the error
+    # is raised.
+    def lost(package: str) -> str:
+        del package
+        raise AdbError("connection closed", details={})
+
+    monkeypatch.setattr(device, "_start_component", lost)
+    out = tmp_path / "run"
+    with pytest.raises(AdbError):
+        run(device, clock, out, restart=restart)
+    assert not [c for c in commands(fake_adb) if c.startswith(("am ", "input "))]
+    assert android.stopped == []
+    records = lines(out / "transitions.jsonl")
+    assert len(records) == 2
+    assert records[1] == {
+        "schema": "uiprobe.transition_end/1",
+        "recorded_at": records[1]["recorded_at"],
+        "action_id": 1,
+        "not_sent": True,
+        "reason": "adb_error",
+    }
+    assert json.loads((out / "run.json").read_bytes())["stop_reason"] == "error"
 
 
 @pytest.mark.parametrize("kind", ["tap", "back"])

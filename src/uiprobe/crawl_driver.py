@@ -1160,25 +1160,45 @@ class _Run:
         When it cannot be read, the start is not sent: the action is closed
         (a first launch as not sent, a relaunch with `relaunch_id` as
         ``start_not_sent``) and `LaunchFailedError` (``launcher_unreadable``)
-        ends the run.
+        ends the run. Any other error of uiprobe or of the device in the read
+        of a first launch (`relaunch_id` None; an adb connection lost, a
+        changed device) also closes it as not sent, with the error's word
+        (`_failure_word`, ``adb_error`` for a lost connection), before it is
+        raised: nothing was sent. In a relaunch, `relaunch` closes it.
+        A wait for the device that was stopped (``pin_wait_stopped``) is
+        closed by the driver's ending, with the reason that stopped it.
         """
         self.start_component = None
         try:
             read = self.device._start_component  # noqa: SLF001 - internal to uiprobe
             self.start_component = read(self.package)
         except DeviceNotFoundError as error:
-            if error.details.get("reason") != PIN_NOT_PROVEN:
-                raise
-            return False
+            reason = error.details.get("reason")
+            if reason == PIN_NOT_PROVEN:
+                return False
+            if reason != PIN_WAIT_STOPPED and relaunch_id is None:
+                self.close_unsent(_failure_word(error))
+            raise
         except LaunchFailedError as error:
             if _unreadable_launcher(error):
                 if relaunch_id is not None:
                     self.half_sent(relaunch_id, "launcher_unreadable")
-                elif self.unsent is not None:
-                    self.end_not_sent(self.unsent, "launcher_unreadable")
-                    self.unsent = None
+                else:
+                    self.close_unsent("launcher_unreadable")
+            elif relaunch_id is None:
+                self.close_unsent(_failure_word(error))
+            raise
+        except UiprobeError as error:
+            if relaunch_id is None:
+                self.close_unsent(_failure_word(error))
             raise
         return True
+
+    def close_unsent(self, reason: str) -> None:
+        """Close the action in the gate (if any) as not sent for `reason`."""
+        if self.unsent is not None:
+            action_id, self.unsent = self.unsent, None
+            self.end_not_sent(action_id, reason)
 
     def halt(self, now: float | None = None) -> str | None:
         """The reason not to send that does not depend on the screen, if any."""
@@ -1254,7 +1274,18 @@ class _Run:
         unsent = self.relaunch_stop(action_id, action)
         if unsent is not None:
             return unsent
-        reason = self.relaunch_halt(action_id)
+        try:
+            reason = self.relaunch_halt(action_id)
+        except BaseException as error:
+            # The force-stop went out and nothing has sent the start: an
+            # error (a changed device in the pin check, say) or an interrupt
+            # here leaves no doubt about the start, so the action is closed
+            # as start_not_sent (not as failed, or left open) before it is
+            # raised again. A step that already closed it is not repeated.
+            if self._open == action_id:
+                with contextlib.suppress(RunFolderError):
+                    self.half_sent(action_id, _failure_word(error))
+            raise
         if reason == NOT_SENT_RECONNECTED or (
             reason is None and not self.final_check("start", self.sent_epoch)
         ):
@@ -1466,6 +1497,23 @@ class _Run:
             self.writer.write_skip(
                 item.screen_id, item.fingerprint, item.reasons, body, details
             )
+
+
+def _failure_word(error: BaseException) -> str:
+    """The short word for an error that ended a launch: the launch failure's
+    or the device error's ``reason`` when it has one (``launcher_unreadable``,
+    ``device_changed``), else the error code (``adb_error`` for a lost adb
+    connection); ``interrupted`` for Ctrl+C, ``internal_error`` otherwise."""
+    if isinstance(error, KeyboardInterrupt):
+        return INTERRUPTED
+    if not isinstance(error, UiprobeError):
+        return "internal_error"
+    reason = error.details.get("reason")
+    if isinstance(error, LaunchFailedError | DeviceNotFoundError) and isinstance(
+        reason, str
+    ):
+        return reason
+    return error.code
 
 
 def _unreadable_launcher(error: Exception) -> bool:
