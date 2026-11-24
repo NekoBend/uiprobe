@@ -1613,22 +1613,40 @@ def test_an_unknown_flag_name_on_the_asked_display_still_refuses(base, cover):
 
 
 @pytest.mark.parametrize(
-    ("base", "cover", "marker", "old", "new"),
+    ("base", "cover", "config", "marker", "old", "new"),
     [
-        (API36, COVER36, "Settings, id=121", "inputConfig=0x0", COVER_NAME),
-        (API32, COVER32, "bab5115 StatusBar", "SPLIT_TOUCH", COVER_NAME),
+        # display 1's row names the unknown name too (let through there)
+        (
+            API36,
+            COVER36,
+            COVER_NAME,
+            "Settings, id=121",
+            "inputConfig=0x0",
+            f"inputConfig={COVER_NAME}",
+        ),
+        # flags= forms refuse unknown names in every list, so display 1's row
+        # names a known flag: the refusal must come from display 0's row
+        (API32, COVER32, "SPLIT_TOUCH", "bab5115 StatusBar", "SPLIT_TOUCH", COVER_NAME),
     ],
+    ids=["api36", "api32"],
 )
 def test_the_same_unknown_name_on_display_0_still_refuses(
-    base, cover, marker, old, new
+    base, cover, config, marker, old, new
 ):
-    if old == "inputConfig=0x0":
-        new = f"inputConfig={new}"
-    text = _cover_first(_edit(base, marker, old, new), cover)
+    valid = _cover_first(base, cover, config)
+    found = read_window_at(valid, (160, 320))
+    assert isinstance(found, InputWindow), found  # display 1 reads
+    assert found == read_window_at(base, (160, 320))
+    text = _cover_first(_edit(base, marker, old, new), cover, config)
     refused = read_window_at(text, (160, 320))
     assert refused == LINE_FORMAT
     assert getattr(refused, "rule", None) == "unknown_flag"
-    assert explain_input_windows(text).rule == "unknown_flag"
+    verdict = explain_input_windows(text)
+    assert verdict.rule == "unknown_flag"
+    # The refusal is at display 0's edited row, in display 0's list.
+    assert verdict.line == text.split("\n").index(_line(text, marker))
+    assert verdict.list_head == verdict.chosen
+    assert verdict.reached == (True, True)
 
 
 @pytest.mark.parametrize(("base", "cover"), [(API36, COVER36)])
