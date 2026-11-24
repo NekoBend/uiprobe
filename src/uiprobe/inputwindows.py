@@ -52,26 +52,43 @@ read could be the window on top: a window line of no known form, one with a
 read field twice (a window's title and ``applicationInfo.name`` are printed as
 the app gave them, so text there must not pass for a field), a field whose
 value is followed by more text before the next ``, key=`` field, a flag name
-that is not known, row numbers that do not run 0, 1, 2, ..., any other line
-inside the list, more than one list that could be the display's, a list that
-does not end at a line it is known to end at (`_LIST_END`), rows of one list
-that differ in form (a quoted or bare name, or which of `_FORM_FIELDS` they
-print after the name, so field-like text in a name or in
-``applicationInfo.name`` does not count; on the hex form ``scale=`` alone for
-API 24 to 28, or ``globalScale=``, ``windowScale=`` and ``portalToDisplayId=``
-together for API 29 and 30) or in having transform lines, a list per display
-with rows of API 24 to 28 (``scale=``), a field named in a line that does not
-read as that field, two ``Display:`` sections of the same number (``Display:
-00`` and ``Display: 0``), a line outside every window list that holds
-``ownerUid=``, or a line of another display's list of no known form (those
-lists are read too). The list's end, the rows' form, the stray owner and the
-other displays' lists matter because a window name may hold line breaks: it
-could fake a whole row and the end of the list, and the real rest of its line,
-with the real owner and display, would then land outside the list or in
-another display's list, or start a row whose number another row has. One case
-remains (a documented limit): the lowest window of the list, when no window
-above it takes the point, can fake a whole row in its name, and the real rest
-of its line then reads as one more row below it.
+that is not known (in the list of the display asked for; see below), row
+numbers that do not run 0, 1, 2, ..., any other line inside the list, more
+than one list that could be the display's, a list that does not end at a line
+it is known to end at (`_LIST_END`), rows of one list that differ in form (a
+quoted or bare name, or which of `_FORM_FIELDS` they print after the name, so
+field-like text in a name or in ``applicationInfo.name`` does not count; on
+the hex form ``scale=`` alone for API 24 to 28, or ``globalScale=``,
+``windowScale=`` and ``portalToDisplayId=`` together for API 29 and 30) or in
+having transform lines, a list per display with rows of API 24 to 28
+(``scale=``), a field named in a line that does not read as that field, two
+``Display:`` sections of the same number (``Display: 00`` and ``Display: 0``),
+a line outside every window list that holds ``ownerUid=``, or a line of
+another display's list of no known form (those lists are read too). The list's
+end, the rows' form, the stray owner and the other displays' lists matter
+because a window name may hold line breaks: it could fake a whole row and the
+end of the list, and the real rest of its line, with the real owner and
+display, would then land outside the list or in another display's list, or
+start a row whose number another row has. One case remains (a documented
+limit): the lowest window of the list, when no window above it takes the
+point, can fake a whole row in its name, and the real rest of its line then
+reads as one more row below it.
+
+Flag names of another display's list: in a list per display the rows of the
+display asked for must name only known flags, but the ``inputConfig=`` of a
+row of another display's list (the forms of API 33 on) may name unknown ones,
+each one upper-case word (`_NAME_SHAPE`); everything else in those rows is
+read as strictly as in the display's own list, so where the lists begin and
+end stays known. Rows of the ``flags=`` forms (API 24 to 32) are read exactly
+as before in every list: a name there could also stand for a hex value of
+another form (``flags=DEAD`` on an API 30 row), so it is not let through. A
+two-display Samsung foldable (Android 17) printed its cover screen's list
+(``Display: 1``, off while the phone is open) above display 0's, with
+``SKIP_UNTRUSTED_TOUCH_TOAST``, a name not known here. This rests on an
+assumption that was not checked on a device: that a touch injected on display
+0 is delivered only to display 0's windows (recalled Android behaviour). In
+the one list of every display (API 24 to 28) the rows of other displays are
+skipped before their flags are read, as before.
 
 The legacy dispatcher (API 24 to 32) gives a touch anywhere on the display to
 a visible touchable window that is "touch modal", one with neither
@@ -304,6 +321,9 @@ _ONCE: Final = (
 # The fields of the Samsung form (API 36): all of them or none.
 _SAMSUNG_KEYS: Final = ("samsungFlags=", "pTouchableRegion=", "1HXY=")
 _HEADER: Final = "Input Dispatcher State:"
+# What an unknown flag name in another display's list must look like to be
+# let through there (`_names`): one upper-case word, as every known name is.
+_NAME_SHAPE = re.compile(r"[A-Z][A-Z0-9_]*")
 # Fields every row of one version printed: which of them a row has tells its
 # form, and all rows of a list must have the same (`_form`).
 _FORM_FIELDS: Final = (
@@ -752,13 +772,19 @@ def _title(name: str) -> str:
     return match["title"] if match else name
 
 
-def _names(value: str, known: frozenset[str]) -> frozenset[str] | None:
+def _names(
+    value: str, known: frozenset[str], *, checked: bool = True
+) -> frozenset[str] | None:
     """The names of a ``A | B | C`` value, None when one is not in `known`
-    (``0x0`` alone is no names)."""
+    (``0x0`` alone is no names). Without `checked` (a row of another
+    display's list) a name not in `known` passes when it is one upper-case
+    word (`_NAME_SHAPE`); any other text is still None."""
     if value == "0x0":
         return frozenset()
     names = value.split(" | ")
-    if not all(name in known for name in names):
+    if checked and not all(name in known for name in names):
+        return None
+    if not all(name in known or _NAME_SHAPE.fullmatch(name) for name in names):
         return None
     return frozenset(names)
 
@@ -780,10 +806,12 @@ def _hex_form(line: str) -> bool | None:
     return None
 
 
-def _touch(line: str) -> tuple[bool, bool, bool] | str:
+def _touch(line: str, *, checked: bool = True) -> tuple[bool, bool, bool] | str:
     """Whether the window takes touches, whether it is touch modal and whether
     its form prints ``portalToDisplayId`` (API 29 to 32); the rule that
-    refuses the line when it has no known form."""
+    refuses the line when it has no known form. Without `checked` (a row of
+    another display's list) the ``inputConfig=`` names need not be known
+    (see `_names`); the ``flags=`` forms are always read whole."""
     config = _INPUT_CONFIG.search(line)
     visible = _VISIBLE.search(line)
     named = _NAMED_FLAGS.search(line)
@@ -796,7 +824,7 @@ def _touch(line: str) -> tuple[bool, bool, bool] | str:
     ):
         return "field_value"
     if config is not None:  # API 33 on
-        names = _names(config["names"], _INPUT_CONFIG_NAMES)
+        names = _names(config["names"], _INPUT_CONFIG_NAMES, checked=checked)
         if names is None:
             return "unknown_flag"
         if visible is not None or named is not None:
@@ -804,7 +832,8 @@ def _touch(line: str) -> tuple[bool, bool, bool] | str:
         return not names & _NOT_TAKING, False, False
     if visible is None:
         return "field_missing"
-    return _flags_touch(line, named, shown=visible["visible"] == "true")
+    shown = visible["visible"] == "true"
+    return _flags_touch(line, named, shown=shown)
 
 
 def _flags_touch(
@@ -852,10 +881,13 @@ def _missing(line: str, key: str) -> str:
     return "field_value" if key in line else "field_missing"
 
 
-def _window(line: str, name: str, at: int) -> InputWindow | _Refusal:
+def _window(
+    line: str, name: str, at: int, *, checked: bool = True
+) -> InputWindow | _Refusal:
     """Read one window line (stripped, at index `at`) whose name field is
-    `name`."""
-    touch = _touch(line)
+    `name`; without `checked` its ``inputConfig=`` names need not be known
+    (`_names`)."""
+    touch = _touch(line, checked=checked)
     if isinstance(touch, str):
         return _Refusal(LINE_FORMAT, touch, at)
     uid = _UID.search(line)
@@ -954,10 +986,11 @@ def _turns(group: _Group) -> bool:
 
 
 def _row(
-    group: _Group, index: int, found: _List, display_id: int
+    group: _Group, index: int, found: _List, display_id: int, *, checked: bool = True
 ) -> InputWindow | _Refusal | None:
     """Read the window line of row `index` of `found`; None when it is of
-    another display than `display_id` (only in a list of every display)."""
+    another display than `display_id` (only in a list of every display).
+    Without `checked` its ``inputConfig=`` names need not be known (`_names`)."""
     line, at = group.line, group.at
     match = _LINE.match(line)
     if match is None:
@@ -972,7 +1005,7 @@ def _row(
     if display != display_id:
         return None
     name = match["quoted"] if match["quoted"] is not None else match["bare"]
-    return _window(line, name, at)
+    return _window(line, name, at, checked=checked)
 
 
 def _split(text: str) -> list[str]:
@@ -996,7 +1029,11 @@ def _parse(
         for other in found.others:  # read as well: a name could have made them
             reading = other
             shown = display_id if other.display is None else other.display
-            read = _read(other, shown, trace)
+            # A touch on the display is taken to reach only that display's
+            # windows (recalled, not checked on a device), so the inputConfig
+            # names of another display's rows need not be known; the rest of
+            # their lines is read as strictly as the display's own.
+            read = _read(other, shown, trace, checked=False)
             if isinstance(read, _Refusal) and read.reason in {
                 LINE_FORMAT,
                 REGION_FORMAT,
@@ -1106,10 +1143,16 @@ def _note_window(trace: _Trace | None, group: _Group) -> None:
 
 
 def _read(
-    found: _List, display_id: int, trace: _Trace | None = None
+    found: _List,
+    display_id: int,
+    trace: _Trace | None = None,
+    *,
+    checked: bool = True,
 ) -> tuple[InputWindow, ...] | _Refusal:
     """Read the windows of `display_id` in the list `found` (see
-    `parse_input_windows`), noting in `trace` what it read."""
+    `parse_input_windows`), noting in `trace` what it read. Without
+    `checked` (the list of another display than the one asked for) the
+    ``inputConfig=`` names need not be known (`_names`)."""
     _note_rows(trace, found)  # entered, also when it refuses right away
     groups = _group(found)
     if isinstance(groups, _Refusal):
@@ -1126,7 +1169,7 @@ def _read(
             raise _TooLongError(group.rest_at[0]) from error
         if isinstance(turned, _Refusal):
             return turned
-        window = _row(group, index, found, display_id)
+        window = _row(group, index, found, display_id, checked=checked)
         if isinstance(window, _Refusal):
             return window
         if window is None:
