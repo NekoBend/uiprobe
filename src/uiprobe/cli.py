@@ -67,7 +67,7 @@ from uiprobe.pngfile import (
     depends_on_a_drive_folder,
     save_png,
 )
-from uiprobe.runlog import RunFolderError, _new_folder
+from uiprobe.runlog import RunFolderError, _check_folder, _new_folder
 from uiprobe.settings import (
     _DEFAULT_ACTIONS,
     _DEFAULT_DEPTH,
@@ -1302,6 +1302,25 @@ def _run_folder_parent(
     return dirname(stripped)
 
 
+def _check_run_folder_leaf(
+    folder: str,
+    *,
+    windows: bool | None = None,
+    splitdrive: Callable[[str], tuple[str, str]] = os.path.splitdrive,
+) -> None:
+    """Refuse `folder` when something is at it once trailing separators go.
+
+    ``taken/`` names the file or dangling link ``taken`` as a folder; the
+    lookup of ``taken/`` itself fails, so the name without the separators is
+    checked as `check_new_path` checks a path. Nothing is created.
+    """
+    stripped = _without_trailing_separators(
+        folder, windows=windows, splitdrive=splitdrive
+    )
+    if stripped != folder:
+        _check_folder(stripped)
+
+
 def _check_run_folder_parent(folder: str) -> None:
     """Refuse the run folder `folder` when its parent is missing or no folder.
 
@@ -1440,7 +1459,9 @@ def _crawl_policy(args: argparse.Namespace) -> _CrawlSetup:
         # run makes before it creates the folder, and that its parent is an
         # existing folder (nothing is created here; the run's own checks and
         # its create-only mkdir still follow).
-        _check_run_folder_parent(_new_folder(out))
+        folder = _new_folder(out)
+        _check_run_folder_leaf(folder)
+        _check_run_folder_parent(folder)
     policy = policy_from_settings(
         settings,
         extra_deny=args.deny,
@@ -1832,7 +1853,12 @@ def _made_by_this_run(error: BaseException) -> bool:
     raises (see `uiprobe.crawl_driver._crawl_on`). Nothing is inferred from
     what is on the disk, which another program can change.
     """
-    return getattr(error, "_uiprobe_own_run_folder", False) is True
+    own = getattr(error, "_uiprobe_own_run_folder", False) is True
+    # Read once: an error object raised again by a later run (a reused
+    # KeyboardInterrupt, say) must not carry this run's folder into it.
+    with contextlib.suppress(Exception):
+        setattr(error, "_uiprobe_own_run_folder", False)  # noqa: B010
+    return own
 
 
 def _flush(stream: TextIO) -> None:

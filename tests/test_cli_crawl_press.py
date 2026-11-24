@@ -15,7 +15,7 @@ from tests.test_crawl_driver import OTHER, SCREENS, SERIAL, SHOP, TRANSPORT
 from uiprobe import cli
 from uiprobe.crawl_driver import CrawlResult
 from uiprobe.device import Device
-from uiprobe.settings import SETTINGS_FILE, render_default_settings
+from uiprobe.settings import SETTINGS_FILE, _shown, render_default_settings
 
 if TYPE_CHECKING:
     from tests.fake_adb_server import FakeAdbServer
@@ -224,7 +224,9 @@ def test_ctrl_c_writes_the_run_and_exits_130(fake_adb, capsys, tmp_path, monkeyp
     out = tmp_path / "run"
     code, _text, err = press(capsys, fake_adb, "--press", "--out", str(out))
     assert code == 130
-    assert err == f"uiprobe: error: interrupted; the run so far is in {out}\n"
+    assert (
+        err == f"uiprobe: error: interrupted; the run so far is in {_shown(str(out))}\n"
+    )
     run_json = json.loads((out / "run.json").read_bytes())
     assert run_json["stop_reason"] == "interrupted"
 

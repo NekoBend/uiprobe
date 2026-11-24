@@ -21,7 +21,7 @@ from tests.test_cli_crawl_settings_press import (
     write_settings,
 )
 from tests.test_crawl_driver import SCREENS, SERIAL, SHOP, TRANSPORT
-from uiprobe import cli, runlog
+from uiprobe import cli, crawl_driver, runlog
 from uiprobe import settings as settings_module
 from uiprobe.device import IDENTITY_COMMAND
 from uiprobe.errors import AdbError
@@ -749,3 +749,107 @@ def test_a_str_subclass_cannot_change_the_package(fake_adb, android, here):
     assert Path(setup.out).name == NAME
     assert fake_adb.requests == []
     assert android.inputs == []
+
+
+# --- a run folder named with trailing separators ------------------------------
+
+
+@pytest.mark.parametrize("kind", ["file", "dangling link"])
+@pytest.mark.parametrize("ending", ["/", "///"])
+@pytest.mark.parametrize("from_file", [False, True])
+def test_a_taken_name_with_trailing_separators_is_refused_before_the_device(
+    fake_adb, android, capsys, here, connections, kind, ending, from_file
+):
+    write_settings(here, settings_text(press=from_file))
+    taken = here / "taken"
+    if kind == "file":
+        taken.write_text("mine", encoding="utf-8")
+    else:
+        try:
+            taken.symlink_to(here / "missing")
+        except OSError:
+            pytest.skip("this system cannot make a link here")
+    switch = [] if from_file else ["--press"]
+    out = str(taken) + ending
+    code, text, _err = crawl(capsys, fake_adb, *switch, "--out", out, "--json")
+    assert code == 1
+    error = error_of(text)
+    assert error["code"] == "run_folder_error"
+    assert "already exists" in error["message"]
+    assert "out" not in error["details"]
+    assert fake_adb.requests == []
+    assert connections == []
+    assert android.inputs == []
+    if kind == "file":
+        assert taken.read_text(encoding="utf-8") == "mine"
+
+
+def test_the_leaf_check_follows_windows_separators(here):
+    taken = here / "taken"
+    taken.write_text("mine", encoding="utf-8")
+    with pytest.raises(runlog.RunFolderError, match="already exists"):
+        cli._check_run_folder_leaf(
+            str(taken) + "\\\\", windows=True, splitdrive=ntpath.splitdrive
+        )
+    # Under POSIX rules a backslash is part of the name, and nothing is there.
+    cli._check_run_folder_leaf(str(taken) + "\\", windows=False)
+
+
+# --- the ownership mark ---------------------------------------------------------
+
+
+@pytest.mark.usefixtures("android")
+def test_an_interrupt_while_the_writer_closes_names_the_folder(
+    fake_adb, capsys, here, monkeypatch
+):
+    write_settings(here, settings_text(press=True))
+    out = here / "run"
+
+    def interrupted(_self: runlog.RunWriter) -> None:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(runlog.RunWriter, "close", interrupted)
+    code, _text, err = crawl(
+        capsys, fake_adb, *FAST, "--out", str(out), "--actions", "2"
+    )
+    assert code == 130
+    assert (
+        err == f"uiprobe: error: interrupted; the run so far is in {_shown(str(out))}\n"
+    )
+
+
+@pytest.mark.usefixtures("android")
+def test_a_reused_interrupt_does_not_carry_the_folder_into_the_next_run(
+    fake_adb, capsys, here, monkeypatch
+):
+    write_settings(here, settings_text(press=True))
+    shared = KeyboardInterrupt()
+    calls: list[str] = []
+
+    def interrupted(_device: object, _package: str, out: str, **_kwargs: object):
+        calls.append(out)
+        if len(calls) == 1:  # the first run made its folder, as the crawl marks
+            Path(out).mkdir()
+            setattr(shared, "_uiprobe_own_run_folder", True)  # noqa: B010
+        raise shared
+
+    monkeypatch.setattr(cli, "crawl_run", interrupted)
+    first = here / "first"
+    code, _text, err = crawl(capsys, fake_adb, "--out", str(first))
+    assert code == 130
+    assert _shown(str(first)) in err
+    code, _text, err = crawl(capsys, fake_adb, "--out", str(here / "second"))
+    assert code == 130
+    assert err == "uiprobe: error: interrupted\n"
+
+
+def test_an_error_that_refuses_the_mark_keeps_its_identity():
+    class Strict(KeyboardInterrupt):
+        def __setattr__(self, name: str, value: object) -> None:
+            raise TypeError(name)
+
+    error = Strict()
+    crawl_driver._mark_own_run_folder(error)
+    assert type(error) is Strict
+    assert not hasattr(error, "_uiprobe_own_run_folder")
+    assert cli._made_by_this_run(error) is False
