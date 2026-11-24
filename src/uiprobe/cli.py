@@ -68,7 +68,7 @@ from uiprobe.pngfile import (
     depends_on_a_drive_folder,
     save_png,
 )
-from uiprobe.runlog import RunFolderError
+from uiprobe.runlog import RunFolderError, _new_folder
 from uiprobe.settings import (
     _DEFAULT_ACTIONS,
     _DEFAULT_DEPTH,
@@ -574,8 +574,9 @@ def _add_crawl_parser(add_parser: Callable[..., argparse.ArgumentParser]) -> Non
             " writes no file on this computer. --dry-run forces the preview."
             " --press, or press = true in the settings file, runs a pressing"
             " crawl: it starts the app, presses what the rules allow, presses"
-            " BACK and restarts the app, and records every step in the new"
-            " folder --out DIR. It presses only on an emulator unless"
+            " BACK and restarts the app, and records every step in a new run"
+            " folder: --out DIR, or one inside runs_dir of the settings file."
+            " It presses only on an emulator unless"
             " --allow-real-device is given, and stops at the settings file's"
             " [limits] unless --depth, --actions or --minutes say otherwise."
             f" The rules come from the settings file (./{SETTINGS_FILE}"
@@ -599,7 +600,8 @@ def _add_crawl_parser(add_parser: Callable[..., argparse.ArgumentParser]) -> Non
         action="store_true",
         help=(
             "press for real: start the app and press what the rules allow;"
-            " needs --out; cannot be combined with --dry-run"
+            " needs --out DIR, or runs_dir in the settings file; cannot be"
+            " combined with --dry-run"
         ),
     )
     _add_press_options(crawl)
@@ -1261,7 +1263,7 @@ def _file_press_out(
             )
         raise _UsageError(msg)
     parent = _runs_dir_parent(args, settings.runs_dir, shown_file)
-    base = f"{args.package}-{_run_stamp()}"
+    base = f"{args.package}-{_run_stamp()}"  # a plain str: see _crawl_policy
     for number in range(1, _MAX_RUN_NAME + 1):
         name = base if number == 1 else f"{base}-{number}"
         candidate = os.path.join(parent, name)  # noqa: PTH118 - kept as given
@@ -1314,10 +1316,15 @@ def _runs_dir_parent(args: argparse.Namespace, runs_dir: str, shown_file: str) -
     except (OSError, ValueError) as error:
         msg = f"cannot check the folder for run folders {where}: {error}"
         raise RunFolderError(msg, details={"path": parent}) from None
-    if stat.S_ISLNK(info.st_mode):
+    # A link or a Windows junction is refused here. Only these are checked:
+    # os.lstat reports just the name-surrogate reparse points (symbolic links
+    # and junctions) as links, and other reparse points, such as cloud-file
+    # placeholders, are resolved by the system, so refusing on the reparse
+    # point attribute alone would refuse ordinary synced folders.
+    if stat.S_ISLNK(info.st_mode) or os.path.isjunction(parent):
         msg = (
-            f"the folder for run folders {where} is a link; name the folder"
-            " itself in runs_dir, or add --out DIR"
+            f"the folder for run folders {where} is a link or junction; give"
+            " the folder it points to in runs_dir, or add --out DIR"
         )
         raise RunFolderError(msg, details={"path": parent})
     if not stat.S_ISDIR(info.st_mode):
@@ -1339,6 +1346,7 @@ def _crawl_policy(args: argparse.Namespace) -> _CrawlSetup:
     if args.press and args.dry_run:
         msg = "--press and --dry-run cannot be combined"
         raise _UsageError(msg)
+    args.package = str(args.package)  # a plain str for the check and the names
     try:
         check_package(args.package)
     except ValueError as exc:
@@ -1374,6 +1382,10 @@ def _crawl_policy(args: argparse.Namespace) -> _CrawlSetup:
     if press_source is not None:
         # --out, else runs_dir, else a usage error: only _file_press_out decides.
         out, out_source = _file_press_out(args, settings, press_source)
+        # Refusal only, before the device is contacted: the same checks the
+        # run makes before it creates the folder (nothing is created here;
+        # those checks and the create-only mkdir still follow in the run).
+        _new_folder(out)
     policy = policy_from_settings(
         settings,
         extra_deny=args.deny,
@@ -1744,7 +1756,12 @@ def _cmd_crawl_press(args: argparse.Namespace, setup: _CrawlSetup) -> int:
         # nothing was written or sent; say it in the command's words.
         raise _cli_not_emulator(device, exc) from None
     except UiprobeError as exc:
-        if not existed and Path(out).exists():  # made by this run
+        # A folder found at the chosen name when the run went to make it
+        # (another program made it first) is not this run's: never name it.
+        taken = isinstance(exc, RunFolderError) and isinstance(
+            exc.__cause__, FileExistsError
+        )
+        if not existed and not taken and Path(out).exists():  # made by this run
             exc.details.setdefault("out", out)
         raise
     moves = result.repins  # as run.json counts them

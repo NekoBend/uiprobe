@@ -5,8 +5,9 @@ from __future__ import annotations
 import json
 import os
 import re
+import stat
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import pytest
 
@@ -18,7 +19,8 @@ from tests.test_cli_crawl_settings_press import (
     write_settings,
 )
 from tests.test_crawl_driver import SCREENS, SERIAL, SHOP, TRANSPORT
-from uiprobe import cli
+from uiprobe import cli, runlog
+from uiprobe import settings as settings_module
 from uiprobe.device import IDENTITY_COMMAND
 from uiprobe.settings import (
     SETTINGS_FILE,
@@ -63,7 +65,7 @@ def crawl(
     return code, captured.out, captured.err
 
 
-def error_of(text: str) -> dict[str, object]:
+def error_of(text: str) -> dict[str, Any]:
     return json.loads(text)["error"]
 
 
@@ -218,6 +220,90 @@ def test_a_runs_dir_that_is_a_link_is_refused(fake_adb, capsys, here):
 
 
 @pytest.mark.usefixtures("android")
+def test_a_runs_dir_that_is_a_junction_is_refused(fake_adb, capsys, here, monkeypatch):
+    (here / "runs").mkdir()
+    write_settings(here, with_runs_dir("runs"))
+    original = os.path.isjunction
+
+    def junction_at_runs(path: str) -> bool:
+        return path == "runs" or original(path)
+
+    monkeypatch.setattr(os.path, "isjunction", junction_at_runs)
+    code, _text, err = crawl(capsys, fake_adb)
+    assert code == 1
+    assert err == (
+        f"uiprobe: error: the folder for run folders runs (runs_dir in"
+        f" {SETTINGS_FILE}) is a link or junction; give the folder it points to"
+        " in runs_dir, or add --out DIR\n"
+    )
+    assert fake_adb.requests == []
+    assert list((here / "runs").iterdir()) == []
+
+
+@pytest.mark.usefixtures("android")
+def test_another_reparse_point_is_accepted(fake_adb, capsys, here, monkeypatch):
+    # A folder with the reparse point attribute that is neither a link nor a
+    # junction (a cloud-file placeholder, say) is an ordinary folder here.
+    runs = here / "runs"
+    runs.mkdir()
+    write_settings(here, with_runs_dir("runs"))
+    original = os.lstat
+
+    class Placeholder:
+        st_mode = stat.S_IFDIR | 0o700
+        st_file_attributes = stat.FILE_ATTRIBUTE_REPARSE_POINT
+
+    def placeholder_at_runs(path: str, *args: object, **kwargs: object) -> object:
+        if path == "runs":
+            return Placeholder()
+        return original(path, *args, **kwargs)  # ty: ignore[invalid-argument-type]
+
+    monkeypatch.setattr(os, "lstat", placeholder_at_runs)
+    code, _text, _err = crawl(capsys, fake_adb, *FAST, "--actions", "2")
+    assert code == 0
+    assert (runs / NAME / "run.json").exists()
+
+
+@pytest.mark.parametrize("from_file", [False, True])
+def test_an_existing_out_is_refused_before_the_device(
+    fake_adb, android, capsys, here, connections, from_file
+):
+    write_settings(here, settings_text(press=from_file))
+    taken = here / "taken"
+    taken.mkdir()
+    switch = [] if from_file else ["--press"]
+    code, text, _err = crawl(capsys, fake_adb, *switch, "--out", str(taken), "--json")
+    assert code == 1
+    error = error_of(text)
+    assert error["code"] == "run_folder_error"
+    assert "already exists" in str(error["message"])
+    assert "out" not in error["details"]
+    assert fake_adb.requests == []
+    assert connections == []
+    assert android.inputs == []
+
+
+@pytest.mark.usefixtures("android")
+def test_a_drive_relative_run_folder_is_refused_before_the_device(
+    fake_adb, capsys, here, connections, monkeypatch
+):
+    # On Windows, --config D:rules.toml with a relative runs_dir names a folder
+    # relative to drive D's own working folder; the early check refuses it as
+    # the run would. Faked here, where such paths do not exist.
+    (here / "runs").mkdir()
+    write_settings(here, with_runs_dir("runs"))
+    monkeypatch.setattr(
+        runlog, "depends_on_a_drive_folder", lambda path: path.startswith("runs")
+    )
+    code, _text, err = crawl(capsys, fake_adb)
+    assert code == 1
+    assert "on Windows give a full path with its drive" in err
+    assert fake_adb.requests == []
+    assert connections == []
+    assert list((here / "runs").iterdir()) == []
+
+
+@pytest.mark.usefixtures("android")
 def test_a_link_above_the_last_part_is_followed(fake_adb, capsys, here):
     (here / "real" / "runs").mkdir(parents=True)
     try:
@@ -286,6 +372,7 @@ def test_a_folder_made_in_a_race_ends_the_run_unshared(
     error = error_of(text)
     assert error["code"] == "run_folder_error"
     assert "already exists" in str(error["message"])
+    assert "out" not in error["details"]  # the folder is not this run's
     assert device_writes(fake_adb) == []
     assert android.inputs == []
     assert sorted(p.name for p in (runs / NAME).iterdir()) == ["theirs.txt"]
@@ -371,6 +458,28 @@ def test_runs_dir_is_read(here):
 
 
 @pytest.mark.parametrize(
+    ("value", "read"),
+    [
+        ("runs/", "runs"),
+        ("runs//", "runs"),
+        ("/", "/"),
+        ("//", "/"),
+        (".", "."),
+        ("runs/..", "runs/.."),
+    ],
+)
+def test_trailing_separators_of_runs_dir_are_dropped(here, value, read):
+    path = write_settings(here, with_runs_dir(value))
+    assert load_settings(path).runs_dir == read
+
+
+def test_the_ending_is_scanned_once():
+    long = "a" + "/." * 200_000 + "/" * 200_000
+    assert settings_module._folder_form_base(long) == "a"
+    assert settings_module._without_trailing_separators("b" + "/" * 400_000) == "b"
+
+
+@pytest.mark.parametrize(
     ("value", "message"),
     [
         ("5", "runs_dir: must be a string (a folder path)"),
@@ -378,21 +487,9 @@ def test_runs_dir_is_read(here):
         ('["runs"]', "runs_dir: must be a string (a folder path)"),
         ('""', "runs_dir: must not be empty"),
         ('"runs\\u0000x"', "runs_dir: must not hold a null character"),
-        (
-            '"runs/"',
-            'runs_dir: must not end with a path separator or "/." (the folder form'
-            " of a path); write 'runs'",
-        ),
-        (
-            '"runs/."',
-            'runs_dir: must not end with a path separator or "/." (the folder form'
-            " of a path); write 'runs'",
-        ),
-        (
-            '"/"',
-            'runs_dir: must not end with a path separator or "/." (the folder form'
-            " of a path)",
-        ),
+        ('"runs/."', "runs_dir: must not end with \"/.\"; write 'runs'"),
+        ('"runs/./"', "runs_dir: must not end with \"/.\"; write 'runs'"),
+        ('"/."', 'runs_dir: must not end with "/."'),
     ],
 )
 def test_invalid_runs_dir_values_are_refused(here, value, message):

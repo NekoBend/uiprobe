@@ -95,6 +95,7 @@ modification time is not detected there.
 
 from __future__ import annotations
 
+import ntpath
 import os
 import re
 import stat
@@ -337,23 +338,42 @@ class Settings:
     runs_dir: str | None = None
 
 
+def _separators() -> str:
+    """The path separators of this platform: also a backslash on Windows."""
+    return "/\\" if sys.platform == "win32" else "/"
+
+
 def _folder_form_base(path: str) -> str | None:
     """Return `path` without a trailing separator or ``.`` part, if it has one.
 
     ``rules.toml/``, ``rules.toml/.`` and ``rules.toml/./`` are the folder
     form of ``rules.toml``; None means `path` has no such ending. On Windows a
-    backslash counts as a separator too.
+    backslash counts as a separator too. The end is scanned by index, once.
     """
-    separators = "/\\" if sys.platform == "win32" else "/"
-    stripped = path
-    while stripped:
-        if stripped[-1] in separators:
-            stripped = stripped[:-1]
-        elif stripped[-2:-1] in tuple(separators) and stripped[-1] == ".":
-            stripped = stripped[:-2]
+    separators = _separators()
+    end = len(path)
+    while end:
+        if path[end - 1] in separators:
+            end -= 1
+        elif end >= 2 and path[end - 1] == "." and path[end - 2] in separators:
+            end -= 2
         else:
             break
-    return None if stripped == path else stripped
+    return None if end == len(path) else path[:end]
+
+
+def _without_trailing_separators(path: str) -> str:
+    """Return `path` without trailing separators, keeping a root (``/``, ``C:\\``).
+
+    The end is scanned by index, once.
+    """
+    separators = _separators()
+    drive = ntpath.splitdrive(path)[0] if sys.platform == "win32" else ""
+    keep = len(drive) + 1  # the drive and one separator: the root
+    end = len(path)
+    while end > keep and path[end - 1] in separators:
+        end -= 1
+    return path[:end]
 
 
 def policy_from_settings(
@@ -458,8 +478,8 @@ def render_default_settings() -> str:
         f"format_version = {FORMAT_VERSION}",
         f"defaults_version = {DEFAULTS_VERSION}",
         "# With true, crawl presses for real without --press (it still needs",
-        "# --out DIR, and --allow-real-device on a device that is not an",
-        "# emulator); --dry-run previews instead.",
+        "# --out DIR, or runs_dir below, and --allow-real-device on a device",
+        "# that is not an emulator); --dry-run previews instead.",
         "press = false",
         "# The folder that gets the run folders of a pressing crawl without --out",
         "# (relative to the folder of this file; it must exist):",
@@ -1004,14 +1024,13 @@ def _runs_dir(parsed: dict[str, object], reader: _Reader) -> str | None:
         raise reader.fail("runs_dir", "must not be empty")
     if "\0" in value:
         raise reader.fail("runs_dir", "must not hold a null character")
+    # Trailing separators only say "a folder", which runs_dir names anyway;
+    # a "/." ending stays refused: in --config that form hid a file.
+    value = _without_trailing_separators(value)
     base = _folder_form_base(value)
-    if base is not None:
+    if base is not None and value.endswith("."):
         hint = f"; write {_value_text(base)}" if base else ""
-        raise reader.fail(
-            "runs_dir",
-            'must not end with a path separator or "/." (the folder form of a'
-            f" path){hint}",
-        )
+        raise reader.fail("runs_dir", f'must not end with "/."{hint}')
     return value
 
 
