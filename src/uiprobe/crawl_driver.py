@@ -1068,7 +1068,8 @@ class _Run:
         late = self.now() >= self.deadline
         # uiprobe's own check once more, after the caller's clock (which may
         # have read the device and shown several displays first) and before
-        # the final comparison; its cause wins over any other reason.
+        # the final comparison; its cause wins over the reasons found so far
+        # (a changed pin or the time limit below still come first).
         if guard and displays_seen(self.device):
             self.gate_focus_details = {"cause": FOCUS_CAUSE_SEVERAL_DISPLAYS}
             why = NOT_SENT_FOCUS_UNKNOWN

@@ -1411,11 +1411,13 @@ _WINDOW_OWNER: Final = re.compile(
 
 
 def displays_seen(device: Device) -> bool:
-    """Whether a ``dumpsys window`` read (the full dump or ``windows``) of
-    `device` has shown several displays since `forget_displays`.
+    """Whether a ``dumpsys window`` read (the full dump or ``windows``) or a
+    `Device.window_at` read of `device` has shown several displays since
+    `forget_displays`.
 
     A module function, not a method, so a subclass cannot replace it: the
-    crawl asks it after its final comparison, where no caller code may run.
+    crawl asks it after the caller's last clock call and before its final
+    comparison.
     """
     return device._several_seen  # noqa: SLF001 - uiprobe's own state
 
