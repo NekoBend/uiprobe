@@ -14,6 +14,7 @@ What the file holds: the deny words and their exception words, the confirm
 words, the phrases that mark a
 screen as irreversible, the rules (unlabeled,
 number-only and toggle elements, two-target rows and rows with buttons,
+toolbar up buttons,
 confirm buttons in dialogs, irreversible
 screens, the screen-edge
 sizes, the smallest visible size), the crawl limits, ``press`` and the
@@ -37,7 +38,9 @@ its default. Version 2 added the ``[irreversible]`` table, the rule
 rules ``skip_two_target_rows`` (a missing one reads True) and
 ``skip_rows_with_buttons`` (a missing one reads False); a file written at
 version 3 must have both, and an older uiprobe refuses a version 3 file
-(its ``defaults_version`` is out of range there).
+(its ``defaults_version`` is out of range there). Version 4 added the rule
+``skip_navigate_up`` (a missing one reads True); a file written at version 4
+must have it, and an older uiprobe refuses a version 4 file.
 
 ``[deny] except`` holds exception words (see `uiprobe.guards.word_matches`): a
 deny-word hit that lies completely inside one of them, where it stands as a
@@ -137,7 +140,7 @@ __all__ = [
 
 SETTINGS_FILE: Final = "uiprobe.toml"
 FORMAT_VERSION: Final = 1
-DEFAULTS_VERSION: Final = 3
+DEFAULTS_VERSION: Final = 4
 MAX_SETTINGS_BYTES: Final = 1024 * 1024
 
 # Every default list item with the defaults version that introduced it. Each
@@ -155,6 +158,7 @@ MAX_SETTINGS_BYTES: Final = 1024 * 1024
 # Version 2 added the start-over deny words, the [irreversible] table with all
 # of its phrases and the rule refuse_irreversible_screens. Version 3 added the
 # rules skip_two_target_rows and skip_rows_with_buttons (no list items).
+# Version 4 added the rule skip_navigate_up (no list items).
 _LATER_DENY: Final[dict[str, int]] = {
     "やり直": 2,
     "元に戻": 2,
@@ -164,7 +168,7 @@ _LATER_DENY: Final[dict[str, int]] = {
 # The [deny] except list has no built-in words. One added later starts at the
 # next defaults version (raise DEFAULTS_VERSION with it); before that, the
 # test that no default is tagged beyond the current version fails.
-_FIRST_EXCEPT: Final = 4
+_FIRST_EXCEPT: Final = 5
 _LATER_EXCEPT: Final[dict[str, int]] = {}
 _LATER_CONFIRM: Final[dict[str, int]] = {}
 # The [irreversible] table came with version 2, so its items start there.
@@ -210,6 +214,7 @@ _BOOL_RULES: Final = (
     "refuse_irreversible_screens",
     "skip_two_target_rows",
     "skip_rows_with_buttons",
+    "skip_navigate_up",
 )
 # table -> key -> (lowest, highest) allowed value
 _INT_RANGES: Final[dict[str, dict[str, tuple[int, int]]]] = {
@@ -235,11 +240,13 @@ _LATER_RULES: Final[dict[str, int]] = {
     "refuse_irreversible_screens": 2,
     "skip_two_target_rows": 3,
     "skip_rows_with_buttons": 3,
+    "skip_navigate_up": 4,
 }
 _LATER_RULE_VALUES: Final[dict[str, bool]] = {
     "refuse_irreversible_screens": True,
     "skip_two_target_rows": True,
     "skip_rows_with_buttons": False,
+    "skip_navigate_up": True,
 }
 _TABLE_KEYS: Final[dict[str, frozenset[str]]] = {
     "deny": frozenset({"words", "except", "remove"}),
@@ -278,7 +285,8 @@ class Settings:
     ``()``, so a Settings built with the fields of an earlier version, by
     keyword or by position, still works. ``skip_two_target_rows`` (default
     True) and ``skip_rows_with_buttons`` (default False), added with defaults
-    version 3, follow it for the same reason.
+    version 3, and ``skip_navigate_up`` (default True), added with defaults
+    version 4, follow it for the same reason.
     """
 
     source: Path
@@ -308,6 +316,7 @@ class Settings:
     deny_exceptions: tuple[str, ...] = ()
     skip_two_target_rows: bool = True
     skip_rows_with_buttons: bool = False
+    skip_navigate_up: bool = True
 
 
 def policy_from_settings(
@@ -319,10 +328,11 @@ def policy_from_settings(
     """Return the `Policy` that the effective `settings` describe.
 
     The deny words, their exception words and the confirm words, the
-    unlabeled, number-only, toggle, row and dialog-confirm rules, the edge sizes
-    and the smallest visible size come from the settings. `extra_deny` adds
-    deny words for this policy only (for example ``--deny``); an exception
-    word equal to one of them is dropped, so the added word blocks as given.
+    unlabeled, number-only, toggle, row, up-button and dialog-confirm rules,
+    the edge sizes and the smallest visible size come from the settings.
+    `extra_deny` adds deny words for this policy only (for example
+    ``--deny``); an exception word equal to one of them is dropped, so the
+    added word blocks as given.
     `tap_unlabeled` None keeps the file's value; a bool replaces it (the
     command line passes True to force it for one run).
 
@@ -348,6 +358,7 @@ def policy_from_settings(
         skip_toggles=settings.skip_toggles,
         skip_two_target_rows=settings.skip_two_target_rows,
         skip_rows_with_buttons=settings.skip_rows_with_buttons,
+        skip_navigate_up=settings.skip_navigate_up,
         refuse_dialog_confirm=settings.refuse_dialog_confirm,
         edges=(
             settings.edge_top_px,
@@ -454,6 +465,9 @@ def render_default_settings() -> str:
         "# Settings apps whose rows have no divider id; it also refuses list",
         "# rows of ordinary apps that hold a button (a star, a menu).",
         "skip_rows_with_buttons = false",
+        "# Do not press the up button at the top left of a toolbar: the crawl",
+        "# presses the rows of a sub-page first and goes back with BACK.",
+        "skip_navigate_up = true",
         f"min_visible_px = {MIN_VISIBLE_PX}",
         f"edge_top_px = {API36_TOP_PX}",
         f"edge_bottom_px = {API36_BOTTOM_PX}",
@@ -1101,6 +1115,7 @@ def load_settings(path: str | os.PathLike[str]) -> Settings:
         refuse_irreversible_screens=flags["refuse_irreversible_screens"],
         skip_two_target_rows=flags["skip_two_target_rows"],
         skip_rows_with_buttons=flags["skip_rows_with_buttons"],
+        skip_navigate_up=flags["skip_navigate_up"],
         min_visible_px=sizes["min_visible_px"],
         edge_top_px=sizes["edge_top_px"],
         edge_bottom_px=sizes["edge_bottom_px"],

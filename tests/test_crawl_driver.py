@@ -1382,6 +1382,7 @@ def test_the_policy_copy_keeps_every_field():
         "deny_exceptions": ("automatically",),
         "skip_two_target_rows": False,
         "skip_rows_with_buttons": True,
+        "skip_navigate_up": False,
     }
     assert set(values) == {f.name for f in fields(Policy)}
     default = Policy()
@@ -3158,3 +3159,99 @@ def test_skip_lines_name_the_row_reasons(tmp_path, fake_adb, clock, monkeypatch)
     # 310..370) were tapped; neither row.
     taps = {i.point for i in android.inputs if i.kind == "tap"}
     assert taps == {(268, 245), (280, 340)}
+
+
+# --- the up button of a sub-page ---
+
+UP = "android.widget.ImageButton"
+
+
+def up_button() -> El:
+    # The API 37 emulator's Settings records it at (16, 24, 72, 80), outside
+    # the screen-edge areas; the fake renders its elements flat, so the rule
+    # finds it here by its label.
+    return El((16, 24, 72, 80), desc="Navigate up", cls=UP, go="back")
+
+
+SUBPAGE_SCREENS = (
+    Screen("home", "com.example.launcher/.Home", (El((0, 0, 320, 640)),)),
+    Screen(
+        "top",
+        f"{SHOP}/.Top",
+        (
+            El((0, 0, 320, 100), text="Settings"),
+            button(200, "Network", "network"),
+        ),
+    ),
+    Screen(
+        "network",
+        f"{SHOP}/.Network",
+        (
+            up_button(),
+            El((80, 24, 300, 80), text="Network"),
+            button(200, "Wi-Fi", "wifi"),
+            button(260, "Mobile", "mobile"),
+        ),
+    ),
+    Screen(
+        "wifi",
+        f"{SHOP}/.Wifi",
+        (
+            up_button(),
+            El((80, 24, 300, 80), text="Wi-Fi"),
+            button(200, "Saved", "saved"),
+        ),
+    ),
+    Screen(
+        "saved", f"{SHOP}/.Saved", (up_button(), El((80, 24, 300, 80), text="Saved"))
+    ),
+    Screen(
+        "mobile", f"{SHOP}/.Mobile", (up_button(), El((80, 24, 300, 80), text="Mobile"))
+    ),
+)
+
+
+def crawl_subpages(
+    fake_adb: FakeAdbServer, clock: Clock, out: Path, policy: Policy
+) -> tuple[FakeAndroid, CrawlResult]:
+    android = FakeAndroid(
+        fake_adb, SERIAL, SUBPAGE_SCREENS, start="home", transport_id=TRANSPORT
+    )
+    device = Device(adb_server=fake_adb.address)
+    result = run(device, clock, out, limits=Limits(actions=12), policy=policy)
+    return android, result
+
+
+def test_the_rows_of_a_subpage_are_tapped_before_its_up_button(
+    tmp_path, fake_adb, clock
+):
+    android, result = crawl_subpages(fake_adb, clock, tmp_path / "run", Policy())
+    taps = [(i.screen, i.point) for i in android.inputs if i.kind == "tap"]
+    # Never the up button (center 44, 52): every row of every sub-page, the
+    # deepest first.
+    assert taps == [
+        ("top", (160, 220)),
+        ("network", (160, 220)),
+        ("wifi", (160, 220)),
+        ("network", (160, 280)),
+    ]
+    assert (result.stop_reason, result.screens) == ("exhausted", 5)
+    rows = {r["element"]["id"]: r for r in lines(tmp_path / "run" / "skipped.jsonl")}
+    assert {tuple(r["reasons"]) for r in rows.values()} == {("navigate_up",)}
+
+
+def test_with_the_up_rule_off_the_crawl_presses_up_and_stays_shallow(
+    tmp_path, fake_adb, clock
+):
+    android, result = crawl_subpages(
+        fake_adb, clock, tmp_path / "run", Policy(skip_navigate_up=False)
+    )
+    taps = [(i.screen, i.point) for i in android.inputs if i.kind == "tap"]
+    # As before the rule: the up button is the first candidate of the sub-page,
+    # so it is pressed at once. It lands on the parent, which the engine takes
+    # for a deeper screen; its BACK there leaves the app, and after the
+    # relaunch every candidate is already tried: no row of a sub-page is
+    # pressed and only 2 screens are seen (5 above).
+    assert taps == [("top", (160, 220)), ("network", (44, 52))]
+    assert result.stop_reason == "exhausted"
+    assert result.screens == 2
