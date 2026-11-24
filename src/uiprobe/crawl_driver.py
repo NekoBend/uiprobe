@@ -10,11 +10,12 @@ clock or file), and the writer imports it, so the driver sits above both.
 What is sent. Only what the engine returned, and for a tap only what
 `CrawlEngine.recheck` allowed for that very `Tap` object, in the gate right
 before it is sent: the first launch (by default ``force-stop`` then
-start, so the run begins on the app's first screen; with ``restart=False``
-only the start), a relaunch (``force-stop`` then start; a launch is ``am
-start -W`` of the launcher activity, read right before each start, never
-``monkey``), a tap at the point judge gave, and the BACK key. Text, long
-presses, swipes and other keys are never sent. By default the engine never
+start of the launcher activity, so the run does not go on from the screen
+the app showed; with ``restart=False`` only the start), a relaunch
+(``force-stop`` then start; a launch is ``am start -W`` of the launcher
+activity, read right before each start, never ``monkey``), a tap at the
+point judge gave, and the BACK key. Text, long presses, swipes and other
+keys are never sent. By default the engine never
 returns BACK for a screen of another app (it relaunches instead);
 ``Policy.back_on_other_screens`` allows it. A BACK or
 relaunch decided on such a screen names its package (and the foreground) as
@@ -1629,14 +1630,15 @@ def crawl(
     passed (the device check itself reads one property).
 
     `restart` (the default True) makes the first action force-stop the app
-    (``am force-stop``) and then start it, so every run begins on the app's
-    first screen; what the app had not saved is lost. It is one action of
-    kind ``launch``, counted once, whose start line has ``restart: true``,
-    and it passes the checks of a relaunch: the force-stop goes out only
-    after `stop`, the time limit and the pin were checked and the launcher
-    activity was read (when it cannot be read, nothing is sent), and the
-    start only after they were checked and read again. When `stop` or the
-    time limit ends the run between the two, the start is not sent
+    (``am force-stop``) and then start its launcher activity, so the run
+    does not go on from the screen the app showed (which screen the app then
+    shows is up to the app); what the app had not saved is lost. It is one
+    action of kind ``launch``, counted once, whose start line has ``restart:
+    true``, and it passes the checks of a relaunch: the force-stop goes out
+    only after `stop`, the time limit and the pin were checked and the
+    launcher activity was read (when it cannot be read, nothing is sent),
+    and the start only after they were checked and read again. When `stop`
+    or the time limit ends the run between the two, the start is not sent
     (``start_not_sent``) and the summary says the app was stopped but not
     started. ``restart=False`` sends only the start, so the crawl begins on
     the screen the app shows now. Earlier versions behaved as
