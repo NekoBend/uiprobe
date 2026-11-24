@@ -10,6 +10,7 @@ up.
 
 from __future__ import annotations
 
+import inspect
 import re
 from typing import TYPE_CHECKING
 
@@ -909,6 +910,8 @@ def test_a_caller_clock_that_first_shows_two_displays_sends_nothing(tmp_path, fa
     driver, _, observation = _gate_run(
         tmp_path, device, ReadingClock(), policy=Policy(check_tap_window=False)
     )
+    # A keyboard shown: the late cause still wins over keyboard_shown.
+    driver.device.keyboard_shown = lambda: True
     armed.append(0)
     driver.send(Back(), observation)
     assert before_flip == [False]  # the early check could not see it
@@ -934,6 +937,13 @@ def test_the_last_check_is_not_caller_code(tmp_path, fake_adb, monkeypatch):
     android, _, driver, _, observation = gate_run(tmp_path, fake_adb, "")
     driver.send(Back(), observation)
     assert calls == ["Device", "Device"]  # the early check and the last one
+    source = inspect.getsource(crawl_driver._Run.gate)
+    # The last check comes before the final comparison, nothing after it.
+    assert source.index("displays_seen(self.device):") < source.index(
+        "self.final_check(path"
+    )
+    tail = source[source.index("self.final_check(path") :]
+    assert "displays_seen" not in tail
     assert not hasattr(Device, "_displays_seen")
     assert [i.kind for i in android.inputs] == ["key"]
 

@@ -1051,6 +1051,12 @@ class _Run:
         # device also checks the time with uiprobe's own clock right before
         # the input goes out.
         late = self.now() >= self.deadline
+        # uiprobe's own check once more, after the caller's clock (which may
+        # have read the device and shown several displays first) and before
+        # the final comparison; its cause wins over any other reason.
+        if guard and displays_seen(self.device):
+            self.gate_focus_details = {"cause": FOCUS_CAUSE_SEVERAL_DISPLAYS}
+            why = NOT_SENT_FOCUS_UNKNOWN
         path = (
             "tap"
             if isinstance(action, Tap)
@@ -1062,12 +1068,6 @@ class _Run:
             return NOT_SENT_RECONNECTED, seen
         if late:
             return NOT_SENT_TIME_LIMIT, None
-        # uiprobe's own check once more, after the caller's clock (which may
-        # have read the device and shown several displays first); no caller
-        # code runs from here to the request.
-        if why is None and guard and displays_seen(self.device):
-            self.gate_focus_details = {"cause": FOCUS_CAUSE_SEVERAL_DISPLAYS}
-            why = NOT_SENT_FOCUS_UNKNOWN
         return why, seen
 
     def launch_gate(self) -> str | None:
