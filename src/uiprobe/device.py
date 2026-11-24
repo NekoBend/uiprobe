@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import contextlib
-import itertools
 import os
 import re
 import secrets
@@ -1231,9 +1230,9 @@ def _several_displays(lines: list[str]) -> bool:
         return True
     displays = {
         match[1]
-        for head, below in itertools.pairwise(lines)
+        for index, head in enumerate(lines[:-1])
         if _WINDOW_HEAD_HASH.match(head)
-        and (match := _WINDOW_DISPLAY.match(below)) is not None
+        and (match := _WINDOW_DISPLAY.match(lines[index + 1])) is not None
     }
     return len(displays) > 1
 
