@@ -33,6 +33,13 @@ def here(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return tmp_path
 
 
+NOT_PRESSING = (
+    "is used only when the crawl presses: add --press, or set press = true in"
+    f" the settings file {SETTINGS_FILE}"
+)
+DRY_RUN_PRESS_ONLY = "is used only when the crawl presses, and --dry-run never presses"
+
+
 def press(
     capsys: pytest.CaptureFixture[str], fake_adb: FakeAdbServer, *argv: str
 ) -> tuple[int, str, str]:
@@ -48,16 +55,20 @@ def test_press_runs_a_short_crawl_on_an_emulator(fake_adb, android, capsys, tmp_
     assert (code, err) == (0, "")
     lines = text.splitlines()
     assert lines[0] == f"pressing on {SERIAL} (emulator): {SHOP}"
-    assert lines[1] == "limits: depth 3, actions 30, minutes 5"
-    assert lines[2] == f"run folder: {out}"
-    assert lines[3] == "BACK on screens of other apps: no (restart the app)"
-    assert lines[4] == "check the window at each tap point: yes"
-    assert lines[5].startswith("stopped: ")
+    assert lines[1] == "pressing because: --press"
+    assert lines[2] == (
+        "limits: depth 5 (settings file), actions 300 (settings file),"
+        " minutes 30 (settings file)"
+    )
+    assert lines[3] == f"run folder: {out}"
+    assert lines[4] == "BACK on screens of other apps: no (restart the app)"
+    assert lines[5] == "check the window at each tap point: yes"
+    assert lines[6].startswith("stopped: ")
     assert any(line.startswith("actions: ") for line in lines)
-    assert f"run folder: {out}" in lines[6:]
+    assert f"run folder: {out}" in lines[7:]
     assert [i for i in android.inputs if i.kind == "tap"]
     begin = json.loads((out / "run-start.json").read_bytes())
-    assert begin["limits"] == {"depth": 3, "actions": 30, "minutes": 5}
+    assert begin["limits"] == {"depth": 5, "actions": 300, "minutes": 30}
     assert begin["check_tap_window"] is True
     assert begin["back_on_other_screens"] is False
     assert (out / "run.json").exists()
@@ -85,7 +96,13 @@ def test_press_in_json(fake_adb, capsys, tmp_path):
     assert result["schema"] == "uiprobe.crawl_run/1"
     assert result["package"] == SHOP
     assert result["device"] == {"serial": SERIAL, "emulator": True}
-    assert result["limits"] == {"depth": 3, "actions": 4, "minutes": 5}
+    assert result["press_source"] == "option"
+    assert result["limits"] == {"depth": 5, "actions": 4, "minutes": 30}
+    assert result["limits_source"] == {
+        "depth": "file",
+        "actions": "option",
+        "minutes": "file",
+    }
     assert result["back_on_other_screens"] is True
     assert result["check_tap_window"] is False
     assert result["out"] == str(out)
@@ -129,10 +146,13 @@ def test_a_real_device_runs_with_the_option(fake_adb, android, capsys, tmp_path)
 @pytest.mark.parametrize(
     ("argv", "message"),
     [
-        (["--out", "x"], "--out is used only with --press"),
-        (["--actions", "3"], "--actions is used only with --press"),
-        (["--allow-real-device"], "--allow-real-device is used only with --press"),
-        (["--no-tap-window-check"], "--no-tap-window-check is used only with --press"),
+        (["--out", "x"], f"--out {NOT_PRESSING}"),
+        (["--actions", "3"], f"--actions {NOT_PRESSING}"),
+        (["--allow-real-device"], f"--allow-real-device {NOT_PRESSING}"),
+        (["--no-tap-window-check"], f"--no-tap-window-check {NOT_PRESSING}"),
+        (["--dry-run", "--out", "x"], f"--out {DRY_RUN_PRESS_ONLY}"),
+        (["--dry-run", "--minutes", "3"], f"--minutes {DRY_RUN_PRESS_ONLY}"),
+        (["--dry-run", "--screenshots"], f"--screenshots {DRY_RUN_PRESS_ONLY}"),
         (["--press"], "--press needs --out DIR, the new folder to record the run into"),
         (
             ["--press", "--out", "x", "--actions", "0"],
@@ -246,14 +266,17 @@ def test_dumps_that_keep_failing_name_the_screen(
 
 
 @pytest.mark.usefixtures("here")
-def test_a_settings_file_with_press_true_alone_does_not_press(
-    fake_adb, android, capsys, here
-):
+def test_press_true_without_out_names_out_and_the_file(fake_adb, android, capsys, here):
     text = render_default_settings().replace("press = false", "press = true")
     (here / SETTINGS_FILE).write_text(text, encoding="utf-8")
     code, out, err = press(capsys, fake_adb)
     assert (code, out) == (2, "")
-    assert "only when --press is given" in err
+    assert err == (
+        f"uiprobe: error: the settings file {SETTINGS_FILE} says press = true,"
+        " so this crawl presses and needs --out DIR, the new folder to record"
+        " the run into; add --dry-run to preview instead\n"
+    )
+    assert fake_adb.requests == []
     assert android.inputs == []
 
 

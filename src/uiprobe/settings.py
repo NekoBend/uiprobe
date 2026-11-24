@@ -4,11 +4,12 @@ The defaults are written out in a TOML file, ``uiprobe.toml``, that
 ``uiprobe init`` creates and that users edit freely. This module holds the
 file format, the generator (`render_default_settings`,
 `write_default_settings`) and a strict reader (`load_settings`). ``uiprobe crawl``
-(the preview) reads the file for its no-press defaults, through
-`policy_from_settings`, and ``uiprobe key`` reads the keys it refuses. The crawl
-limits are not used to press (``crawl --press`` takes its own small limits),
-and ``press = true`` only makes ``crawl`` refuse to run unless ``--press`` or
-``--dry-run`` is given.
+reads the file for its no-press defaults, through `policy_from_settings`, and
+``uiprobe key`` reads the keys it refuses. ``press = true`` makes ``crawl``
+press without ``--press`` (``--dry-run`` still previews), and a pressing crawl
+takes the ``[limits]`` that no option overrides. The limits ``uiprobe init``
+writes (`_DEFAULT_DEPTH`, `_DEFAULT_ACTIONS`, `_DEFAULT_MINUTES`) are also the
+command line's defaults when no file value applies.
 
 What the file holds: the deny words and their exception words, the confirm
 words, the phrases that mark a
@@ -193,6 +194,9 @@ _REFUSE_PREFIXES: Final[tuple[tuple[int, str], ...]] = tuple(
     (_LATER_PREFIXES.get(prefix, 1), prefix) for prefix in DEVICE_WIDE_KEY_PREFIXES
 )
 
+# The crawl limits: what `uiprobe init` writes under [limits] and what a
+# pressing crawl uses when neither an option nor the file gives a value. The
+# command line imports these, so both always agree.
 _DEFAULT_DEPTH: Final = 5
 _DEFAULT_ACTIONS: Final = 300
 _DEFAULT_MINUTES: Final = 30
@@ -407,8 +411,9 @@ def render_default_settings() -> str:
         "",
         f"format_version = {FORMAT_VERSION}",
         f"defaults_version = {DEFAULTS_VERSION}",
-        "# Not used to press: crawl presses only with --press. With true, crawl",
-        "# refuses to run unless --press or --dry-run is given.",
+        "# With true, crawl presses for real without --press (it still needs",
+        "# --out DIR, and --allow-real-device on a device that is not an",
+        "# emulator); --dry-run previews instead.",
         "press = false",
         "",
         "[deny]",
@@ -460,6 +465,8 @@ def render_default_settings() -> str:
         f"edge_side_px = {API36_SIDE_PX}",
         "",
         "[limits]",
+        "# The limits of a pressing crawl; --depth, --actions and --minutes",
+        "# override them for one run.",
         f"depth = {_DEFAULT_DEPTH}",
         f"actions = {_DEFAULT_ACTIONS}",
         f"minutes = {_DEFAULT_MINUTES}",

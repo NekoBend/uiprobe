@@ -21,10 +21,10 @@ import os
 import re
 import stat
 import sys
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Final, NoReturn, TextIO, override
+from typing import TYPE_CHECKING, Final, Literal, NoReturn, TextIO, override
 
 from uiprobe import __version__
 from uiprobe._json import dumps
@@ -68,6 +68,9 @@ from uiprobe.pngfile import (
     save_png,
 )
 from uiprobe.settings import (
+    _DEFAULT_ACTIONS,
+    _DEFAULT_DEPTH,
+    _DEFAULT_MINUTES,
     SETTINGS_FILE,
     IncompleteFileError,
     InterruptedFileError,
@@ -92,13 +95,22 @@ __all__ = ["main", "run"]
 FIND_SCHEMA = "uiprobe.find/1"
 CRAWL_RUN_SCHEMA = "uiprobe.crawl_run/1"
 # The limits of a pressing crawl from the command line: (lowest, highest,
-# default, what). The defaults are small on purpose, so a bare --press ends
-# soon; the settings file's [limits] are the preview's and are not used here.
-_PRESS_LIMITS: dict[str, tuple[int, int, int, str]] = {
-    "depth": (1, 50, 3, "how deep it taps on one path (does not end the run)"),
-    "actions": (1, 10000, 30, "the most sent actions (launch, taps, BACK, restarts)"),
-    "minutes": (1, 1440, 5, "the longest run in minutes"),
+# what). Each value is the option, else the settings file's [limits], else
+# _DEFAULT_LIMITS, the values `uiprobe init` writes (see `_press_limits`).
+_PRESS_LIMITS: dict[str, tuple[int, int, str]] = {
+    "depth": (1, 50, "how deep it taps on one path (does not end the run)"),
+    "actions": (1, 10000, "the most sent actions (launch, taps, BACK, restarts)"),
+    "minutes": (1, 1440, "the longest run in minutes"),
 }
+_DEFAULT_LIMITS: Final[dict[str, int]] = {
+    "depth": _DEFAULT_DEPTH,
+    "actions": _DEFAULT_ACTIONS,
+    "minutes": _DEFAULT_MINUTES,
+}
+# Where a limit of a pressing run came from (the "limits_source" values).
+_LimitSource = Literal["option", "file", "default"]
+# Why a run presses (the "press_source" values): --press, or press = true.
+_PressSource = Literal["option", "file"]
 _PRESS_SETTLE = 1.0
 
 
@@ -552,11 +564,12 @@ def _add_crawl_parser(add_parser: Callable[..., argparse.ArgumentParser]) -> Non
             " lists what a crawl of PACKAGE would press and what it would skip,"
             " with the reasons. It presses nothing, does not start the app and"
             " writes no file on this computer. --dry-run forces the preview."
-            " --press runs a pressing crawl: it starts the app, presses what the"
-            " rules allow, presses BACK and restarts the app, and records every"
-            " step in the new folder --out DIR. It presses only on an emulator"
-            " unless --allow-real-device is given, and stops after a few actions"
-            " unless --depth, --actions or --minutes say otherwise."
+            " --press, or press = true in the settings file, runs a pressing"
+            " crawl: it starts the app, presses what the rules allow, presses"
+            " BACK and restarts the app, and records every step in the new"
+            " folder --out DIR. It presses only on an emulator unless"
+            " --allow-real-device is given, and stops at the settings file's"
+            " [limits] unless --depth, --actions or --minutes say otherwise."
             f" The rules come from the settings file (./{SETTINGS_FILE}"
             " or --config PATH); without one the command stops. Create it with"
             " uiprobe init."
@@ -568,8 +581,9 @@ def _add_crawl_parser(add_parser: Callable[..., argparse.ArgumentParser]) -> Non
         "--dry-run",
         action="store_true",
         help=(
-            "force the preview (the default): judge the screen showing now;"
-            " cannot be combined with --press"
+            "force the preview (the default): judge the screen showing now,"
+            " also when the settings file says press = true; cannot be"
+            " combined with --press"
         ),
     )
     crawl.add_argument(
@@ -601,40 +615,44 @@ def _add_crawl_parser(add_parser: Callable[..., argparse.ArgumentParser]) -> Non
 
 
 def _add_press_options(crawl: argparse.ArgumentParser) -> None:
-    """The options that only a pressing crawl (--press) takes."""
+    """The options that only a pressing crawl (--press or press = true) takes."""
     crawl.add_argument(
         "--out",
         metavar="DIR",
-        help="with --press: the new run folder to record into (must not exist)",
+        help="when pressing: the new run folder to record into (must not exist)",
     )
-    for name, (low, high, default, what) in _PRESS_LIMITS.items():
+    for name, (low, high, what) in _PRESS_LIMITS.items():
         crawl.add_argument(
             f"--{name}",
             type=_bounded_int(f"--{name}", low, high),
             metavar="N",
-            help=f"with --press: {what}, {low} to {high} (default {default})",
+            help=(
+                f"when pressing: {what}, {low} to {high} (default: [limits]"
+                f" {name} of the settings file; uiprobe init writes"
+                f" {_DEFAULT_LIMITS[name]})"
+            ),
         )
     crawl.add_argument(
         "--settle",
         type=_settle_seconds,
         metavar="SEC",
-        help=f"with --press: the pause after a tap or BACK (default {_PRESS_SETTLE})",
+        help=f"when pressing: the pause after a tap or BACK (default {_PRESS_SETTLE})",
     )
     crawl.add_argument(
         "--screenshots",
         action="store_true",
-        help="with --press: also save a screenshot of each new screen",
+        help="when pressing: also save a screenshot of each new screen",
     )
     crawl.add_argument(
         "--allow-real-device",
         action="store_true",
-        help="with --press: also press on a device that is not an emulator",
+        help="when pressing: also press on a device that is not an emulator",
     )
     crawl.add_argument(
         "--back-on-other-screens",
         action="store_true",
         help=(
-            "with --press: press BACK on a screen of another app (by default the"
+            "when pressing: press BACK on a screen of another app (by default the"
             " app is restarted instead and nothing goes to the other app)"
         ),
     )
@@ -642,7 +660,7 @@ def _add_press_options(crawl: argparse.ArgumentParser) -> None:
         "--no-tap-window-check",
         action="store_true",
         help=(
-            "with --press: do not read which window takes a tap at its point (by"
+            "when pressing: do not read which window takes a tap at its point (by"
             " default a tap goes out only when a window of the app takes it)"
         ),
     )
@@ -995,12 +1013,17 @@ def _key_settings(args: argparse.Namespace) -> Settings | None:
     return _load_settings(SETTINGS_FILE)
 
 
-def _create_line(path: str) -> str:
-    """Return the command that creates ``path``; a path needing quoting gives PATH."""
+def _command_path(path: str) -> str:
+    """Return `path` for a printed command; one that needs quoting gives PATH."""
     pattern = _PLAIN_WINDOWS_PATH_RE if _ON_WINDOWS else _PLAIN_PATH_RE
     if pattern.fullmatch(str(path)) is None:
-        return "uiprobe init PATH"
-    return f"uiprobe init {path}"
+        return "PATH"
+    return path
+
+
+def _create_line(path: str) -> str:
+    """Return the command that creates ``path``; a path needing quoting gives PATH."""
+    return f"uiprobe init {_command_path(path)}"
 
 
 def _crawl_settings(args: argparse.Namespace) -> Settings:
@@ -1019,10 +1042,10 @@ def _crawl_settings(args: argparse.Namespace) -> Settings:
             # Name the looked-for path only when it needs no shell quoting.
             create = _create_line(path)
         # Keep a --dry-run or --press the caller gave: a file that says
-        # press = true is refused without --dry-run, and --press stays visible.
+        # press = true presses without --dry-run, and --press stays visible.
         switch = " --dry-run" if args.dry_run else ""
         name = f"uiprobe crawl {args.package}{switch} --config PATH"
-        if args.press:
+        if args.press or any(given for _option, given in _press_only(args)):
             # A pressing run has more options (--out, limits, device) than a
             # line could repeat safely: name the one thing to add.
             name = "add --config PATH to the same command"
@@ -1135,10 +1158,52 @@ def _cmd_launch(args: argparse.Namespace) -> int:
     return 0
 
 
-def _crawl_policy(args: argparse.Namespace) -> tuple[Policy, Settings]:
-    """Check the crawl options, read the settings and build the policy.
+@dataclass(frozen=True)
+class _CrawlSetup:
+    """What a crawl runs with, decided before any device is contacted.
 
-    No device is contacted.
+    ``press_source`` is None for the preview, else why the run presses;
+    ``out`` is the run folder of a pressing run (None for the preview).
+    """
+
+    policy: Policy
+    settings: Settings
+    press_source: _PressSource | None
+    out: str | None
+
+
+def _refuse_press_only(args: argparse.Namespace, why: str) -> None:
+    """Refuse the first option that only a pressing run takes, if one was given."""
+    given = [option for option, value in _press_only(args) if value]
+    if given:
+        msg = f"{given[0]} is used only when the crawl presses{why}"
+        raise _UsageError(msg)
+
+
+def _file_press_out(settings: Settings) -> str:
+    """Return the run folder of a run that presses by press = true without --out.
+
+    PENDING: the owner has not yet chosen what such a run records into, and
+    this function is the one place that choice changes. Now (option O1) it is
+    a usage error that names --out and says that the file sets press = true.
+    The alternatives would only replace this body: O2 returns a new folder
+    that did not exist (for example ./uiprobe-runs/PACKAGE-YYYYMMDD-HHMMSS),
+    O3 one below a parent folder named by a new settings key.
+    """
+    msg = (
+        f"the settings file {_shown(str(settings.source))} says press = true,"
+        " so this crawl presses and needs --out DIR, the new folder to record"
+        " the run into; add --dry-run to preview instead"
+    )
+    raise _UsageError(msg)
+
+
+def _crawl_policy(args: argparse.Namespace) -> _CrawlSetup:
+    """Check the crawl options, read the settings, decide whether it presses.
+
+    A run presses when --press is given, or when the settings file says
+    press = true and --dry-run is not given. What the options alone decide is
+    checked before the file is read. No device is contacted.
     """
     if args.press and args.dry_run:
         msg = "--press and --dry-run cannot be combined"
@@ -1153,28 +1218,33 @@ def _crawl_policy(args: argparse.Namespace) -> tuple[Policy, Settings]:
         except ValueError:
             msg = f"--deny word is empty after normalization: {word!r}"
             raise _UsageError(msg) from None
-    if not args.press:
-        given = [option for option, value in _press_only(args) if value]
-        if given:
-            msg = f"{given[0]} is used only with --press"
-            raise _UsageError(msg)
-    elif args.out is None:
+    if args.dry_run:
+        _refuse_press_only(args, ", and --dry-run never presses")
+    elif args.press and args.out is None:
         msg = "--press needs --out DIR, the new folder to record the run into"
         raise _UsageError(msg)
     settings = _crawl_settings(args)
-    if settings.press and not (args.press or args.dry_run):
-        msg = (
-            f"the settings file {_shown(str(settings.source))} says press = true,"
-            " but a crawl presses only when --press is given: add --press and"
-            " --out DIR to press, or --dry-run to preview"
+    press_source: _PressSource | None = None
+    if args.press:
+        press_source = "option"
+    elif settings.press and not args.dry_run:
+        press_source = "file"
+    if press_source is None and not args.dry_run:
+        _refuse_press_only(
+            args,
+            ": add --press, or set press = true in the settings file"
+            f" {_shown(str(settings.source))}",
         )
-        raise _UsageError(msg)
+    out: str | None = args.out
+    if press_source == "file" and out is None:
+        # The choice for this case is pending; only _file_press_out changes.
+        out = _file_press_out(settings)
     policy = policy_from_settings(
         settings,
         extra_deny=args.deny,
         tap_unlabeled=True if args.tap_unlabeled else None,
     )
-    return policy, settings
+    return _CrawlSetup(policy, settings, press_source, out)
 
 
 def _detail_text(decision: Decision, detail: Detail) -> str:
@@ -1221,7 +1291,13 @@ def _decision_center(screen: Screen, decision: Decision) -> tuple[int, int] | No
     return decision.point
 
 
-def _preview_text(result: Preview, settings_path: str, *, dry_run: bool) -> str:
+def _preview_text(
+    result: Preview,
+    settings_path: str,
+    *,
+    dry_run: bool,
+    guidance: Sequence[str] = (),
+) -> str:
     screen = result.screen
     shown = {True: "shown", False: "hidden", None: "unknown"}[result.keyboard_shown]
     foreground = "unknown" if result.foreground is None else result.foreground
@@ -1246,13 +1322,40 @@ def _preview_text(result: Preview, settings_path: str, *, dry_run: bool) -> str:
         + _reasons_text(d)
         for d in skipped
     )
-    # Guidance on how to switch to a pressing run (--press, or
-    # press = true in the settings file, plus --allow-real-device on a real
-    # device) is printed here once the pressing crawl exists. Until then no
-    # command is printed, because every pressing command is refused.
     how = "--dry-run" if dry_run else "the default"
     lines.append(f"nothing was pressed: this was a preview ({how})")
+    lines.extend(guidance)
     return "\n".join(lines)
+
+
+def _preview_guidance(
+    args: argparse.Namespace, settings: Settings, device: Device
+) -> list[str]:
+    """How to switch from this preview to a pressing run; empty when none applies.
+
+    A file that says press = true was overridden by --dry-run, so dropping
+    that option is the switch and nothing is printed. Otherwise the lines name
+    --press for this run and press = true for every run, and, unless the
+    device answers that it is an emulator, --allow-real-device.
+    """
+    if settings.press:
+        return []
+    config = ""
+    if args.config is not None:
+        config = f" --config {_command_path(args.config)}"
+    lines = [
+        f"to press this time: uiprobe crawl {_printable(args.package)}"
+        f" --press --out DIR{config}",
+        "to always press: set press = true in"
+        f" {_printable(_shown(str(settings.source)))}",
+    ]
+    try:
+        emulator = device.is_emulator()
+    except UiprobeError:
+        emulator = False  # unknown: name the option, which is then needed
+    if not emulator:
+        lines.append("on a real device also add --allow-real-device")
+    return lines
 
 
 def _detail_json(detail: Detail) -> dict[str, object]:
@@ -1289,27 +1392,40 @@ def _preview_json(result: Preview, settings_path: str) -> dict[str, object]:
     return payload
 
 
-def _cmd_crawl(args: argparse.Namespace) -> int:
-    if args.press and (sys.stderr if args.json else sys.stdout) is None:
-        # Before anything else writes (a settings warning would go to stdout).
+def _check_plan_stream(args: argparse.Namespace) -> None:
+    """Refuse a pressing run whose plan cannot be shown (a closed stream)."""
+    if (sys.stderr if args.json else sys.stdout) is None:
         stream = "stderr" if args.json else "stdout"
         msg = f"the plan cannot be shown: {stream} is closed, so nothing was pressed"
         raise _UsageError(msg)
-    policy, settings = _crawl_policy(args)
+
+
+def _cmd_crawl(args: argparse.Namespace) -> int:
     if args.press:
-        return _cmd_crawl_press(args, policy)
-    settings_path = str(settings.source)
+        # Before anything else writes (a settings warning would go to stdout).
+        _check_plan_stream(args)
+    setup = _crawl_policy(args)
+    if setup.press_source is not None:
+        # press = true is known only now, after the file was read.
+        _check_plan_stream(args)
+        return _cmd_crawl_press(args, setup)
+    settings_path = str(setup.settings.source)
     device = Device(
         _single_serial(args),
         adb_server=args.adb_server,
         adb=args.adb,
         start_server=args.start_server,
     )
-    result = make_preview(device, args.package, policy)
+    result = make_preview(device, args.package, setup.policy)
     if args.json:
         _emit(dumps(_preview_json(result, settings_path), indent=2))
     else:
-        _emit(_preview_text(result, settings_path, dry_run=args.dry_run))
+        guidance = _preview_guidance(args, setup.settings, device)
+        _emit(
+            _preview_text(
+                result, settings_path, dry_run=args.dry_run, guidance=guidance
+            )
+        )
     return 0
 
 
@@ -1346,33 +1462,66 @@ def _settle_seconds(text: str) -> float:
     return value
 
 
-def _press_limits(args: argparse.Namespace) -> Limits:
+def _press_limits(
+    args: argparse.Namespace, settings: Settings | None
+) -> tuple[Limits, dict[str, _LimitSource]]:
+    """Return the limits of a pressing run and where each one came from.
+
+    Each of depth, actions and minutes is the option when it was given, else
+    the settings file's [limits] value (every defaults version holds them),
+    else `_DEFAULT_LIMITS`, the value `uiprobe init` writes.
+    """
     given = {"depth": args.depth, "actions": args.actions, "minutes": args.minutes}
+    from_file = (
+        None
+        if settings is None
+        else {
+            "depth": settings.depth,
+            "actions": settings.actions,
+            "minutes": settings.minutes,
+        }
+    )
     values: dict[str, int] = {}
-    for name, (low, high, default, _what) in _PRESS_LIMITS.items():
-        value = given[name]
-        value = default if value is None else value
+    sources: dict[str, _LimitSource] = {}
+    for name, (low, high, _what) in _PRESS_LIMITS.items():
+        source: _LimitSource
+        if given[name] is not None:
+            value, source = given[name], "option"
+        elif from_file is not None:
+            value, source = from_file[name], "file"
+        else:
+            value, source = _DEFAULT_LIMITS[name], "default"
         if not low <= value <= high:
-            msg = f"--{name} must be from {low} to {high}, got {value}"
+            msg = (
+                f"the {name} limit must be from {low} to {high}, got {value}"
+                f" ({_limit_source_text(name, source)})"
+            )
             raise _UsageError(msg)
         values[name] = value
-    return Limits(**values)
+        sources[name] = source
+    return Limits(**values), sources
+
+
+def _limit_source_text(name: str, source: str) -> str:
+    """Where a limit came from, as the plan text says it."""
+    return {"option": f"--{name}", "file": "settings file"}.get(source, "default")
 
 
 def _press_settle(args: argparse.Namespace) -> float:
     return _PRESS_SETTLE if args.settle is None else args.settle
 
 
-def _cmd_crawl_press(args: argparse.Namespace, policy: Policy) -> int:
-    """Run a pressing crawl into ``--out`` and report how it ended."""
-    limits = _press_limits(args)
+def _cmd_crawl_press(args: argparse.Namespace, setup: _CrawlSetup) -> int:
+    """Run a pressing crawl into its run folder and report how it ended."""
+    limits, limits_source = _press_limits(args, setup.settings)
     settle = _press_settle(args)
     policy = replace(
-        policy,
+        setup.policy,
         back_on_other_screens=args.back_on_other_screens,
         check_tap_window=not args.no_tap_window_check,
     )
-    out: str = args.out
+    assert setup.out is not None  # noqa: S101 - _crawl_policy sets it to press
+    out: str = setup.out
     shown_out = _shown(out)
     device = Device(
         _single_serial(args),
@@ -1401,11 +1550,13 @@ def _cmd_crawl_press(args: argparse.Namespace, policy: Policy) -> int:
     plan: dict[str, object] = {
         "package": args.package,
         "device": {"serial": device.serial, "emulator": emulator},
+        "press_source": setup.press_source,
         "limits": {
             "depth": limits.depth,
             "actions": limits.actions,
             "minutes": limits.minutes,
         },
+        "limits_source": limits_source,
         "out": out,
         "back_on_other_screens": policy.back_on_other_screens,
         "check_tap_window": policy.check_tap_window,
@@ -1417,7 +1568,10 @@ def _cmd_crawl_press(args: argparse.Namespace, policy: Policy) -> int:
     if plan_stream is None:  # a closed stream at start: refuse before pressing
         msg = "the plan cannot be shown: " + ("stderr" if args.json else "stdout")
         raise _UsageError(msg + " is closed, so nothing was pressed")
-    _emit(_press_plan_text(plan), stream=plan_stream)
+    _emit(
+        _press_plan_text(plan, settings=str(setup.settings.source)),
+        stream=plan_stream,
+    )
     _flush(plan_stream)
     existed = Path(out).exists() or Path(out).is_symlink()
     try:
@@ -1504,11 +1658,9 @@ def _press_device_check(device: Device, *, allow_real_device: bool) -> bool | No
         return None
 
 
-def _press_plan_text(plan: dict[str, object]) -> str:
+def _press_plan_text(plan: dict[str, object], *, settings: str) -> str:
     device = plan["device"]
-    limits = plan["limits"]
     assert isinstance(device, dict)  # noqa: S101 - built above
-    assert isinstance(limits, dict)  # noqa: S101
     kind = {True: "emulator", False: "real device"}.get(
         device["emulator"], "emulator check unreadable"
     )
@@ -1516,8 +1668,8 @@ def _press_plan_text(plan: dict[str, object]) -> str:
         [
             f"pressing on {_printable(str(device['serial']))} ({kind}):"
             f" {_printable(str(plan['package']))}",
-            f"limits: depth {limits['depth']}, actions {limits['actions']},"
-            f" minutes {limits['minutes']}",
+            _press_because_text(plan, settings),
+            _press_limits_text(plan),
             f"run folder: {_shown(str(plan['out']))}",
             "BACK on screens of other apps: "
             + ("yes" if plan["back_on_other_screens"] else "no (restart the app)"),
@@ -1525,6 +1677,26 @@ def _press_plan_text(plan: dict[str, object]) -> str:
             + ("yes" if plan["check_tap_window"] else "no"),
         ]
     )
+
+
+def _press_because_text(plan: dict[str, object], settings: str) -> str:
+    """The plan line that says why the run presses."""
+    if plan["press_source"] == "file":
+        return f"pressing because: press = true in {_printable(_shown(settings))}"
+    return "pressing because: --press"
+
+
+def _press_limits_text(plan: dict[str, object]) -> str:
+    """The plan line with each limit and where it came from."""
+    limits = plan["limits"]
+    sources = plan["limits_source"]
+    assert isinstance(limits, dict)  # noqa: S101 - built in _cmd_crawl_press
+    assert isinstance(sources, dict)  # noqa: S101
+    shown = ", ".join(
+        f"{name} {limits[name]} ({_limit_source_text(name, sources[name])})"
+        for name in _PRESS_LIMITS
+    )
+    return f"limits: {shown}"
 
 
 # The package of the system's lock screen and notification shade.
