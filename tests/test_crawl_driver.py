@@ -2821,6 +2821,79 @@ def test_an_interrupt_after_the_force_stop_closes_the_start_as_not_sent(
 
 
 @pytest.mark.parametrize("restart", [False, True], ids=["no-restart", "restart"])
+def test_a_failed_write_of_the_not_sent_line_keeps_the_read_error(
+    tmp_path, device, android, monkeypatch, clock, fake_adb, restart
+):
+    # The adb connection is lost in the first launcher read, and the end line
+    # that closes the launch cannot be written: the error raised is still the
+    # read's, not the run folder's.
+    def lost(package: str) -> str:
+        del package
+        raise AdbError("connection closed", details={})
+
+    original = RunWriter.write_transition_end
+
+    def refuse_not_sent(self, *args, **kwargs):
+        if kwargs.get("not_sent") is not None:
+            raise RunFolderError("disk full", details={"path": "x"})
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(device, "_start_component", lost)
+    monkeypatch.setattr(RunWriter, "write_transition_end", refuse_not_sent)
+    out = tmp_path / "run"
+    with pytest.raises(AdbError, match="connection closed"):
+        run(device, clock, out, restart=restart)
+    assert not [c for c in commands(fake_adb) if c.startswith(("am ", "input "))]
+    assert android.stopped == []
+    assert len(lines(out / "transitions.jsonl")) == 1  # the end line failed
+    assert json.loads((out / "run.json").read_bytes())["stop_reason"] == "error"
+
+
+@pytest.mark.parametrize("restart", [False, True], ids=["relaunch", "first-launch"])
+def test_an_interrupt_in_the_last_comparison_before_the_start_closes_it(
+    tmp_path, device, android, monkeypatch, clock, fake_adb, restart
+):
+    # Ctrl+C arrives in the last comparison of the pin before the start,
+    # after the force-stop went out: the start is not sent, the action is
+    # closed as start_not_sent with the note, and the interrupt is raised.
+    cover_after_browse(monkeypatch, device, android)
+    final_check = crawl_driver._Run.final_check
+    interrupted: list[bool] = []
+
+    def interrupt_at_start(self, path: str, approved: int) -> bool:
+        if path == "start" and not interrupted:
+            interrupted.append(True)
+            raise KeyboardInterrupt
+        return final_check(self, path, approved)
+
+    monkeypatch.setattr(crawl_driver._Run, "final_check", interrupt_at_start)
+    out = tmp_path / "run"
+    with pytest.raises(KeyboardInterrupt):
+        run(device, clock, out, restart=restart)
+    assert interrupted
+    assert android.stopped == [SHOP]
+    assert len(start_requests(fake_adb)) == (0 if restart else 1)
+    records = lines(out / "transitions.jsonl")
+    started = [r for r in records if "action" in r]
+    assert started[-1]["action"]["kind"] == ("launch" if restart else "relaunch")
+    assert records[-1] == {
+        "schema": "uiprobe.transition_end/1",
+        "recorded_at": records[-1]["recorded_at"],
+        "action_id": started[-1]["action_id"],
+        "not_sent": True,
+        "reason": "start_not_sent",
+    }
+    summary = (out / "summary.txt").read_text(encoding="utf-8")
+    what = (
+        "at the start of the run but not started"
+        if restart
+        else "but not started again"
+    )
+    assert f"{SHOP} was force-stopped {what} (interrupted)" in summary
+    assert json.loads((out / "run.json").read_bytes())["stop_reason"] == "interrupted"
+
+
+@pytest.mark.parametrize("restart", [False, True], ids=["no-restart", "restart"])
 def test_a_lost_connection_in_the_first_launcher_read_closes_the_launch(
     tmp_path, device, android, monkeypatch, clock, fake_adb, restart
 ):

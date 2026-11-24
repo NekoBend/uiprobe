@@ -10,8 +10,8 @@ clock or file), and the writer imports it, so the driver sits above both.
 What is sent. Only what the engine returned, and for a tap only what
 `CrawlEngine.recheck` allowed for that very `Tap` object, in the gate right
 before it is sent: the first launch (by default ``force-stop`` then
-start of the launcher activity, so the run does not go on from the screen
-the app showed; with ``restart=False`` only the start), a relaunch
+start of the launcher activity, whose screen is up to the app; with
+``restart=False`` only the start), a relaunch
 (``force-stop`` then start; a launch is ``am start -W`` of the launcher
 activity, read right before each start, never ``monkey``), a tap at the
 point judge gave, and the BACK key. Text, long presses, swipes and other
@@ -1167,7 +1167,9 @@ class _Run:
         (`_failure_word`, ``adb_error`` for a lost connection), before it is
         raised: nothing was sent. In a relaunch, `relaunch` closes it.
         A wait for the device that was stopped (``pin_wait_stopped``) is
-        closed by the driver's ending, with the reason that stopped it.
+        closed by the driver's ending, with the reason that stopped it. When
+        writing that end line fails (`RunFolderError`), the error of the read
+        is the one raised.
         """
         self.start_component = None
         try:
@@ -1183,7 +1185,8 @@ class _Run:
         except LaunchFailedError as error:
             if _unreadable_launcher(error):
                 if relaunch_id is not None:
-                    self.half_sent(relaunch_id, "launcher_unreadable")
+                    with contextlib.suppress(RunFolderError):
+                        self.half_sent(relaunch_id, "launcher_unreadable")
                 else:
                     self.close_unsent("launcher_unreadable")
             elif relaunch_id is None:
@@ -1196,10 +1199,16 @@ class _Run:
         return True
 
     def close_unsent(self, reason: str) -> None:
-        """Close the action in the gate (if any) as not sent for `reason`."""
+        """Close the action in the gate (if any) as not sent for `reason`.
+
+        Called only while an error is being raised: a failure to write the
+        end line (`RunFolderError`) is not raised, so that error stays the
+        one raised.
+        """
         if self.unsent is not None:
             action_id, self.unsent = self.unsent, None
-            self.end_not_sent(action_id, reason)
+            with contextlib.suppress(RunFolderError):
+                self.end_not_sent(action_id, reason)
 
     def halt(self, now: float | None = None) -> str | None:
         """The reason not to send that does not depend on the screen, if any."""
@@ -1277,19 +1286,23 @@ class _Run:
             return unsent
         try:
             reason = self.relaunch_halt(action_id)
+            # The last comparison before the start, inside the region: nothing
+            # runs after it but leaving the region and the tests below.
+            stale = reason == NOT_SENT_RECONNECTED or (
+                reason is None and not self.final_check("start", self.sent_epoch)
+            )
         except BaseException as error:
             # The force-stop went out and nothing has sent the start: an
             # error (a changed device in the pin check, say) or an interrupt
-            # here leaves no doubt about the start, so the action is closed
-            # as start_not_sent (not as failed, or left open) before it is
-            # raised again. A step that already closed it is not repeated.
+            # here, up to and in the last comparison, leaves no doubt about
+            # the start, so the action is closed as start_not_sent (not as
+            # failed, or left open) before it is raised again. A step that
+            # already closed it is not repeated. `launch` is outside.
             if self._open == action_id:
                 with contextlib.suppress(RunFolderError):
                     self.half_sent(action_id, _failure_word(error))
             raise
-        if reason == NOT_SENT_RECONNECTED or (
-            reason is None and not self.final_check("start", self.sent_epoch)
-        ):
+        if stale:
             # The device had to be proven again after the force-stop: the
             # start is not sent on the earlier decision.
             return self.half_sent(action_id, NOT_SENT_RECONNECTED)
@@ -1630,19 +1643,18 @@ def crawl(
     passed (the device check itself reads one property).
 
     `restart` (the default True) makes the first action force-stop the app
-    (``am force-stop``) and then start its launcher activity, so the run
-    does not go on from the screen the app showed (which screen the app then
-    shows is up to the app); what the app had not saved is lost. It is one
-    action of kind ``launch``, counted once, whose start line has ``restart:
-    true``, and it passes the checks of a relaunch: the force-stop goes out
-    only after `stop`, the time limit and the pin were checked and the
-    launcher activity was read (when it cannot be read, nothing is sent),
-    and the start only after they were checked and read again. When `stop`
-    or the time limit ends the run between the two, the start is not sent
-    (``start_not_sent``) and the summary says the app was stopped but not
-    started. ``restart=False`` sends only the start, so the crawl begins on
-    the screen the app shows now. Earlier versions behaved as
-    ``restart=False``. Every launch and relaunch reads the app's launcher
+    (``am force-stop``) and then start its launcher activity (which screen
+    the app then shows is up to the app); what the app had not saved is
+    lost. It is one action of kind ``launch``, counted once, whose start
+    line has ``restart: true``, and it passes the checks of a relaunch: the
+    force-stop goes out only after `stop`, the time limit and the pin were
+    checked and the launcher activity was read (when it cannot be read,
+    nothing is sent), and the start only after they were checked and read
+    again. When `stop` or the time limit ends the run between the two, the
+    start is not sent (``start_not_sent``) and the summary says the app was
+    stopped but not started. ``restart=False`` sends only the start, so the
+    crawl begins on the screen the app shows now. Earlier versions behaved
+    as ``restart=False``. Every launch and relaunch reads the app's launcher
     activity with ``cmd package resolve-activity`` right before its start
     and starts it with ``am start -W`` (`Device.launch`); when it cannot be
     read, the start is not sent and the run ends with `LaunchFailedError`
