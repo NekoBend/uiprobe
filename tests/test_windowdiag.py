@@ -14,18 +14,20 @@ any part of them would.
 from __future__ import annotations
 
 import copy
+import dataclasses
 import json
 import pickle
 import random
 import re
 import sys
+import typing
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pytest
 
 from uiprobe import cli
-from uiprobe.crawl_driver import CrawlResult
+from uiprobe.crawl_driver import CrawlResult, _Run
 from uiprobe.device import Device
 from uiprobe.inputwindows import (
     RULES,
@@ -35,10 +37,16 @@ from uiprobe.inputwindows import (
     read_window_at,
     window_line_fields,
 )
+from uiprobe.packageuid import PackageUid
 from uiprobe.windowdiag import (
+    APP_TESTED,
+    APP_UID_UNREADABLE,
     CAP,
     KNOWN_KEYS,
     LINE_KINDS,
+    NOTE,
+    NOTE_TESTED,
+    NOTE_UID_UNREADABLE,
     NOTICE,
     NOTICE_SHOWN,
     SCHEMA,
@@ -52,6 +60,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Iterator, Sequence
 
     from tests.fake_adb_server import FakeAdbServer
+    from uiprobe.inputwindows import InputWindow
 
 DATA = Path(__file__).parent / "data" / "inputwindows"
 SERIAL = "emulator-5554"
@@ -1391,6 +1400,256 @@ def test_an_unknown_option_before_diagnose_is_not_echoed(capsys, before, as_json
     assert "uiprobe [-s SERIAL] diagnose tap-window [-s SERIAL]" in shown
 
 
+# --- samsungFlags=0x1: the note, and --package ---
+
+LAUNCHER = "com.example.launcher"  # the app of rows 4, 6 and 11 of SAMSUNG36
+LAUNCHER_UID = 10002
+# The launcher's own window (row 11), and a window of another uid (row 3).
+OWN_ROW = 11
+OTHER_ROW = 3
+# A window of the launcher's uid whose title does not name it (row 6).
+UNNAMED_ROW = 6
+
+
+def _flagged(row: int) -> str:
+    """SAMSUNG36 with ``samsungFlags=0x1`` on row `row`."""
+    return _edit_row(SAMSUNG36, row, "samsungFlags=0x0", "samsungFlags=0x1")
+
+
+def _package_stanza(package: str, uid: int, *, shared: bool = False) -> str:
+    """A ``dumpsys package <package>`` output in the API 24 form."""
+    shared_line = (
+        f"    sharedUser=SharedUserSetting{{1d5f23c com.example.shared/{uid}}}\n"
+        if shared
+        else ""
+    )
+    return (
+        "Packages:\n"
+        f"  Package [{package}] (634ebb0):\n"
+        f"    userId={uid}\n"
+        f"{shared_line}"
+        f"    pkg=Package{{9f8e7d6 {package}}}\n"
+        "    User 0: ceDataInode=114790 installed=true hidden=false"
+        " suspended=false stopped=false notLaunched=false enabled=0\n"
+        "Dexopt state:\n"
+    )
+
+
+def _crawl_test(package: str, app: PackageUid) -> Callable[[InputWindow], bool]:
+    """The crawl's test, called as the crawl calls it (`_Run.cover`)."""
+    run = _Run.__new__(_Run)
+    run.package = package
+    return lambda window: run.app_window(window, app)
+
+
+@pytest.mark.parametrize("rule", sorted(CASES))
+def test_the_note_is_given_only_for_samsung_flags(rule):
+    text, display = CASES[rule]
+    for shown in (False, True):
+        found = diagnose_tap_window(text, display_id=display, show_device_text=shown)
+        lines = found.to_text().split("\n")
+        payload = found.to_dict()
+        if rule != "samsung_flags":
+            assert found.note is None
+            assert "note" not in payload
+            assert not any(line.startswith("note:") for line in lines)
+            continue
+        assert found.note == NOTE
+        assert payload["note"] == NOTE
+        assert lines[1].startswith("result: not readable: line_format, rule samsung")
+        assert lines[2] == f"note: {NOTE}"
+        assert sum(line.startswith("note:") for line in lines) == 1
+
+
+def test_the_note_names_the_crawl_and_the_option():
+    assert NOTE == (
+        "a crawl accepts samsungFlags=0x1 on the target app's own window;"
+        " diagnose is not told an app (add --package PKG to test that app's"
+        " windows)"
+    )
+    for name in CAPTURES:
+        assert "note" not in diagnose_tap_window(CAPTURES[name]).to_dict()
+
+
+@pytest.mark.parametrize("shared", [False, True])
+def test_with_the_crawls_test_the_apps_own_0x1_window_reads(shared):
+    app = PackageUid(LAUNCHER_UID, shared=shared)
+    owned = _crawl_test(LAUNCHER, app)
+    own = diagnose_tap_window(_flagged(OWN_ROW), owned=owned)
+    assert (own.readable, own.app_test, own.note) == (True, APP_TESTED, None)
+    assert "note" not in own.to_dict()
+    other = diagnose_tap_window(_flagged(OTHER_ROW), owned=owned)
+    assert (other.reason, other.rule) == ("line_format", "samsung_flags")
+    assert (other.app_test, other.note) == (APP_TESTED, NOTE_TESTED)
+    assert other.to_text().split("\n")[2] == f"note: {NOTE_TESTED}"
+    assert other.to_dict()["note"] == NOTE_TESTED
+    # The title test of a shared uid: a window of the uid that does not name
+    # the app is the app's only when the uid is its own.
+    unnamed = diagnose_tap_window(_flagged(UNNAMED_ROW), owned=owned)
+    assert unnamed.readable is not shared
+    # The same verdicts as the crawl's own reader with the same test.
+    for row in (OWN_ROW, OTHER_ROW, UNNAMED_ROW):
+        verdict = explain_input_windows(_flagged(row), owned=owned)
+        found = diagnose_tap_window(_flagged(row), owned=owned)
+        assert (found.reason, found.rule) == (verdict.reason, verdict.rule)
+
+
+def test_a_wrong_app_test_is_refused():
+    found = diagnose_tap_window(SAMSUNG36)
+    with pytest.raises(ValueError, match="app_test"):
+        dataclasses.replace(found, app_test="maybe")
+
+
+def _samsung_phone(fake: FakeAdbServer, row: int, package: str | None) -> None:
+    fake.add_device(SERIAL, model="SM_TEST")
+    fake.on_shell(SERIAL, "dumpsys input", _flagged(row).encode())
+    if package is not None:
+        stanza = _package_stanza(package, LAUNCHER_UID)
+        fake.on_shell(SERIAL, f"dumpsys package {package}", stanza.encode())
+
+
+TAP_WINDOW = ["diagnose", "tap-window"]
+
+
+@pytest.mark.parametrize("as_json", [False, True])
+def test_the_command_adds_the_note_for_samsung_flags(fake_adb, capsys, as_json):
+    _samsung_phone(fake_adb, OWN_ROW, None)
+    argv = [*TAP_WINDOW, "--adb-server", fake_adb.address]
+    code, out, err = invoke(capsys, *argv, *(["--json"] if as_json else []))
+    assert (code, err) == (0, "")
+    assert _sent(fake_adb) == ["dumpsys input"]
+    if as_json:
+        payload = json.loads(out)
+        assert (payload["rule"], payload["note"]) == ("samsung_flags", NOTE)
+        assert payload["schema"] == SCHEMA
+        return
+    lines = out.rstrip("\n").split("\n")
+    assert lines[1].startswith("result: not readable: line_format, rule samsung_flags")
+    assert lines[2] == f"note: {NOTE}"
+
+
+@pytest.mark.parametrize("as_json", [False, True])
+@pytest.mark.parametrize(
+    ("row", "readable", "note"),
+    [(OWN_ROW, True, None), (OTHER_ROW, False, NOTE_TESTED)],
+    ids=["own_window", "other_window"],
+)
+def test_package_accepts_0x1_only_on_the_apps_own_window(
+    fake_adb, capsys, row, readable, note, as_json
+):
+    _samsung_phone(fake_adb, row, LAUNCHER)
+    argv = [*TAP_WINDOW, "--package", LAUNCHER, "--adb-server", fake_adb.address]
+    code, out, err = invoke(capsys, *argv, *(["--json"] if as_json else []))
+    assert (code, err) == (0, "")
+    # The existing read plus the app's uid, read first as the crawl does;
+    # nothing that presses, types or starts anything.
+    sent = _sent(fake_adb)
+    assert sent == [f"dumpsys package {LAUNCHER}", "dumpsys input"]
+    assert not any(c.startswith(("input ", "am ", "monkey", "cmd ")) for c in sent)
+    # The package is the user's own input: it is not echoed, and the notice
+    # (no app or window names) stays the plain one.
+    assert LAUNCHER not in out
+    assert "launcher" not in out
+    if as_json:
+        payload = json.loads(out)
+        assert (payload["readable"], payload.get("note")) == (readable, note)
+        assert payload["notice"] == NOTICE
+        assert "package" not in payload
+        return
+    lines = out.rstrip("\n").split("\n")
+    assert lines[0] == f"uiprobe diagnose tap-window: {NOTICE}; it read: dumpsys input"
+    if readable:
+        assert lines[1] == "result: readable"
+        assert not any(line.startswith("note:") for line in lines)
+    else:
+        assert lines[1].startswith("result: not readable: line_format, rule samsung")
+        assert lines[2] == f"note: {note}"
+
+
+def test_package_whose_uid_cannot_be_read_tells_no_window(fake_adb, capsys):
+    _samsung_phone(fake_adb, OWN_ROW, None)
+    fake_adb.on_shell(SERIAL, f"dumpsys package {LAUNCHER}", b"")  # not installed
+    argv = [*TAP_WINDOW, "--package", LAUNCHER, "--json"]
+    code, out, _ = invoke(capsys, *argv, "--adb-server", fake_adb.address)
+    assert code == 0
+    assert _sent(fake_adb) == [f"dumpsys package {LAUNCHER}", "dumpsys input"]
+    payload = json.loads(out)
+    assert (payload["rule"], payload["note"]) == ("samsung_flags", NOTE_UID_UNREADABLE)
+    assert LAUNCHER not in out
+
+
+def test_package_runs_the_crawls_own_test(fake_adb, capsys, monkeypatch):
+    calls: list[tuple[str, int]] = []
+    original = _Run.app_window
+
+    def spy(run: _Run, window: InputWindow, app: PackageUid) -> bool:
+        calls.append((run.package, app.uid))
+        return original(run, window, app)
+
+    monkeypatch.setattr(_Run, "app_window", spy)
+    _samsung_phone(fake_adb, OWN_ROW, LAUNCHER)
+    argv = [*TAP_WINDOW, "--package", LAUNCHER, "--json"]
+    code, out, _ = invoke(capsys, *argv, "--adb-server", fake_adb.address)
+    assert code == 0
+    assert json.loads(out)["readable"] is True
+    assert calls
+    assert set(calls) == {(LAUNCHER, LAUNCHER_UID)}
+
+
+@pytest.mark.parametrize("as_json", [False, True])
+@pytest.mark.parametrize(
+    "package",
+    ["DEMO_PACKAGE", "com.", "com..DEMO_PACKAGE", "1com.DEMO_PACKAGE", "com.x" * 60],
+)
+def test_an_invalid_package_is_a_usage_error_not_echoed(
+    fake_adb, capsys, package, as_json
+):
+    _samsung_phone(fake_adb, OWN_ROW, None)
+    argv = [*TAP_WINDOW, "--package", package, "--adb-server", fake_adb.address]
+    code, out, err = invoke(capsys, *argv, *(["--json"] if as_json else []))
+    assert code == 2
+    assert fake_adb.commands == []  # refused before the device is contacted
+    assert "DEMO_PACKAGE" not in out + err
+    assert package not in out + err
+    shown = json.loads(out)["error"] if as_json else {"message": err}
+    assert "--package is not a valid package name (it is not shown)" in str(shown)
+    if as_json:
+        assert shown["code"] == "usage_error"
+
+
+def test_package_without_a_value_is_not_echoed(capsys):
+    code, out, err = invoke(capsys, *TAP_WINDOW, "--json", "--package")
+    assert code == 2
+    message = json.loads(out)["error"]["message"]
+    assert "[--show-device-text] [--package PKG]" in message
+    assert err == ""
+
+
+def test_device_diagnose_tap_window_checks_owned_first(fake_adb):
+    _samsung_phone(fake_adb, OWN_ROW, None)
+    device = Device(SERIAL, adb_server=fake_adb.address)
+    with pytest.raises(TypeError, match="owned"):
+        device.diagnose_tap_window(owned="x.y")  # ty: ignore[invalid-argument-type]
+    assert _sent(fake_adb) == []
+    app = PackageUid(LAUNCHER_UID, shared=False)
+    found = device.diagnose_tap_window(owned=_crawl_test(LAUNCHER, app))
+    assert (found.readable, found.app_test) == (True, APP_TESTED)
+    assert _sent(fake_adb) == ["dumpsys input"]
+
+
+def test_the_owned_parameters_of_the_diagnosis_resolve_at_run_time():
+    for function in (diagnose_tap_window, Device.diagnose_tap_window):
+        hints = typing.get_type_hints(function)
+        assert "Callable" in str(hints["owned"])
+
+
+def test_the_uid_unreadable_note_is_kept_by_replace():
+    found = diagnose_tap_window(_flagged(OWN_ROW))
+    marked = dataclasses.replace(found, app_test=APP_UID_UNREADABLE)
+    assert marked.note == NOTE_UID_UNREADABLE
+    assert marked.to_text().split("\n")[2] == f"note: {NOTE_UID_UNREADABLE}"
+
+
 def _huge_rotation_after_top_row(text: str) -> str:
     top = _row(text, 0)
     return _sub(
@@ -1673,6 +1932,7 @@ _TEXT_LINES = (
         rf" rule (?:{_alt(RULE_NAMES)})"
         rf"(?: at line \d+ of the (?:{_alt(PART_NAMES)}) part)?"
     ),
+    re.compile(re.escape(f"note: {NOTE}")),
     re.compile(
         r"the display's list: (?:none taken|(?:the list of every display|its"
         r" Display section), (?:\d+\+? windows read|not reached)"
@@ -1701,6 +1961,7 @@ def _count_value(value: object, *, capped: bool) -> None:
 def _closed_json(payload: dict[str, object]) -> None:
     """A default JSON report holds only fixed keys, fixed strings and
     numbers uiprobe counted."""
+    noted = payload["rule"] == "samsung_flags"
     assert set(payload) == {
         "schema",
         "notice",
@@ -1714,7 +1975,10 @@ def _closed_json(payload: dict[str, object]) -> None:
         "windows_read",
         "display_list",
         "lines",
+        *(["note"] if noted else []),
     }
+    if noted:
+        assert payload["note"] == NOTE
     assert (payload["schema"], payload["notice"], payload["command"]) == (
         SCHEMA,
         NOTICE,
@@ -1752,6 +2016,8 @@ def _closed_object(found: TapWindowDiagnosis) -> None:
     assert found.rule is None or found.rule in RULE_NAMES
     assert found.part is None or found.part in PART_NAMES
     assert found.show_device_text is False
+    assert found.app_test is None
+    assert found.note == (NOTE if found.rule == "samsung_flags" else None)
     assert found.forms == ()
     assert len(found.lists) <= 1
     for item in found.lists:

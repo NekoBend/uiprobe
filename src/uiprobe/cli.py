@@ -28,9 +28,9 @@ from typing import TYPE_CHECKING, Final, Literal, NoReturn, TextIO, override
 from uiprobe import __version__
 from uiprobe._json import dumps
 from uiprobe.crawl import Limits
-from uiprobe.crawl_driver import CrawlResult, _check_device
+from uiprobe.crawl_driver import CrawlResult, _check_device, _Run
 from uiprobe.crawl_driver import crawl as crawl_run
-from uiprobe.crawl_preview import check_package
+from uiprobe.crawl_preview import MAX_PACKAGE_LENGTH, check_package
 from uiprobe.crawl_preview import preview as make_preview
 from uiprobe.device import (
     DEFAULT_LAUNCH_TIMEOUT,
@@ -84,6 +84,7 @@ from uiprobe.settings import (
     policy_from_settings,
     write_default_settings,
 )
+from uiprobe.windowdiag import APP_UID_UNREADABLE, TapWindowDiagnosis
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
@@ -91,7 +92,9 @@ if TYPE_CHECKING:
     from uiprobe.adb import DeviceInfo
     from uiprobe.crawl_preview import Preview
     from uiprobe.guards import Decision, Detail
+    from uiprobe.inputwindows import InputWindow
     from uiprobe.model import Element, Screen
+    from uiprobe.packageuid import PackageUid
 
 __all__ = ["main", "run"]
 
@@ -539,10 +542,21 @@ def _add_diagnose_parser(add_parser: Callable[..., argparse.ArgumentParser]) -> 
             " failure their kind and length. No text of the device's"
             " output is printed: no serial, app or window names, coordinates,"
             " accounts or network values (unless --show-device-text). Nothing"
-            " is sent to the device but that one read."
+            " is sent to the device but that one read, and with --package the"
+            " read of the app's uid (dumpsys package PKG) before it."
         ),
     )
     _add_common_options(tap_window, in_command=True)
+    tap_window.add_argument(
+        "--package",
+        metavar="PKG",
+        help=(
+            "test the samsungFlags=0x1 windows as a crawl of PKG does: read"
+            " PKG's uid first (dumpsys package PKG) and accept that value on"
+            " PKG's own windows (the crawl's owner uid and title test); PKG is"
+            " not printed"
+        ),
+    )
     tap_window.add_argument(
         "--show-device-text",
         action="store_true",
@@ -2181,8 +2195,46 @@ def _diagnose_failure(
     return _fail(kind, message, as_json=as_json, details=details)
 
 
+# The package of --package is the user's own input: it is not echoed, so
+# the report's notice (no app names) stays true.
+_DIAGNOSE_PACKAGE_MESSAGE = (
+    "--package is not a valid package name (it is not shown): two or more"
+    " segments separated by dots, each an ASCII letter followed by letters,"
+    f" digits or underscores; at most {MAX_PACKAGE_LENGTH} characters"
+)
+
+
+def _diagnose_package(args: argparse.Namespace) -> str | None:
+    """The package of --package checked as `crawl PACKAGE` checks its own,
+    None without the option. The refusal does not echo it."""
+    if args.package is None:
+        return None
+    package = str.__str__(args.package)
+    try:
+        return check_package(package)
+    except ValueError:
+        raise _UsageError(_DIAGNOSE_PACKAGE_MESSAGE) from None
+
+
+def _crawl_owned(package: str, app: PackageUid) -> Callable[[InputWindow], bool]:
+    """The crawl's own test of the app's windows (`_Run.app_window`), for
+    `package` whose uid read as `app`: the same code, not a copy of it.
+
+    The test reads only the run's ``package``, so a run object is made
+    without its other state; nothing of the crawl runs.
+    """
+    run = _Run.__new__(_Run)
+    run.package = package
+
+    def owned(window: InputWindow) -> bool:
+        return run.app_window(window, app)
+
+    return owned
+
+
 def _cmd_diagnose(args: argparse.Namespace) -> int:
     serial = _single_serial(args)
+    package = _diagnose_package(args)
     try:
         try:
             device = Device(
@@ -2193,7 +2245,7 @@ def _cmd_diagnose(args: argparse.Namespace) -> int:
             )
         except (TypeError, ValueError):  # a malformed serial or server address
             return _fail(USAGE_ERROR, _DIAGNOSE_USAGE_MESSAGE, as_json=args.json)
-        found = device.diagnose_tap_window(show_device_text=args.show_device_text)
+        found = _diagnose_on(device, package, show_device_text=args.show_device_text)
     except UiprobeError as exc:
         return _diagnose_failure((exc.code, exc.exit_code), as_json=args.json)
     except Exception as exc:  # noqa: BLE001 - its message could hold device text
@@ -2201,6 +2253,24 @@ def _cmd_diagnose(args: argparse.Namespace) -> int:
         return _diagnose_failure(INTERNAL_ERROR, as_json=args.json, details=details)
     _emit(dumps(found.to_dict(), indent=2) if args.json else found.to_text())
     return 0
+
+
+def _diagnose_on(
+    device: Device, package: str | None, *, show_device_text: bool
+) -> TapWindowDiagnosis:
+    """Read the window list, with the app's own windows told as the crawl
+    tells them when a package is given: its uid first (as the crawl reads it
+    at its start), then ``dumpsys input``. A uid that cannot be read tells
+    no window (the report says so when it matters)."""
+    if package is None:
+        return device.diagnose_tap_window(show_device_text=show_device_text)
+    app = device.package_uid(package)
+    if app is None:
+        found = device.diagnose_tap_window(show_device_text=show_device_text)
+        return replace(found, app_test=APP_UID_UNREADABLE)
+    return device.diagnose_tap_window(
+        show_device_text=show_device_text, owned=_crawl_owned(package, app)
+    )
 
 
 _HANDLERS: dict[str, Callable[[argparse.Namespace], int]] = {
@@ -2315,8 +2385,8 @@ _DIAGNOSE_USAGE_MESSAGE = (
     "the arguments of diagnose could not be read (they are not shown, as they"
     " can name the device); use: uiprobe [-s SERIAL] diagnose tap-window"
     " [-s SERIAL] [--adb PATH] [--adb-server tcp:HOST:PORT] [--no-start-server]"
-    " [--json] [--show-device-text]; device options go after tap-window or"
-    " before diagnose"
+    " [--json] [--show-device-text] [--package PKG]; device options go after"
+    " tap-window or before diagnose"
 )
 # Options before the command that take a value: their value is not a command.
 _TOP_OPTIONS_WITH_VALUE = frozenset({"-s", "--serial", "--adb", "--adb-server"})

@@ -23,11 +23,21 @@ With ``show_device_text`` the report also holds each shown line's tokens
 the forms of the rows; that text comes from the device, and window names
 and app text can appear in it, so it carries its own notice
 (`NOTICE_SHOWN`).
+
+The reader reads ``samsungFlags=0x1`` only on a window of the app the check
+is for (``owned``, the crawl's owner uid and title test). Without ``owned``
+every such window of the display's list refuses (``samsung_flags``), also
+where a crawl of the app would read it, and the report says so in a note
+(`NOTE`). With ``owned`` the windows it accepts read as in the crawl.
 """
 
 from __future__ import annotations
 
 import re
+
+# Imported at run time, not only for type checking, so that
+# typing.get_type_hints() resolves diagnose_tap_window's ``owned``.
+from collections.abc import Callable  # noqa: TC003
 from dataclasses import dataclass, replace
 from typing import Final
 
@@ -42,6 +52,7 @@ from uiprobe.inputwindows import (
     _TRANSFORM,
     _VIEWPORT,
     RULES,
+    InputWindow,
     RowFields,
     Verdict,
     explain_input_windows,
@@ -49,8 +60,13 @@ from uiprobe.inputwindows import (
 )
 
 __all__ = [
+    "APP_TESTED",
+    "APP_UID_UNREADABLE",
     "CAP",
     "COMMAND",
+    "NOTE",
+    "NOTE_TESTED",
+    "NOTE_UID_UNREADABLE",
     "NOTICE",
     "NOTICE_SHOWN",
     "SCHEMA",
@@ -73,6 +89,27 @@ NOTICE_SHOWN: Final = (
     " app text can appear as field names, values and flags, with or without"
     " line breaks, and may include a serial or personal data; read it before"
     " pasting it anywhere"
+)
+# Whether the app's own windows were told (`TapWindowDiagnosis.app_test`):
+# with the crawl's test, or not, because the app's uid could not be read.
+APP_TESTED: Final = "tested"
+APP_UID_UNREADABLE: Final = "uid_unreadable"
+_APP_TESTS: Final = frozenset({None, APP_TESTED, APP_UID_UNREADABLE})
+# The rule a samsungFlags=0x1 window refuses with when it is not the app's.
+_SAMSUNG_FLAGS: Final = "samsung_flags"
+_NOTE_HEAD: Final = "a crawl accepts samsungFlags=0x1 on the target app's own window; "
+# What a samsung_flags result means, by `TapWindowDiagnosis.app_test`.
+NOTE: Final = (
+    _NOTE_HEAD + "diagnose is not told an app (add --package PKG to test that"
+    " app's windows)"
+)
+NOTE_TESTED: Final = (
+    _NOTE_HEAD + "this window is not the given app's own window by the crawl's"
+    " owner uid and title test"
+)
+NOTE_UID_UNREADABLE: Final = (
+    _NOTE_HEAD + "the given app's uid could not be read (dumpsys package), so no"
+    " window counted as its own, and a crawl of it would refuse every tap"
 )
 DISPATCHER: Final = "dispatcher"
 INPUT_READER: Final = "input_reader"
@@ -291,7 +328,10 @@ class TapWindowDiagnosis:
     it (from 1; the dispatcher's header is line 1 of `DISPATCHER`) where the
     check refused, both None when no one line is to blame. ``lists`` holds
     only the list the reader took as the display's, and ``forms`` and the
-    lines' ``tokens`` are empty, unless ``show_device_text``.
+    lines' ``tokens`` are empty, unless ``show_device_text``. ``app_test``
+    says whether the app's own windows were told: None (no app given),
+    `APP_TESTED` (with the crawl's test) or `APP_UID_UNREADABLE` (an app was
+    given but its uid could not be read, so none was).
     """
 
     reason: str | None
@@ -302,6 +342,12 @@ class TapWindowDiagnosis:
     lines: tuple[LineShape, ...]
     forms: tuple[Form, ...] = ()
     show_device_text: bool = False
+    app_test: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.app_test not in _APP_TESTS:
+            msg = "app_test must be None, APP_TESTED or APP_UID_UNREADABLE"
+            raise ValueError(msg)
 
     @property
     def readable(self) -> bool:
@@ -327,6 +373,19 @@ class TapWindowDiagnosis:
         ``show_device_text``."""
         return NOTICE_SHOWN if self.show_device_text else NOTICE
 
+    @property
+    def note(self) -> str | None:
+        """What a ``samsung_flags`` result means for a crawl (`NOTE`,
+        `NOTE_TESTED` or `NOTE_UID_UNREADABLE`, by ``app_test``); None for
+        any other result."""
+        if self.rule != _SAMSUNG_FLAGS:
+            return None
+        if self.app_test == APP_TESTED:
+            return NOTE_TESTED
+        if self.app_test == APP_UID_UNREADABLE:
+            return NOTE_UID_UNREADABLE
+        return NOTE
+
     def to_dict(self) -> dict[str, object]:
         """Return the ``uiprobe.diagnose_tap_window/1`` JSON object."""
         payload: dict[str, object] = {
@@ -345,6 +404,8 @@ class TapWindowDiagnosis:
                 _line_dict(shape, tokens=self.show_device_text) for shape in self.lines
             ],
         }
+        if self.note is not None:
+            payload["note"] = self.note
         if self.show_device_text:
             payload["lists"] = [_list_dict(item) for item in self.lists]
             payload["forms"] = [
@@ -374,6 +435,8 @@ class TapWindowDiagnosis:
             lines.append(
                 f"result: not readable: {self.reason}, rule {self.rule}{where}"
             )
+        if self.note is not None:
+            lines.append(f"note: {self.note}")
         chosen = self.display_list
         taken = "none taken" if chosen is None else _list_text(chosen)
         lines.append(f"the display's list: {taken}")
@@ -829,17 +892,24 @@ def _forms(lines: list[str], verdict: Verdict) -> tuple[Form, ...]:
 
 
 def diagnose_tap_window(
-    text: str, *, show_device_text: bool = False, display_id: int = 0
+    text: str,
+    *,
+    show_device_text: bool = False,
+    display_id: int = 0,
+    owned: Callable[[InputWindow], bool] | None = None,
 ) -> TapWindowDiagnosis:
     """Diagnose the tap window check on the whole text of ``dumpsys input``.
 
     By default the result holds no text of `text`: only the verdict, line
     numbers, the kinds the reader gave lines, lengths and counts (see the
     module). With `show_device_text` it also holds each shown line's
-    tokens and the rows' forms, which hold device text.
+    tokens and the rows' forms, which hold device text. `owned` tells the
+    app's own windows, the only ones whose ``samsungFlags=0x1`` reads, as
+    in the crawl (`uiprobe.inputwindows.explain_input_windows`); with it
+    ``app_test`` is `APP_TESTED`.
     """
     lines = [line.removesuffix("\r") for line in text.split("\n")]
-    verdict = explain_input_windows(text, display_id)
+    verdict = explain_input_windows(text, display_id, owned=owned)
     if verdict.rule is not None and verdict.rule not in RULES[verdict.reason or ""]:
         msg = "the reader refused with a rule outside RULES"  # a bug, not the text
         raise AssertionError(msg)
@@ -863,4 +933,5 @@ def diagnose_tap_window(
         shapes,
         _forms(lines, verdict) if show_device_text else (),
         show_device_text=show_device_text,
+        app_test=None if owned is None else APP_TESTED,
     )
