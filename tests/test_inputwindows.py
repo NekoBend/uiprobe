@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import re
 import sys
+import typing
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -1671,3 +1672,11 @@ def test_the_owner_test_changes_nothing_without_samsung_flags_0x1(text, owned):
         assert getattr(found, "rule", None) == getattr(
             read_window_at(text, point), "rule", None
         )
+
+
+def test_the_owned_parameters_resolve_at_run_time():
+    # Callable is imported at run time, so the hints of the public
+    # functions resolve (for tools that read them).
+    for function in (read_window_at, parse_input_windows, explain_input_windows):
+        hints = typing.get_type_hints(function)
+        assert "Callable" in str(hints["owned"])

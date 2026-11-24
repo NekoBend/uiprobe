@@ -3176,7 +3176,10 @@ class Device:
         four are an `Unreadable` whose ``rule`` names the check that refused
         (see `diagnose_tap_window`). `owned` tells the app's own windows,
         the only ones that may print ``samsungFlags=0x1`` (see
-        `uiprobe.inputwindows.read_window_at`; without it none may).
+        `uiprobe.inputwindows.read_window_at`; without it none may). The
+        crawl always passes `owned` by keyword: an override in a subclass
+        must accept it and forward it (else the first guarded tap raises
+        `TypeError`).
 
         Raises:
             AdbError: The adb protocol or the command failed.

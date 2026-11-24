@@ -741,3 +741,42 @@ def test_samsung_flags_0x1_is_read_only_on_the_apps_window(
         "unreadable": "line_format",
         "rule": "samsung_flags",
     }
+
+
+@pytest.mark.parametrize("flagged", [True, False], ids=["0x1", "0x0"])
+@pytest.mark.parametrize("shared", [False, True], ids=["system_uid", "shared_uid"])
+def test_samsung_flags_0x1_on_an_off_point_window_of_the_apps_uid_is_refused(
+    tmp_path: Path, device, android, clock, monkeypatch, shared, flagged
+):
+    # A window with the app's uid but another title, away from the point,
+    # prints 0x1: the title test says it is not the app's, so no tap goes out.
+    if android.api < 33:
+        pytest.skip("the Samsung form is of API 36")
+    other = "com.example.shophelper" if shared else "android"
+    uid = 10500 if shared else 1000
+    for package in (SHOP, other):
+        android.uids[package] = uid
+        if shared:
+            android.shared_users[package] = "com.example.shared"
+    android.overlays.append(("HelperPopup", other, (272, 434, 320, 482)))
+    dumped = android._dumpsys_input
+    monkeypatch.setattr(
+        android,
+        "_dumpsys_input",
+        lambda: _samsung_rows(
+            dumped(), lambda line: flagged and " HelperPopup," in line
+        ),
+    )
+    out = tmp_path / "run"
+    result = run(device, clock, out, limits=Limits(actions=3))
+    if not flagged:  # the same window with 0x0 does not stop the tap
+        assert BROWSE in _taps(android)
+        return
+    assert _taps(android) == []
+    refused = _covered(out)
+    assert refused
+    assert refused[0]["details"] == {
+        "unreadable": "line_format",
+        "rule": "samsung_flags",
+    }
+    assert (result.cover_unknown, result.cover_rule) == ("line_format", "samsung_flags")

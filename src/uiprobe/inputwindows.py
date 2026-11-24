@@ -137,11 +137,12 @@ return); `explain_input_windows` adds the line it refused at, for
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field, replace
-from typing import TYPE_CHECKING, Final, Self
 
-if TYPE_CHECKING:
-    from collections.abc import Callable
+# Imported at run time, not only for type checking, so that
+# typing.get_type_hints() resolves the ``owned`` parameters.
+from collections.abc import Callable  # noqa: TC003
+from dataclasses import dataclass, field, replace
+from typing import Final, Self
 
 __all__ = [
     "LINE_FORMAT",
