@@ -28,7 +28,7 @@ from typing import TYPE_CHECKING, Final, Literal, NoReturn, TextIO, override
 from uiprobe import __version__
 from uiprobe._json import dumps
 from uiprobe.crawl import Limits
-from uiprobe.crawl_driver import CrawlResult, _check_device, _Run
+from uiprobe.crawl_driver import CrawlResult, _app_window, _check_device
 from uiprobe.crawl_driver import crawl as crawl_run
 from uiprobe.crawl_preview import MAX_PACKAGE_LENGTH, check_package
 from uiprobe.crawl_preview import preview as make_preview
@@ -2217,17 +2217,11 @@ def _diagnose_package(args: argparse.Namespace) -> str | None:
 
 
 def _crawl_owned(package: str, app: PackageUid) -> Callable[[InputWindow], bool]:
-    """The crawl's own test of the app's windows (`_Run.app_window`), for
-    `package` whose uid read as `app`: the same code, not a copy of it.
-
-    The test reads only the run's ``package``, so a run object is made
-    without its other state; nothing of the crawl runs.
-    """
-    run = _Run.__new__(_Run)
-    run.package = package
+    """The crawl's own test of the app's windows (`_app_window`, which
+    `_Run.app_window` calls), for `package` whose uid read as `app`."""
 
     def owned(window: InputWindow) -> bool:
-        return run.app_window(window, app)
+        return _app_window(package, window, app)
 
     return owned
 

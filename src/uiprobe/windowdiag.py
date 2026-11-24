@@ -67,6 +67,7 @@ __all__ = [
     "NOTE",
     "NOTE_TESTED",
     "NOTE_UID_UNREADABLE",
+    "NOTE_UID_UNREADABLE_ANY",
     "NOTICE",
     "NOTICE_SHOWN",
     "SCHEMA",
@@ -110,6 +111,11 @@ NOTE_TESTED: Final = (
 NOTE_UID_UNREADABLE: Final = (
     _NOTE_HEAD + "the given app's uid could not be read (dumpsys package), so no"
     " window counted as its own, and a crawl of it would refuse every tap"
+)
+# With an app whose uid could not be read and any other result.
+NOTE_UID_UNREADABLE_ANY: Final = (
+    "the given app's uid could not be read (dumpsys package); no window"
+    " counted as its own"
 )
 DISPATCHER: Final = "dispatcher"
 INPUT_READER: Final = "input_reader"
@@ -376,9 +382,12 @@ class TapWindowDiagnosis:
     @property
     def note(self) -> str | None:
         """What a ``samsung_flags`` result means for a crawl (`NOTE`,
-        `NOTE_TESTED` or `NOTE_UID_UNREADABLE`, by ``app_test``); None for
-        any other result."""
+        `NOTE_TESTED` or `NOTE_UID_UNREADABLE`, by ``app_test``), and
+        `NOTE_UID_UNREADABLE_ANY` for any other result of an app whose uid
+        could not be read; else None."""
         if self.rule != _SAMSUNG_FLAGS:
+            if self.app_test == APP_UID_UNREADABLE:
+                return NOTE_UID_UNREADABLE_ANY
             return None
         if self.app_test == APP_TESTED:
             return NOTE_TESTED

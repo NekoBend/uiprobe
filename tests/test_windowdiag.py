@@ -26,8 +26,8 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from uiprobe import cli
-from uiprobe.crawl_driver import CrawlResult, _Run
+from uiprobe import cli, crawl_driver
+from uiprobe.crawl_driver import CrawlResult, _app_window, _Run
 from uiprobe.device import Device
 from uiprobe.inputwindows import (
     RULES,
@@ -47,6 +47,7 @@ from uiprobe.windowdiag import (
     NOTE,
     NOTE_TESTED,
     NOTE_UID_UNREADABLE,
+    NOTE_UID_UNREADABLE_ANY,
     NOTICE,
     NOTICE_SHOWN,
     SCHEMA,
@@ -1436,10 +1437,8 @@ def _package_stanza(package: str, uid: int, *, shared: bool = False) -> str:
 
 
 def _crawl_test(package: str, app: PackageUid) -> Callable[[InputWindow], bool]:
-    """The crawl's test, called as the crawl calls it (`_Run.cover`)."""
-    run = _Run.__new__(_Run)
-    run.package = package
-    return lambda window: run.app_window(window, app)
+    """The crawl's test (`_Run.app_window` calls it with the run's package)."""
+    return lambda window: _app_window(package, window, app)
 
 
 @pytest.mark.parametrize("rule", sorted(CASES))
@@ -1566,27 +1565,77 @@ def test_package_accepts_0x1_only_on_the_apps_own_window(
         assert lines[2] == f"note: {note}"
 
 
-def test_package_whose_uid_cannot_be_read_tells_no_window(fake_adb, capsys):
-    _samsung_phone(fake_adb, OWN_ROW, None)
+@pytest.mark.parametrize("as_json", [False, True])
+@pytest.mark.parametrize(
+    ("text", "rule", "note"),
+    [
+        (_flagged(OWN_ROW), "samsung_flags", NOTE_UID_UNREADABLE),
+        (SAMSUNG36, None, NOTE_UID_UNREADABLE_ANY),
+        (CASES["unknown_flag"][0], "unknown_flag", NOTE_UID_UNREADABLE_ANY),
+    ],
+    ids=["samsung_flags", "readable", "other_rule"],
+)
+def test_package_whose_uid_cannot_be_read_is_always_noted(
+    fake_adb, capsys, text, rule, note, as_json
+):
+    fake_adb.add_device(SERIAL, model="SM_TEST")
+    fake_adb.on_shell(SERIAL, "dumpsys input", text.encode())
     fake_adb.on_shell(SERIAL, f"dumpsys package {LAUNCHER}", b"")  # not installed
-    argv = [*TAP_WINDOW, "--package", LAUNCHER, "--json"]
-    code, out, _ = invoke(capsys, *argv, "--adb-server", fake_adb.address)
-    assert code == 0
+    argv = [*TAP_WINDOW, "--package", LAUNCHER, "--adb-server", fake_adb.address]
+    code, out, err = invoke(capsys, *argv, *(["--json"] if as_json else []))
+    assert (code, err) == (0, "")
     assert _sent(fake_adb) == [f"dumpsys package {LAUNCHER}", "dumpsys input"]
-    payload = json.loads(out)
-    assert (payload["rule"], payload["note"]) == ("samsung_flags", NOTE_UID_UNREADABLE)
     assert LAUNCHER not in out
+    if as_json:
+        payload = json.loads(out)
+        assert (payload["rule"], payload["note"]) == (rule, note)
+        assert payload["notice"] == NOTICE
+        return
+    lines = out.rstrip("\n").split("\n")
+    assert lines[1].startswith("result: readable" if rule is None else "result: not")
+    assert lines[2] == f"note: {note}"
+    assert sum(line.startswith("note:") for line in lines) == 1
+
+
+def test_the_short_uid_note_is_the_given_sentence():
+    assert NOTE_UID_UNREADABLE_ANY == (
+        "the given app's uid could not be read (dumpsys package); no window"
+        " counted as its own"
+    )
+    # Without --package, or with a uid that was read, no note but samsung_flags'.
+    app = PackageUid(LAUNCHER_UID, shared=False)
+    for owned in (None, _crawl_test(LAUNCHER, app)):
+        assert diagnose_tap_window(SAMSUNG36, owned=owned).note is None
+
+
+def test_the_crawl_and_diagnose_share_one_app_window_test(monkeypatch):
+    # cli calls the very function the crawl's _Run.app_window calls.
+    assert cli._app_window is crawl_driver._app_window
+    calls: list[str] = []
+
+    def spy(package: str, _window: InputWindow, _app: PackageUid) -> bool:
+        calls.append(package)
+        return True
+
+    monkeypatch.setattr(crawl_driver, "_app_window", spy)
+    run = _Run.__new__(_Run)
+    run.package = LAUNCHER
+    window = parse_input_windows(SAMSUNG36)
+    assert not isinstance(window, str)
+    assert run.app_window(window[0], PackageUid(LAUNCHER_UID, shared=False))
+    assert calls == [LAUNCHER]
 
 
 def test_package_runs_the_crawls_own_test(fake_adb, capsys, monkeypatch):
     calls: list[tuple[str, int]] = []
-    original = _Run.app_window
+    original = crawl_driver._app_window
 
-    def spy(run: _Run, window: InputWindow, app: PackageUid) -> bool:
-        calls.append((run.package, app.uid))
-        return original(run, window, app)
+    def spy(package: str, window: InputWindow, app: PackageUid) -> bool:
+        calls.append((package, app.uid))
+        return original(package, window, app)
 
-    monkeypatch.setattr(_Run, "app_window", spy)
+    # cli imported the function itself (the identity is checked above).
+    monkeypatch.setattr(cli, "_app_window", spy)
     _samsung_phone(fake_adb, OWN_ROW, LAUNCHER)
     argv = [*TAP_WINDOW, "--package", LAUNCHER, "--json"]
     code, out, _ = invoke(capsys, *argv, "--adb-server", fake_adb.address)

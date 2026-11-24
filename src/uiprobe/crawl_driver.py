@@ -409,6 +409,15 @@ class _Seen:
     focus: FocusedWindow | None
 
 
+def _app_window(package: str, window: InputWindow, app: PackageUid) -> bool:
+    """Whether `window` belongs to the app (see `cover`): its owner uid
+    is the app's, and its title names the app unless the app has a uid
+    of its own (not shared, 10000 or more)."""
+    uid, shared = app.uid, app.shared
+    named = window.title == package or window.title.startswith(package + "/")
+    return window.owner_uid == uid and (named or (not shared and uid >= _FIRST_APP_UID))
+
+
 class _Run:
     """The state of one crawl: the engine, the writer and what is still open."""
 
@@ -911,16 +920,7 @@ class _Run:
         return NOT_SENT_COVERED, {"window": found.title, "owner_uid": found.owner_uid}
 
     def app_window(self, window: InputWindow, app: PackageUid) -> bool:
-        """Whether `window` belongs to the app (see `cover`): its owner uid
-        is the app's, and its title names the app unless the app has a uid
-        of its own (not shared, 10000 or more)."""
-        uid, shared = app.uid, app.shared
-        named = window.title == self.package or window.title.startswith(
-            self.package + "/"
-        )
-        return window.owner_uid == uid and (
-            named or (not shared and uid >= _FIRST_APP_UID)
-        )
+        return _app_window(self.package, window, app)
 
     def uncovered(
         self,
