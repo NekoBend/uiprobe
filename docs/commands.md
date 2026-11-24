@@ -382,7 +382,7 @@ The rules, under the reason the crawl records with them (`details.rule` next to 
 | `line_format` | `display_mismatch` | A row's `displayId=` differs from its `Display:` section. |
 | `line_format` | `field_value` | A field that is read is named but its value does not read: a value of another form (`visible=yes`), or more text after it before the next `, key=` field. |
 | `line_format` | `field_missing` | A field that is read is not there: `ownerUid=`, or both `inputConfig=` and `visible=`, or `flags=` beside `visible=`. |
-| `line_format` | `unknown_flag` | A flag name in `inputConfig=` or `flags=` that uiprobe does not know. |
+| `line_format` | `unknown_flag` | A flag name in `inputConfig=` or `flags=` that uiprobe does not know, in a row of display 0 (in another display's list only a name that is not one upper-case word refuses; a touch on display 0 is assumed to reach only display 0's windows, recalled Android behaviour not checked on a device). |
 | `line_format` | `mixed_flags` | `inputConfig=` together with `visible=` or `flags=`. |
 | `line_format` | `hex_form` | A `flags=0x...` row that is neither wholly of API 24 to 28 (`scale=`) nor of API 29 and 30 (`globalScale=`, `windowScale=` and `portalToDisplayId=`). |
 | `line_format` | `portal_missing` | A row of a form that prints `portalToDisplayId=` (API 29 to 32) without it. |

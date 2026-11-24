@@ -41,6 +41,7 @@ from uiprobe.inputwindows import (
     ROTATION,
     InputWindow,
     display_orientation,
+    explain_input_windows,
     parse_input_windows,
     read_window_at,
     window_at,
@@ -1547,3 +1548,121 @@ def test_each_same_line_fake_is_line_format_on_the_samsung_form(fake):
 def test_a_field_name_in_a_name_counts_on_the_samsung_form(fake):
     edited = _edit(SAMSUNG36, STATUS, "StatusBar,", f"StatusBar{fake},")
     assert read_window_at(edited, (540, 50)) == LINE_FORMAT
+
+
+# --- unknown flag names in another display's list ---
+
+# A second display listed above display 0, as a two-display phone printed it
+# (its cover screen, Display: 1, first). Made-up values in the API 36 form
+# (`DISPLAY1`) and in the API 32 named-flags form (a row of api32.txt).
+COVER_NAME = "SKIP_UNTRUSTED_TOUCH_TOAST"
+COVER36 = (
+    "  Display: 1\n"
+    "    logicalSize=100x100\n"
+    "        transform (ROT_0) (IDENTITY)\n"
+    "    Windows:\n"
+    "      0: name=abc123 com.example.app/com.example.app.CoverActivity, id=7,"
+    " displayId=1, inputConfig=NOT_FOCUSABLE | {config}, alpha=1,"
+    " frame=[0,0][100,100], globalScale=1, applicationInfo.name=,"
+    " applicationInfo.token=<null>, touchableRegion=[0,0][100,100], ownerPid=1,"
+    " ownerUid=10123, dispatchingTimeout=5000ms\n"
+    "      transform (ROT_0) (IDENTITY)\n"
+)
+COVER32 = (
+    "  Display: 1\n"
+    "    Windows:\n"
+    "      0: name='abc123 com.example.app/com.example.app.CoverActivity', id=7,"
+    " displayId=1, portalToDisplayId=-1, paused=false, focusable=false,"
+    " hasWallpaper=false, visible=true, alpha=1.00, flags=NOT_FOCUSABLE | {config},"
+    " type=2000, frame=[0,0][100,100], globalScale=1.000000,"
+    " applicationInfo.name=, applicationInfo.token=<null>,"
+    " touchableRegion=[0,0][100,100], inputFeatures=0x0, ownerPid=1,"
+    " ownerUid=10123, dispatchingTimeout=5000ms, trustedOverlay=false,"
+    " hasToken=true, touchOcclusionMode=BLOCK_UNTRUSTED, displayOrientation=0\n"
+    "        transform (ROT_0) (IDENTITY)\n"
+)
+
+
+def _cover_first(base: str, cover: str, config: str = COVER_NAME) -> str:
+    """`base` with the list of display 1 (`cover`, its row's flags ending
+    in `config`) printed above display 0's."""
+    block = cover.replace("{config}", config)
+    return base.replace("  Display: 0\n", block + "  Display: 0\n")
+
+
+@pytest.mark.parametrize(("base", "cover"), [(API36, COVER36), (API32, COVER32)])
+def test_an_unknown_flag_name_on_another_display_lets_display_0_be_read(base, cover):
+    text = _cover_first(base, cover)
+    assert parse_input_windows(text) == parse_input_windows(base)
+    found = read_window_at(text, (160, 320))
+    assert isinstance(found, InputWindow), found
+    assert found == read_window_at(base, (160, 320))
+    verdict = explain_input_windows(text)
+    assert verdict.reason is None
+    assert verdict.reached == (True, True)  # display 1's list was read too
+
+
+@pytest.mark.parametrize(("base", "cover"), [(API36, COVER36), (API32, COVER32)])
+def test_an_unknown_flag_name_on_the_asked_display_still_refuses(base, cover):
+    # Display 1 asked for: its own unknown name refuses.
+    text = _cover_first(base, cover)
+    refused = parse_input_windows(text, display_id=1)
+    assert refused == LINE_FORMAT
+    assert isinstance(refused, str)
+    assert getattr(refused, "rule", None) == "unknown_flag"
+
+
+@pytest.mark.parametrize(
+    ("base", "cover", "marker", "old", "new"),
+    [
+        (API36, COVER36, "Settings, id=121", "inputConfig=0x0", COVER_NAME),
+        (API32, COVER32, "bab5115 StatusBar", "SPLIT_TOUCH", COVER_NAME),
+    ],
+)
+def test_the_same_unknown_name_on_display_0_still_refuses(
+    base, cover, marker, old, new
+):
+    if old == "inputConfig=0x0":
+        new = f"inputConfig={new}"
+    text = _cover_first(_edit(base, marker, old, new), cover)
+    refused = read_window_at(text, (160, 320))
+    assert refused == LINE_FORMAT
+    assert getattr(refused, "rule", None) == "unknown_flag"
+    assert explain_input_windows(text).rule == "unknown_flag"
+
+
+@pytest.mark.parametrize(("base", "cover"), [(API36, COVER36), (API32, COVER32)])
+@pytest.mark.parametrize(
+    ("config", "old", "new", "rule"),
+    [
+        # names that are no upper-case word stay unknown_flag
+        ("skip_untrusted_touch_toast", "", "", "unknown_flag"),
+        ("SKIP UNTRUSTED", "", "", "unknown_flag"),
+        (f"{COVER_NAME}|SPY", "", "", "unknown_flag"),
+        (f"{COVER_NAME} | ", "", "", "unknown_flag"),
+        (f"{COVER_NAME} x", "", "", "unknown_flag"),
+        # the rest of the line is read as strictly as display 0's
+        (COVER_NAME, "ownerPid=1,", "ownerPid=1, ownerUid=1,", "field_twice"),
+        (COVER_NAME, "displayId=1,", "displayId=0,", "display_mismatch"),
+        (COVER_NAME, "ownerUid=10123", "ownerUid=x", "field_value"),
+        (COVER_NAME, "alpha=1", "alpha=1, visible=true", "mixed_flags"),
+        (COVER_NAME, "touchableRegion=[0,0][100,100]", "touchableRegion=x", None),
+        (COVER_NAME, "0: name=", "1: name=", "row_number"),
+    ],
+)
+def test_a_format_error_on_another_display_still_refuses(
+    base, cover, config, old, new, rule
+):
+    if "visible=" in new and base is API32:
+        new, rule = "alpha=1.00, inputConfig=0x0", "mixed_flags"
+        old = "alpha=1.00"
+    edited = cover.replace(old, new, 1) if old else cover
+    assert edited != cover or not old
+    text = _cover_first(base, edited, config)
+    refused = read_window_at(text, (160, 320))
+    assert isinstance(refused, str), refused
+    if rule is None:  # the region
+        assert refused == REGION_FORMAT
+    else:
+        assert refused == LINE_FORMAT
+        assert getattr(refused, "rule", None) == rule
