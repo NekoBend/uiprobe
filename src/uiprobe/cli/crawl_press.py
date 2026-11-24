@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import argparse  # noqa: TC003 (a runtime import in the former cli.py)
 import contextlib
 import sys
 from dataclasses import replace
-from typing import TYPE_CHECKING, Final, Literal
+from typing import Final, Literal
 
 from uiprobe._json import dumps
 from uiprobe.cli.commands import _single_serial
@@ -31,9 +32,6 @@ from uiprobe.crawl_preview import preview as make_preview
 from uiprobe.device import PIN_WAIT_STOPPED, Device
 from uiprobe.errors import INTERRUPTED, NotEmulatorError, UiprobeError
 from uiprobe.settings import Settings, _shown
-
-if TYPE_CHECKING:
-    import argparse
 
 CRAWL_RUN_SCHEMA = "uiprobe.crawl_run/1"
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse  # noqa: TC003 (a runtime import in the former cli.py)
 import re
 import sys
 from datetime import UTC, datetime
@@ -38,7 +39,6 @@ from uiprobe.settings import (
 )
 
 if TYPE_CHECKING:
-    import argparse
     from collections.abc import Sequence
 
     from uiprobe.adb import DeviceInfo

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse  # noqa: TC003 (a runtime import in the former cli.py)
 from dataclasses import replace
 from typing import TYPE_CHECKING
 
@@ -16,7 +17,6 @@ from uiprobe.errors import INTERNAL_ERROR, USAGE_ERROR, UiprobeError
 from uiprobe.windowdiag import APP_CRAWL_TESTED, APP_UID_UNREADABLE, TapWindowDiagnosis
 
 if TYPE_CHECKING:
-    import argparse
     from collections.abc import Callable
 
     from uiprobe.inputwindows import InputWindow

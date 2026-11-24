@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse  # noqa: TC003 (a runtime import in the former cli.py)
 import os
 import re
 import stat
@@ -13,6 +14,7 @@ from typing import TYPE_CHECKING, Literal
 from uiprobe.cli.output import _emit, _printable
 from uiprobe.cli.parser import _GuidedUsageError, _press_only, _UsageError
 from uiprobe.crawl_preview import check_package
+from uiprobe.device import Device  # noqa: TC001 (a runtime import in the former cli.py)
 from uiprobe.errors import UiprobeError
 from uiprobe.guards import REASONS, Policy
 from uiprobe.pngfile import check_new_path, depends_on_a_drive_folder
@@ -29,11 +31,9 @@ from uiprobe.settings import (
 )
 
 if TYPE_CHECKING:
-    import argparse
     from collections.abc import Callable, Sequence
 
     from uiprobe.crawl_preview import Preview
-    from uiprobe.device import Device
     from uiprobe.guards import Decision, Detail
     from uiprobe.model import Screen
 

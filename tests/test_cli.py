@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import contextlib
 import errno
+import inspect
 import io
 import json
 import os
 import re
 import sys
+import typing
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -1096,3 +1098,40 @@ def test_main_interrupt_with_a_dead_reader_redirects_the_descriptor(monkeypatch,
                 pass
             with contextlib.suppress(OSError):
                 stream.close()
+
+
+def test_every_annotation_in_the_cli_package_resolves():
+    # Names that were only imported for type checking in the single module;
+    # a test may supply them, nothing else may be missing at run time.
+    from collections.abc import Callable, Sequence
+
+    from uiprobe.adb import DeviceInfo
+    from uiprobe.crawl_preview import Preview
+    from uiprobe.guards import Decision, Detail
+    from uiprobe.inputwindows import InputWindow
+    from uiprobe.model import Element, Screen
+    from uiprobe.packageuid import PackageUid
+
+    extra = {
+        "Callable": Callable,
+        "Sequence": Sequence,
+        "DeviceInfo": DeviceInfo,
+        "Preview": Preview,
+        "Decision": Decision,
+        "Detail": Detail,
+        "InputWindow": InputWindow,
+        "Element": Element,
+        "Screen": Screen,
+        "PackageUid": PackageUid,
+    }
+    functions = []
+    for value in vars(cli).values():
+        if inspect.isclass(value) and value.__module__.startswith("uiprobe.cli"):
+            functions += [
+                member for member in vars(value).values() if inspect.isfunction(member)
+            ]
+        elif inspect.isfunction(value) and value.__module__.startswith("uiprobe.cli"):
+            functions.append(value)
+    assert len(functions) > 50
+    for function in functions:
+        typing.get_type_hints(function, localns=extra)
