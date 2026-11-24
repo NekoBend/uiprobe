@@ -42,7 +42,9 @@ DISPLAY = (320, 640)
 CLICK = ("clickable",)
 BUTTON = "android.widget.Button"
 GUARDS_DIR = Path(guards.__file__).parent
-GUARDS_FILES = sorted(GUARDS_DIR.glob("*.py"), key=lambda path: path.name)
+GUARDS_FILES = sorted(
+    GUARDS_DIR.rglob("*.py"), key=lambda path: path.relative_to(GUARDS_DIR).as_posix()
+)
 
 
 def root(bounds=(0, 0, 320, 640), *, package=PKG):
@@ -1251,7 +1253,9 @@ def test_property_only_labeled_elements_are_pressed_by_default() -> None:
 # -- imports ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("path", GUARDS_FILES, ids=lambda path: path.name)
+@pytest.mark.parametrize(
+    "path", GUARDS_FILES, ids=lambda path: path.relative_to(GUARDS_DIR).as_posix()
+)
 def test_guards_imports_only_allowed_modules(path: Path) -> None:
     allowed = {
         "__future__",
@@ -1282,7 +1286,7 @@ def test_guards_imports_only_allowed_modules(path: Path) -> None:
 
 
 def test_the_guards_package_holds_exactly_the_known_files() -> None:
-    assert [path.name for path in GUARDS_FILES] == [
+    assert [path.relative_to(GUARDS_DIR).as_posix() for path in GUARDS_FILES] == [
         "__init__.py",
         "constants.py",
         "judge.py",
