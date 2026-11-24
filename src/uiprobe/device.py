@@ -9,7 +9,8 @@ import secrets
 import time
 
 # Imported at run time, not only for type checking, so that
-# typing.get_type_hints() resolves Device.window_at's ``owned``.
+# typing.get_type_hints() resolves the ``owned`` of Device.window_at and
+# Device.diagnose_tap_window.
 from collections.abc import Callable  # noqa: TC003
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -3451,16 +3452,25 @@ class Device:
         return read_window_at(text, point, owned=owned)
 
     def diagnose_tap_window(
-        self, *, show_device_text: bool = False
+        self,
+        *,
+        show_device_text: bool = False,
+        owned: Callable[[InputWindow], bool] | None = None,
     ) -> TapWindowDiagnosis:
         """Tell whether `window_at` can read this device's window list, and if
         not which rule refused it and where, with no text of the device's
         output in the result (see `uiprobe.windowdiag`).
 
         Reads ``dumpsys input`` once. With `show_device_text` the result
-        also holds the shapes of the lines, which hold device text.
+        also holds the shapes of the lines, which hold device text. `owned`
+        tells the app's own windows, the only ones that may print
+        ``samsungFlags=0x1``, as for `window_at` (``uiprobe diagnose
+        tap-window --package`` passes the crawl's test); without it every
+        such window of display 0's list refuses (``samsung_flags``).
 
         Raises:
+            TypeError: `show_device_text` is not a bool, or `owned` is
+                neither None nor callable (before any request).
             AdbError: The adb protocol or the command failed.
             AdbServerUnavailableError: The adb server cannot be reached.
             DeviceNotFoundError: The device is gone.
@@ -3470,8 +3480,11 @@ class Device:
         if not isinstance(show_device_text, bool):
             msg = "show_device_text must be a bool"
             raise TypeError(msg)
+        if owned is not None and not callable(owned):
+            msg = "owned must be None or callable"
+            raise TypeError(msg)
         text = self._shell("dumpsys input")
-        return diagnose_tap_window(text, show_device_text=show_device_text)
+        return diagnose_tap_window(text, show_device_text=show_device_text, owned=owned)
 
     def package_uid(self, package: str) -> PackageUid | None:
         """Return the app id the system gave `package` and whether the package
