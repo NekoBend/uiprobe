@@ -31,11 +31,12 @@ on a screen of the app, and on a screen of another app with
 the crawl declares (`crawl_driver._SEND_PATHS`), and a send without a
 decision fails, so a new sending path cannot be added without a row. The
 first launch force-stops the app by default (``restart=True``), through the
-``force-stop`` and ``start`` paths of a relaunch: every row but ``launch``
-runs with it, so each of them checks that force-stop and start as well, and
-the ``first-force-stop`` row checks that they are the first two sends. The
-``launch`` row runs with ``restart=False``, whose first launch is a start
-alone.
+``force-stop`` and ``start`` paths of a relaunch: every row but those of
+the ``launch`` path runs with it, so each of them checks that force-stop and
+start as well, and the ``first-force-stop`` row checks that they are the
+first two sends. The rows of the ``launch`` path (``launch`` and
+``launch-two-displays``) run with ``restart=False``, whose first launch is a
+start alone.
 Meta-tests show that the test fails, for every row, when a clock call is
 inserted into the production `_Run.final_check` right after its comparison
 or into `_Run.epoch_is` right after the equality, and when the row of a path
@@ -139,6 +140,22 @@ def off_target_back(device: Device, android: FakeAndroid, monkeypatch) -> None:
     monkeypatch.setattr(device, "key", key)
 
 
+# Added to the fake's `dumpsys window`: a second display without focus.
+SECOND_DISPLAY = (
+    "  Display: mDisplayId=0 (organized)\n"
+    "  Display: mDisplayId=1 (organized)\n"
+    "  mCurrentFocus=null\n"
+    "  mTopFocusedDisplayId=0\n"
+)
+
+
+def two_displays(device: Device, android: FakeAndroid, monkeypatch) -> None:
+    """The small app on a device with two displays, the tap window check off
+    (the row's policy): the launch goes out, no tap or BACK does."""
+    del device, monkeypatch
+    android.extra_dumpsys["window"] = SECOND_DISPLAY
+
+
 class Row(NamedTuple):
     """A scenario, the sending path it must send, its policy options, and
     whether the first launch force-stops the app (`crawl`'s ``restart``)."""
@@ -158,6 +175,9 @@ ROWS: dict[str, Row] = {
     "first-force-stop": Row("force-stop", plain, {}),
     "force-stop": Row("force-stop", cover_after_browse, {}),
     "start": Row("start", cover_after_browse, {}),
+    "launch-two-displays": Row(
+        "launch", two_displays, {"check_tap_window": False}, restart=False
+    ),
 }
 
 
@@ -450,6 +470,8 @@ def test_no_caller_code_runs_between_the_final_comparison_and_the_send(
     if row.scenario is off_target_back:
         # Some of its BACKs went to the other app's screens.
         assert any(package != SHOP for package in OFF_TARGET_BACKS)
+    if row.scenario is two_displays:
+        assert sends.get("tap", 0) == sends.get("back", 0) == 0
     # The first two sends are the first launch: force-stop and start, each
     # on its own decision, with restart; a start alone without it.
     decided = [w for k, w in events if k == "decided"][:2]

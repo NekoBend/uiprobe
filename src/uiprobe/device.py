@@ -1151,7 +1151,7 @@ def _parse_display_size(text: str) -> tuple[int, int] | None:
     return None
 
 
-_COMPONENT = r"([A-Za-z0-9_.$]{1,256})/([A-Za-z0-9_.$]{1,256})"
+_COMPONENT = r"(?P<package>[A-Za-z0-9_.$]{1,256})/(?P<cls>[A-Za-z0-9_.$]{1,256})"
 _RECORD = r"ActivityRecord\{[0-9a-f]{1,16} u[0-9]{1,3} " + _COMPONENT
 _TASK_SUFFIX = r"(?: t-?[0-9]{1,9})?(?: [a-z]{1,16})?"
 _MAX_DUMPSYS_LINE = 4096
@@ -1191,6 +1191,173 @@ _RESUMED_SOURCE: Final = _Source(
 )
 _ABSENT: Final = object()
 
+# On a device with several displays (a foldable's cover screen), `dumpsys
+# window` prints a block per display, each with its own ``mCurrentFocus`` and
+# ``mFocusedApp``, in no fixed order, and one ``mTopFocusedDisplayId`` names
+# the focused display. A dump is read that way when more than one line holds
+# ``Display:`` then ``mDisplayId`` (any spacing), or any line that holds
+# ``mTopFocusedDisplayId`` is not exactly ``  mTopFocusedDisplayId=0``;
+# otherwise it is read as on a single display (an API 37 emulator prints one
+# header and that exact line, API 24 a header and no such line). A forged
+# header makes two, and a forged or malformed top line is not that exact
+# line, so forgeries land on the stricter reading. No line counts or is
+# dropped because of where a header sits: an app can forge headers in a
+# window title, so a header's position proves nothing.
+_DISPLAY_HEADER_FIELD: Final = re.compile(r"Display:\s*mDisplayId")
+_TOP_FOCUSED_DISPLAY_FIELD: Final = "mTopFocusedDisplayId"
+_TOP_FOCUSED_DISPLAY_ZERO: Final = "  mTopFocusedDisplayId=0"
+_TOP_FOCUSED_DISPLAY: Final = re.compile(
+    r"  mTopFocusedDisplayId=(-1|0|[1-9][0-9]{0,9})"
+)
+_CURRENT_FOCUS_FIELD: Final = re.compile(r"(?<![A-Za-z0-9_])mCurrentFocus\s*[=:]")
+_CURRENT_FOCUS_NULL: Final = "  mCurrentFocus=null"
+# The start of the line below a window block's header for a window on display 0.
+_WINDOW_ON_DISPLAY_ZERO: Final = "    mDisplayId=0 "
+_CURRENT_FOCUS_EXACT: Final = re.compile(
+    r"  mCurrentFocus=Window\{([0-9a-f]{1,16}) u([0-9]{1,3}) ([^\r\n]{1,512})\}"
+)
+
+
+def _several_displays(lines: list[str]) -> bool:
+    """Whether a `dumpsys window` dump is read as one with several displays.
+
+    More than one header line, a top line other than the exact
+    ``  mTopFocusedDisplayId=0`` that single-display devices print, or window
+    blocks on more than one display (the exact ``    mDisplayId=N`` line right
+    below a window block's header). A forged line can only add a display.
+    """
+    headers = sum(1 for line in lines if _DISPLAY_HEADER_FIELD.search(line))
+    if headers > 1 or any(
+        _TOP_FOCUSED_DISPLAY_FIELD in line and line != _TOP_FOCUSED_DISPLAY_ZERO
+        for line in lines
+    ):
+        return True
+    displays = {
+        match[1]
+        for index, head in enumerate(lines[:-1])
+        if _WINDOW_HEAD_HASH.match(head)
+        and (match := _WINDOW_DISPLAY.match(lines[index + 1])) is not None
+    }
+    return len(displays) > 1
+
+
+def _dump_lines(text: str) -> list[str]:
+    """The lines of `text`, each with at most one CR before its LF cut off.
+
+    A CR at the very end, with no LF after it, stays.
+    """
+    *lines, last = text.split("\n")
+    return [line.removesuffix("\r") for line in lines] + [last]
+
+
+def _names_other_display(lines: list[str]) -> bool:
+    """Whether the ``mTopFocusedDisplayId`` lines, all exact and agreeing,
+    name a display other than 0 (missing or malformed lines do not)."""
+    values: set[str] = set()
+    for line in lines:
+        if _TOP_FOCUSED_DISPLAY_FIELD not in line:
+            continue
+        match = (
+            _TOP_FOCUSED_DISPLAY.fullmatch(line)
+            if len(line) <= _MAX_DUMPSYS_LINE
+            else None
+        )
+        if match is None:
+            return False
+        values.add(match[1])
+    return len(values) == 1 and values.isdisjoint({"0", "-1"})
+
+
+def _names_a_display(lines: list[str]) -> bool:
+    """Whether an exact ``mTopFocusedDisplayId`` line names a display other
+    than 0 (another display has the focus)."""
+    return any(
+        (match := _TOP_FOCUSED_DISPLAY.fullmatch(line)) is not None and match[1] != "0"
+        for line in lines
+        if _TOP_FOCUSED_DISPLAY_FIELD in line and len(line) <= _MAX_DUMPSYS_LINE
+    )
+
+
+def _display_zero_focused(lines: list[str]) -> bool:
+    """Whether every ``mTopFocusedDisplayId`` line is exact and says 0.
+
+    Every line that holds the name counts, in any spacing; there must be at
+    least one.
+    """
+    tops = [line for line in lines if _TOP_FOCUSED_DISPLAY_FIELD in line]
+    for line in tops:
+        match = (
+            _TOP_FOCUSED_DISPLAY.fullmatch(line)
+            if len(line) <= _MAX_DUMPSYS_LINE
+            else None
+        )
+        if match is None or match[1] != "0":
+            return False
+    return bool(tops)
+
+
+def _read_focus_of_several(lines: list[str]) -> tuple[str, str, str] | None:
+    """The focused window of a dump with several displays, or None.
+
+    Only the shape seen on a two-display phone is accepted: every line that
+    names ``mCurrentFocus`` as a field (any indentation and spacing) is a
+    claim, there are as many claims as display header lines, every claim but
+    one is exactly ``  mCurrentFocus=null``, and that one is an exact
+    ``  mCurrentFocus=Window{...}``. Anything else is None. A title can still
+    forge a header and a focus line as a pair; that pair is the remaining
+    case this cannot tell (documented as best effort).
+    """
+    claims = [line for line in lines if _CURRENT_FOCUS_FIELD.search(line)]
+    headers = sum(1 for line in lines if _DISPLAY_HEADER_FIELD.search(line))
+    windows = [line for line in claims if line != _CURRENT_FOCUS_NULL]
+    if len(claims) != headers or len(windows) != 1:
+        return None
+    line = windows[0]
+    match = (
+        _CURRENT_FOCUS_EXACT.fullmatch(line) if len(line) <= _MAX_DUMPSYS_LINE else None
+    )
+    return None if match is None else (match[1], match[3], match[2])
+
+
+# In `dumpsys activity activities` of a two-display phone, ``topResumedActivity``
+# and ``ResumedActivity`` were each printed once (seen on one capture only),
+# while ``mFocusedApp`` was printed per display.
+_RESUMED_FIELD: Final = re.compile(
+    r"(?<![A-Za-z0-9_])(topResumedActivity|mResumedActivity|ResumedActivity)\s*[=:]"
+)
+_RESUMED_EXACT: Final = re.compile(
+    r" *(?:topResumedActivity|mResumedActivity|ResumedActivity)[=:] ?"
+    + _RECORD
+    + _TASK_SUFFIX
+    + r"\}"
+)
+
+
+def _read_resumed_of_several(text: str) -> tuple[str, str] | None:
+    """The resumed activity for a dump with several displays, or None.
+
+    Every line that names ``topResumedActivity``, ``mResumedActivity`` or
+    ``ResumedActivity`` as a field (any spacing before the ``=`` or ``:``) is
+    a claim and must be exact; there must be a ``topResumedActivity`` claim
+    and a ``ResumedActivity`` claim, and all must name the same component.
+    """
+    names: set[str] = set()
+    found: set[tuple[str, str]] = set()
+    for line in _dump_lines(text):
+        claim = _RESUMED_FIELD.search(line)
+        if claim is None:
+            continue
+        match = (
+            _RESUMED_EXACT.fullmatch(line) if len(line) <= _MAX_DUMPSYS_LINE else None
+        )
+        if match is None:
+            return None
+        names.add(claim[1])
+        found.add((match["package"], match["cls"]))
+    if not {"topResumedActivity", "ResumedActivity"} <= names or len(found) != 1:
+        return None
+    return found.pop()
+
 
 def _read_source(text: str, source: _Source) -> tuple[str, str] | object | None:
     """Return the component `source` names, None if unusable, or `_ABSENT`.
@@ -1210,7 +1377,7 @@ def _read_source(text: str, source: _Source) -> tuple[str, str] | object | None:
         match = source.shape.fullmatch(line) if len(line) <= _MAX_DUMPSYS_LINE else None
         if match is None:
             return _ABSENT if len(lines) == 1 else None
-        found.add((match[1], match[2]))
+        found.add((match["package"], match["cls"]))
     return found.pop() if len(found) == 1 else None
 
 
@@ -1228,6 +1395,11 @@ _WINDOW_HEAD: Final = re.compile(
 # there counts as a header of that hash (a title that holds ``Window{<hash>``
 # further on does not).
 _WINDOW_HEAD_HASH: Final = re.compile(r"  Window #[0-9]+ Window\{([0-9a-f]+) ")
+# A display's section in `dumpsys input` (API 29 and later); a forged one can
+# only add a display.
+_INPUT_DISPLAY: Final = re.compile(r"\s*Display: (-?[0-9]{1,10})")
+# The line below a window block's header names the window's display.
+_WINDOW_DISPLAY: Final = re.compile(r"    mDisplayId=(0|[1-9][0-9]{0,9}) ")
 # The system writes this line; 24 has mShowToOwnerOnly, 30 and 36 showForAllUsers.
 _WINDOW_OWNER: Final = re.compile(
     r"    mOwnerUid=(?P<uid>[0-9]{1,10})"
@@ -1238,11 +1410,29 @@ _WINDOW_OWNER: Final = re.compile(
 )
 
 
+def displays_seen(device: Device) -> bool:
+    """Whether a ``dumpsys window`` read (the full dump or ``windows``) or a
+    `Device.window_at` read of `device` has shown several displays since
+    `forget_displays`.
+
+    A module function, not a method, so a subclass cannot replace it: the
+    crawl asks it after the caller's last clock call and before its final
+    comparison.
+    """
+    return device._several_seen  # noqa: SLF001 - uiprobe's own state
+
+
+def forget_displays(device: Device) -> None:
+    """Start a new run: no read of `device` has shown several displays yet."""
+    device._several_seen = False  # noqa: SLF001 - uiprobe's own state
+
+
 def _read_current_focus(text: str) -> tuple[str, str, str] | None:
     """The ``(hash, title, user)`` of the focused window, or None.
 
     Every line that claims ``mCurrentFocus`` must be well formed and all must
-    name the same window; anything else is None.
+    name the same window; anything else is None. (A dump with several
+    displays is read by `_read_focus_of_several` instead.)
     """
     lines = {
         line.rstrip("\r")
@@ -1260,11 +1450,36 @@ def _read_current_focus(text: str) -> tuple[str, str, str] | None:
     return windows.pop() if len(windows) == 1 else None
 
 
+def _window_focus(
+    text: str, lines: list[str], *, several: bool
+) -> tuple[str, str, str] | None:
+    """The ``(hash, title, user)`` of the focused window, or None.
+
+    `several` picks the reading: a dump with several displays is read only
+    while display 0 has the focus (see `_read_focus_of_several`), any other
+    as before (`_read_current_focus`).
+    """
+    if not several:
+        return _read_current_focus(text)
+    return _read_focus_of_several(lines) if _display_zero_focused(lines) else None
+
+
 def _read_window_owner(
-    text: str, window: str, title: str, user: str
+    text: str, window: str, title: str, user: str, *, display_zero: bool = False
 ) -> FocusedWindow | None:
-    """The owner of window `window` from its block, or None (see focused_window)."""
-    lines = [line.rstrip("\r") for line in text.split("\n")]
+    """The owner of window `window` from its block, or None (see focused_window).
+
+    With `display_zero` (a dump with several displays), the line below the
+    block's header, which the system writes, must also start with
+    ``mDisplayId=0``: the window is on display 0. A title with a line break
+    cannot forge it, because such a title never matches the focus line. The
+    lines then lose at most one CR before each LF (see `_dump_lines`).
+    """
+    lines = (
+        _dump_lines(text)
+        if display_zero
+        else [line.rstrip("\r") for line in text.split("\n")]
+    )
     heads = [
         index
         for index, line in enumerate(lines)
@@ -1276,6 +1491,8 @@ def _read_window_owner(
     line = lines[index]
     head = _WINDOW_HEAD.fullmatch(line) if len(line) <= _MAX_DUMPSYS_LINE else None
     if head is None or head[1] != window or head[2] != user or head[3] != title:
+        return None
+    if display_zero and not lines[index + 1].startswith(_WINDOW_ON_DISPLAY_ZERO):
         return None
     owner = _WINDOW_OWNER.fullmatch(lines[index + 2])
     if owner is None:
@@ -1541,6 +1758,9 @@ class Device:
         self._info = select_device(self._client.devices(), serial)
         self._api_level: int | None = None
         self._api_level_known = False
+        self._several_seen = False  # see _displays_seen
+        # The latest dump with several displays named another focused display.
+        self._other_display = False
         self._latest_screen: Screen | None = None
         # True when the latest screen's display came from `wm size`, False when
         # it is the extent of the dumped windows; always set with the screen.
@@ -2808,6 +3028,7 @@ class Device:
         deadline = self._clock() + limit
         while True:
             self._check_no_failure(failed)
+            self._other_display = False
             seen = self.foreground()
             # A read can succeed after a failure inside it (a wait that read
             # the identity again), also on the last poll: that ends it too.
@@ -2824,6 +3045,8 @@ class Device:
         shown = None if seen is None else _shown_foreground(seen)
         details.update(reason="not_in_front", foreground=shown, timeout=limit)
         last = "unknown" if shown is None else shown
+        if seen is None and self._other_display:
+            last += "; another display, perhaps the cover screen, has the focus"
         msg = f"{package} was not in front after {limit:g} seconds (foreground: {last})"
         raise LaunchFailedError(msg, details=details)
 
@@ -3045,7 +3268,10 @@ class Device:
         The package comes from the same trusted sources as the activity in
         `dump`; it is whatever package that source names, not filtered. None
         means the output does not tell it reliably (missing, malformed,
-        forged or ambiguous).
+        forged or ambiguous). On a device with several displays (a foldable
+        with a cover screen) it is read only while ``mTopFocusedDisplayId``
+        says display 0 has the focus, and then from the resumed activity
+        alone (see `_trusted_component`); otherwise None.
 
         Raises:
             AdbError: The adb protocol or the command failed.
@@ -3073,7 +3299,11 @@ class Device:
         can hold newlines, so a forged block can be added but the genuine one
         cannot be removed), a block whose title differs, or an owner line of
         another shape. The two dumps are read one after the other, so a focus
-        that changed in between gives None too.
+        that changed in between gives None too. On a device with several
+        displays it is read only while ``mTopFocusedDisplayId`` says display
+        0 has the focus; ``null`` lines are then left out and the other
+        ``mCurrentFocus`` lines must name one window (see
+        `_read_focus_of_several`); otherwise None.
 
         Raises:
             AdbError: The adb protocol or the command failed.
@@ -3082,17 +3312,32 @@ class Device:
             DeviceOfflineError: The device is offline.
             DeviceUnauthorizedError: The device has not authorized this host.
         """
-        focus = _read_current_focus(self._shell("dumpsys window"))
+        # The reading (one display or several) is decided once, from the
+        # first dump; a later read of this call that disagrees gives None.
+        text = self._shell("dumpsys window")
+        lines = _dump_lines(text)
+        several = self._note_dump(lines)
+        focus = _window_focus(text, lines, several=several)
         if focus is None:
             return None
-        found = _read_window_owner(self._shell("dumpsys window windows"), *focus)
+        windows = self._shell("dumpsys window windows")
+        windows_lines = _dump_lines(windows)
+        if (self._note_dump(windows_lines) and not several) or _names_a_display(
+            windows_lines
+        ):
+            return None
+        found = _read_window_owner(windows, *focus, display_zero=several)
         # Read the focus again: a window that took it between the two dumps
         # would otherwise be given the old window's owner.
         if found is None:
             return None
+        again = self._shell("dumpsys window")
+        again_lines = _dump_lines(again)
+        if self._note_dump(again_lines) != several:
+            return None
         return (
             found
-            if _read_current_focus(self._shell("dumpsys window")) == focus
+            if _window_focus(again, again_lines, several=several) == focus
             else None
         )
 
@@ -3185,6 +3430,8 @@ class Device:
         that does not accept it raises `TypeError` on the first guarded tap;
         one that accepts it but does not forward it makes the app's own
         windows with ``samsungFlags=0x1`` refuse the tap (``samsung_flags``).
+        ``Display: N`` sections of two or more numbers in the read count as
+        several displays for `displays_seen`.
 
         Raises:
             AdbError: The adb protocol or the command failed.
@@ -3193,7 +3440,15 @@ class Device:
             DeviceOfflineError: The device is offline.
             DeviceUnauthorizedError: The device has not authorized this host.
         """
-        return read_window_at(self._shell("dumpsys input"), point, owned=owned)
+        text = self._shell("dumpsys input")
+        sections = {
+            int(match[1])
+            for line in _dump_lines(text)
+            if (match := _INPUT_DISPLAY.fullmatch(line)) is not None
+        }
+        if len(sections) > 1:
+            self._several_seen = True
+        return read_window_at(text, point, owned=owned)
 
     def diagnose_tap_window(
         self, *, show_device_text: bool = False
@@ -3424,14 +3679,36 @@ class Device:
 
         ``dumpsys window`` is read first; only when it says nothing is
         ``dumpsys activity activities`` read. A source that speaks but cannot
-        be trusted gives None with no fallback. Device errors propagate.
+        be trusted gives None with no fallback. A dump with several displays
+        (see `_several_displays`) is read only while every
+        ``mTopFocusedDisplayId`` line says display 0, and then its
+        ``mFocusedApp`` lines, one per display, are not used: the component
+        comes from the activity dump's ``topResumedActivity`` and
+        ``ResumedActivity`` alone, which must both be there and agree (see
+        `_read_resumed_of_several`). Device errors propagate.
         """
-        found = _read_source(self._shell("dumpsys window"), _FOCUSED_APP_SOURCE)
+        text = self._shell("dumpsys window")
+        lines = _dump_lines(text)
+        if self._note_dump(lines):
+            self._other_display = _names_other_display(lines)
+            if not _display_zero_focused(lines):
+                return None
+            return _read_resumed_of_several(self._shell("dumpsys activity activities"))
+        found = _read_source(text, _FOCUSED_APP_SOURCE)
         if found is _ABSENT:
             found = _read_source(
                 self._shell("dumpsys activity activities"), _RESUMED_SOURCE
             )
         return found if isinstance(found, tuple) else None
+
+    def _note_dump(self, lines: list[str]) -> bool:
+        """Whether a ``dumpsys window`` read shows several displays; once one
+        has, `displays_seen` stays True until `forget_displays` (a crawl run
+        calls it when it starts)."""
+        several = _several_displays(lines)
+        if several:
+            self._several_seen = True
+        return several
 
     def _focused_component(self, package: str) -> tuple[str, str] | None:
         """Return the focused component, only when it belongs to `package`.
