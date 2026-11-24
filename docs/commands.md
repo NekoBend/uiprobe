@@ -320,7 +320,7 @@ Limit: the `LaunchState:` values seen and accepted are `COLD`, `WARM`, `HOT` and
 
 With `--json` the result is a `uiprobe.action/1` object (see [Output formats](output.md)); `restart` is always written.
 
-`uiprobe launch` stops the app only with `--restart`. A pressing crawl has the opposite default: `uiprobe crawl PACKAGE --press` (or `uiprobe crawl PACKAGE --out DIR` with `press = true` in the settings file) force-stops the app and then starts its launcher activity; which screen the app then shows is up to the app (as with `other_activity` above: Settings on API 36 and 37 emulators brought back another package's search screen after a force-stop). `--no-restart` turns the force-stop off, so the crawl starts from the screen the app shows now (see [Pressing crawl](crawl.md#pressing-crawl---press)). `--no-restart` is used only when the crawl presses (with `--press`, or with `press = true` in the settings file); given to a preview, it is a usage error.
+`uiprobe launch` stops the app only with `--restart`. A pressing crawl has the opposite default: `uiprobe crawl PACKAGE --press --out DIR` (or `uiprobe crawl PACKAGE --out DIR` with `press = true` in the settings file) force-stops the app and then starts its launcher activity; which screen the app then shows is up to the app (as with `other_activity` above: Settings on API 36 and 37 emulators brought back another package's search screen after a force-stop). `--no-restart` turns the force-stop off, so the crawl starts from the screen the app shows now (see [Pressing crawl](crawl.md#pressing-crawl---press)). `--no-restart` is used only when the crawl presses (with `--press`, or with `press = true` in the settings file); given to a preview, it is a usage error.
 
 ## Diagnosing the tap window check
 
