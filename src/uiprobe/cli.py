@@ -1049,7 +1049,10 @@ def _check_config_path(path: str | None) -> None:
         ' separator or "/." (that is the folder form of a path)'
     )
     if file:
-        msg += f"; to use the file, give --config {_shown(file)}"
+        hint = _hint_path(file)
+        if hint == "PATH":
+            hint = "PATH, the same path without that ending"
+        msg += f"; to use the file, give --config {hint}"
     raise _UsageError(msg)
 
 
@@ -1063,12 +1066,17 @@ def _key_settings(args: argparse.Namespace) -> Settings | None:
     return _load_settings(SETTINGS_FILE)
 
 
-def _create_line(path: str) -> str:
-    """Return the command that creates ``path``; a path needing quoting gives PATH."""
+def _hint_path(path: str) -> str:
+    """Return `path` for a printed hint; one that needs shell quoting gives PATH."""
     pattern = _PLAIN_WINDOWS_PATH_RE if _ON_WINDOWS else _PLAIN_PATH_RE
     if pattern.fullmatch(str(path)) is None:
-        return "uiprobe init PATH"
-    return f"uiprobe init {path}"
+        return "PATH"
+    return path
+
+
+def _create_line(path: str) -> str:
+    """Return the command that creates ``path``; a path needing quoting gives PATH."""
+    return f"uiprobe init {_hint_path(path)}"
 
 
 def _crawl_settings(args: argparse.Namespace) -> Settings:
@@ -1226,6 +1234,9 @@ def _refuse_press_only(args: argparse.Namespace, why: str) -> None:
         raise _UsageError(msg)
 
 
+# The --out choice below is also named in the "to always press" line of
+# `_preview_guidance` (each run then needs --out DIR): update that line, its
+# tests and docs/crawl.md when this choice changes.
 def _file_press_out(settings: Settings) -> str:
     """Return the run folder of a run that presses by press = true without --out.
 
@@ -1399,8 +1410,11 @@ def _preview_guidance(
         this_time = "remove --dry-run and " + this_time
     lines = [
         f"to press this time: {this_time}",
+        # Names --out DIR because a run that presses by press = true needs it
+        # (see _file_press_out); change both together.
         "to always press: set press = true in"
-        f" {_printable(_shown(str(settings.source)))}",
+        f" {_printable(_shown(str(settings.source)))} (each run then needs"
+        " --out DIR)",
     ]
     try:
         emulator = device.is_emulator()
@@ -1459,6 +1473,9 @@ def _cmd_crawl(args: argparse.Namespace) -> int:
         _check_plan_stream(args)
     setup = _crawl_policy(args)  # checks the plan stream of press = true too
     if setup.press_source is not None:
+        # Again right before the device is made: whatever wrote in between
+        # (the settings warnings) may have closed the stream.
+        _check_plan_stream(args)
         return _cmd_crawl_press(args, setup)
     settings_path = str(setup.settings.source)
     device = Device(

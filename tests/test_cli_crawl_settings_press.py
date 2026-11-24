@@ -71,8 +71,8 @@ def edited(
     return text
 
 
-def write_settings(folder: Path, text: str) -> Path:
-    path = folder / SETTINGS_FILE
+def write_settings(folder: Path, text: str, name: str = SETTINGS_FILE) -> Path:
+    path = folder / name
     path.write_text(text, encoding="utf-8", newline="\n")
     return path
 
@@ -503,7 +503,8 @@ TO_PRESS = "to press this time: add --press --out DIR to the same command"
 TO_PRESS_DRY = (
     "to press this time: remove --dry-run and add --press --out DIR to the same command"
 )
-TO_ALWAYS = f"to always press: set press = true in {SETTINGS_FILE}"
+NEEDS_OUT = " (each run then needs --out DIR)"
+TO_ALWAYS = f"to always press: set press = true in {SETTINGS_FILE}{NEEDS_OUT}"
 REAL = "on a real device also add --allow-real-device"
 
 
@@ -554,7 +555,7 @@ def test_the_guidance_names_the_file_that_was_used(fake_adb, capsys, here):
     assert _ending(text) == [
         LAST,
         TO_PRESS,
-        f"to always press: set press = true in {path}",
+        f"to always press: set press = true in {path}{NEEDS_OUT}",
     ]
 
 
@@ -651,6 +652,19 @@ def test_key_refuses_a_folder_form_config_path(fake_adb, capsys, here):
     assert fake_adb.requests == []
 
 
+@pytest.mark.usefixtures("android")
+def test_the_folder_form_hint_does_not_print_a_path_that_needs_quoting(
+    fake_adb, capsys, here
+):
+    path = write_settings(here, settings_text(), "qa[1].toml")
+    code, text, err = crawl(capsys, fake_adb, "--config", f"{path}/.")
+    assert (code, text) == (2, "")
+    assert err.endswith(
+        "; to use the file, give --config PATH, the same path without that ending\n"
+    )
+    assert f"--config {path}\n" not in err
+
+
 @pytest.mark.parametrize(
     ("given", "file"),
     [
@@ -716,3 +730,36 @@ def test_a_warning_does_not_reach_stdout_before_the_plan_refusal(
     assert "stderr is closed" in error["message"]
     assert fake_adb.requests == []
     assert android.inputs == []
+
+
+def test_a_stream_closed_by_the_warnings_is_refused_before_the_device(
+    fake_adb, android, capsys, here, monkeypatch
+):
+    write_settings(here, settings_text(press=True))
+
+    def close_stderr(_settings: object) -> None:
+        monkeypatch.setattr("sys.stderr", None)  # as a caller's writer might
+
+    monkeypatch.setattr(cli, "_settings_warnings", close_stderr)
+    code = cli.run(
+        ["--adb-server", fake_adb.address, "crawl", SHOP, "--out", "run", "--json"]
+    )
+    captured = capsys.readouterr()
+    assert code == 2
+    assert "stderr is closed" in json.loads(captured.out)["error"]["message"]
+    assert fake_adb.requests == []
+    assert android.inputs == []
+
+
+def test_the_settings_path_is_asked_for_once(here):
+    path = write_settings(here, settings_text())
+    other = write_settings(here, settings_text(press=True), "other.toml")
+    answers = iter([str(path), str(other)])
+
+    class Changing:
+        def __fspath__(self) -> str:
+            return next(answers)
+
+    loaded = load_settings(Changing())
+    assert loaded.source == path
+    assert loaded.press is False

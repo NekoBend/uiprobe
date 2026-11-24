@@ -995,12 +995,15 @@ def load_settings(path: str | os.PathLike[str]) -> Settings:
         SettingsError: The file cannot be read or is invalid; the message
             names the file and the key.
     """
-    location = Path(path)
+    # One string for the read and for `Settings.source`, so a PathLike that
+    # answers differently each time cannot name two files.
+    given = os.fspath(path)
+    location = Path(given)
     reader = _Reader(location)
     # Open the path as given: Path() drops a trailing "/." (and "."
     # components), so "rules.toml/." would read rules.toml, which no other
     # program would. Messages about the read name the path as given.
-    data = _read_bytes(os.fspath(path), _shown(os.fspath(path)))
+    data = _read_bytes(given, _shown(given))
     text = _decode(data, reader.shown)
     try:
         parsed = tomllib.loads(text)
