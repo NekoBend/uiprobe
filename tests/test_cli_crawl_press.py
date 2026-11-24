@@ -53,9 +53,9 @@ def test_press_runs_a_short_crawl_on_an_emulator(fake_adb, android, capsys, tmp_
     assert lines[3] == "BACK on screens of other apps: no (restart the app)"
     assert lines[4] == "check the window at each tap point: yes"
     assert lines[5] == (
-        "start: the app is stopped first (am force-stop), then started on its"
-        " first screen; what it had not saved is lost (--no-restart starts from"
-        " the screen it shows now)"
+        "start: the app is stopped first (am force-stop), then its launcher"
+        " activity is started; what it had not saved is lost (--no-restart"
+        " starts from the screen it shows now)"
     )
     assert lines[6].startswith("stopped: ")
     assert any(line.startswith("actions: ") for line in lines)
@@ -794,9 +794,9 @@ def test_the_plan_text_names_the_start_choice():
     restart = cli._press_plan_text({**plan, "restart": True}).splitlines()
     kept = cli._press_plan_text({**plan, "restart": False}).splitlines()
     assert restart[-1] == (
-        "start: the app is stopped first (am force-stop), then started on its"
-        " first screen; what it had not saved is lost (--no-restart starts from"
-        " the screen it shows now)"
+        "start: the app is stopped first (am force-stop), then its launcher"
+        " activity is started; what it had not saved is lost (--no-restart"
+        " starts from the screen it shows now)"
     )
     assert kept[-1] == (
         "start: the app is not stopped first; the crawl starts from the screen"

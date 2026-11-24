@@ -652,8 +652,8 @@ def _add_press_options(crawl: argparse.ArgumentParser) -> None:
         action="store_true",
         help=(
             "with --press: start from the screen the app shows now (by default"
-            " the app is stopped first with am force-stop, then started on its"
-            " first screen; what it had not saved is lost)"
+            " the app is stopped first with am force-stop, then its launcher"
+            " activity is started; what it had not saved is lost)"
         ),
     )
 
@@ -1543,9 +1543,9 @@ def _press_plan_text(plan: dict[str, object]) -> str:
 # The plan line about the first action, by whether it force-stops the app.
 _RESTART_PLAN: Final = {
     True: (
-        "start: the app is stopped first (am force-stop), then started on its"
-        " first screen; what it had not saved is lost (--no-restart starts from"
-        " the screen it shows now)"
+        "start: the app is stopped first (am force-stop), then its launcher"
+        " activity is started; what it had not saved is lost (--no-restart"
+        " starts from the screen it shows now)"
     ),
     False: (
         "start: the app is not stopped first; the crawl starts from the screen"
