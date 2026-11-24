@@ -107,7 +107,14 @@ from uiprobe.crawl import (
     _Prints,
 )
 from uiprobe.crawl_preview import check_package
-from uiprobe.device import PIN_NOT_PROVEN, PIN_WAIT_STOPPED, SEND_STOPPED, _monotonic
+from uiprobe.device import (
+    PIN_NOT_PROVEN,
+    PIN_WAIT_STOPPED,
+    SEND_STOPPED,
+    _monotonic,
+    displays_seen,
+    forget_displays,
+)
 from uiprobe.errors import (
     DeviceNotFoundError,
     DumpError,
@@ -221,6 +228,10 @@ NOT_SENT_STOPPED: Final = "stopped"
 NOT_SENT_TIME_LIMIT: Final = "time_limit"
 NOT_SENT_FOREGROUND_UNKNOWN: Final = "foreground_unknown"
 NOT_SENT_FOCUS_UNKNOWN: Final = "focus_unknown"
+# The ``cause`` in the details of a ``focus_unknown`` end line when the focus
+# was read on a device with several displays and Policy.check_tap_window is
+# off: the focus reading alone is not trusted there.
+FOCUS_CAUSE_SEVERAL_DISPLAYS: Final = "several_displays_need_tap_window_check"
 NOT_SENT_FOCUS_OTHER: Final = "focus_other"
 NOT_SENT_FOCUS_CHANGED: Final = "focus_changed"
 NOT_SENT_KEYBOARD_UNKNOWN: Final = "keyboard_unknown"
@@ -416,6 +427,8 @@ class _Run:
         # out (the first launch or a relaunch), used by that start only.
         self.start_component: str | None = None
         self.gate_details: dict[str, str | int] | None = None  # why, for cover
+        # Why the focus counted as unknown, when not because it was unreadable.
+        self.gate_focus_details: dict[str, str | int] | None = None
         self.not_sent: dict[str, int] = {}  # not_sent end lines by reason
         self.cover_unknown: str | None = None  # what the first cover_unknown missed
         self.cover_rule: str | None = None  # and the reader's rule, when it had one
@@ -739,7 +752,13 @@ class _Run:
                 self.last_screen_id = self.gate_screen_id
             self.last_foreground = seen.observation.foreground
         if reason is not None:
-            details = self.gate_details if reason in _COVER_REASONS else None
+            details = (
+                self.gate_details
+                if reason in _COVER_REASONS
+                else self.gate_focus_details
+                if reason == NOT_SENT_FOCUS_UNKNOWN
+                else None
+            )
             self.end_not_sent(action_id, reason, details)
             if reason == NOT_SENT_RECONNECTED and not isinstance(action, Launch):
                 # Nothing was sent and nothing about the screen is known: the
@@ -963,8 +982,19 @@ class _Run:
         foreground = self.device.foreground()
         focus = self.device.focused_window()
         keyboard = self.device.keyboard_shown()
-        seen = _Seen(Observation(screen, foreground, keyboard, now), focus)
         self.gate_details = None
+        self.gate_focus_details = None
+        # With several displays the focus reading is best effort against
+        # window titles that forge lines, so the check of the window at the
+        # tap point is the guard: without it, a tap or BACK is not sent. Any
+        # read of this device in the run that showed several displays counts
+        # (the observation's too), and this reason comes before the others.
+        guard = isinstance(action, Tap | Back) and not self.policy.check_tap_window
+        unchecked = guard and displays_seen(self.device)
+        if unchecked:
+            before = focus = None
+            self.gate_focus_details = {"cause": FOCUS_CAUSE_SEVERAL_DISPLAYS}
+        seen = _Seen(Observation(screen, foreground, keyboard, now), focus)
         if isinstance(action, Tap):
             # The last read: the window that takes a touch at the point.
             cover = (
@@ -975,6 +1005,7 @@ class _Run:
             allowed = self.engine.recheck(action, seen.observation)
             owners = {None if f is None else f.owner for f in (before, focus)}
             checks = (
+                (unchecked, NOT_SENT_FOCUS_UNKNOWN),
                 (keyboard is None, NOT_SENT_KEYBOARD_UNKNOWN),
                 (keyboard is True, NOT_SENT_KEYBOARD_SHOWN),
                 (before is None or focus is None, NOT_SENT_FOCUS_UNKNOWN),
@@ -1002,6 +1033,7 @@ class _Run:
                 and self.on_target(before.screen, before.foreground)
             )
             checks = (
+                (unchecked, NOT_SENT_FOCUS_UNKNOWN),
                 (before is None, NOT_SENT_CHANGED),  # not reached: a launch only
                 (foreground is None, NOT_SENT_FOREGROUND_UNKNOWN),
                 (focus is None, NOT_SENT_FOCUS_UNKNOWN),
@@ -1035,6 +1067,13 @@ class _Run:
         # device also checks the time with uiprobe's own clock right before
         # the input goes out.
         late = self.now() >= self.deadline
+        # uiprobe's own check once more, after the caller's clock (which may
+        # have read the device and shown several displays first) and before
+        # the final comparison; its cause wins over the reasons found so far
+        # (a changed pin or the time limit below still come first).
+        if guard and displays_seen(self.device):
+            self.gate_focus_details = {"cause": FOCUS_CAUSE_SEVERAL_DISPLAYS}
+            why = NOT_SENT_FOCUS_UNKNOWN
         path = (
             "tap"
             if isinstance(action, Tap)
@@ -1616,6 +1655,7 @@ def _crawl_on(
     repins_before: int,
 ) -> CrawlResult:
     """`crawl` after its arguments were checked: pin, check, run."""
+    forget_displays(device)  # several displays seen count within one run
     device.pin_transport()
     _check_device(device, allow_real_device=allow_real_device)
     # The app's uid, which a tap's window must have (Policy.check_tap_window),
