@@ -663,8 +663,8 @@ DRY_RUN_LAST = "nothing was pressed: this was a preview (--dry-run)"
 # The switch lines after a preview on an emulator with the file's press = false.
 GUIDANCE = [
     "to press this time: add --press --out DIR to the same command",
-    f"to always press: set press = true in {SETTINGS_FILE} (each run then needs"
-    " --out DIR)",
+    f"to always press: set press = true in {SETTINGS_FILE}, and runs_dir (the folder"
+    " that gets the run folders) or --out DIR on each run",
 ]
 
 

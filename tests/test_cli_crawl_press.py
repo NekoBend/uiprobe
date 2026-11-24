@@ -60,7 +60,7 @@ def test_press_runs_a_short_crawl_on_an_emulator(fake_adb, android, capsys, tmp_
         "limits: depth 5 (settings file), actions 300 (settings file),"
         " minutes 30 (settings file)"
     )
-    assert lines[3] == f"run folder: {out}"
+    assert lines[3] == f"run folder: {out} (--out)"
     assert lines[4] == "BACK on screens of other apps: no (restart the app)"
     assert lines[5] == "check the window at each tap point: yes"
     assert lines[6] == (
@@ -812,6 +812,7 @@ def test_the_plan_text_names_the_start_choice():
         "limits": {"depth": 5, "actions": 30, "minutes": 30},
         "limits_source": {"depth": "file", "actions": "option", "minutes": "file"},
         "out": "run",
+        "out_source": "option",
         "back_on_other_screens": False,
         "check_tap_window": True,
         "screenshots": False,

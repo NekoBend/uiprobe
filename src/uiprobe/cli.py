@@ -65,8 +65,10 @@ from uiprobe.pngfile import (
     PngInterruptedError,
     check_new_path,
     check_png,
+    depends_on_a_drive_folder,
     save_png,
 )
+from uiprobe.runlog import RunFolderError
 from uiprobe.settings import (
     _DEFAULT_ACTIONS,
     _DEFAULT_DEPTH,
@@ -76,6 +78,7 @@ from uiprobe.settings import (
     InterruptedFileError,
     Settings,
     SettingsError,
+    _folder_form_base,
     _shown,
     load_settings,
     policy_from_settings,
@@ -111,6 +114,10 @@ _DEFAULT_LIMITS: Final[dict[str, int]] = {
 _LimitSource = Literal["option", "file", "default"]
 # Why a run presses (the "press_source" values): --press, or press = true.
 _PressSource = Literal["option", "file"]
+# Where the run folder came from (the "out_source" values): --out, or runs_dir.
+_OutSource = Literal["option", "file"]
+# The most names tried in runs_dir for one run: NAME, then NAME-2 to NAME-99.
+_MAX_RUN_NAME = 99
 _PRESS_SETTLE = 1.0
 
 
@@ -1013,24 +1020,6 @@ def _is_missing(path: str) -> bool:
     return False
 
 
-def _file_of_folder_form(path: str) -> str | None:
-    """Return `path` without a trailing separator or ``.`` part, if it has one.
-
-    ``rules.toml/``, ``rules.toml/.`` and ``rules.toml/./`` are the folder
-    form of ``rules.toml``; None means `path` has no such ending.
-    """
-    separators = "/\\" if _ON_WINDOWS else "/"
-    stripped = path
-    while stripped:
-        if stripped[-1] in separators:
-            stripped = stripped[:-1]
-        elif stripped[-2:-1] in tuple(separators) and stripped[-1] == ".":
-            stripped = stripped[:-2]
-        else:
-            break
-    return None if stripped == path else stripped
-
-
 def _check_config_path(path: str | None) -> None:
     """Refuse a ``--config`` value that ends with a path separator or ``/.``.
 
@@ -1041,7 +1030,7 @@ def _check_config_path(path: str | None) -> None:
     """
     if path is None:
         return
-    file = _file_of_folder_form(path)
+    file = _folder_form_base(path)
     if file is None:
         return
     msg = (
@@ -1217,13 +1206,15 @@ class _CrawlSetup:
     """What a crawl runs with, decided before any device is contacted.
 
     ``press_source`` is None for the preview, else why the run presses;
-    ``out`` is the run folder of a pressing run (None for the preview).
+    ``out`` is the run folder of a pressing run and ``out_source`` where it
+    came from (both None for the preview).
     """
 
     policy: Policy
     settings: Settings
     press_source: _PressSource | None
     out: str | None
+    out_source: _OutSource | None
 
 
 def _refuse_press_only(args: argparse.Namespace, why: str) -> None:
@@ -1234,25 +1225,108 @@ def _refuse_press_only(args: argparse.Namespace, why: str) -> None:
         raise _UsageError(msg)
 
 
-# The --out choice below is also named in the "to always press" line of
-# `_preview_guidance` (each run then needs --out DIR): update that line, its
-# tests and docs/crawl.md when this choice changes.
-def _file_press_out(settings: Settings) -> str:
-    """Return the run folder of a run that presses by press = true without --out.
+# The run folder rule below is also named in the switch lines of
+# `_preview_guidance` ("add --press" with runs_dir, else "--press --out DIR",
+# and the "to always press" line): update them, their tests and
+# docs/crawl.md when this rule changes.
+def _file_press_out(
+    args: argparse.Namespace, settings: Settings, press_source: _PressSource
+) -> tuple[str, _OutSource]:
+    """Return the run folder of a pressing run and where it came from.
 
-    PENDING: the owner has not yet chosen what such a run records into, and
-    this function is the one place that choice changes. Now (option O1) it is
-    a usage error that names --out and says that the file sets press = true.
-    The alternatives would only replace this body: O2 returns a new folder
-    that did not exist (for example ./uiprobe-runs/PACKAGE-YYYYMMDD-HHMMSS),
-    O3 one below a parent folder named by a new settings key.
+    The rule is the same for --press and press = true: --out when given
+    (relative to the working folder); else a new folder inside the settings
+    file's runs_dir, named ``PACKAGE-YYYYMMDD-HHMMSS`` in local time, with
+    ``-2`` to ``-99`` added when that name is taken; else a usage error that
+    asks for --out. The parent must exist and be a folder, not a link; only
+    the run folder is made in it, later, by `crawl_run` with a create-only
+    mkdir (a folder that appears there before that ends the run unshared).
+
+    Raises:
+        _UsageError: No --out and no runs_dir.
+        RunFolderError: The runs_dir folder is missing, not a folder or a
+            link, or every name up to ``-99`` is taken.
     """
+    if args.out is not None:
+        return args.out, "option"
+    shown_file = _shown(str(settings.source))
+    if settings.runs_dir is None:
+        if press_source == "option":
+            msg = "--press needs --out DIR, the new folder to record the run into"
+        else:
+            msg = (
+                f"the settings file {shown_file} says press = true, so this"
+                " crawl presses and needs --out DIR, the new folder to record"
+                " the run into; add --dry-run to preview instead"
+            )
+        raise _UsageError(msg)
+    parent = _runs_dir_parent(args, settings.runs_dir, shown_file)
+    base = f"{args.package}-{_run_stamp()}"
+    for number in range(1, _MAX_RUN_NAME + 1):
+        name = base if number == 1 else f"{base}-{number}"
+        candidate = os.path.join(parent, name)  # noqa: PTH118 - kept as given
+        try:
+            check_new_path(candidate)
+        except FileExistsError:
+            continue
+        except (OSError, ValueError) as error:
+            msg = f"cannot check the run folder {_shown(candidate)}: {error}"
+            raise RunFolderError(msg, details={"path": candidate}) from None
+        return candidate, "file"
     msg = (
-        f"the settings file {_shown(str(settings.source))} says press = true,"
-        " so this crawl presses and needs --out DIR, the new folder to record"
-        " the run into; add --dry-run to preview instead"
+        f"cannot make a run folder in {_shown(parent)} (runs_dir in"
+        f" {shown_file}): {base} and {base}-2 to {base}-{_MAX_RUN_NAME} all"
+        " exist; remove some, or add --out DIR"
     )
-    raise _UsageError(msg)
+    raise RunFolderError(msg, details={"path": parent})
+
+
+def _run_stamp() -> str:
+    """The local time for a run folder name: YYYYMMDD-HHMMSS, no zone."""
+    return f"{datetime.now().astimezone():%Y%m%d-%H%M%S}"
+
+
+def _runs_dir_parent(args: argparse.Namespace, runs_dir: str, shown_file: str) -> str:
+    """Return the runs_dir folder, checked: it exists, is a folder, is no link.
+
+    A relative runs_dir counts from the folder of the settings file, taken
+    from the path as given (--config, or ./uiprobe.toml); ``~`` is not
+    expanded. Links in earlier parts of the path are followed, as for --out.
+    """
+    if depends_on_a_drive_folder(runs_dir):
+        msg = (
+            f"runs_dir {_shown(runs_dir)} in {shown_file} depends on a drive's"
+            " own working folder; give a full path with its drive, or a path"
+            " relative to the settings file"
+        )
+        raise RunFolderError(msg, details={"path": runs_dir})
+    config = SETTINGS_FILE if args.config is None else args.config
+    parent = os.path.join(os.path.dirname(config), runs_dir)  # noqa: PTH118, PTH120
+    where = f"{_shown(parent)} (runs_dir in {shown_file})"
+    try:
+        info = os.lstat(parent)
+    except (FileNotFoundError, NotADirectoryError):
+        msg = (
+            f"the folder for run folders {where} does not exist; create that"
+            " folder, or add --out DIR"
+        )
+        raise RunFolderError(msg, details={"path": parent}) from None
+    except (OSError, ValueError) as error:
+        msg = f"cannot check the folder for run folders {where}: {error}"
+        raise RunFolderError(msg, details={"path": parent}) from None
+    if stat.S_ISLNK(info.st_mode):
+        msg = (
+            f"the folder for run folders {where} is a link; name the folder"
+            " itself in runs_dir, or add --out DIR"
+        )
+        raise RunFolderError(msg, details={"path": parent})
+    if not stat.S_ISDIR(info.st_mode):
+        msg = (
+            f"the folder for run folders {where} is not a folder; fix runs_dir,"
+            " or add --out DIR"
+        )
+        raise RunFolderError(msg, details={"path": parent})
+    return parent
 
 
 def _crawl_policy(args: argparse.Namespace) -> _CrawlSetup:
@@ -1277,9 +1351,6 @@ def _crawl_policy(args: argparse.Namespace) -> _CrawlSetup:
             raise _UsageError(msg) from None
     if args.dry_run:
         _refuse_press_only(args, ", and --dry-run never presses")
-    elif args.press and args.out is None:
-        msg = "--press needs --out DIR, the new folder to record the run into"
-        raise _UsageError(msg)
     settings = _crawl_settings(args)
     press_source: _PressSource | None = None
     if args.press:
@@ -1298,16 +1369,17 @@ def _crawl_policy(args: argparse.Namespace) -> _CrawlSetup:
             ": add --press, or set press = true in the settings file"
             f" {_shown(str(settings.source))}",
         )
-    out: str | None = args.out
-    if press_source == "file" and out is None:
-        # The choice for this case is pending; only _file_press_out changes.
-        out = _file_press_out(settings)
+    out: str | None = None
+    out_source: _OutSource | None = None
+    if press_source is not None:
+        # --out, else runs_dir, else a usage error: only _file_press_out decides.
+        out, out_source = _file_press_out(args, settings, press_source)
     policy = policy_from_settings(
         settings,
         extra_deny=args.deny,
         tap_unlabeled=True if args.tap_unlabeled else None,
     )
-    return _CrawlSetup(policy, settings, press_source, out)
+    return _CrawlSetup(policy, settings, press_source, out, out_source)
 
 
 def _detail_text(decision: Decision, detail: Detail) -> str:
@@ -1397,24 +1469,26 @@ def _preview_guidance(
     """How to switch from this preview to a pressing run; empty when none applies.
 
     A file that says press = true was overridden by --dry-run, so the switch
-    is to remove that option (and add --out DIR) and nothing is printed.
-    Otherwise the lines say what to add to the same command for this run (so
-    its other options, such as -s, --deny and --config, stay as they were)
-    and press = true for every run, and, unless the device answers that it
-    is an emulator, --allow-real-device.
+    is to remove that option (and add --out DIR unless the file has runs_dir)
+    and nothing is printed. Otherwise the lines say what to add to the same
+    command for this run (so its other options, such as -s, --deny and
+    --config, stay as they were: --press, and --out DIR unless the file has
+    runs_dir) and what makes every run press, and, unless the device answers
+    that it is an emulator, --allow-real-device.
     """
     if settings.press:
         return []
-    this_time = "add --press --out DIR to the same command"
+    # These lines follow the run folder rule of _file_press_out; change both
+    # together.
+    add = "--press" if settings.runs_dir is not None else "--press --out DIR"
+    this_time = f"add {add} to the same command"
     if args.dry_run:
         this_time = "remove --dry-run and " + this_time
     lines = [
         f"to press this time: {this_time}",
-        # Names --out DIR because a run that presses by press = true needs it
-        # (see _file_press_out); change both together.
         "to always press: set press = true in"
-        f" {_printable(_shown(str(settings.source)))} (each run then needs"
-        " --out DIR)",
+        f" {_printable(_shown(str(settings.source)))}, and runs_dir (the folder"
+        " that gets the run folders) or --out DIR on each run",
     ]
     try:
         emulator = device.is_emulator()
@@ -1626,6 +1700,7 @@ def _cmd_crawl_press(args: argparse.Namespace, setup: _CrawlSetup) -> int:
         },
         "limits_source": limits_source,
         "out": out,
+        "out_source": setup.out_source,
         "back_on_other_screens": policy.back_on_other_screens,
         "check_tap_window": policy.check_tap_window,
         "screenshots": args.screenshots,
@@ -1740,7 +1815,7 @@ def _press_plan_text(plan: dict[str, object], *, settings: str) -> str:
             f" {_printable(str(plan['package']))}",
             _press_because_text(plan, settings),
             _press_limits_text(plan),
-            f"run folder: {_shown(str(plan['out']))}",
+            _press_out_text(plan, settings),
             "BACK on screens of other apps: "
             + ("yes" if plan["back_on_other_screens"] else "no (restart the app)"),
             "check the window at each tap point: "
@@ -1755,6 +1830,16 @@ def _press_because_text(plan: dict[str, object], settings: str) -> str:
     if plan["press_source"] == "file":
         return f"pressing because: press = true in {_printable(_shown(settings))}"
     return "pressing because: --press"
+
+
+def _press_out_text(plan: dict[str, object], settings: str) -> str:
+    """The plan line with the run folder and where it came from."""
+    source = (
+        f"runs_dir in {_printable(_shown(settings))}"
+        if plan["out_source"] == "file"
+        else "--out"
+    )
+    return f"run folder: {_shown(str(plan['out']))} ({source})"
 
 
 def _press_limits_text(plan: dict[str, object]) -> str:

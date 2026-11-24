@@ -2266,6 +2266,7 @@ def test_settings_built_with_the_earlier_fields_still_work(tmp_path):
         "skip_rows_with_buttons",
         "skip_navigate_up",
         "skip_sliders",
+        "runs_dir",
     ]
 
 

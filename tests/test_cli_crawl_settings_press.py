@@ -14,6 +14,7 @@ import pytest
 from tests.fake_device import FakeAndroid
 from tests.test_crawl_driver import SCREENS, SERIAL, SHOP, TRANSPORT
 from uiprobe import cli
+from uiprobe import settings as settings_module
 from uiprobe.crawl import Limits
 from uiprobe.device import IDENTITY_COMMAND
 from uiprobe.settings import (
@@ -254,14 +255,14 @@ def test_press_true_without_out_is_a_usage_error(
 
 @pytest.mark.usefixtures("android")
 def test_the_out_choice_is_made_in_one_place(fake_adb, capsys, here, monkeypatch):
-    # O2 or O3 would replace only cli._file_press_out: what it returns is the
-    # run folder of a run that presses by the file without --out.
+    # Only cli._file_press_out decides the run folder: what it returns is the
+    # run folder of the run.
     write_settings(here, settings_text(press=True))
     chosen = here / "chosen"
-    monkeypatch.setattr(cli, "_file_press_out", lambda _settings: str(chosen))
+    monkeypatch.setattr(cli, "_file_press_out", lambda *_args: (str(chosen), "option"))
     code, text, _err = crawl(capsys, fake_adb, *FAST, "--actions", "3")
     assert code == 0
-    assert f"run folder: {chosen}" in text.splitlines()
+    assert f"run folder: {chosen} (--out)" in text.splitlines()
     assert (chosen / "run.json").exists()
 
 
@@ -503,7 +504,9 @@ TO_PRESS = "to press this time: add --press --out DIR to the same command"
 TO_PRESS_DRY = (
     "to press this time: remove --dry-run and add --press --out DIR to the same command"
 )
-NEEDS_OUT = " (each run then needs --out DIR)"
+NEEDS_OUT = (
+    ", and runs_dir (the folder that gets the run folders) or --out DIR on each run"
+)
 TO_ALWAYS = f"to always press: set press = true in {SETTINGS_FILE}{NEEDS_OUT}"
 REAL = "on a real device also add --allow-real-device"
 
@@ -679,7 +682,7 @@ def test_the_folder_form_hint_does_not_print_a_path_that_needs_quoting(
     ],
 )
 def test_the_folder_form_is_found(given, file):
-    assert cli._file_of_folder_form(given) == file
+    assert settings_module._folder_form_base(given) == file
 
 
 # --- the order of device reads in a pressing run -------------------------------

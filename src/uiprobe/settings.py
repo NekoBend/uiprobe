@@ -212,7 +212,9 @@ _KEY_NAME: Final = re.compile(r"KEYCODE_[A-Z0-9_]{1,40}")
 _UTF8_BOM: Final = b"\xef\xbb\xbf"
 _UTF16_BOMS: Final = (b"\xff\xfe", b"\xfe\xff")
 
-_TOP_KEYS: Final = frozenset({"format_version", "defaults_version", "press"})
+_TOP_KEYS: Final = frozenset(
+    {"format_version", "defaults_version", "press", "runs_dir"}
+)
 _BOOL_RULES: Final = (
     "tap_unlabeled",
     "skip_number_only",
@@ -296,7 +298,9 @@ class Settings:
     keyword or by position, still works. ``skip_two_target_rows`` (default
     True) and ``skip_rows_with_buttons`` (default False), added with defaults
     version 3, and ``skip_navigate_up`` and ``skip_sliders`` (both default
-    True), added with defaults version 4, follow it for the same reason.
+    True), added with defaults version 4, and ``runs_dir`` (default None, an
+    optional key that needed no new defaults version), follow it for the same
+    reason.
     """
 
     source: Path
@@ -328,6 +332,28 @@ class Settings:
     skip_rows_with_buttons: bool = False
     skip_navigate_up: bool = True
     skip_sliders: bool = True
+    # The optional top-level key runs_dir: the folder that gets the run
+    # folders of a pressing crawl without --out (None: not set).
+    runs_dir: str | None = None
+
+
+def _folder_form_base(path: str) -> str | None:
+    """Return `path` without a trailing separator or ``.`` part, if it has one.
+
+    ``rules.toml/``, ``rules.toml/.`` and ``rules.toml/./`` are the folder
+    form of ``rules.toml``; None means `path` has no such ending. On Windows a
+    backslash counts as a separator too.
+    """
+    separators = "/\\" if sys.platform == "win32" else "/"
+    stripped = path
+    while stripped:
+        if stripped[-1] in separators:
+            stripped = stripped[:-1]
+        elif stripped[-2:-1] in tuple(separators) and stripped[-1] == ".":
+            stripped = stripped[:-2]
+        else:
+            break
+    return None if stripped == path else stripped
 
 
 def policy_from_settings(
@@ -435,6 +461,9 @@ def render_default_settings() -> str:
         "# --out DIR, and --allow-real-device on a device that is not an",
         "# emulator); --dry-run previews instead.",
         "press = false",
+        "# The folder that gets the run folders of a pressing crawl without --out",
+        "# (relative to the folder of this file; it must exist):",
+        '# runs_dir = "uiprobe-runs"',
         "",
         "[deny]",
         "# Never press an element that contains one of these words.",
@@ -964,6 +993,28 @@ def _decode(data: bytes, shown: str) -> str:
         raise SettingsError(msg) from error
 
 
+def _runs_dir(parsed: dict[str, object], reader: _Reader) -> str | None:
+    """Read the optional ``runs_dir``: a non-empty path that names a folder."""
+    if "runs_dir" not in parsed:
+        return None
+    value = parsed["runs_dir"]
+    if not isinstance(value, str):
+        raise reader.fail("runs_dir", "must be a string (a folder path)")
+    if not value:
+        raise reader.fail("runs_dir", "must not be empty")
+    if "\0" in value:
+        raise reader.fail("runs_dir", "must not hold a null character")
+    base = _folder_form_base(value)
+    if base is not None:
+        hint = f"; write {_value_text(base)}" if base else ""
+        raise reader.fail(
+            "runs_dir",
+            'must not end with a path separator or "/." (the folder form of a'
+            f" path){hint}",
+        )
+    return value
+
+
 def load_settings(path: str | os.PathLike[str]) -> Settings:
     """Read and validate the settings file `path`; return the effective values.
 
@@ -1020,6 +1071,7 @@ def load_settings(path: str | os.PathLike[str]) -> Settings:
         parsed, "", "defaults_version", 1, DEFAULTS_VERSION
     )
     press = reader.boolean(parsed, "", "press")
+    runs_dir = _runs_dir(parsed, reader)
 
     deny = reader.table(parsed, "deny", _TABLE_KEYS["deny"])
     deny_listed = reader.strings(deny, "deny", "words", _word_identity)
@@ -1118,6 +1170,7 @@ def load_settings(path: str | os.PathLike[str]) -> Settings:
         format_version=format_version,
         defaults_version=defaults_version,
         press=press,
+        runs_dir=runs_dir,
         deny_words=deny_words,
         deny_exceptions=deny_exceptions,
         confirm_words=_merge(
