@@ -191,6 +191,11 @@ CASES: dict[str, tuple[str, int]] = {
         _edit_row(SAMSUNG36, 0, "samsungFlags=0x0", "samsungFlags=0x10"),
         0,
     ),
+    # 0x1 is read only on a window the caller calls the app's; none here.
+    "samsung_flags": (
+        _edit_row(SAMSUNG36, 0, "samsungFlags=0x0", "samsungFlags=0x1"),
+        0,
+    ),
     "region_missing": (_edit_row(API36, 3, ", touchableRegion=<empty>", ""), 0),
     "region_format": (
         _edit_row(API36, 2, "[272,434][320,482]", "[272,434][320,482][1,1][2,2]"),

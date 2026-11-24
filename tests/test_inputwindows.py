@@ -27,11 +27,13 @@ from __future__ import annotations
 
 import re
 import sys
+import typing
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pytest
 
+from uiprobe.device import Device
 from uiprobe.inputwindows import (
     LINE_FORMAT,
     NO_LIST,
@@ -41,6 +43,7 @@ from uiprobe.inputwindows import (
     ROTATION,
     InputWindow,
     display_orientation,
+    explain_input_windows,
     parse_input_windows,
     read_window_at,
     window_at,
@@ -1375,12 +1378,12 @@ def test_the_seen_1hxy_values_do_not_change_the_touch(hxy):
     assert (found.title, found.owner_uid) == ("StatusBar", 10001)
 
 
-# Values the phone did not print: what they do to a touch is not known.
+# Values the phone did not print: what they do to a touch is not known (0x1,
+# seen on the app's own window only, is tested further down).
 @pytest.mark.parametrize(
     "value",
     [
         "0x80000000",
-        "0x1",
         "0x00",
         "0x8 | FORCE_TRUSTED_OVERLAY",
         "NOT_KNOWN",
@@ -1389,11 +1392,20 @@ def test_the_seen_1hxy_values_do_not_change_the_touch(hxy):
         "0xg",
         "",
         "force_trusted_overlay",
+        "FORCE_TRUSTED_OVERLAY | 0x400000",
+        "0x40000",
+        "0x10",
+        "0x01",
+        "0x1 | FORCE_TRUSTED_OVERLAY",
     ],
 )
 def test_an_unseen_samsung_flags_value_is_line_format(value):
     edited = _edit(SAMSUNG36, STATUS, "samsungFlags=0x0", f"samsungFlags={value}")
     assert read_window_at(edited, (540, 1170)) == LINE_FORMAT
+    # Also on a window the caller calls the app's: only 0x1 is read there.
+    found = read_window_at(edited, (540, 1170), owned=lambda _window: True)
+    assert found == LINE_FORMAT
+    assert getattr(found, "rule", None) == "samsung_fields"
 
 
 @pytest.mark.parametrize(
@@ -1547,3 +1559,301 @@ def test_each_same_line_fake_is_line_format_on_the_samsung_form(fake):
 def test_a_field_name_in_a_name_counts_on_the_samsung_form(fake):
     edited = _edit(SAMSUNG36, STATUS, "StatusBar,", f"StatusBar{fake},")
     assert read_window_at(edited, (540, 50)) == LINE_FORMAT
+
+
+# --- unknown flag names in another display's list ---
+
+# A second display listed above display 0, as a two-display phone printed it
+# (its cover screen, Display: 1, first). Made-up values in the API 36 form
+# (`DISPLAY1`) and in the API 32 named-flags form (a row of api32.txt).
+COVER_NAME = "SKIP_UNTRUSTED_TOUCH_TOAST"
+COVER36 = (
+    "  Display: 1\n"
+    "    logicalSize=100x100\n"
+    "        transform (ROT_0) (IDENTITY)\n"
+    "    Windows:\n"
+    "      0: name=abc123 com.example.app/com.example.app.CoverActivity, id=7,"
+    " displayId=1, inputConfig=NOT_FOCUSABLE | {config}, alpha=1,"
+    " frame=[0,0][100,100], globalScale=1, applicationInfo.name=,"
+    " applicationInfo.token=<null>, touchableRegion=[0,0][100,100], ownerPid=1,"
+    " ownerUid=10123, dispatchingTimeout=5000ms\n"
+    "      transform (ROT_0) (IDENTITY)\n"
+)
+COVER32 = (
+    "  Display: 1\n"
+    "    Windows:\n"
+    "      0: name='abc123 com.example.app/com.example.app.CoverActivity', id=7,"
+    " displayId=1, portalToDisplayId=-1, paused=false, focusable=false,"
+    " hasWallpaper=false, visible=true, alpha=1.00, flags=NOT_FOCUSABLE | {config},"
+    " type=2000, frame=[0,0][100,100], globalScale=1.000000,"
+    " applicationInfo.name=, applicationInfo.token=<null>,"
+    " touchableRegion=[0,0][100,100], inputFeatures=0x0, ownerPid=1,"
+    " ownerUid=10123, dispatchingTimeout=5000ms, trustedOverlay=false,"
+    " hasToken=true, touchOcclusionMode=BLOCK_UNTRUSTED, displayOrientation=0\n"
+    "        transform (ROT_0) (IDENTITY)\n"
+)
+
+
+def _cover_first(base: str, cover: str, config: str = COVER_NAME) -> str:
+    """`base` with the list of display 1 (`cover`, its row's flags ending
+    in `config`) printed above display 0's."""
+    block = cover.replace("{config}", config)
+    return base.replace("  Display: 0\n", block + "  Display: 0\n")
+
+
+def test_an_unknown_flag_name_on_another_display_lets_display_0_be_read():
+    base = API36
+    text = _cover_first(base, COVER36)
+    assert parse_input_windows(text) == parse_input_windows(base)
+    found = read_window_at(text, (160, 320))
+    assert isinstance(found, InputWindow), found
+    assert found == read_window_at(base, (160, 320))
+    verdict = explain_input_windows(text)
+    assert verdict.reason is None
+    assert verdict.reached == (True, True)  # display 1's list was read too
+
+
+@pytest.mark.parametrize(("base", "cover"), [(API36, COVER36), (API32, COVER32)])
+def test_an_unknown_flag_name_on_the_asked_display_still_refuses(base, cover):
+    # Display 1 asked for: its own unknown name refuses.
+    text = _cover_first(base, cover)
+    refused = parse_input_windows(text, display_id=1)
+    assert refused == LINE_FORMAT
+    assert isinstance(refused, str)
+    assert getattr(refused, "rule", None) == "unknown_flag"
+
+
+@pytest.mark.parametrize(
+    ("base", "cover", "config", "marker", "old", "new"),
+    [
+        # display 1's row names the unknown name too (let through there)
+        (
+            API36,
+            COVER36,
+            COVER_NAME,
+            "Settings, id=121",
+            "inputConfig=0x0",
+            f"inputConfig={COVER_NAME}",
+        ),
+        # flags= forms refuse unknown names in every list, so display 1's row
+        # names a known flag: the refusal must come from display 0's row
+        (API32, COVER32, "SPLIT_TOUCH", "bab5115 StatusBar", "SPLIT_TOUCH", COVER_NAME),
+    ],
+    ids=["api36", "api32"],
+)
+def test_the_same_unknown_name_on_display_0_still_refuses(
+    base, cover, config, marker, old, new
+):
+    valid = _cover_first(base, cover, config)
+    found = read_window_at(valid, (160, 320))
+    assert isinstance(found, InputWindow), found  # display 1 reads
+    assert found == read_window_at(base, (160, 320))
+    text = _cover_first(_edit(base, marker, old, new), cover, config)
+    refused = read_window_at(text, (160, 320))
+    assert refused == LINE_FORMAT
+    assert getattr(refused, "rule", None) == "unknown_flag"
+    verdict = explain_input_windows(text)
+    assert verdict.rule == "unknown_flag"
+    # The refusal is at display 0's edited row, in display 0's list.
+    assert verdict.line == text.split("\n").index(_line(text, marker))
+    assert verdict.list_head == verdict.chosen
+    assert verdict.reached == (True, True)
+
+
+@pytest.mark.parametrize(("base", "cover"), [(API36, COVER36)])
+@pytest.mark.parametrize(
+    ("config", "old", "new", "rule"),
+    [
+        # names that are no upper-case word stay unknown_flag
+        ("skip_untrusted_touch_toast", "", "", "unknown_flag"),
+        ("SKIP UNTRUSTED", "", "", "unknown_flag"),
+        (f"{COVER_NAME}|SPY", "", "", "unknown_flag"),
+        (f"{COVER_NAME} | ", "", "", "unknown_flag"),
+        (f"{COVER_NAME} x", "", "", "unknown_flag"),
+        # the rest of the line is read as strictly as display 0's
+        (COVER_NAME, "ownerPid=1,", "ownerPid=1, ownerUid=1,", "field_twice"),
+        (COVER_NAME, "displayId=1,", "displayId=0,", "display_mismatch"),
+        (COVER_NAME, "ownerUid=10123", "ownerUid=x", "field_value"),
+        (COVER_NAME, "alpha=1", "alpha=1, visible=true", "mixed_flags"),
+        (COVER_NAME, "touchableRegion=[0,0][100,100]", "touchableRegion=x", None),
+        (COVER_NAME, "0: name=", "1: name=", "row_number"),
+    ],
+)
+def test_a_format_error_on_another_display_still_refuses(
+    base, cover, config, old, new, rule
+):
+    edited = cover.replace(old, new, 1) if old else cover
+    assert edited != cover or not old
+    text = _cover_first(base, edited, config)
+    refused = read_window_at(text, (160, 320))
+    assert isinstance(refused, str), refused
+    if rule is None:  # the region
+        assert refused == REGION_FORMAT
+    else:
+        assert refused == LINE_FORMAT
+        assert getattr(refused, "rule", None) == rule
+
+
+# --- samsungFlags=0x1: read only on the app's own window ---
+
+APP = "com.example.app/com.example.app.MainActivity"
+APP_ROW = "abcdef0 com.example.launcher/com.example.launcher.HomeActivity"
+APP_UID = 10123
+
+
+def _app_on_samsung(flags: str = "0x0") -> str:
+    """samsung36.txt with its full-screen activity row (row 11) made the
+    window of a made-up app (`APP`, uid `APP_UID`) printing
+    ``samsungFlags=<flags>``."""
+    text = _edit(SAMSUNG36, APP_ROW, "samsungFlags=0x0", f"samsungFlags={flags}")
+    text = _edit(text, APP_ROW, "ownerUid=10002", f"ownerUid={APP_UID}")
+    return _edit(text, APP_ROW, APP_ROW, f"abc123 {APP}")
+
+
+def _is_app(window: InputWindow) -> bool:
+    """The crawl's test for a window of an app with a uid of its own."""
+    return window.owner_uid == APP_UID
+
+
+def test_samsung_flags_0x1_on_the_apps_own_window_is_read():
+    text = _app_on_samsung("0x1")
+    found = read_window_at(text, (540, 1170), owned=_is_app)
+    assert isinstance(found, InputWindow), found
+    assert (found.title, found.owner_uid, found.samsung_0x1) == (APP, APP_UID, True)
+    assert found.takes_touch
+    # The same as without the value, but for the mark.
+    plain = read_window_at(_app_on_samsung(), (540, 1170), owned=_is_app)
+    assert isinstance(plain, InputWindow)
+    assert not plain.samsung_0x1
+    windows = parse_input_windows(text, owned=_is_app)
+    assert not isinstance(windows, str)
+    assert explain_input_windows(text, owned=_is_app).reason is None
+
+
+def test_samsung_flags_0x1_without_knowing_the_app_is_refused():
+    text = _app_on_samsung("0x1")
+    for found in (
+        read_window_at(text, (540, 1170)),
+        parse_input_windows(text),
+        read_window_at(text, (540, 1170), owned=lambda _window: False),
+    ):
+        assert found == LINE_FORMAT
+        assert getattr(found, "rule", None) == "samsung_flags"
+    verdict = explain_input_windows(text)
+    assert (verdict.reason, verdict.rule) == (LINE_FORMAT, "samsung_flags")
+    assert verdict.line == text.split("\n").index(_line(text, APP))
+
+
+@pytest.mark.parametrize(
+    ("marker", "point"),
+    [
+        (STATUS, (540, 50)),  # another app's window at the point
+        (STATUS, (540, 1170)),  # above the app's window, not at the point
+        ("abcdef1 NavigationBar0", (540, 1170)),
+        ("13: name=Wallpaper wrapper#66", (540, 1170)),  # below it, taking no touch
+        ("abcdef7 com.example.wallpaper", (540, 1170)),
+    ],
+)
+def test_samsung_flags_0x1_on_another_apps_window_is_refused(marker, point):
+    base = _app_on_samsung("0x1")
+    row = _line(base, marker)
+    text = base.replace(row, re.sub(r"samsungFlags=[^,]*", "samsungFlags=0x1", row))
+    assert _line(text, marker).count("samsungFlags=0x1,") == 1
+    found = read_window_at(text, point, owned=_is_app)
+    assert found == LINE_FORMAT
+    assert getattr(found, "rule", None) == "samsung_flags"
+    # Only on another app's window: the app's own 0x1 alone is read.
+    alone = read_window_at(base, point, owned=_is_app)
+    assert isinstance(alone, InputWindow)
+
+
+def test_samsung_flags_0x1_needs_the_owner_test_not_the_title():
+    # A window titled like the app but owned by another uid is not the app's.
+    text = _edit(_app_on_samsung("0x1"), APP, f"ownerUid={APP_UID}", "ownerUid=10001")
+    found = read_window_at(text, (540, 1170), owned=_is_app)
+    assert found == LINE_FORMAT
+    assert getattr(found, "rule", None) == "samsung_flags"
+
+
+def test_samsung_flags_0x1_in_another_displays_list_is_refused():
+    cover = (
+        "  Display: 1\n"
+        "    logicalSize=100x100\n"
+        "        transform (ROT_0) (IDENTITY)\n"
+        "    Windows:\n"
+        + _line(_app_on_samsung("0x1"), APP)
+        .replace("      11: ", "      0: ")
+        .replace("displayId=0", "displayId=1")
+        + "\n      transform (ROT_0) (IDENTITY)\n"
+    )
+    text = SAMSUNG36.replace("  Display: 0\n", cover + "  Display: 0\n")
+    found = read_window_at(text, (540, 1170), owned=lambda _window: True)
+    assert found == LINE_FORMAT
+    assert getattr(found, "rule", None) == "samsung_fields"
+
+
+@pytest.mark.parametrize(
+    "text",
+    [API24, API30, API31, API32, API33, API34, API35, API36, SAMSUNG36],
+    ids=["api24", "api30", "api31", "api32", "api33", "api34", "api35", "api36", "s36"],
+)
+@pytest.mark.parametrize("owned", [None, lambda _w: True, lambda _w: False])
+def test_the_owner_test_changes_nothing_without_samsung_flags_0x1(text, owned):
+    assert parse_input_windows(text, owned=owned) == parse_input_windows(text)
+    for point in [(160, 320), (160, 10), (540, 1170), (540, 50)]:
+        found = read_window_at(text, point, owned=owned)
+        assert found == read_window_at(text, point)
+        assert getattr(found, "rule", None) == getattr(
+            read_window_at(text, point), "rule", None
+        )
+
+
+# The flags= forms (API 24 to 32) are read as before in every list: a name
+# there could stand for a hex value of another form. Made-up row in the API
+# 30 form (a row of api30.txt).
+COVER30 = (
+    "  Display: 1\n"
+    "    Windows:\n"
+    "      0: name='Window{abc123 u0 com.example.app/com.example.app.CoverActivity}',"
+    " displayId=1, portalToDisplayId=-1, paused=false, hasFocus=false,"
+    " hasWallpaper=false, visible=true, canReceiveKeys=false, flags={config},"
+    " type=0x00000001, frame=[0,0][100,100], globalScale=1.000000,"
+    " windowScale=(1.000000,1.000000), touchableRegion=[0,0][100,100],"
+    " inputFeatures=0x00000000, ownerPid=1, ownerUid=10123, dispatchingTimeout=5000ms\n"
+)
+NO_WINDOW_SCALE = " windowScale=(1.000000,1.000000),"
+
+
+@pytest.mark.parametrize(
+    ("base", "cover", "config", "drop", "rule"),
+    [
+        # rules as origin/main gives them for the same text
+        (API32, COVER32, COVER_NAME, "", "unknown_flag"),
+        (API30, COVER30, "DEAD", "", "unknown_flag"),
+        (API30, COVER30, "DEAD", NO_WINDOW_SCALE, "unknown_flag"),
+        (API30, COVER30, "0xDEAD", NO_WINDOW_SCALE, "hex_form"),
+    ],
+    ids=["api32_name", "api30_dead", "api30_dead_no_scale", "api30_hex_no_scale"],
+)
+def test_the_flags_forms_on_another_display_are_read_as_before(
+    base, cover, config, drop, rule
+):
+    edited = cover.replace(drop, "", 1) if drop else cover
+    assert edited != cover or not drop
+    text = _cover_first(base, edited, config)
+    refused = read_window_at(text, (160, 320))
+    assert refused == LINE_FORMAT
+    assert getattr(refused, "rule", None) == rule
+    assert explain_input_windows(text).rule == rule
+    # The same row with a hex value the form knows lets display 0 be read.
+    fine = _cover_first(base, cover, "0x81800008" if base is API30 else "SPLIT_TOUCH")
+    assert read_window_at(fine, (160, 320)) == read_window_at(base, (160, 320))
+
+
+def test_the_owned_parameters_resolve_at_run_time():
+    # Callable is imported at run time, so the hints of the public
+    # functions and of Device.window_at resolve (for tools that read them).
+    functions = (read_window_at, parse_input_windows, explain_input_windows)
+    for function in (*functions, Device.window_at):
+        hints = typing.get_type_hints(function)
+        assert "Callable" in str(hints["owned"])

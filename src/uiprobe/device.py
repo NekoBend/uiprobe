@@ -7,6 +7,10 @@ import os
 import re
 import secrets
 import time
+
+# Imported at run time, not only for type checking, so that
+# typing.get_type_hints() resolves Device.window_at's ``owned``.
+from collections.abc import Callable  # noqa: TC003
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Final, NamedTuple
@@ -47,7 +51,7 @@ from uiprobe.pngfile import check_png
 from uiprobe.windowdiag import TapWindowDiagnosis, diagnose_tap_window
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping, Sequence
+    from collections.abc import Mapping, Sequence
 
 __all__ = [
     "DEVICE_WIDE_KEYS",
@@ -3398,7 +3402,12 @@ class Device:
         # No mark is set here: the identity read itself went out only with a
         # current proof (see `_check_listed`), which a proof had set.
 
-    def window_at(self, point: tuple[int, int]) -> InputWindow | str:
+    def window_at(
+        self,
+        point: tuple[int, int],
+        *,
+        owned: Callable[[InputWindow], bool] | None = None,
+    ) -> InputWindow | str:
         """Return the window a touch at `point` would reach, or why that is
         not known.
 
@@ -3409,7 +3418,13 @@ class Device:
         read), ``no_window`` (no window takes a touch there) or ``portal``
         (the window there forwards touches to another display); the first
         four are an `Unreadable` whose ``rule`` names the check that refused
-        (see `diagnose_tap_window`).
+        (see `diagnose_tap_window`). `owned` tells the app's own windows,
+        the only ones that may print ``samsungFlags=0x1`` (see
+        `uiprobe.inputwindows.read_window_at`; without it none may). The
+        crawl always passes `owned` by keyword. An override in a subclass
+        that does not accept it raises `TypeError` on the first guarded tap;
+        one that accepts it but does not forward it makes the app's own
+        windows with ``samsungFlags=0x1`` refuse the tap (``samsung_flags``).
 
         Raises:
             AdbError: The adb protocol or the command failed.
@@ -3418,7 +3433,7 @@ class Device:
             DeviceOfflineError: The device is offline.
             DeviceUnauthorizedError: The device has not authorized this host.
         """
-        return read_window_at(self._shell("dumpsys input"), point)
+        return read_window_at(self._shell("dumpsys input"), point, owned=owned)
 
     def diagnose_tap_window(
         self, *, show_device_text: bool = False

@@ -134,6 +134,7 @@ if TYPE_CHECKING:
 
     from uiprobe.crawl import Action, SkippedElement
     from uiprobe.device import Device, FocusedWindow
+    from uiprobe.inputwindows import InputWindow
     from uiprobe.model import Element, Screen
     from uiprobe.packageuid import PackageUid
 
@@ -862,12 +863,18 @@ class _Run:
         system windows have), the window's title must also name the app: be
         the package or begin with the package and ``/`` (as an activity's
         window does); a window of the app with another title is refused.
+        The same test tells the reader which windows may print
+        ``samsungFlags=0x1`` (`uiprobe.inputwindows.read_window_at`).
         """
         app = self.app_uid
         unknown = "target_uid" if app is None else self.uncovered(app, focus, screen)
         if app is None or unknown is not None:
             return NOT_SENT_COVER_UNKNOWN, {"unreadable": unknown or "target_uid"}
-        found = self.device.window_at(point)
+
+        def owned(window: InputWindow) -> bool:
+            return self.app_window(window, app)
+
+        found = self.device.window_at(point, owned=owned)
         if isinstance(found, Unreadable):  # the reason, and the check that refused
             return NOT_SENT_COVER_UNKNOWN, {
                 "unreadable": str(found),
@@ -875,13 +882,21 @@ class _Run:
             }
         if isinstance(found, str):
             return NOT_SENT_COVER_UNKNOWN, {"unreadable": found}
-        uid, shared = app.uid, app.shared
-        named = found.title == self.package or found.title.startswith(
-            self.package + "/"
-        )
-        if found.owner_uid == uid and (named or (not shared and uid >= _FIRST_APP_UID)):
+        if self.app_window(found, app):
             return None
         return NOT_SENT_COVERED, {"window": found.title, "owner_uid": found.owner_uid}
+
+    def app_window(self, window: InputWindow, app: PackageUid) -> bool:
+        """Whether `window` belongs to the app (see `cover`): its owner uid
+        is the app's, and its title names the app unless the app has a uid
+        of its own (not shared, 10000 or more)."""
+        uid, shared = app.uid, app.shared
+        named = window.title == self.package or window.title.startswith(
+            self.package + "/"
+        )
+        return window.owner_uid == uid and (
+            named or (not shared and uid >= _FIRST_APP_UID)
+        )
 
     def uncovered(
         self,
