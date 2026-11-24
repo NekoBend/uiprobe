@@ -1657,7 +1657,7 @@ def test_package_runs_the_crawls_own_test(fake_adb, capsys, monkeypatch):
         return original(package, window, app)
 
     # cli imported the function itself (the identity is checked above).
-    monkeypatch.setattr(cli, "_app_window", spy)
+    monkeypatch.setattr(cli.diagnose, "_app_window", spy)
     _samsung_phone(fake_adb, OWN_ROW, LAUNCHER)
     argv = [*TAP_WINDOW, "--package", LAUNCHER, "--json"]
     code, out, _ = invoke(capsys, *argv, "--adb-server", fake_adb.address)

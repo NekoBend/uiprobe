@@ -50,7 +50,7 @@ def android(fake_adb: FakeAdbServer) -> FakeAndroid:
 @pytest.fixture
 def here(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr(cli, "_run_stamp", lambda: STAMP)
+    monkeypatch.setattr(cli.crawl_dry, "_run_stamp", lambda: STAMP)
     return tmp_path
 
 
@@ -424,7 +424,7 @@ def test_a_folder_made_in_a_race_ends_the_run_unshared(
         (Path(out) / "theirs.txt").write_text("theirs", encoding="utf-8")
         return original(device, package, out, **kwargs)  # ty: ignore[invalid-argument-type]
 
-    monkeypatch.setattr(cli, "crawl_run", someone_else_first)
+    monkeypatch.setattr(cli.crawl_press, "crawl_run", someone_else_first)
     code, text, _err = crawl(capsys, fake_adb, *FAST, "--json")
     assert code == 1
     error = error_of(text)
@@ -656,7 +656,7 @@ def test_a_folder_made_by_another_program_during_an_interrupt_is_not_named(
         out.mkdir()  # another program, while the run had not made its own
         raise KeyboardInterrupt
 
-    monkeypatch.setattr(cli, "crawl_run", interrupted_before_the_folder)
+    monkeypatch.setattr(cli.crawl_press, "crawl_run", interrupted_before_the_folder)
     code, text, _err = crawl(capsys, fake_adb, "--out", str(out), "--json")
     assert code == 130
     error = error_of(text)
@@ -681,7 +681,7 @@ def test_a_folder_another_run_made_and_wrote_is_not_named(
             raise KeyboardInterrupt
         raise AdbError("the device went away")
 
-    monkeypatch.setattr(cli, "crawl_run", the_other_run_was_first)
+    monkeypatch.setattr(cli.crawl_press, "crawl_run", the_other_run_was_first)
     code, text, _err = crawl(capsys, fake_adb, "--out", str(out), "--json")
     assert code != 0
     assert "out" not in error_of(text).get("details", {})
@@ -833,7 +833,7 @@ def test_a_reused_interrupt_does_not_carry_the_folder_into_the_next_run(
             setattr(shared, "_uiprobe_own_run_folder", True)  # noqa: B010
         raise shared
 
-    monkeypatch.setattr(cli, "crawl_run", interrupted)
+    monkeypatch.setattr(cli.crawl_press, "crawl_run", interrupted)
     first = here / "first"
     code, _text, err = crawl(capsys, fake_adb, "--out", str(first))
     assert code == 130

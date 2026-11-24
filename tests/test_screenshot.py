@@ -724,7 +724,7 @@ def test_a_file_that_appears_meanwhile_is_still_refused(
 ):
     target = tmp_path / "shot.png"
     target.write_bytes(b"late")
-    monkeypatch.setattr(cli, "_check_new_file", lambda _path: None)
+    monkeypatch.setattr(cli.commands, "_check_new_file", lambda _path: None)
     monkeypatch.setattr(pngfile, "check_new_path", lambda _path: None)
     code, out, err = shoot(capsys, fake_adb, target)
     assert (code, out) == (2, "")

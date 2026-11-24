@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import contextlib
 import errno
+import inspect
 import io
 import json
 import os
 import re
 import sys
+import typing
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -345,7 +347,7 @@ def test_a_type_error_from_the_library_reaches_the_user_as_usage_error(
     phone, capsys, monkeypatch
 ):
     monkeypatch.setattr(
-        "uiprobe.cli.Device",
+        "uiprobe.cli.commands.Device",
         lambda *_a, **_k: Device(5554, adb_server=phone.address),  # ty: ignore[invalid-argument-type]
     )
     code, out, _ = invoke(capsys, "dump", "--json")
@@ -980,13 +982,14 @@ def test_real_commands_write_through_emit_so_a_closed_windows_pipe_exits_1(
     monkeypatch, capsys, redirected, phone, pipe_descriptor, command, flag
 ):
     emitted: list[str] = []
-    real_emit = cli._emit
+    real_emit = cli.output._emit
 
     def spy(text: str, *, stream=None) -> None:
         emitted.append(text)
         real_emit(text, stream=stream)
 
-    monkeypatch.setattr(cli, "_emit", spy)
+    monkeypatch.setattr(cli.commands, "_emit", spy)
+    monkeypatch.setattr(cli.output, "_emit", spy)
     monkeypatch.setattr(sys, "platform", "win32")
     monkeypatch.setattr(sys, "stdout", _FailingOutput(pipe_descriptor))
     code = cli.run([command, *flag, "--adb-server", phone.address])
@@ -1095,3 +1098,40 @@ def test_main_interrupt_with_a_dead_reader_redirects_the_descriptor(monkeypatch,
                 pass
             with contextlib.suppress(OSError):
                 stream.close()
+
+
+def test_every_annotation_in_the_cli_package_resolves():
+    # Names that were only imported for type checking in the single module;
+    # a test may supply them, nothing else may be missing at run time.
+    from collections.abc import Callable, Sequence
+
+    from uiprobe.adb import DeviceInfo
+    from uiprobe.crawl_preview import Preview
+    from uiprobe.guards import Decision, Detail
+    from uiprobe.inputwindows import InputWindow
+    from uiprobe.model import Element, Screen
+    from uiprobe.packageuid import PackageUid
+
+    extra = {
+        "Callable": Callable,
+        "Sequence": Sequence,
+        "DeviceInfo": DeviceInfo,
+        "Preview": Preview,
+        "Decision": Decision,
+        "Detail": Detail,
+        "InputWindow": InputWindow,
+        "Element": Element,
+        "Screen": Screen,
+        "PackageUid": PackageUid,
+    }
+    functions = []
+    for value in vars(cli).values():
+        if inspect.isclass(value) and value.__module__.startswith("uiprobe.cli"):
+            functions += [
+                member for member in vars(value).values() if inspect.isfunction(member)
+            ]
+        elif inspect.isfunction(value) and value.__module__.startswith("uiprobe.cli"):
+            functions.append(value)
+    assert len(functions) > 50
+    for function in functions:
+        typing.get_type_hints(function, localns=extra)
