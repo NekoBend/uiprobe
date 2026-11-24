@@ -95,7 +95,6 @@ modification time is not detected there.
 
 from __future__ import annotations
 
-import ntpath
 import os
 import re
 import stat
@@ -368,7 +367,7 @@ def _without_trailing_separators(path: str) -> str:
     The end is scanned by index, once.
     """
     separators = _separators()
-    drive = ntpath.splitdrive(path)[0] if sys.platform == "win32" else ""
+    drive = os.path.splitdrive(path)[0]  # "" where there are no drives
     keep = len(drive) + 1  # the drive and one separator: the root
     end = len(path)
     while end > keep and path[end - 1] in separators:
