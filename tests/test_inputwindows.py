@@ -41,6 +41,7 @@ from uiprobe.inputwindows import (
     ROTATION,
     InputWindow,
     display_orientation,
+    explain_input_windows,
     parse_input_windows,
     read_window_at,
     window_at,
@@ -1375,12 +1376,12 @@ def test_the_seen_1hxy_values_do_not_change_the_touch(hxy):
     assert (found.title, found.owner_uid) == ("StatusBar", 10001)
 
 
-# Values the phone did not print: what they do to a touch is not known.
+# Values the phone did not print: what they do to a touch is not known (0x1,
+# seen on the app's own window only, is tested further down).
 @pytest.mark.parametrize(
     "value",
     [
         "0x80000000",
-        "0x1",
         "0x00",
         "0x8 | FORCE_TRUSTED_OVERLAY",
         "NOT_KNOWN",
@@ -1389,11 +1390,20 @@ def test_the_seen_1hxy_values_do_not_change_the_touch(hxy):
         "0xg",
         "",
         "force_trusted_overlay",
+        "FORCE_TRUSTED_OVERLAY | 0x400000",
+        "0x40000",
+        "0x10",
+        "0x01",
+        "0x1 | FORCE_TRUSTED_OVERLAY",
     ],
 )
 def test_an_unseen_samsung_flags_value_is_line_format(value):
     edited = _edit(SAMSUNG36, STATUS, "samsungFlags=0x0", f"samsungFlags={value}")
     assert read_window_at(edited, (540, 1170)) == LINE_FORMAT
+    # Also on a window the caller calls the app's: only 0x1 is read there.
+    found = read_window_at(edited, (540, 1170), owned=lambda _window: True)
+    assert found == LINE_FORMAT
+    assert getattr(found, "rule", None) == "samsung_fields"
 
 
 @pytest.mark.parametrize(
@@ -1547,3 +1557,117 @@ def test_each_same_line_fake_is_line_format_on_the_samsung_form(fake):
 def test_a_field_name_in_a_name_counts_on_the_samsung_form(fake):
     edited = _edit(SAMSUNG36, STATUS, "StatusBar,", f"StatusBar{fake},")
     assert read_window_at(edited, (540, 50)) == LINE_FORMAT
+
+
+# --- samsungFlags=0x1: read only on the app's own window ---
+
+APP = "com.example.app/com.example.app.MainActivity"
+APP_ROW = "abcdef0 com.example.launcher/com.example.launcher.HomeActivity"
+APP_UID = 10123
+
+
+def _app_on_samsung(flags: str = "0x0") -> str:
+    """samsung36.txt with its full-screen activity row (row 11) made the
+    window of a made-up app (`APP`, uid `APP_UID`) printing
+    ``samsungFlags=<flags>``."""
+    text = _edit(SAMSUNG36, APP_ROW, "samsungFlags=0x0", f"samsungFlags={flags}")
+    text = _edit(text, APP_ROW, "ownerUid=10002", f"ownerUid={APP_UID}")
+    return _edit(text, APP_ROW, APP_ROW, f"abc123 {APP}")
+
+
+def _is_app(window: InputWindow) -> bool:
+    """The crawl's test for a window of an app with a uid of its own."""
+    return window.owner_uid == APP_UID
+
+
+def test_samsung_flags_0x1_on_the_apps_own_window_is_read():
+    text = _app_on_samsung("0x1")
+    found = read_window_at(text, (540, 1170), owned=_is_app)
+    assert isinstance(found, InputWindow), found
+    assert (found.title, found.owner_uid, found.samsung_0x1) == (APP, APP_UID, True)
+    assert found.takes_touch
+    # The same as without the value, but for the mark.
+    plain = read_window_at(_app_on_samsung(), (540, 1170), owned=_is_app)
+    assert isinstance(plain, InputWindow)
+    assert not plain.samsung_0x1
+    windows = parse_input_windows(text, owned=_is_app)
+    assert not isinstance(windows, str)
+    assert explain_input_windows(text, owned=_is_app).reason is None
+
+
+def test_samsung_flags_0x1_without_knowing_the_app_is_refused():
+    text = _app_on_samsung("0x1")
+    for found in (
+        read_window_at(text, (540, 1170)),
+        parse_input_windows(text),
+        read_window_at(text, (540, 1170), owned=lambda _window: False),
+    ):
+        assert found == LINE_FORMAT
+        assert getattr(found, "rule", None) == "samsung_flags"
+    verdict = explain_input_windows(text)
+    assert (verdict.reason, verdict.rule) == (LINE_FORMAT, "samsung_flags")
+    assert verdict.line == text.split("\n").index(_line(text, APP))
+
+
+@pytest.mark.parametrize(
+    ("marker", "point"),
+    [
+        (STATUS, (540, 50)),  # another app's window at the point
+        (STATUS, (540, 1170)),  # above the app's window, not at the point
+        ("abcdef1 NavigationBar0", (540, 1170)),
+        ("13: name=Wallpaper wrapper#66", (540, 1170)),  # below it, taking no touch
+        ("abcdef7 com.example.wallpaper", (540, 1170)),
+    ],
+)
+def test_samsung_flags_0x1_on_another_apps_window_is_refused(marker, point):
+    base = _app_on_samsung("0x1")
+    row = _line(base, marker)
+    text = base.replace(row, re.sub(r"samsungFlags=[^,]*", "samsungFlags=0x1", row))
+    assert _line(text, marker).count("samsungFlags=0x1,") == 1
+    found = read_window_at(text, point, owned=_is_app)
+    assert found == LINE_FORMAT
+    assert getattr(found, "rule", None) == "samsung_flags"
+    # Only on another app's window: the app's own 0x1 alone is read.
+    alone = read_window_at(base, point, owned=_is_app)
+    assert isinstance(alone, InputWindow)
+
+
+def test_samsung_flags_0x1_needs_the_owner_test_not_the_title():
+    # A window titled like the app but owned by another uid is not the app's.
+    text = _edit(_app_on_samsung("0x1"), APP, f"ownerUid={APP_UID}", "ownerUid=10001")
+    found = read_window_at(text, (540, 1170), owned=_is_app)
+    assert found == LINE_FORMAT
+    assert getattr(found, "rule", None) == "samsung_flags"
+
+
+def test_samsung_flags_0x1_in_another_displays_list_is_refused():
+    cover = (
+        "  Display: 1\n"
+        "    logicalSize=100x100\n"
+        "        transform (ROT_0) (IDENTITY)\n"
+        "    Windows:\n"
+        + _line(_app_on_samsung("0x1"), APP)
+        .replace("      11: ", "      0: ")
+        .replace("displayId=0", "displayId=1")
+        + "\n      transform (ROT_0) (IDENTITY)\n"
+    )
+    text = SAMSUNG36.replace("  Display: 0\n", cover + "  Display: 0\n")
+    found = read_window_at(text, (540, 1170), owned=lambda _window: True)
+    assert found == LINE_FORMAT
+    assert getattr(found, "rule", None) == "samsung_fields"
+
+
+@pytest.mark.parametrize(
+    "text",
+    [API24, API30, API31, API32, API33, API34, API35, API36, SAMSUNG36],
+    ids=["api24", "api30", "api31", "api32", "api33", "api34", "api35", "api36", "s36"],
+)
+@pytest.mark.parametrize("owned", [None, lambda _w: True, lambda _w: False])
+def test_the_owner_test_changes_nothing_without_samsung_flags_0x1(text, owned):
+    assert parse_input_windows(text, owned=owned) == parse_input_windows(text)
+    for point in [(160, 320), (160, 10), (540, 1170), (540, 50)]:
+        found = read_window_at(text, point, owned=owned)
+        assert found == read_window_at(text, point)
+        assert getattr(found, "rule", None) == getattr(
+            read_window_at(text, point), "rule", None
+        )

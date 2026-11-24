@@ -3158,7 +3158,12 @@ class Device:
         # No mark is set here: the identity read itself went out only with a
         # current proof (see `_check_listed`), which a proof had set.
 
-    def window_at(self, point: tuple[int, int]) -> InputWindow | str:
+    def window_at(
+        self,
+        point: tuple[int, int],
+        *,
+        owned: Callable[[InputWindow], bool] | None = None,
+    ) -> InputWindow | str:
         """Return the window a touch at `point` would reach, or why that is
         not known.
 
@@ -3169,7 +3174,9 @@ class Device:
         read), ``no_window`` (no window takes a touch there) or ``portal``
         (the window there forwards touches to another display); the first
         four are an `Unreadable` whose ``rule`` names the check that refused
-        (see `diagnose_tap_window`).
+        (see `diagnose_tap_window`). `owned` tells the app's own windows,
+        the only ones that may print ``samsungFlags=0x1`` (see
+        `uiprobe.inputwindows.read_window_at`; without it none may).
 
         Raises:
             AdbError: The adb protocol or the command failed.
@@ -3178,7 +3185,7 @@ class Device:
             DeviceOfflineError: The device is offline.
             DeviceUnauthorizedError: The device has not authorized this host.
         """
-        return read_window_at(self._shell("dumpsys input"), point)
+        return read_window_at(self._shell("dumpsys input"), point, owned=owned)
 
     def diagnose_tap_window(
         self, *, show_device_text: bool = False

@@ -386,7 +386,8 @@ The rules, under the reason the crawl records with them (`details.rule` next to 
 | `line_format` | `mixed_flags` | `inputConfig=` together with `visible=` or `flags=`. |
 | `line_format` | `hex_form` | A `flags=0x...` row that is neither wholly of API 24 to 28 (`scale=`) nor of API 29 and 30 (`globalScale=`, `windowScale=` and `portalToDisplayId=`). |
 | `line_format` | `portal_missing` | A row of a form that prints `portalToDisplayId=` (API 29 to 32) without it. |
-| `line_format` | `samsung_fields` | A row names `samsungFlags=`, `pTouchableRegion=` or `1HXY=` (the Samsung form, API 36), but the fields after the name do not hold all three at their places with a value the phone printed. |
+| `line_format` | `samsung_fields` | A row names `samsungFlags=`, `pTouchableRegion=` or `1HXY=` (the Samsung form, API 36), but the fields after the name do not hold all three at their places with a value the phone printed (for `samsungFlags=0x1`, in another display's list). |
+| `line_format` | `samsung_flags` | A window of the display's list prints `samsungFlags=0x1` and is not the app's own window (the same owner uid and title test as for the window at the point; see [Crawling from Python](python.md#crawling-from-python-alpha)), wherever it is in the list and whether or not it takes touches. Two Samsung phones printed that value on the app's own window only; what it means is not known. This command knows no app, so it names this rule for every window with that value, also where the crawl would tap. |
 | `region_format` | `region_missing` | A row without `touchableRegion=`. |
 | `region_format` | `region_format` | A touchable region that is not one rectangle or `<empty>`. |
 | `region_format` | `region_reversed` | A touchable region whose right is left of its left, or bottom above its top. |

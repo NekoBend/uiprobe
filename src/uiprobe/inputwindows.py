@@ -42,6 +42,17 @@ touch is not known, so a row with one is `LINE_FORMAT`. The fields are named
 by case (``samsungFlags=`` holds no ``flags=``, ``pTouchableRegion=`` no
 ``touchableRegion=``).
 
+One more ``samsungFlags=`` value, ``0x1``, was printed by two Samsung phones
+on the target app's own window only (Settings, with its own uid). What it
+means is not known, so it is read only there: on a window of the list of the
+display asked for that the caller says is the app's (``owned`` of
+`read_window_at`, the same owner uid and title test the crawl uses for the
+window at the point). Any other window with it, at the point or not, taking
+touches or not, makes the list `LINE_FORMAT` (``samsung_flags``), and in
+another display's list it is ``samsung_fields`` like any value not seen.
+Other values (``FORCE_TRUSTED_OVERLAY | 0x400000``, ``0x40000``) stay
+refused.
+
 All of them have ``displayId=``, ``touchableRegion=[l,t][r,b]`` or ``<empty>``
 and ``ownerUid=``. On API 24 to 28 there is one list of every display; on API
 29 to 36 the windows are listed per display (``Display: <id>``, right above
@@ -127,7 +138,10 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field, replace
-from typing import Final, Self
+from typing import TYPE_CHECKING, Final, Self
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 __all__ = [
     "LINE_FORMAT",
@@ -191,6 +205,7 @@ RULES: Final = {
         "hex_form",
         "portal_missing",
         "samsung_fields",
+        "samsung_flags",
     ),
     REGION_FORMAT: ("region_missing", "region_format", "region_reversed"),
     ROTATION: (
@@ -357,8 +372,12 @@ _PORTAL = re.compile(rf", portalToDisplayId=(?P<to>-?\d{{1,10}}){_NEXT}")
 # The Samsung fields (API 36) at their places in the fields after the name
 # (`_meta`), with only the values the phone printed (see the module's text).
 _SAMSUNG_FLAGS = re.compile(
-    r", inputConfig=[^,]*, samsungFlags=(?:0x0|0x8|FORCE_TRUSTED_OVERLAY)" + _NEXT
+    r", inputConfig=[^,]*, samsungFlags=(?P<value>0x0|0x8|0x1|FORCE_TRUSTED_OVERLAY)"
+    + _NEXT
 )
+# The samsungFlags value seen only on the app's own window (see the module's
+# text): accepted only on a window the caller says is the app's (``owned``).
+_SAMSUNG_OWN_ONLY: Final = "0x1"
 _SAMSUNG_REGION = re.compile(
     rf", touchableRegion=(?:<empty>|\[{_NUMBER},{_NUMBER}\]\[{_NUMBER},{_NUMBER}\]), "
     r"pTouchableRegion=<empty>, 1HXY=\[0, 0, [01]\]" + _NEXT
@@ -407,7 +426,9 @@ class InputWindow:
     whether the window takes a touch inside its region at all. ``modal``
     (API 24 to 32 only) says that it takes a touch anywhere on its display,
     whatever its region; ``portal`` that it forwards touches to another
-    display.
+    display. ``samsung_0x1`` that it prints ``samsungFlags=0x1`` (the
+    Samsung form), which is read only on a window of the app the check is
+    for (see `read_window_at`).
     """
 
     title: str
@@ -416,6 +437,7 @@ class InputWindow:
     owner_uid: int
     modal: bool = False
     portal: bool = False
+    samsung_0x1: bool = False
 
     def holds(self, point: tuple[int, int]) -> bool:
         """Whether a touch at `point` goes to this window."""
@@ -830,20 +852,22 @@ def _flags_touch(
     return takes, takes and not names & {"NOT_FOCUSABLE", "NOT_TOUCH_MODAL"}, True
 
 
-def _samsung(line: str) -> bool | None:
-    """Whether a window line has the fields of the Samsung form (API 36);
-    None when one of them is named anywhere in the line (its name and
-    ``applicationInfo.name`` included) but the fields after the name do not
-    hold ``samsungFlags=`` right after ``inputConfig=`` and
-    ``pTouchableRegion=`` and ``1HXY=`` right after ``touchableRegion=``, each
-    with a value the phone printed. They do not change whether or where the
-    window takes a touch."""
+def _samsung(line: str) -> str | None:
+    """The ``samsungFlags=`` value of a window line of the Samsung form (API
+    36), ``""`` when the line has none of its fields; None when one of them
+    is named anywhere in the line (its name and ``applicationInfo.name``
+    included) but the fields after the name do not hold ``samsungFlags=``
+    right after ``inputConfig=`` and ``pTouchableRegion=`` and ``1HXY=`` right
+    after ``touchableRegion=``, each with a value the phone printed. They do
+    not change whether or where the window takes a touch (``0x1`` is read
+    only on the app's own window, see `_read`)."""
     if not any(key in line for key in _SAMSUNG_KEYS):
-        return False
+        return ""
     meta = _meta(line)
-    if _SAMSUNG_FLAGS.search(meta) is None or _SAMSUNG_REGION.search(meta) is None:
+    flags = _SAMSUNG_FLAGS.search(meta)
+    if flags is None or _SAMSUNG_REGION.search(meta) is None:
         return None
-    return True
+    return flags["value"]
 
 
 def _missing(line: str, key: str) -> str:
@@ -862,7 +886,8 @@ def _window(line: str, name: str, at: int) -> InputWindow | _Refusal:
     if uid is None:
         return _Refusal(LINE_FORMAT, _missing(line, "ownerUid="), at)
     portal = _PORTAL.search(line)
-    if _samsung(line) is None:
+    samsung = _samsung(line)
+    if samsung is None:
         return _Refusal(LINE_FORMAT, "samsung_fields", at)
     if portal is None and ("portalToDisplayId=" in line or touch[2]):
         rule = "field_value" if "portalToDisplayId=" in line else "portal_missing"
@@ -878,6 +903,7 @@ def _window(line: str, name: str, at: int) -> InputWindow | _Refusal:
         owner_uid=int(uid["uid"]),
         modal=modal,
         portal=portal is not None and int(portal["to"]) != -1,
+        samsung_0x1=samsung == _SAMSUNG_OWN_ONLY,
     )
 
 
@@ -980,10 +1006,13 @@ def _split(text: str) -> list[str]:
 
 
 def _parse(
-    lines: list[str], display_id: int, trace: _Trace | None = None
+    lines: list[str],
+    display_id: int,
+    trace: _Trace | None = None,
+    owned: Callable[[InputWindow], bool] | None = None,
 ) -> tuple[InputWindow, ...] | _Refusal:
     """Read the windows of `display_id` (see `parse_input_windows`), noting
-    in `trace` what it read."""
+    in `trace` what it read; `owned` tells the app's own windows (`_read`)."""
     found = _window_list(lines, display_id)
     if isinstance(found, _Refusal):
         return found
@@ -996,14 +1025,14 @@ def _parse(
         for other in found.others:  # read as well: a name could have made them
             reading = other
             shown = display_id if other.display is None else other.display
-            read = _read(other, shown, trace)
+            read = _read(other, shown, trace, mine=False)
             if isinstance(read, _Refusal) and read.reason in {
                 LINE_FORMAT,
                 REGION_FORMAT,
             }:
                 return _in(read, other)
         reading = found
-        return _in(_read(found, display_id, trace), found)
+        return _in(_read(found, display_id, trace, owned=owned), found)
     except _TooLongError as error:
         # Such a number could be anything, 0 or display 0 included.
         return _Refusal(ROTATION, "number_too_long", error.line, reading.head)
@@ -1019,7 +1048,10 @@ def _in(
 
 
 def parse_input_windows(
-    text: str, display_id: int = 0
+    text: str,
+    display_id: int = 0,
+    *,
+    owned: Callable[[InputWindow], bool] | None = None,
 ) -> tuple[InputWindow, ...] | Unreadable:
     """Read the windows of `display_id` from the top down.
 
@@ -1033,8 +1065,14 @@ def parse_input_windows(
     orientation too long to read in any list read, another display's
     included), as an `Unreadable` that also names the rule that refused. The
     ``Viewport`` lines are read by `display_orientation`, not here.
+
+    A window that prints ``samsungFlags=0x1`` (the Samsung form) is read
+    only when `owned` says it is a window of the app the check is for;
+    otherwise the list is `LINE_FORMAT` (``samsung_flags``), wherever the
+    window is and whether or not it takes touches. Without `owned` no window
+    is the app's.
     """
-    read = _parse(_split(text), display_id)
+    read = _parse(_split(text), display_id, owned=owned)
     return Unreadable(read.reason, read.rule) if isinstance(read, _Refusal) else read
 
 
@@ -1105,11 +1143,40 @@ def _note_window(trace: _Trace | None, group: _Group) -> None:
             trace.kinds[at] = "transform" if i == 0 else "matrix_row"
 
 
+def _own_only(
+    window: InputWindow,
+    at: int,
+    *,
+    mine: bool,
+    owned: Callable[[InputWindow], bool] | None,
+) -> InputWindow | _Refusal:
+    """`window` (read at line `at`), or why its ``samsungFlags=0x1`` refuses
+    the list (see `_read`)."""
+    if not window.samsung_0x1:
+        return window
+    if not mine:
+        return _Refusal(LINE_FORMAT, "samsung_fields", at)
+    if owned is None or not owned(window):
+        return _Refusal(LINE_FORMAT, "samsung_flags", at)
+    return window
+
+
 def _read(
-    found: _List, display_id: int, trace: _Trace | None = None
+    found: _List,
+    display_id: int,
+    trace: _Trace | None = None,
+    *,
+    mine: bool = True,
+    owned: Callable[[InputWindow], bool] | None = None,
 ) -> tuple[InputWindow, ...] | _Refusal:
     """Read the windows of `display_id` in the list `found` (see
-    `parse_input_windows`), noting in `trace` what it read."""
+    `parse_input_windows`), noting in `trace` what it read.
+
+    A window with ``samsungFlags=0x1`` passes only in the list of the
+    display asked for (`mine`; elsewhere ``samsung_fields`` as for any value
+    not seen) and only when `owned` says it is the app's (else
+    ``samsung_flags``): that value was seen only on the app's own window,
+    and what it does to a touch is not known."""
     _note_rows(trace, found)  # entered, also when it refuses right away
     groups = _group(found)
     if isinstance(groups, _Refusal):
@@ -1127,6 +1194,8 @@ def _read(
         if isinstance(turned, _Refusal):
             return turned
         window = _row(group, index, found, display_id)
+        if isinstance(window, InputWindow):
+            window = _own_only(window, group.at, mine=mine, owned=owned)
         if isinstance(window, _Refusal):
             return window
         if window is None:
@@ -1208,12 +1277,15 @@ def display_orientation(text: str, display_id: int = 0) -> int | None:
 
 
 def _checked(
-    lines: list[str], display_id: int, trace: _Trace | None = None
+    lines: list[str],
+    display_id: int,
+    trace: _Trace | None = None,
+    owned: Callable[[InputWindow], bool] | None = None,
 ) -> tuple[InputWindow, ...] | _Refusal:
     """The windows of `display_id` when both the list and the display's
     orientation read and the orientation is 0, else why not, noting in
-    `trace` what it read."""
-    read = _parse(lines, display_id, trace)
+    `trace` what it read; `owned` tells the app's own windows (`_read`)."""
+    read = _parse(lines, display_id, trace, owned)
     if isinstance(read, _Refusal):
         return read
     turned = _orientation(lines, display_id, trace)
@@ -1312,12 +1384,19 @@ def _spans(lines: list[str], start: int) -> tuple[ListSpan, ...]:
     return tuple(spans)
 
 
-def explain_input_windows(text: str, display_id: int = 0) -> Verdict:
+def explain_input_windows(
+    text: str,
+    display_id: int = 0,
+    *,
+    owned: Callable[[InputWindow], bool] | None = None,
+) -> Verdict:
     """Tell whether the windows of `display_id` can be read from the whole
     text of ``dumpsys input``, and if not, which rule refused and where.
 
     It runs the same checks as `read_window_at` up to the point (the list,
-    then the display's orientation) and refuses exactly what they refuse.
+    then the display's orientation) and refuses exactly what they refuse,
+    with the same `owned` (without it, a ``samsungFlags=0x1`` window
+    refuses: ``samsung_flags``).
     """
     lines = _split(text)
     start = _dispatcher_start(lines)
@@ -1325,7 +1404,7 @@ def explain_input_windows(text: str, display_id: int = 0) -> Verdict:
     lists = () if first is None else _spans(lines, first)
     end = None if first is None else _dispatcher_end(lines, first)
     trace = _Trace()
-    read = _checked(lines, display_id, trace)
+    read = _checked(lines, display_id, trace, owned)
     chosen = [span for span in lists if span.head == trace.chosen]
     kinds = _heading_kinds(lines, first, tuple(chosen)) | trace.kinds
     reached = tuple(span.head in trace.reached for span in lists)
@@ -1494,7 +1573,11 @@ def window_at(
 
 
 def read_window_at(
-    text: str, point: tuple[int, int], display_id: int = 0
+    text: str,
+    point: tuple[int, int],
+    display_id: int = 0,
+    *,
+    owned: Callable[[InputWindow], bool] | None = None,
 ) -> InputWindow | str:
     """Return the window a touch at `point` of `display_id` reaches, read from
     the whole text of ``dumpsys input``, or why that is not known.
@@ -1504,8 +1587,14 @@ def read_window_at(
     `NO_WINDOW` (no window takes a touch there) or `PORTAL` (the window there
     forwards the touch to another display). The reasons of the first two are
     an `Unreadable` that names the rule that refused (see `RULES`).
+
+    `owned` tells whether a window is one of the app the check is for (the
+    caller's own test of the owner uid and title): a window of the list
+    with ``samsungFlags=0x1`` is read only when it says so, else the list is
+    `LINE_FORMAT` (``samsung_flags``), whether or not that window is at the
+    point (see `parse_input_windows`).
     """
-    windows = _checked(_split(text), display_id)
+    windows = _checked(_split(text), display_id, owned=owned)
     if isinstance(windows, _Refusal):
         return Unreadable(windows.reason, windows.rule)
     found = window_at(windows, point)

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sys
 from typing import TYPE_CHECKING
 
@@ -125,7 +126,7 @@ def test_the_check_can_be_turned_off(tmp_path: Path, device, android, clock, fak
 def test_a_window_that_cannot_be_read_refuses_the_tap(
     tmp_path: Path, device, android, clock, monkeypatch, problem
 ):
-    monkeypatch.setattr(device, "window_at", lambda _point: problem)
+    monkeypatch.setattr(device, "window_at", lambda _point, **_kw: problem)
     out = tmp_path / "run"
     run(device, clock, out, limits=Limits(actions=3))
     assert _taps(android) == []
@@ -500,14 +501,14 @@ def test_a_device_away_during_the_window_read_is_device_reconnected(
     original = device.window_at
     first: list[tuple[int, int]] = []
 
-    def away_once(point: tuple[int, int]) -> object:
+    def away_once(point: tuple[int, int], **kwargs: object) -> object:
         if not first:
             first.append(point)
             x, y = point
             android.overlays.append(("ChatHead", OVERLAY, (x - 1, y - 1, x + 1, y + 1)))
             Waits(device, [renumber(fake_adb, TRANSPORT)])
             listing(fake_adb, (TRANSPORT, "offline"))
-        return original(point)
+        return original(point, **kwargs)
 
     monkeypatch.setattr(device, "window_at", away_once)
     out = tmp_path / "run"
@@ -673,3 +674,70 @@ def test_braces_in_the_focused_title_do_not_stop_the_tap(
     run(device, clock, out, limits=Limits(actions=3))
     assert BROWSE in _taps(android)
     assert not _covered(out)
+
+
+# --- samsungFlags=0x1 (the Samsung form): read only on the app's window ---
+
+
+def _samsung_rows(text: str, flagged: Callable[[str], bool]) -> str:
+    """`text` (an API 36 form list) with the Samsung fields added to every
+    window row, ``samsungFlags=0x1`` on the rows `flagged` picks and 0x0 on
+    the others."""
+    out = []
+    for line in text.split("\n"):
+        if ", inputConfig=" in line and ", ownerUid=" in line:
+            value = "0x1" if flagged(line) else "0x0"
+            line = re.sub(r"(, inputConfig=[^,]*)", rf"\1, samsungFlags={value}", line)
+            line = re.sub(
+                r"(, touchableRegion=(?:<empty>|\[[^\]]*\]\[[^\]]*\]))",
+                r"\1, pTouchableRegion=<empty>, 1HXY=[0, 0, 0]",
+                line,
+            )
+        out.append(line)
+    return "\n".join(out)
+
+
+@pytest.mark.parametrize(
+    ("flagged", "tapped", "uid"),
+    [
+        (SHOP, True, None),  # the app's own window, at the point
+        (SHOP, True, 1000),  # a system uid: its title names the app
+        ("StatusBar", False, None),  # another app's window, not at the point
+        ("ChatHead", False, None),  # another app's window at the point
+    ],
+)
+def test_samsung_flags_0x1_is_read_only_on_the_apps_window(
+    tmp_path: Path, device, android, clock, monkeypatch, flagged, tapped, uid
+):
+    if android.api < 33:
+        pytest.skip("the Samsung form is of API 36")
+    if uid is not None:
+        android.uids[SHOP] = uid
+    original = android.show
+
+    def show_then_cover(name: str) -> None:
+        original(name)
+        if name == "main" and flagged == "ChatHead":
+            android.overlays.append(("ChatHead", OVERLAY, (0, 180, 320, 260)))
+
+    monkeypatch.setattr(android, "show", show_then_cover)
+    dumped = android._dumpsys_input
+    monkeypatch.setattr(
+        android,
+        "_dumpsys_input",
+        lambda: _samsung_rows(dumped(), lambda line: f" {flagged}" in line),
+    )
+    out = tmp_path / "run"
+    result = run(device, clock, out, limits=Limits(actions=3))
+    if tapped:
+        assert BROWSE in _taps(android)
+        assert result.cover_unknown is None
+        assert not _covered(out)
+        return
+    assert BROWSE not in _taps(android)
+    refused = _covered(out)
+    assert refused
+    assert refused[0]["details"] == {
+        "unreadable": "line_format",
+        "rule": "samsung_flags",
+    }
