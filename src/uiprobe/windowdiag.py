@@ -25,7 +25,8 @@ and app text can appear in it, so it carries its own notice
 (`NOTICE_SHOWN`).
 
 The reader reads ``samsungFlags=0x1`` only on a window of the app the check
-is for (``owned``, the crawl's owner uid and title test). Without ``owned``
+is for (``owned``: the crawl's owner uid and title test, or a caller's own).
+Without ``owned``
 every such window of the display's list refuses (``samsung_flags``), also
 where a crawl of the app would read it, and the report says so in a note
 (`NOTE`). With ``owned`` the windows it accepts read as in the crawl.
@@ -60,11 +61,13 @@ from uiprobe.inputwindows import (
 )
 
 __all__ = [
+    "APP_CRAWL_TESTED",
     "APP_TESTED",
     "APP_UID_UNREADABLE",
     "CAP",
     "COMMAND",
     "NOTE",
+    "NOTE_CRAWL_TESTED",
     "NOTE_TESTED",
     "NOTE_UID_UNREADABLE",
     "NOTE_UID_UNREADABLE_ANY",
@@ -92,10 +95,13 @@ NOTICE_SHOWN: Final = (
     " pasting it anywhere"
 )
 # Whether the app's own windows were told (`TapWindowDiagnosis.app_test`):
-# with the crawl's test, or not, because the app's uid could not be read.
+# with a test the caller gave (``owned``), with the crawl's own test (as
+# ``uiprobe diagnose tap-window --package`` builds it), or not, because the
+# app's uid could not be read.
 APP_TESTED: Final = "tested"
+APP_CRAWL_TESTED: Final = "crawl_tested"
 APP_UID_UNREADABLE: Final = "uid_unreadable"
-_APP_TESTS: Final = frozenset({None, APP_TESTED, APP_UID_UNREADABLE})
+_APP_TESTS: Final = frozenset({None, APP_TESTED, APP_CRAWL_TESTED, APP_UID_UNREADABLE})
 # The rule a samsungFlags=0x1 window refuses with when it is not the app's.
 _SAMSUNG_FLAGS: Final = "samsung_flags"
 _NOTE_HEAD: Final = "a crawl accepts samsungFlags=0x1 on the target app's own window; "
@@ -105,12 +111,16 @@ NOTE: Final = (
     " app's windows)"
 )
 NOTE_TESTED: Final = (
+    _NOTE_HEAD + "this window is not the given app's own window by the given owned test"
+)
+NOTE_CRAWL_TESTED: Final = (
     _NOTE_HEAD + "this window is not the given app's own window by the crawl's"
     " owner uid and title test"
 )
 NOTE_UID_UNREADABLE: Final = (
     _NOTE_HEAD + "the given app's uid could not be read (dumpsys package), so no"
-    " window counted as its own, and a crawl of it would refuse every tap"
+    " window counted as its own, and a crawl of it would refuse every tap with"
+    " the tap window check on"
 )
 # With an app whose uid could not be read and any other result.
 NOTE_UID_UNREADABLE_ANY: Final = (
@@ -336,8 +346,9 @@ class TapWindowDiagnosis:
     only the list the reader took as the display's, and ``forms`` and the
     lines' ``tokens`` are empty, unless ``show_device_text``. ``app_test``
     says whether the app's own windows were told: None (no app given),
-    `APP_TESTED` (with the crawl's test) or `APP_UID_UNREADABLE` (an app was
-    given but its uid could not be read, so none was).
+    `APP_TESTED` (with a test the caller gave), `APP_CRAWL_TESTED` (with the
+    crawl's own test, which ``--package`` builds) or `APP_UID_UNREADABLE`
+    (an app was given but its uid could not be read, so none was).
     """
 
     reason: str | None
@@ -352,7 +363,10 @@ class TapWindowDiagnosis:
 
     def __post_init__(self) -> None:
         if self.app_test not in _APP_TESTS:
-            msg = "app_test must be None, APP_TESTED or APP_UID_UNREADABLE"
+            msg = (
+                "app_test must be None, APP_TESTED, APP_CRAWL_TESTED or"
+                " APP_UID_UNREADABLE"
+            )
             raise ValueError(msg)
 
     @property
@@ -382,7 +396,8 @@ class TapWindowDiagnosis:
     @property
     def note(self) -> str | None:
         """What a ``samsung_flags`` result means for a crawl (`NOTE`,
-        `NOTE_TESTED` or `NOTE_UID_UNREADABLE`, by ``app_test``), and
+        `NOTE_TESTED`, `NOTE_CRAWL_TESTED` or `NOTE_UID_UNREADABLE`, by
+        ``app_test``), and
         `NOTE_UID_UNREADABLE_ANY` for any other result of an app whose uid
         could not be read; else None."""
         if self.rule != _SAMSUNG_FLAGS:
@@ -391,6 +406,8 @@ class TapWindowDiagnosis:
             return None
         if self.app_test == APP_TESTED:
             return NOTE_TESTED
+        if self.app_test == APP_CRAWL_TESTED:
+            return NOTE_CRAWL_TESTED
         if self.app_test == APP_UID_UNREADABLE:
             return NOTE_UID_UNREADABLE
         return NOTE

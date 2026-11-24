@@ -84,7 +84,11 @@ from uiprobe.settings import (
     policy_from_settings,
     write_default_settings,
 )
-from uiprobe.windowdiag import APP_UID_UNREADABLE, TapWindowDiagnosis
+from uiprobe.windowdiag import (
+    APP_CRAWL_TESTED,
+    APP_UID_UNREADABLE,
+    TapWindowDiagnosis,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
@@ -2255,16 +2259,17 @@ def _diagnose_on(
     """Read the window list, with the app's own windows told as the crawl
     tells them when a package is given: its uid first (as the crawl reads it
     at its start), then ``dumpsys input``. A uid that cannot be read tells
-    no window (the report says so when it matters)."""
+    no window (the report's note says so)."""
     if package is None:
         return device.diagnose_tap_window(show_device_text=show_device_text)
     app = device.package_uid(package)
     if app is None:
         found = device.diagnose_tap_window(show_device_text=show_device_text)
         return replace(found, app_test=APP_UID_UNREADABLE)
-    return device.diagnose_tap_window(
+    found = device.diagnose_tap_window(
         show_device_text=show_device_text, owned=_crawl_owned(package, app)
     )
+    return replace(found, app_test=APP_CRAWL_TESTED)
 
 
 _HANDLERS: dict[str, Callable[[argparse.Namespace], int]] = {

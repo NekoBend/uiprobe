@@ -39,12 +39,14 @@ from uiprobe.inputwindows import (
 )
 from uiprobe.packageuid import PackageUid
 from uiprobe.windowdiag import (
+    APP_CRAWL_TESTED,
     APP_TESTED,
     APP_UID_UNREADABLE,
     CAP,
     KNOWN_KEYS,
     LINE_KINDS,
     NOTE,
+    NOTE_CRAWL_TESTED,
     NOTE_TESTED,
     NOTE_UID_UNREADABLE,
     NOTE_UID_UNREADABLE_ANY,
@@ -1530,7 +1532,7 @@ def test_the_command_adds_the_note_for_samsung_flags(fake_adb, capsys, as_json):
 @pytest.mark.parametrize("as_json", [False, True])
 @pytest.mark.parametrize(
     ("row", "readable", "note"),
-    [(OWN_ROW, True, None), (OTHER_ROW, False, NOTE_TESTED)],
+    [(OWN_ROW, True, None), (OTHER_ROW, False, NOTE_CRAWL_TESTED)],
     ids=["own_window", "other_window"],
 )
 def test_package_accepts_0x1_only_on_the_apps_own_window(
@@ -1595,6 +1597,26 @@ def test_package_whose_uid_cannot_be_read_is_always_noted(
     assert lines[1].startswith("result: readable" if rule is None else "result: not")
     assert lines[2] == f"note: {note}"
     assert sum(line.startswith("note:") for line in lines) == 1
+
+
+def test_the_notes_name_the_test_that_was_applied():
+    head = "a crawl accepts samsungFlags=0x1 on the target app's own window; "
+    assert (
+        head + "this window is not the given app's own window by the given owned test"
+    ) == NOTE_TESTED
+    assert (
+        head + "this window is not the given app's own window by the crawl's"
+        " owner uid and title test"
+    ) == NOTE_CRAWL_TESTED
+    assert NOTE_UID_UNREADABLE.endswith(
+        "a crawl of it would refuse every tap with the tap window check on"
+    )
+    found = diagnose_tap_window(_flagged(OTHER_ROW), owned=lambda _window: False)
+    assert (found.app_test, found.note) == (APP_TESTED, NOTE_TESTED)
+    marked = dataclasses.replace(found, app_test=APP_CRAWL_TESTED)
+    assert marked.note == NOTE_CRAWL_TESTED
+    assert "crawl's owner uid" not in found.to_text()
+    assert dataclasses.replace(marked, rule=None).note is None
 
 
 def test_the_short_uid_note_is_the_given_sentence():
