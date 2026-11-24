@@ -33,6 +33,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
+from uiprobe.device import Device
 from uiprobe.inputwindows import (
     LINE_FORMAT,
     NO_LIST,
@@ -1676,7 +1677,8 @@ def test_the_owner_test_changes_nothing_without_samsung_flags_0x1(text, owned):
 
 def test_the_owned_parameters_resolve_at_run_time():
     # Callable is imported at run time, so the hints of the public
-    # functions resolve (for tools that read them).
-    for function in (read_window_at, parse_input_windows, explain_input_windows):
+    # functions and of Device.window_at resolve (for tools that read them).
+    functions = (read_window_at, parse_input_windows, explain_input_windows)
+    for function in (*functions, Device.window_at):
         hints = typing.get_type_hints(function)
         assert "Callable" in str(hints["owned"])

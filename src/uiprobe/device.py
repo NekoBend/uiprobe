@@ -7,6 +7,10 @@ import os
 import re
 import secrets
 import time
+
+# Imported at run time, not only for type checking, so that
+# typing.get_type_hints() resolves Device.window_at's ``owned``.
+from collections.abc import Callable  # noqa: TC003
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Final, NamedTuple
@@ -47,7 +51,7 @@ from uiprobe.pngfile import check_png
 from uiprobe.windowdiag import TapWindowDiagnosis, diagnose_tap_window
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping, Sequence
+    from collections.abc import Mapping, Sequence
 
 __all__ = [
     "DEVICE_WIDE_KEYS",
@@ -3177,9 +3181,10 @@ class Device:
         (see `diagnose_tap_window`). `owned` tells the app's own windows,
         the only ones that may print ``samsungFlags=0x1`` (see
         `uiprobe.inputwindows.read_window_at`; without it none may). The
-        crawl always passes `owned` by keyword: an override in a subclass
-        must accept it and forward it (else the first guarded tap raises
-        `TypeError`).
+        crawl always passes `owned` by keyword. An override in a subclass
+        that does not accept it raises `TypeError` on the first guarded tap;
+        one that accepts it but does not forward it makes the app's own
+        windows with ``samsungFlags=0x1`` refuse the tap (``samsung_flags``).
 
         Raises:
             AdbError: The adb protocol or the command failed.
