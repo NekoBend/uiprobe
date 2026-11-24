@@ -78,6 +78,17 @@ APP_BLOCK = (
     f"    mOwnerUid=10150 showForAllUsers=false package={APP} appop=NONE\n"
 )
 APP_WINDOW = FocusedWindow(APP, APP_TITLE, "abc123", 0, 10150)
+# The cover screen's launcher window has its own block and owner.
+LAUNCHER_TITLE = f"{LAUNCHER}/{LAUNCHER}.Home"
+LAUNCHER_BLOCK = (
+    f"  Window #1 Window{{bcd234 u0 {LAUNCHER_TITLE}}}:\n"
+    "    mDisplayId=1 rootTaskId=4 mSession=Session{3 4:u0a120} mClient=y\n"
+    f"    mOwnerUid=10120 showForAllUsers=false package={LAUNCHER} appop=NONE\n"
+)
+LAUNCHER_WINDOW = FocusedWindow(LAUNCHER, LAUNCHER_TITLE, "bcd234", 0, 10120)
+# Another package, named only by the activity dump.
+OTHER = "com.example.other"
+OTHER_RECORD = f"ActivityRecord{{aaa111 u0 {OTHER}/.Main t20}}"
 # What `dumpsys activity activities` prints on such a device: one
 # mFocusedApp per display, one topResumedActivity and ResumedActivity.
 ACTIVITY_DUMP = (
@@ -94,7 +105,7 @@ def make(
     screens = (Screen("main", f"{APP}/.MainActivity", (El((0, 0, 9, 9), text="Hi"),)),)
     android = FakeAndroid(fake_adb, SERIAL, screens, start="main", api=36)
     android.override(WINDOW, window.encode())
-    android.override(WINDOWS, APP_BLOCK.encode())
+    android.override(WINDOWS, (LAUNCHER_BLOCK + APP_BLOCK).encode())
     android.override(ACTIVITIES, activities.encode())
     return android, Device(adb_server=fake_adb.address)
 
@@ -363,7 +374,7 @@ def test_forged_lines_never_give_a_forged_answer(fake_adb, window, activities):
     genuine = LAUNCHER if LAUNCHER_RECORD in activities.split("\n")[1] else APP
     assert device.foreground() in {genuine, None}
     focus = device.focused_window()
-    assert focus is None or (genuine == APP and focus == APP_WINDOW)
+    assert focus is None or focus.owner == genuine
 
 
 def test_headers_on_both_sides_give_the_genuine_foreground(fake_adb):
@@ -435,7 +446,7 @@ AS_BEFORE = [
         APP,
         APP_WINDOW,
     ),
-    (BOTH_SIDES.split("  mInputMethodTarget")[0], LAUNCHER, None),
+    (BOTH_SIDES.split("  mInputMethodTarget")[0], LAUNCHER, LAUNCHER_WINDOW),
     (SINGLE, APP, APP_WINDOW),
     (SINGLE.replace("\n", "\r\n"), APP, APP_WINDOW),
     (SINGLE + "  mTopFocusedDisplayId=0\n", APP, APP_WINDOW),
@@ -481,3 +492,181 @@ def test_forgeries_on_a_single_display_never_give_a_forged_answer(fake_adb, forg
     # They take the reading of several displays: mFocusedApp is not used.
     android.override(ACTIVITIES, b"nothing\n")
     assert device.foreground() is None
+
+
+# --- the stricter reading of round D ---
+
+
+def test_the_foreground_comes_from_the_activity_dump_alone(fake_adb):
+    # The window dump names the app on display 0; the activity dump another
+    # package, which is what is read.
+    _, device = make(fake_adb, OPEN, resumed(OTHER_RECORD))
+    assert device.foreground() == OTHER
+    assert device.focused_window() == APP_WINDOW
+
+
+def test_the_owner_block_of_each_display_is_told_apart(fake_adb):
+    # One display: the launcher window's own block gives its owner. Two
+    # displays with top 0: the same window, on display 1, is not read.
+    android, device = make(
+        fake_adb, f"  mCurrentFocus={LAUNCHER_FOCUS}\n  mFocusedApp={LAUNCHER_RECORD}\n"
+    )
+    assert device.focused_window() == LAUNCHER_WINDOW
+    two = window_dump(
+        display(1, LAUNCHER_FOCUS, LAUNCHER_RECORD), display(0, "null", APP_RECORD)
+    )
+    android.override(WINDOW, two.encode())
+    assert device.focused_window() is None
+
+
+@pytest.mark.parametrize(
+    "window",
+    [
+        # All focus lines null.
+        window_dump(
+            display(1, "null", LAUNCHER_RECORD), display(0, "null", APP_RECORD)
+        ),
+        # Top 0, display 0 null, display 1 focused (the reversed case).
+        window_dump(
+            display(0, "null", APP_RECORD), display(1, LAUNCHER_FOCUS, LAUNCHER_RECORD)
+        ),
+        # All genuine lines null and one forged focus line alone.
+        window_dump(display(1, "null", LAUNCHER_RECORD), display(0, "null", APP_RECORD))
+        + f"  mCurrentFocus={APP_FOCUS}\n",
+        # A forged focus line beside the genuine one, even naming it again.
+        OPEN + f"  mCurrentFocus={APP_FOCUS}\n",
+        OPEN + "  mCurrentFocus=Window{ffff u0 x}\n",
+        # A forged null line, or a forged header alone: the counts differ.
+        OPEN + "  mCurrentFocus=null\n",
+        OPEN + "  Display: mDisplayId=5 (organized)\n",
+        # A forged header with a forged focus line: two windows.
+        OPEN
+        + "  Display: mDisplayId=5 (organized)\n  mCurrentFocus=Window{ffff u0 x}\n",
+        # One CR too many.
+        OPEN.replace("\n", "\r\r\n"),
+    ],
+    ids=[
+        "all-null",
+        "reversed-top-0",
+        "forged-sole-claim",
+        "forged-same-claim",
+        "forged-other-claim",
+        "forged-null",
+        "forged-header",
+        "forged-pair-beside-genuine",
+        "double-cr",
+    ],
+)
+def test_focus_outside_the_seen_shape_is_unknown(fake_adb, window):
+    _, device = make(fake_adb, window)
+    assert device.focused_window() is None
+
+
+def test_a_forged_header_and_null_pair_keeps_the_genuine_focus(fake_adb):
+    window = OPEN + "  Display: mDisplayId=5 (organized)\n  mCurrentFocus=null\n"
+    _, device = make(fake_adb, window)
+    assert device.focused_window() == APP_WINDOW
+
+
+def test_known_limit_a_forged_pair_where_no_display_has_focus(fake_adb):
+    # Documented limit: when no display has a focused window, a title that
+    # forges a header and a focus line as a pair is read as the focus. Taps
+    # stay guarded by the check of the window at the tap point; a BACK would
+    # go to whichever window really has the focus (none here).
+    window = window_dump(
+        display(1, "null", LAUNCHER_RECORD), display(0, "null", APP_RECORD)
+    ) + (f"  Display: mDisplayId=5 (organized)\n  mCurrentFocus={APP_FOCUS}\n")
+    _, device = make(fake_adb, window)
+    assert device.focused_window() == APP_WINDOW
+
+
+@pytest.mark.parametrize(
+    "activities",
+    [
+        f"  mResumedActivity: {APP_RECORD}\n",
+        f"  topResumedActivity={APP_RECORD}\n",
+        f"    ResumedActivity: {APP_RECORD}\n",
+        f"  mResumedActivity: {APP_RECORD}\n  topResumedActivity={APP_RECORD}\n",
+        resumed(APP_RECORD) + f"    ResumedActivity : {OTHER_RECORD}\n",
+        resumed(APP_RECORD) + f"\ttopResumedActivity={APP_RECORD}\n",
+        resumed(APP_RECORD) + f"  mResumedActivity: {OTHER_RECORD}\n",
+        resumed(APP_RECORD).replace("\n", "\r\r\n"),
+        resumed(APP_RECORD).replace(" t14}", " t14}}"),
+    ],
+    ids=[
+        "m-resumed-only",
+        "top-only",
+        "resumed-only",
+        "m-resumed-and-top",
+        "spaced-resumed-disagrees",
+        "tab-indented",
+        "m-resumed-disagrees",
+        "double-cr",
+        "extra-brace",
+    ],
+)
+def test_resumed_lines_outside_the_seen_shape_give_unknown(fake_adb, activities):
+    _, device = make(fake_adb, OPEN, activities)
+    assert device.foreground() is None
+
+
+def test_a_spaced_resumed_line_that_agrees_is_still_not_exact(fake_adb):
+    activities = resumed(APP_RECORD) + f"    ResumedActivity : {APP_RECORD}\n"
+    _, device = make(fake_adb, OPEN, activities)
+    assert device.foreground() is None  # not the exact shape
+
+
+def test_launch_says_when_another_display_has_the_focus(fake_adb):
+    android, device = make(fake_adb, CLOSED)
+    android.override(
+        re.compile(r"^cmd package resolve-activity .*"),
+        f"{APP}/.MainActivity\nuiprobe-exit:0\n".encode(),
+    )
+    with pytest.raises(Exception) as caught:  # noqa: PT011 - checked below
+        device.launch(APP, timeout=0)
+    assert "another display, perhaps the cover screen, has the focus" in str(
+        caught.value
+    )
+
+
+# --- a crawl on two displays ---
+
+# Added to the fake's `dumpsys window`: a second display without focus.
+SECOND_DISPLAY = (
+    "  Display: mDisplayId=0 (organized)\n"
+    "  Display: mDisplayId=1 (organized)\n"
+    "  mCurrentFocus=null\n"
+    "  mTopFocusedDisplayId=0\n"
+)
+
+
+@pytest.mark.parametrize("check", [True, False], ids=["checked", "unchecked"])
+def test_a_crawl_on_two_displays_needs_the_tap_window_check(tmp_path, fake_adb, check):
+    from tests.test_crawl_driver import SCREENS, TRANSPORT, Clock, lines, run
+    from uiprobe.crawl import Limits
+    from uiprobe.guards import Policy
+
+    android = FakeAndroid(
+        fake_adb, SERIAL, SCREENS, start="home", transport_id=TRANSPORT, api=36
+    )
+    android.extra_dumpsys["window"] = SECOND_DISPLAY
+    device = Device(adb_server=fake_adb.address, pin=True)
+    out = tmp_path / "run"
+    run(
+        device,
+        Clock(),
+        out,
+        limits=Limits(actions=4),
+        policy=Policy(check_tap_window=check),
+    )
+    records = lines(out / "transitions.jsonl")
+    refused = [r for r in records if r.get("reason") == "focus_unknown"]
+    if check:
+        assert [i for i in android.inputs if i.kind == "tap"]
+        assert not refused
+    else:
+        assert android.inputs == []
+        assert refused
+        assert refused[0]["details"] == {
+            "cause": "several_displays_need_tap_window_check"
+        }

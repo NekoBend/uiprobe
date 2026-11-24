@@ -220,6 +220,10 @@ NOT_SENT_STOPPED: Final = "stopped"
 NOT_SENT_TIME_LIMIT: Final = "time_limit"
 NOT_SENT_FOREGROUND_UNKNOWN: Final = "foreground_unknown"
 NOT_SENT_FOCUS_UNKNOWN: Final = "focus_unknown"
+# The ``cause`` in the details of a ``focus_unknown`` end line when the focus
+# was read on a device with several displays and Policy.check_tap_window is
+# off: the focus reading alone is not trusted there.
+FOCUS_CAUSE_SEVERAL_DISPLAYS: Final = "several_displays_need_tap_window_check"
 NOT_SENT_FOCUS_OTHER: Final = "focus_other"
 NOT_SENT_FOCUS_CHANGED: Final = "focus_changed"
 NOT_SENT_KEYBOARD_UNKNOWN: Final = "keyboard_unknown"
@@ -414,6 +418,8 @@ class _Run:
         # out (the first launch or a relaunch), used by that start only.
         self.start_component: str | None = None
         self.gate_details: dict[str, str | int] | None = None  # why, for cover
+        # Why the focus counted as unknown, when not because it was unreadable.
+        self.gate_focus_details: dict[str, str | int] | None = None
         self.not_sent: dict[str, int] = {}  # not_sent end lines by reason
         self.cover_unknown: str | None = None  # what the first cover_unknown missed
         self.cover_rule: str | None = None  # and the reader's rule, when it had one
@@ -737,7 +743,13 @@ class _Run:
                 self.last_screen_id = self.gate_screen_id
             self.last_foreground = seen.observation.foreground
         if reason is not None:
-            details = self.gate_details if reason in _COVER_REASONS else None
+            details = (
+                self.gate_details
+                if reason in _COVER_REASONS
+                else self.gate_focus_details
+                if reason == NOT_SENT_FOCUS_UNKNOWN
+                else None
+            )
             self.end_not_sent(action_id, reason, details)
             if reason == NOT_SENT_RECONNECTED and not isinstance(action, Launch):
                 # Nothing was sent and nothing about the screen is known: the
@@ -942,13 +954,25 @@ class _Run:
         # For a tap: the focused window before and after the dump must be the
         # same window of the app, so the dump shows that window (uiautomator
         # dumps the focused window: seen on API 24, 30 and 36 with the shade).
+        self.device._take_display_note()  # noqa: SLF001 - internal to uiprobe
         before = self.device.focused_window() if tap else None
         screen = self.dump() if tap else None
         foreground = self.device.foreground()
         focus = self.device.focused_window()
         keyboard = self.device.keyboard_shown()
-        seen = _Seen(Observation(screen, foreground, keyboard, now), focus)
         self.gate_details = None
+        self.gate_focus_details = None
+        # With several displays the focus reading is best effort against
+        # window titles that forge lines, so the check of the window at the
+        # tap point is the guard: without it, a tap or BACK is not sent.
+        if (
+            isinstance(action, Tap | Back)
+            and not self.policy.check_tap_window
+            and self.device._take_display_note() is not None  # noqa: SLF001
+        ):
+            before = focus = None
+            self.gate_focus_details = {"cause": FOCUS_CAUSE_SEVERAL_DISPLAYS}
+        seen = _Seen(Observation(screen, foreground, keyboard, now), focus)
         if isinstance(action, Tap):
             # The last read: the window that takes a touch at the point.
             cover = (
