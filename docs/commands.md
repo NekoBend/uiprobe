@@ -412,7 +412,7 @@ From Python, `Device.diagnose_tap_window(show_device_text=False)` returns the re
 
 ## Creating the settings file
 
-`uiprobe init [PATH]` creates the settings file `uiprobe.toml` (at `./uiprobe.toml` unless you give a path) and prints its path. It needs no device and no adb server, and it never overwrites a file. The file it writes says `press = false`, so `crawl` previews until you set `press = true` (then `crawl PACKAGE --out DIR` presses for real, see [Crawling an app](crawl.md)), and its `[limits]` (depth 5, actions 300, minutes 30) are the limits of every pressing crawl that gives no `--depth`, `--actions` or `--minutes`. Details are in [Settings file](settings.md).
+`uiprobe init [PATH]` creates the settings file `uiprobe.toml` (at `./uiprobe.toml` unless you give a path) and prints its path. It needs no device and no adb server, and it never overwrites a file. The file it writes says `press = false`, so `crawl` previews until you set `press = true` (then `crawl PACKAGE --out DIR` presses for real, see [Crawling an app](crawl.md)); it has `runs_dir` only as a comment, so a pressing run asks for `--out DIR` until you set `runs_dir` to an existing folder for the run folders, and its `[limits]` (depth 5, actions 300, minutes 30) are the limits of every pressing crawl that gives no `--depth`, `--actions` or `--minutes`. Details are in [Settings file](settings.md).
 
 ## Options
 
