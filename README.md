@@ -8,7 +8,7 @@ uiprobe saves the screen structure of an Android app and sends taps, swipes and 
 
 uiprobe is alpha software: the command line, the JSON formats and the Python API may change in any later version. This is a development snapshot, version 0.1.0a1.dev0; no alpha is tagged yet.
 
-Eleven commands exist: `devices`, `dump`, `screenshot`, `find`, `tap`, `swipe`, `key`, `type`, `launch`, `crawl` and `init`. By default `crawl` previews: it shows what a crawl would press on the screen showing now and presses nothing. `crawl --press --out DIR` crawls for real: it presses on an emulator only (unless `--allow-real-device`), stops after 30 sent actions or 5 minutes and taps at most 3 screens deep on one path unless told otherwise, and records every step in a new folder. Other ways of operating the app are planned. The guards have been checked only on Android emulators; real devices and other Android versions may behave differently.
+Eleven commands exist: `devices`, `dump`, `screenshot`, `find`, `tap`, `swipe`, `key`, `type`, `launch`, `crawl` and `init`. By default `crawl` previews: it shows what a crawl would press on the screen showing now and presses nothing. `crawl --press --out DIR` crawls for real: it presses on an emulator only (unless `--allow-real-device`), force-stops the app and then starts it (unless `--no-restart`), losing what it had not saved, stops after 30 sent actions or 5 minutes and taps at most 3 screens deep on one path unless told otherwise, and records every step in a new folder. Other ways of operating the app are planned. The guards have been checked only on Android emulators; real devices and other Android versions may behave differently.
 
 ## Safety
 

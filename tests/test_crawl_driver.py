@@ -8,13 +8,14 @@ sleeps: the clock and the pause are injected.
 from __future__ import annotations
 
 import contextlib
+import inspect
 import json
 import re
 import time
 from dataclasses import dataclass, fields, replace
 from pathlib import Path
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import pytest
 
@@ -156,6 +157,7 @@ def run(
     settle: float = 1.0,
     stop: Callable[[], bool] | None = None,
     policy: Policy | None = None,
+    restart: bool = True,
 ) -> CrawlResult:
     return crawl(
         device,
@@ -169,6 +171,7 @@ def run(
         stop=stop,
         clock=clock.monotonic,
         sleep=clock.sleep,
+        restart=restart,
     )
 
 
@@ -229,6 +232,13 @@ def test_a_small_app_is_crawled_end_to_end(tmp_path, device, android, clock):
     assert ids == list(range(1, result.actions + 1))
     assert [e["action_id"] for e in ends] == ids
     assert starts[0]["action"] == {"kind": "launch"}
+    # The run is planned with restart, and only the first launch force-stops
+    # (then starts, as one action).
+    assert [start["restart"], *(s.get("restart") for s in starts)] == [
+        True,
+        True,
+        *[None] * (len(starts) - 1),
+    ]
     assert not any(e["dump_failed"] for e in ends)
     kinds = [s["action"]["kind"] for s in starts]
     assert set(kinds) == {"launch", "tap", "back"}
@@ -262,7 +272,7 @@ def test_a_small_app_is_crawled_end_to_end(tmp_path, device, android, clock):
     assert_no_text_input(android)
     assert_no_long_press(android)
     assert_no_press_inside(android, "delete")
-    assert android.stopped == []
+    assert android.stopped == [SHOP]  # the first launch's force-stop only
     # Each tap and BACK waits 1 s in steps of at most 0.1 s (stop is polled).
     assert max(clock.pauses) <= crawl_driver.PAUSE_STEP
     assert sum(clock.pauses) == pytest.approx(1.0 * (result.actions - 1))
@@ -439,7 +449,8 @@ def test_a_relaunch_restarts_the_app(tmp_path, device, android, monkeypatch, clo
     monkeypatch.setattr(device, "tap", tap_then_cover)
     launches = spy(monkeypatch, device, "_launch_component", crowd)
     out = tmp_path / "run"
-    result = run(device, clock, out)
+    # restart=False: android.stopped then counts relaunches only.
+    result = run(device, clock, out, restart=False)
     assert result.stop_reason in STOP_REASONS
     kinds = [
         r["action"]["kind"] for r in lines(out / "transitions.jsonl") if "action" in r
@@ -644,7 +655,8 @@ def test_the_crawl_reads_the_launcher_before_every_start(
         return result
 
     monkeypatch.setattr(device, "tap", tap_then_cover)
-    run(device, clock, tmp_path / "run")
+    # restart=False: android.stopped then counts relaunches only.
+    run(device, clock, tmp_path / "run", restart=False)
     sent = commands(fake_adb)
     resolve = (
         f"cmd package resolve-activity --brief -c {LAUNCHER} {SHOP};"
@@ -697,33 +709,41 @@ def test_a_relaunch_starts_the_launcher_as_it_is_now(
 
     monkeypatch.setattr(device, "tap", tap_then_cover)
     android.override(re.compile(r"^cmd package"), launcher)
-    run(device, clock, tmp_path / "run")
+    # restart=False: android.stopped then counts relaunches only.
+    run(device, clock, tmp_path / "run", restart=False)
     starts = [c for c in commands(fake_adb) if c.startswith("am start")]
     assert len(starts) >= 2
     assert f"-n {SHOP}/.Main;" in starts[0]
     assert all(f"-n {SHOP}/.Detail;" in c for c in starts[1:])
 
 
+@pytest.mark.parametrize("restart", [False, True], ids=["no-restart", "restart"])
 def test_an_unreadable_launcher_ends_the_crawl_at_the_first_launch(
-    tmp_path, device, android, clock, fake_adb
+    tmp_path, device, android, clock, fake_adb, restart
 ):
     # The launcher is read right before the first start: when it cannot be
-    # read, the start is not sent and the run ends with error.
+    # read, the start is not sent and the run ends with error. With restart
+    # it is read in the gate of the force-stop too, so nothing at all is
+    # sent: the app is not force-stopped either.
     android.override(re.compile(r"^cmd package"), b"No activity found\n")
     out = tmp_path / "run"
     with pytest.raises(LaunchFailedError) as info:
-        run(device, clock, out)
+        run(device, clock, out, restart=restart)
     assert info.value.details == {
         "package": SHOP,
         "reason": "launcher_unreadable",
         "output": "No activity found",
     }
     assert not any(c.startswith(("am ", "input ")) for c in commands(fake_adb))
+    assert android.stopped == []
     records = lines(out / "transitions.jsonl")
+    assert len(records) == 2
     assert (records[-1]["not_sent"], records[-1]["reason"]) == (
         True,
         "launcher_unreadable",
     )
+    summary = (out / "summary.txt").read_text(encoding="utf-8")
+    assert "force-stopped" not in summary
     assert json.loads((out / "run.json").read_text(encoding="utf-8"))[
         "stop_reason"
     ] == ("error")
@@ -757,7 +777,8 @@ def test_an_unreadable_launcher_at_a_relaunch_sends_no_start(
     android.override(re.compile(r"^cmd package"), launcher)
     out = tmp_path / "run"
     with pytest.raises(LaunchFailedError) as info:
-        run(device, clock, out)
+        # restart=False: android.stopped then counts relaunches only.
+        run(device, clock, out, restart=False)
     assert info.value.details["reason"] == "launcher_unreadable"
     assert android.stopped == [SHOP]
     starts = [c for c in commands(fake_adb) if c.startswith("am start")]
@@ -833,7 +854,9 @@ def test_a_start_whose_reply_does_not_come_ends_the_crawl(
     monkeypatch.setattr(device._client, "shell", silent_start)
     out = tmp_path / "run"
     with pytest.raises(LaunchFailedError) as info:
-        run(device, clock, out)
+        # The first launch with its force-stop; a relaunch after a first
+        # launch without one, so that cover_after_browse covers the app.
+        run(device, clock, out, restart=nth == 1)
     assert info.value.details["reason"] == "start_timeout"
     # Nothing more after that start: no stop, start, input or read.
     assert device_requests_after(fake_adb, start_requests(fake_adb)[-1]) == []
@@ -879,7 +902,9 @@ def test_a_launch_that_fails_and_ends_the_crawl_gets_its_end_line(
     android.override(re.compile(r"^am start"), answer)
     out = tmp_path / "run"
     with pytest.raises(LaunchFailedError) as info:
-        run(device, clock, out)
+        # The first launch with its force-stop; a relaunch after a first
+        # launch without one, so that cover_after_browse covers the app.
+        run(device, clock, out, restart=nth == 1)
     assert info.value.details["reason"] == "start_failed"
     records = lines(out / "transitions.jsonl")
     started = [r for r in records if "action" in r]
@@ -1067,7 +1092,8 @@ def test_a_late_caller_clock_cannot_move_the_deadline_later(
 
     monkeypatch.setattr(crawl_driver._Run, "launch_gate", late_gate)
     out = tmp_path / "run"
-    result = run(device, clock, out, limits=Limits(minutes=1))
+    # The first launch without a force-stop, whose gate is launch_gate.
+    result = run(device, clock, out, limits=Limits(minutes=1), restart=False)
     assert result.stop_reason == "max_duration"
     assert start_requests(fake_adb) == []
     records = lines(out / "transitions.jsonl")
@@ -1107,6 +1133,7 @@ def test_the_deadline_is_taken_before_the_first_caller_clock_value(
         settle=0.0,
         clock=caller_clock,
         sleep=lambda _s: None,
+        restart=False,  # the first launch's gate is launch_gate
     )
     assert result.stop_reason == "max_duration"
     assert start_requests(fake_adb) == []
@@ -1172,7 +1199,7 @@ def test_a_policy_with_avoided_areas_crawls_as_before(tmp_path, device, android,
         if "action" in r
     ]
     assert kinds == ["launch", "tap", "tap", "back", "back", "tap", "back"]
-    assert android.stopped == []
+    assert android.stopped == [SHOP]  # the first launch's force-stop only
 
 
 # --- uiprobe's own clock, read once per check ---
@@ -1235,7 +1262,8 @@ def test_a_start_that_hands_over_for_a_moment_is_waited_on(
     # The start names an activity of another app, whose screen is in front,
     # and the shop comes back to the front 2 s later. As on main, the launch
     # waits for it: no force-stop and no BACK to the other app before the
-    # wait ends, and the crawl then taps the shop.
+    # wait ends, and the crawl then taps the shop. The only force-stop is the
+    # first launch's own, before its start.
     monkeypatch.setattr(device, "_clock", clock.monotonic)
     monkeypatch.setattr(device, "_sleep", clock.sleep)
     started: list[float] = []
@@ -1272,8 +1300,8 @@ def test_a_start_that_hands_over_for_a_moment_is_waited_on(
     out = tmp_path / "run"
     run(device, clock, out, policy=policy, limits=Limits(actions=3))
     assert len(started) == 1  # one start, no relaunch
-    assert first_input[0] == ("tap", [])  # the shop is tapped, nothing stopped
-    assert android.stopped == []
+    assert first_input[0] == ("tap", [SHOP])  # the shop is tapped, no relaunch
+    assert android.stopped == [SHOP]
     summary = (out / "summary.txt").read_text(encoding="utf-8")
     assert "was not in front after launch" not in summary
 
@@ -1305,22 +1333,92 @@ def test_the_time_budget_starts_before_the_launcher_read(
     assert not [c for _, _, c in fake_adb.commands if c.startswith("am start")]
 
 
+@pytest.mark.parametrize("restart", [False, True], ids=["no-restart", "restart"])
 def test_a_start_whose_launcher_read_ends_past_the_limit_is_not_sent(
-    tmp_path, device, android, clock, fake_adb
+    tmp_path, device, android, clock, fake_adb, restart
 ):
     # The injected clock moves only during the first launch's launcher read,
-    # past the 1-minute limit (uiprobe's own clock does not move). The gate
-    # reads the clock after that read, before its last comparison: no start.
+    # past the 1-minute limit (uiprobe's own clock does not move). The clock
+    # is read after that read, before the last comparison: no start. With
+    # restart that read is in the gate of the force-stop: nothing is sent.
     def slow_read(command: str):
         clock.now += 61.0
         return android._shell(command)
 
     android.override(re.compile(r"^cmd package"), slow_read)
     out = tmp_path / "run"
-    run(device, clock, out, limits=Limits(minutes=1))
+    result = run(device, clock, out, limits=Limits(minutes=1), restart=restart)
+    assert result.stop_reason == "max_duration"
     assert not [c for _, _, c in fake_adb.commands if c.startswith("am start")]
+    assert android.stopped == []
     records = lines(out / "transitions.jsonl")
     assert (records[-1]["not_sent"], records[-1]["reason"]) == (True, "time_limit")
+
+
+def test_a_first_launch_whose_read_after_the_force_stop_ends_late_sends_no_start(
+    tmp_path, device, android, clock, fake_adb
+):
+    # With restart the launcher is read twice: in the gate of the force-stop,
+    # and after the force-stop, before the start. The second read ends past
+    # the limit: the force-stop went out, the start does not.
+    reads: list[str] = []
+
+    def slow_second_read(command: str):
+        reads.append(command)
+        if len(reads) == 2:
+            clock.now += 61.0
+        return android._shell(command)
+
+    android.override(re.compile(r"^cmd package"), slow_second_read)
+    out = tmp_path / "run"
+    result = run(device, clock, out, limits=Limits(minutes=1))
+    assert result.stop_reason == "max_duration"
+    assert len(reads) == 2
+    assert android.stopped == [SHOP]
+    assert not [c for _, _, c in fake_adb.commands if c.startswith("am start")]
+    records = lines(out / "transitions.jsonl")
+    assert (records[-1]["not_sent"], records[-1]["reason"]) == (
+        True,
+        "start_not_sent",
+    )
+
+
+def test_a_launcher_unreadable_only_after_the_first_force_stop_sends_no_start(
+    tmp_path, device, android, clock, fake_adb
+):
+    # The read in the gate of the force-stop works; the read after the
+    # force-stop fails. The app was force-stopped, the start is not sent, the
+    # launch ends as start_not_sent and the run with launch_failed.
+    reads: list[str] = []
+
+    def second_read_fails(command: str):
+        reads.append(command)
+        if len(reads) == 1:
+            return android._shell(command)
+        return b"No activity found\n"
+
+    android.override(re.compile(r"^cmd package"), second_read_fails)
+    out = tmp_path / "run"
+    with pytest.raises(LaunchFailedError) as info:
+        run(device, clock, out)
+    assert info.value.details["reason"] == "launcher_unreadable"
+    assert len(reads) == 2
+    assert android.stopped == [SHOP]
+    assert changing_commands(fake_adb) == [RESOLVE, FORCE_STOP, RESOLVE]
+    records = lines(out / "transitions.jsonl")
+    assert len(records) == 2
+    assert records[0]["restart"] is True
+    assert (records[-1]["not_sent"], records[-1]["reason"]) == (
+        True,
+        "start_not_sent",
+    )
+    summary = (out / "summary.txt").read_text(encoding="utf-8")
+    assert (
+        f"{SHOP} was force-stopped at the start of the run but not started"
+        " (launcher_unreadable)" in summary
+    )
+    run_json = json.loads((out / "run.json").read_text(encoding="utf-8"))
+    assert run_json["stop_reason"] == "error"
 
 
 def test_a_relaunch_whose_launcher_read_ends_past_the_limit_sends_no_start(
@@ -1350,7 +1448,8 @@ def test_a_relaunch_whose_launcher_read_ends_past_the_limit_sends_no_start(
     monkeypatch.setattr(device, "tap", tap_then_cover)
     android.override(re.compile(r"^cmd package"), slow_second_read)
     out = tmp_path / "run"
-    result = run(device, clock, out)
+    # restart=False: android.stopped then counts relaunches only.
+    result = run(device, clock, out, restart=False)
     assert result.stop_reason == "max_duration"
     assert android.stopped == [SHOP]  # the relaunch's force-stop went out
     starts = [c for _, _, c in fake_adb.commands if c.startswith("am start")]
@@ -1453,7 +1552,15 @@ def test_a_relaunch_start_that_went_out_is_not_recorded_as_unsent(
 
     android.override(re.compile(r"^am start"), start_then_end)
     out = tmp_path / "run"
-    result = run(device, clock, out, limits=Limits(minutes=1), stop=lambda: bool(asked))
+    # restart=False: android.stopped then counts relaunches only.
+    result = run(
+        device,
+        clock,
+        out,
+        limits=Limits(minutes=1),
+        stop=lambda: bool(asked),
+        restart=False,
+    )
     assert len(starts) == 2
     expected = "max_duration" if end == "time_limit" else "interrupted"
     assert result.stop_reason == expected
@@ -1480,7 +1587,8 @@ def test_a_stop_asked_during_the_relaunch_pin_check_sends_no_start(
 
     monkeypatch.setattr(Device, "check_pin", check_then_stop)
     out = tmp_path / "run"
-    result = run(device, clock, out, stop=lambda: bool(asked))
+    # restart=False: android.stopped then counts relaunches only.
+    result = run(device, clock, out, stop=lambda: bool(asked), restart=False)
     assert result.stop_reason == "interrupted"
     assert android.stopped == [SHOP]
     assert len(start_requests(fake_adb)) == 1  # the first launch only
@@ -1594,7 +1702,8 @@ def test_a_relaunch_start_is_not_sent_once_the_time_limit_passed(
 
     monkeypatch.setattr(Device, "_check_listed", listed_then_late)
     out = tmp_path / "run"
-    result = run(device, clock, out)
+    # restart=False: android.stopped then counts relaunches only.
+    result = run(device, clock, out, restart=False)
     assert result.stop_reason == "max_duration"
     assert android.stopped == [SHOP]
     assert len(start_requests(fake_adb)) == 1  # the first launch only
@@ -2482,7 +2591,8 @@ def test_a_stop_between_force_stop_and_start_sends_no_start(
     monkeypatch.setattr(device, "stop_app", stop_then_ask)
     launches = spy(monkeypatch, device, "_launch_component", lambda *_a, **_k: None)
     out = tmp_path / "run"
-    result = run(device, clock, out, stop=lambda: bool(stopping))
+    # restart=False: android.stopped then counts relaunches only.
+    result = run(device, clock, out, stop=lambda: bool(stopping), restart=False)
     assert result.stop_reason == "interrupted"
     assert android.stopped == [SHOP]
     assert len(launches) == 1  # the first launch only
@@ -2511,7 +2621,7 @@ def test_a_back_that_is_not_sent_ends_the_run(
     assert not [i for i in android.inputs if i.kind == "key"]
     summary = (out / "summary.txt").read_text(encoding="utf-8")
     assert "back was not sent: keyboard_unknown" in summary
-    assert android.stopped == []  # no relaunch followed
+    assert android.stopped == [SHOP]  # the first launch's; no relaunch followed
 
 
 def test_a_clock_that_does_not_move_cannot_hold_the_pause(tmp_path, device, clock):
@@ -2615,9 +2725,14 @@ def test_a_stop_refusal_ends_the_run_without_another_read(
 # --- the two last gaps ---
 
 
+@pytest.mark.parametrize("restart", [False, True], ids=["relaunch", "first-launch"])
 def test_a_changed_identity_after_the_force_stop_sends_no_start(
-    tmp_path, device, android, monkeypatch, clock
+    tmp_path, device, android, monkeypatch, clock, restart
 ):
+    # The identity changes right after the force-stop (of a relaunch, or of
+    # the first launch with restart): the pin check before the start raises
+    # device_changed. The start was not sent, so the action is closed as
+    # start_not_sent (not failed, not left open), then the error is raised.
     original = device.tap
 
     def tap_then_cover(
@@ -2640,11 +2755,173 @@ def test_a_changed_identity_after_the_force_stop_sends_no_start(
 
     monkeypatch.setattr(device, "stop_app", stop_then_swap)
     launches = spy(monkeypatch, device, "_launch_component", lambda *_a, **_k: None)
+    out = tmp_path / "run"
     with pytest.raises(DeviceNotFoundError) as info:
-        run(device, clock, tmp_path / "run")
+        # restart=False: android.stopped then counts relaunches only.
+        run(device, clock, out, restart=restart)
     assert info.value.details["reason"] == "device_changed"
     assert android.stopped == [SHOP]
-    assert len(launches) == 1  # the first launch only, no start after the stop
+    # No start after the force-stop (without restart, the first launch's).
+    assert len(launches) == (0 if restart else 1)
+    records = lines(out / "transitions.jsonl")
+    started = [r for r in records if "action" in r]
+    assert started[-1]["action"]["kind"] == ("launch" if restart else "relaunch")
+    assert records[-1] == {
+        "schema": "uiprobe.transition_end/1",
+        "recorded_at": records[-1]["recorded_at"],
+        "action_id": started[-1]["action_id"],
+        "not_sent": True,
+        "reason": "start_not_sent",
+    }
+    summary = (out / "summary.txt").read_text(encoding="utf-8")
+    what = (
+        "at the start of the run but not started"
+        if restart
+        else "but not started again"
+    )
+    assert f"{SHOP} was force-stopped {what} (device_changed)" in summary
+    assert json.loads((out / "run.json").read_bytes())["stop_reason"] == "error"
+
+
+@pytest.mark.parametrize("restart", [False, True], ids=["relaunch", "first-launch"])
+def test_an_interrupt_after_the_force_stop_closes_the_start_as_not_sent(
+    tmp_path, device, android, monkeypatch, clock, fake_adb, restart
+):
+    # Ctrl+C arrives in the pin check between the force-stop and the start:
+    # the start was not sent, the action is closed as start_not_sent, then
+    # the interrupt is raised again (stop() does not ask to return).
+    # Without restart the first force-stop is the relaunch's (the cover
+    # brings it); with restart it is the first launch's.
+    cover_after_browse(monkeypatch, device, android)
+    original = Device.check_pin
+    interrupted: list[bool] = []
+
+    def check_then_interrupt(self: Device, **kwargs: object) -> None:
+        original(self, **kwargs)  # ty: ignore[invalid-argument-type]
+        if android.stopped and not interrupted:
+            interrupted.append(True)
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr(Device, "check_pin", check_then_interrupt)
+    out = tmp_path / "run"
+    with pytest.raises(KeyboardInterrupt):
+        run(device, clock, out, restart=restart)
+    assert interrupted
+    assert len(start_requests(fake_adb)) == (0 if restart else 1)
+    records = lines(out / "transitions.jsonl")
+    started = [r for r in records if "action" in r]
+    assert started[-1]["action"]["kind"] == ("launch" if restart else "relaunch")
+    assert (records[-1]["action_id"], records[-1]["reason"]) == (
+        started[-1]["action_id"],
+        "start_not_sent",
+    )
+    assert records[-1]["not_sent"] is True
+    summary = (out / "summary.txt").read_text(encoding="utf-8")
+    assert "force-stopped" in summary
+    assert "(interrupted)" in summary
+    assert json.loads((out / "run.json").read_bytes())["stop_reason"] == "interrupted"
+
+
+@pytest.mark.parametrize("restart", [False, True], ids=["no-restart", "restart"])
+def test_a_failed_write_of_the_not_sent_line_keeps_the_read_error(
+    tmp_path, device, android, monkeypatch, clock, fake_adb, restart
+):
+    # The adb connection is lost in the first launcher read, and the end line
+    # that closes the launch cannot be written: the error raised is still the
+    # read's, not the run folder's.
+    def lost(package: str) -> str:
+        del package
+        raise AdbError("connection closed", details={})
+
+    original = RunWriter.write_transition_end
+
+    def refuse_not_sent(self, *args, **kwargs):
+        if kwargs.get("not_sent") is not None:
+            raise RunFolderError("disk full", details={"path": "x"})
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(device, "_start_component", lost)
+    monkeypatch.setattr(RunWriter, "write_transition_end", refuse_not_sent)
+    out = tmp_path / "run"
+    with pytest.raises(AdbError, match="connection closed"):
+        run(device, clock, out, restart=restart)
+    assert not [c for c in commands(fake_adb) if c.startswith(("am ", "input "))]
+    assert android.stopped == []
+    assert len(lines(out / "transitions.jsonl")) == 1  # the end line failed
+    assert json.loads((out / "run.json").read_bytes())["stop_reason"] == "error"
+
+
+@pytest.mark.parametrize("restart", [False, True], ids=["relaunch", "first-launch"])
+def test_an_interrupt_in_the_last_comparison_before_the_start_closes_it(
+    tmp_path, device, android, monkeypatch, clock, fake_adb, restart
+):
+    # Ctrl+C arrives in the last comparison of the pin before the start,
+    # after the force-stop went out: the start is not sent, the action is
+    # closed as start_not_sent with the note, and the interrupt is raised.
+    cover_after_browse(monkeypatch, device, android)
+    final_check = crawl_driver._Run.final_check
+    interrupted: list[bool] = []
+
+    def interrupt_at_start(self, path: str, approved: int) -> bool:
+        if path == "start" and not interrupted:
+            interrupted.append(True)
+            raise KeyboardInterrupt
+        return final_check(self, path, approved)
+
+    monkeypatch.setattr(crawl_driver._Run, "final_check", interrupt_at_start)
+    out = tmp_path / "run"
+    with pytest.raises(KeyboardInterrupt):
+        run(device, clock, out, restart=restart)
+    assert interrupted
+    assert android.stopped == [SHOP]
+    assert len(start_requests(fake_adb)) == (0 if restart else 1)
+    records = lines(out / "transitions.jsonl")
+    started = [r for r in records if "action" in r]
+    assert started[-1]["action"]["kind"] == ("launch" if restart else "relaunch")
+    assert records[-1] == {
+        "schema": "uiprobe.transition_end/1",
+        "recorded_at": records[-1]["recorded_at"],
+        "action_id": started[-1]["action_id"],
+        "not_sent": True,
+        "reason": "start_not_sent",
+    }
+    summary = (out / "summary.txt").read_text(encoding="utf-8")
+    what = (
+        "at the start of the run but not started"
+        if restart
+        else "but not started again"
+    )
+    assert f"{SHOP} was force-stopped {what} (interrupted)" in summary
+    assert json.loads((out / "run.json").read_bytes())["stop_reason"] == "interrupted"
+
+
+@pytest.mark.parametrize("restart", [False, True], ids=["no-restart", "restart"])
+def test_a_lost_connection_in_the_first_launcher_read_closes_the_launch(
+    tmp_path, device, android, monkeypatch, clock, fake_adb, restart
+):
+    # The adb connection is lost in the first launcher read, before anything
+    # was sent: the launch is closed as not sent (adb_error), then the error
+    # is raised.
+    def lost(package: str) -> str:
+        del package
+        raise AdbError("connection closed", details={})
+
+    monkeypatch.setattr(device, "_start_component", lost)
+    out = tmp_path / "run"
+    with pytest.raises(AdbError):
+        run(device, clock, out, restart=restart)
+    assert not [c for c in commands(fake_adb) if c.startswith(("am ", "input "))]
+    assert android.stopped == []
+    records = lines(out / "transitions.jsonl")
+    assert len(records) == 2
+    assert records[1] == {
+        "schema": "uiprobe.transition_end/1",
+        "recorded_at": records[1]["recorded_at"],
+        "action_id": 1,
+        "not_sent": True,
+        "reason": "adb_error",
+    }
+    assert json.loads((out / "run.json").read_bytes())["stop_reason"] == "error"
 
 
 @pytest.mark.parametrize("kind", ["tap", "back"])
@@ -2714,7 +2991,7 @@ def test_by_default_a_screen_of_another_app_gets_no_input(
     # not one input request reached the adb server, only relaunches of the app
     assert _inputs_sent(fake_adb) == []
     assert android.inputs == []
-    assert android.stopped == [SHOP, SHOP, SHOP]
+    assert android.stopped == [SHOP] * 4  # the first launch and 3 relaunches
     records = lines(out / "transitions.jsonl")
     starts = [r for r in records if "action" in r]
     assert [r["action"]["kind"] for r in starts] == [
@@ -2724,6 +3001,8 @@ def test_by_default_a_screen_of_another_app_gets_no_input(
         "relaunch",
     ]
     assert "off_target" not in starts[0]
+    assert starts[0]["restart"] is True
+    assert not any("restart" in start for start in starts[1:])
     for start in starts[1:]:
         assert start["off_target"] == {
             "package": OTHER,
@@ -2747,7 +3026,7 @@ def test_with_back_on_other_screens_back_goes_to_the_other_app(
     assert len(keys) == 2 * 4
     assert {i.screen for i in keys} == {"ext3", "ext2"}
     assert len(_inputs_sent(fake_adb)) == 2 * 4
-    assert android.stopped == [SHOP, SHOP, SHOP]
+    assert android.stopped == [SHOP] * 4  # the first launch and 3 relaunches
     records = lines(out / "transitions.jsonl")
     starts = [r for r in records if "action" in r]
     assert [r["action"]["kind"] for r in starts] == [
@@ -2980,7 +3259,8 @@ def test_a_restart_whose_pin_check_ends_past_the_limit_is_only_half_sent(
     monkeypatch.setattr(device, "tap", tap_then_cover)
     monkeypatch.setattr(Device, "check_pin", slow_after_stop)
     out = tmp_path / "run"
-    result = run(device, clock, out)
+    # restart=False: android.stopped then counts relaunches only.
+    result = run(device, clock, out, restart=False)
     assert android.stopped == [SHOP]
     assert len(_starts(fake_adb)) == 1  # the first launch only
     assert result.stop_reason == "max_duration"
@@ -3160,6 +3440,161 @@ def test_skip_lines_name_the_row_reasons(tmp_path, fake_adb, clock, monkeypatch)
     # 310..370) were tapped; neither row.
     taps = {i.point for i in android.inputs if i.kind == "tap"}
     assert taps == {(268, 245), (280, 340)}
+
+
+# --- the first launch stops the app first (restart, the default) ---
+
+RESOLVE = (
+    f"cmd package resolve-activity --brief -c {LAUNCHER} {SHOP}; echo uiprobe-exit:$?"
+)
+START = (
+    f"am start -W -a android.intent.action.MAIN -c {LAUNCHER} -n {SHOP}/.Main;"
+    " echo uiprobe-exit:$?"
+)
+FORCE_STOP = f"am force-stop {SHOP}; echo uiprobe-exit:$?"
+
+
+def changing_commands(fake_adb: FakeAdbServer) -> list[str]:
+    """The starts and stops the device received, each with its launcher read."""
+    return [
+        c
+        for c in commands(fake_adb)
+        if c.startswith(("am ", "input ", "monkey")) or c == RESOLVE
+    ]
+
+
+def test_the_first_launch_force_stops_then_starts_as_one_action(
+    tmp_path, device, android, clock, fake_adb
+):
+    android.show("browse")  # the app is open below its first screen
+    out = tmp_path / "run"
+    result = run(device, clock, out, limits=Limits(actions=1))
+    assert (result.stop_reason, result.actions) == ("max_actions", 1)
+    # The launcher read of the gate, the force-stop, then, as a relaunch,
+    # the launcher read again and the start (which uses the second read).
+    assert changing_commands(fake_adb) == [RESOLVE, FORCE_STOP, RESOLVE, START]
+    assert android.stopped == [SHOP]
+    assert android.screen.name == "main"  # the app's first screen
+    records = lines(out / "transitions.jsonl")
+    assert len(records) == 2  # one action: one start line, one end line
+    assert records[0] == {
+        "schema": "uiprobe.transition_start/1",
+        "recorded_at": records[0]["recorded_at"],
+        "action_id": 1,
+        "action": {"kind": "launch"},
+        "restart": True,
+    }
+    assert records[1]["action_id"] == 1
+    assert records[1]["to_screen_id"] == result.last_screen_id
+    shown = json.loads((out / "screens" / f"{result.last_screen_id}.json").read_bytes())
+    assert shown["app"]["activity"].endswith(".Main")
+    assert json.loads((out / "run.json").read_bytes())["actions"] == 1
+    assert json.loads((out / "run-start.json").read_bytes())["restart"] is True
+
+
+def test_without_restart_the_first_launch_sends_only_the_start(
+    tmp_path, device, android, clock, fake_adb
+):
+    android.show("browse")
+    out = tmp_path / "run"
+    result = run(device, clock, out, limits=Limits(actions=1), restart=False)
+    assert (result.stop_reason, result.actions) == ("max_actions", 1)
+    assert changing_commands(fake_adb) == [RESOLVE, START]
+    assert android.stopped == []
+    assert android.screen.name == "browse"  # the screen it showed
+    records = lines(out / "transitions.jsonl")
+    assert records[0]["action"] == {"kind": "launch"}
+    assert "restart" not in records[0]
+    assert json.loads((out / "run-start.json").read_bytes())["restart"] is False
+
+
+@pytest.mark.parametrize("end", ["stop", "time_limit"])
+def test_a_stop_or_the_time_limit_after_the_first_force_stop_sends_no_start(
+    tmp_path, device, android, monkeypatch, clock, fake_adb, end
+):
+    share_clock(monkeypatch, clock)
+    stopped_app: list[bool] = []
+    stop_app = device.stop_app
+
+    def stop_then_end(
+        package: str, _send_by: float | None = None, _epoch: int | None = None
+    ) -> None:
+        stop_app(package, _send_by=_send_by, _epoch=_epoch)
+        stopped_app.append(True)
+        if end == "time_limit":
+            clock.now += 3600.0
+
+    monkeypatch.setattr(device, "stop_app", stop_then_end)
+    out = tmp_path / "run"
+    result = run(device, clock, out, stop=lambda: end == "stop" and bool(stopped_app))
+    assert result.stop_reason == ("interrupted" if end == "stop" else "max_duration")
+    assert android.stopped == [SHOP]
+    assert start_requests(fake_adb) == []
+    assert result.actions == 1
+    assert dict(result.not_sent) == {"start_not_sent": 1}
+    records = lines(out / "transitions.jsonl")
+    assert [r["action_id"] for r in records] == [1, 1]
+    assert records[0]["restart"] is True
+    assert (records[1]["not_sent"], records[1]["reason"]) == (True, "start_not_sent")
+    why = "stopped" if end == "stop" else "time_limit"
+    summary = (out / "summary.txt").read_text(encoding="utf-8")
+    assert (
+        f"{SHOP} was force-stopped at the start of the run but not started ({why})"
+        in summary
+    )
+
+
+@pytest.mark.usefixtures("android")
+@pytest.mark.parametrize("end", ["stop", "time_limit"])
+def test_a_stop_or_the_time_limit_before_the_first_force_stop_sends_nothing(
+    tmp_path, device, monkeypatch, clock, fake_adb, end
+):
+    # Asked in the gate of the force-stop, after its pin check: nothing goes
+    # out, and the launch is closed as not sent for that reason.
+    share_clock(monkeypatch, clock)
+    in_gate: list[bool] = []
+    gate = crawl_driver._Run.restart_gate
+
+    def marked_gate(self):
+        in_gate.append(True)
+        if end == "time_limit":
+            clock.now += 3600.0
+        return gate(self)
+
+    monkeypatch.setattr(crawl_driver._Run, "restart_gate", marked_gate)
+    out = tmp_path / "run"
+    result = run(device, clock, out, stop=lambda: end == "stop" and bool(in_gate))
+    assert in_gate
+    assert result.stop_reason == ("interrupted" if end == "stop" else "max_duration")
+    # Only the gate's launcher read, when stop() did not skip it.
+    assert [c for c in changing_commands(fake_adb) if c != RESOLVE] == []
+    records = lines(out / "transitions.jsonl")
+    reason = "stopped" if end == "stop" else "time_limit"
+    assert (records[-1]["not_sent"], records[-1]["reason"]) == (True, reason)
+    assert "force-stopped" not in (out / "summary.txt").read_text(encoding="utf-8")
+
+
+def test_a_bad_restart_value_is_a_type_error(tmp_path, device, android, fake_adb):
+    loose: Any = crawl
+    for value in ("yes", 1, None):
+        with pytest.raises(TypeError, match="restart must be a bool"):
+            loose(
+                device,
+                SHOP,
+                tmp_path / "run",
+                policy=Policy(),
+                limits=Limits(),
+                restart=value,
+            )
+    assert not (tmp_path / "run").exists()
+    assert fake_adb.commands == []
+    assert android.inputs == []
+
+
+def test_restart_is_keyword_only():
+    parameter = inspect.signature(crawl).parameters["restart"]
+    assert parameter.kind is inspect.Parameter.KEYWORD_ONLY
+    assert parameter.default is True
 
 
 # --- the up button of a sub-page ---
