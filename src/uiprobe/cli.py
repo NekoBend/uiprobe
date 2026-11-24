@@ -1013,18 +1013,44 @@ def _is_missing(path: str) -> bool:
     return False
 
 
-def _check_config_path(path: str | None) -> None:
-    """Refuse a ``--config`` value that ends with a path separator.
+def _file_of_folder_form(path: str) -> str | None:
+    """Return `path` without a trailing separator or ``.`` part, if it has one.
 
-    A folder-like name such as ``rules.toml/`` would otherwise lose its slash
-    when turned into a path and name the file ``rules.toml``.
+    ``rules.toml/``, ``rules.toml/.`` and ``rules.toml/./`` are the folder
+    form of ``rules.toml``; None means `path` has no such ending.
     """
-    if path is not None and path.endswith(("/", "\\") if _ON_WINDOWS else "/"):
-        msg = (
-            f"--config {_shown(path)}: a settings file path cannot end with "
-            "a path separator"
-        )
-        raise _UsageError(msg)
+    separators = "/\\" if _ON_WINDOWS else "/"
+    stripped = path
+    while stripped:
+        if stripped[-1] in separators:
+            stripped = stripped[:-1]
+        elif stripped[-2:-1] in tuple(separators) and stripped[-1] == ".":
+            stripped = stripped[:-2]
+        else:
+            break
+    return None if stripped == path else stripped
+
+
+def _check_config_path(path: str | None) -> None:
+    """Refuse a ``--config`` value that ends with a path separator or ``/.``.
+
+    A folder-like name such as ``rules.toml/`` or ``rules.toml/.`` would
+    otherwise lose its ending when turned into a path and name the file
+    ``rules.toml``. The message names the file itself, never an init command
+    for the folder form.
+    """
+    if path is None:
+        return
+    file = _file_of_folder_form(path)
+    if file is None:
+        return
+    msg = (
+        f"--config {_shown(path)}: a settings file path cannot end with a path"
+        ' separator or "/." (that is the folder form of a path)'
+    )
+    if file:
+        msg += f"; to use the file, give --config {_shown(file)}"
+    raise _UsageError(msg)
 
 
 def _key_settings(args: argparse.Namespace) -> Settings | None:
@@ -1359,12 +1385,12 @@ def _preview_guidance(
 ) -> list[str]:
     """How to switch from this preview to a pressing run; empty when none applies.
 
-    A file that says press = true was overridden by --dry-run, so dropping
-    that option is the switch and nothing is printed. Otherwise the lines say
-    what to add to the same command for this run (so its other options, such
-    as -s, --deny and --config, stay as they were) and press = true for every
-    run, and, unless the device answers that it is an emulator,
-    --allow-real-device.
+    A file that says press = true was overridden by --dry-run, so the switch
+    is to remove that option (and add --out DIR) and nothing is printed.
+    Otherwise the lines say what to add to the same command for this run (so
+    its other options, such as -s, --deny and --config, stay as they were)
+    and press = true for every run, and, unless the device answers that it
+    is an emulator, --allow-real-device.
     """
     if settings.press:
         return []
@@ -1548,26 +1574,15 @@ def _cmd_crawl_press(args: argparse.Namespace, setup: _CrawlSetup) -> int:
     assert setup.out is not None  # noqa: S101 - _crawl_policy sets it to press
     out: str = setup.out
     shown_out = _shown(out)
-    # First the emulator check alone, with the read a dry run makes (getprop
-    # ro.kernel.qemu), so that a real device refused without
-    # --allow-real-device gets no other read (no serial number, build
-    # fingerprint or boot id). Then the pin, on the serial checked here.
-    checked = Device(
-        _single_serial(args),
-        adb_server=args.adb_server,
-        adb=args.adb,
-        start_server=args.start_server,
-    )
-    emulator = _press_device_check(checked, allow_real_device=args.allow_real_device)
     device = Device(
-        checked.serial,
+        _single_serial(args),
         adb_server=args.adb_server,
         adb=args.adb,
         start_server=args.start_server,
         pin=True,
     )
-    # The device may have been swapped between that check and the pin, so
-    # the identity read through the pin must agree before anything is shown
+    emulator = _press_device_check(device, allow_real_device=args.allow_real_device)
+    # The identity read through the pin must agree before anything is shown
     # or written: first that it is still the same device, then (without
     # --allow-real-device) that this identity also says emulator, which every
     # later pin check requires.

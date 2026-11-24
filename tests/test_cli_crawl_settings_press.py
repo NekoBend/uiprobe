@@ -15,7 +15,7 @@ from tests.fake_device import FakeAndroid
 from tests.test_crawl_driver import SCREENS, SERIAL, SHOP, TRANSPORT
 from uiprobe import cli
 from uiprobe.crawl import Limits
-from uiprobe.device import Device
+from uiprobe.device import IDENTITY_COMMAND
 from uiprobe.settings import (
     DEFAULTS_VERSION,
     SETTINGS_FILE,
@@ -609,40 +609,66 @@ def test_the_loader_opens_the_path_as_given(here):
         load_settings(f"{path}/.")
 
 
-@posix_only
+FOLDER_FORM = (
+    'a settings file path cannot end with a path separator or "/." (that is the'
+    " folder form of a path)"
+)
+
+
+@pytest.mark.parametrize("ending", ["/.", "/", "/./", "/./."])
 @pytest.mark.parametrize("switch", [[], ["--dry-run"], ["--press"]])
-def test_a_config_path_past_a_file_reads_nothing(
-    fake_adb, android, capsys, here, connections, switch
+def test_a_folder_form_config_path_names_the_file(
+    fake_adb, android, capsys, here, connections, ending, switch
 ):
     path = write_settings(here, settings_text(press=True))
-    given = f"{path}/."
+    given = f"{path}{ending}"
     pressing = ["--out", str(here / "run")] if switch == ["--press"] else []
     code, text, err = crawl(capsys, fake_adb, *switch, *pressing, "--config", given)
     assert (code, text) == (2, "")
-    # The same guidance as for any --config path that names no file.
-    assert f"none was found (looked for {given})" in err
+    assert err == (
+        f"uiprobe: error: --config {given}: {FOLDER_FORM}; to use the file, give"
+        f" --config {path}\n"
+    )
+    assert "uiprobe init" not in err
     assert fake_adb.requests == []
     assert connections == []
     assert android.inputs == []
     assert not (here / "run").exists()
 
 
-@posix_only
 @pytest.mark.usefixtures("android")
-def test_key_reads_no_settings_past_a_file(fake_adb, capsys, here):
+def test_key_refuses_a_folder_form_config_path(fake_adb, capsys, here):
     path = write_settings(here, settings_text())
     code = cli.run(
         ["--adb-server", fake_adb.address, "key", "back", "--config", f"{path}/."]
     )
     captured = capsys.readouterr()
     assert (code, captured.out) == (2, "")
-    assert captured.err.startswith(f"uiprobe: error: {path}/.: ")
+    assert captured.err == (
+        f"uiprobe: error: --config {path}/.: {FOLDER_FORM}; to use the file, give"
+        f" --config {path}\n"
+    )
     assert fake_adb.requests == []
 
 
-# --- the emulator check comes before the pin ----------------------------------
+@pytest.mark.parametrize(
+    ("given", "file"),
+    [
+        ("rules.toml/.", "rules.toml"),
+        ("rules.toml/", "rules.toml"),
+        ("ci/rules.toml/./", "ci/rules.toml"),
+        ("/", ""),
+        ("rules.toml", None),
+        ("ci/./rules.toml", None),
+        ("rules.toml.", None),
+        ("..", None),
+    ],
+)
+def test_the_folder_form_is_found(given, file):
+    assert cli._file_of_folder_form(given) == file
 
-IDENTITY_WORDS = ("ro.serialno", "ro.build.fingerprint", "boot_id")
+
+# --- the order of device reads in a pressing run -------------------------------
 
 
 def shell_requests(fake_adb: FakeAdbServer) -> list[str]:
@@ -650,9 +676,12 @@ def shell_requests(fake_adb: FakeAdbServer) -> list[str]:
 
 
 @pytest.mark.parametrize("from_file", [False, True])
-def test_a_real_device_gets_only_the_emulator_check(
+def test_a_real_device_is_pinned_before_it_is_refused(
     fake_adb, android, capsys, here, from_file
 ):
+    # A known point, as for --press before press = true existed: the pin reads
+    # the identity (serial number, build fingerprint, boot id) before the
+    # emulator check refuses the device.
     android.props["ro.kernel.qemu"] = "0"
     write_settings(here, settings_text(press=from_file))
     out = here / "run"
@@ -660,45 +689,10 @@ def test_a_real_device_gets_only_the_emulator_check(
     code, text, err = crawl(capsys, fake_adb, *switch, "--out", str(out))
     assert (code, text) == (17, "")
     assert "--allow-real-device" in err
-    assert shell_requests(fake_adb) == ["shell:getprop ro.kernel.qemu"]
-    assert not any(w in r for r in fake_adb.requests for w in IDENTITY_WORDS)
-    assert android.inputs == []
-    assert not out.exists()
-
-
-@pytest.mark.usefixtures("android")
-@pytest.mark.parametrize("from_file", [False, True])
-def test_an_emulator_is_checked_then_pinned(fake_adb, capsys, here, from_file):
-    write_settings(here, settings_text(press=from_file))
-    switch = [] if from_file else ["--press"]
-    code, _text, _err = crawl(
-        capsys, fake_adb, *switch, *FAST, "--out", str(here / "run"), "--actions", "1"
-    )
-    assert code == 0
-    shells = shell_requests(fake_adb)
-    assert shells[0] == "shell:getprop ro.kernel.qemu"
-    assert "ro.serialno" in shells[1]  # the pin's identity read comes second
-
-
-@pytest.mark.parametrize("from_file", [False, True])
-def test_a_device_swapped_after_the_check_is_refused_at_the_pin(
-    fake_adb, android, capsys, here, monkeypatch, from_file
-):
-    original = Device.is_emulator
-
-    def then_swap(self: Device) -> bool:
-        answer = original(self)
-        android.props["ro.kernel.qemu"] = "0"  # another device from here on
-        return answer
-
-    monkeypatch.setattr(Device, "is_emulator", then_swap)
-    write_settings(here, settings_text(press=from_file))
-    out = here / "run"
-    switch = [] if from_file else ["--press"]
-    code, text, err = crawl(capsys, fake_adb, *switch, "--out", str(out))
-    assert (code, text) == (17, "")
-    assert "--allow-real-device" in err
-    assert device_writes(fake_adb) == []
+    assert shell_requests(fake_adb) == [
+        f"shell:{IDENTITY_COMMAND}",
+        "shell:getprop ro.kernel.qemu",
+    ]
     assert android.inputs == []
     assert not out.exists()
 
