@@ -98,7 +98,7 @@ A label made only of whitespace, format or control characters, or of private
 use characters (icon fonts, Unicode category ``Co``) counts as empty, so an
 element with only such a label is unlabeled.
 
-Five crawl rules, each a separate check that a
+Six crawl rules, each a separate check that a
 `Policy` field turns on or off:
 
 * ``number_only`` (``Policy.skip_number_only``): the label of the candidate is
@@ -154,6 +154,20 @@ Five crawl rules, each a separate check that a
   that forges it only makes uiprobe refuse more. Known over-block: the first
   clickable image button of a toolbar on a root screen (a drawer button) is
   not pressed either.
+* ``slider`` (``Policy.skip_sliders``, on by default): the candidate or an
+  element in its subtree is an adjustable control: its class, after the last
+  ``.`` and ``$``, ends with ``SeekBar`` (``AbsSeekBar``,
+  ``AppCompatSeekBar``), ``RatingBar`` or ``Slider`` (the Material
+  ``Slider`` and ``RangeSlider``). A tap on such a control moves it to the
+  tapped place and so changes a value: a Settings row "Notification
+  vibration" whose centre lay on its SeekBar changed the vibration intensity
+  from 5 to 2, and as the slider's description changed, the row was pressed
+  again. The press point of a candidate is always the centre of its visible
+  part, so a candidate whose press point lies inside the part on the display
+  of any slider on the screen (whatever its size) is refused as well, even
+  when the slider is not in its subtree. Compose draws its slider as
+  ``android.widget.SeekBar``, so the same class rule finds it. A
+  ``ProgressBar`` is not refused (it shows a value and takes no input).
 
 Neither row rule sees a row with no structural sign: a saved Wi-Fi network
 row whose press reconnects, with no divider and no button inside, is still
@@ -161,7 +175,7 @@ pressed.
 
 These rules only add refusals. In `REASONS` they come right after
 ``unlabeled``: ``number_only``, ``toggle``, ``two_target_row``,
-``row_with_button``, then ``navigate_up``.
+``row_with_button``, ``navigate_up``, then ``slider``.
 
 A third rule works on the whole screen: ``irreversible_screen``
 (``Policy.skip_irreversible``). When the text, content_desc or hint of any
@@ -233,8 +247,8 @@ the order of `REASONS`: ``screen_too_large``, ``outside_target_app``,
 ``permission_screen``, ``not_visible``, ``covered``, ``disabled``,
 ``text_input``, ``password_field``, ``unlabeled``, ``number_only``,
 ``toggle``, ``two_target_row``, ``row_with_button``, ``navigate_up``,
-``deny_word``, ``irreversible_screen``, ``confirm_button``, ``dialog_confirm_button``,
-``screen_edge``.
+``slider``, ``deny_word``, ``irreversible_screen``, ``confirm_button``,
+``dialog_confirm_button``, ``screen_edge``.
 
 Hit targets: the hit targets of a candidate are the elements whose visible part
 holds its press point (the candidate, its ancestors and every overlay). A
@@ -395,6 +409,7 @@ Reason = Literal[
     "two_target_row",
     "row_with_button",
     "navigate_up",
+    "slider",
     "deny_word",
     "irreversible_screen",
     "confirm_button",
@@ -645,6 +660,8 @@ _TOOLBAR_CLASS: Final = "Toolbar"
 _ACTION_BAR_ID: Final = ":id/action_bar"
 _UP_IDS: Final = (":id/home", ":id/up")
 _NAVIGATE_UP: Final = "Navigate up"
+# The class name endings of adjustable controls (see the ``slider`` rule).
+_SLIDER_CLASSES: Final = ("SeekBar", "RatingBar", "Slider")
 _NUMBER_CATEGORIES: Final = frozenset({"Nd", "Nl", "No"})
 _ID_SEPARATOR: Final = ":id/"
 _UTF16_BOMS: Final = (b"\xff\xfe", b"\xfe\xff")
@@ -1572,6 +1589,10 @@ class Policy:
     up button of a toolbar (found by its class, its parent and its resource
     id, or by the label ``Navigate up``) is not pressed, so a crawl presses
     the rows of a sub-page first and goes back up with its own BACK.
+    ``skip_sliders`` (default True) applies the ``slider`` rule: a candidate
+    that is or holds an adjustable control (a class ending in ``SeekBar``,
+    ``RatingBar`` or ``Slider``), or whose press point lies on one, is not
+    pressed, because a tap moves the control and changes a value.
     ``refuse_dialog_confirm`` (default True) applies the ``dialog_confirm_button``
     reason; False drops only that reason (the ``confirm_button`` reason, a deny
     word on the screen, stays).
@@ -1643,6 +1664,7 @@ class Policy:
     skip_two_target_rows: bool = True
     skip_rows_with_buttons: bool = False
     skip_navigate_up: bool = True
+    skip_sliders: bool = True
 
     def __post_init__(self) -> None:
         if type(self.back_on_other_screens) is not bool:
@@ -1708,6 +1730,7 @@ class Policy:
             skip_two_target_rows=self.skip_two_target_rows,
             skip_rows_with_buttons=self.skip_rows_with_buttons,
             skip_navigate_up=self.skip_navigate_up,
+            skip_sliders=self.skip_sliders,
         )
 
 
@@ -1782,7 +1805,11 @@ class Detail:
     order; for ``two_target_row``, the first divider element in document
     order; for ``row_with_button``, the first clickable descendant in
     document order; for ``navigate_up``, ``note`` names the sign that
-    matched and ``element_id`` the candidate. For ``irreversible_screen``,
+    matched and ``element_id`` the candidate; for ``slider``, ``element_id``
+    is the first slider of the subtree in document order (``note``
+    ``subtree``), else the first slider on the screen whose part on the
+    display holds the press point (``note`` ``press point``). For
+    ``irreversible_screen``,
     ``word`` is the phrase, ``field`` the field and ``element_id`` the
     element where it was found.
     """
@@ -1912,6 +1939,12 @@ class _Tree:
 
 def _has_content(value: str) -> bool:
     return any(not char.isspace() and not _is_invisible(char) for char in value)
+
+
+def _is_slider(element: Element) -> bool:
+    """True when the class names an adjustable control (see ``slider``)."""
+    name = element.class_name.rsplit(".", 1)[-1].rsplit("$", 1)[-1]
+    return name.endswith(_SLIDER_CLASSES)
 
 
 def _is_text_field(element: Element) -> bool:
@@ -2171,6 +2204,18 @@ class _Judge:
             self.tree.tin[i] if e.resource_id.endswith(_TWO_TARGET_DIVIDER) else _NONE
             for i, e in enumerate(self.elements)
         ]
+        # The document position of the first slider of the subtree, and the
+        # part on the display of every slider of the screen.
+        self.sub_slider = [
+            self.tree.tin[i] if _is_slider(e) else _NONE
+            for i, e in enumerate(self.elements)
+        ]
+        clips = (
+            (i, self.screen._clip(e))  # noqa: SLF001
+            for i, e in enumerate(self.elements)
+            if _is_slider(e)
+        )
+        self.slider_parts = [(i, rect) for i, rect in clips if rect is not None]
         own_clickable = [
             self.tree.tin[i] if _CLICKABLE in e.flags else _NONE
             for i, e in enumerate(self.elements)
@@ -2201,6 +2246,7 @@ class _Judge:
                 self.sub_checkable[up] = min(
                     self.sub_checkable[up], self.sub_checkable[i]
                 )
+                self.sub_slider[up] = min(self.sub_slider[up], self.sub_slider[i])
                 self.below_divider[up] = min(
                     self.below_divider[up], own_divider[i], self.below_divider[i]
                 )
@@ -2635,7 +2681,7 @@ class _Judge:
             other("password_field", _PASSWORD_AT)
         if not self.policy.tap_unlabeled and not self.sub_labeled[i]:
             reasons.append("unlabeled")
-        self._crawl_rules(i, reasons, details)
+        self._crawl_rules(i, point, reasons, details)
         self._word_rules(found, reasons, details)
         if found[_CONFIRM] != _NONE:
             self._confirm_reasons(i, own, found, reasons, details)
@@ -2644,10 +2690,14 @@ class _Judge:
         return Decision(element, point, tuple(reasons), tuple(details))
 
     def _crawl_rules(
-        self, i: int, reasons: list[Reason], details: list[Detail]
+        self,
+        i: int,
+        point: tuple[int, int] | None,
+        reasons: list[Reason],
+        details: list[Detail],
     ) -> None:
-        """Add the ``number_only``, ``toggle``, row and ``navigate_up``
-        reasons, each its own check (of the two row reasons, only
+        """Add the ``number_only``, ``toggle``, row, ``navigate_up`` and
+        ``slider`` reasons, each its own check (of the two row reasons, only
         ``two_target_row`` when both match)."""
         if self.policy.skip_number_only:
             label = self._number_label(i)
@@ -2673,6 +2723,26 @@ class _Judge:
                 reasons.append("navigate_up")
                 ident = self.elements[i].id
                 details.append(Detail("navigate_up", note=sign, element_id=ident))
+        if self.policy.skip_sliders:
+            slider = self._slider_detail(i, point)
+            if slider is not None:
+                reasons.append("slider")
+                details.append(slider)
+
+    def _slider_detail(self, i: int, point: tuple[int, int] | None) -> Detail | None:
+        """Return the ``slider`` detail: a slider in the subtree, else a slider
+        on the screen whose part on the display holds the press point.
+        """
+        if self.sub_slider[i] != _NONE:
+            slider = self.elements[self.tree.pre[self.sub_slider[i]]]
+            return Detail("slider", note="subtree", element_id=slider.id)
+        if point is not None:
+            x, y = point
+            for j, rect in self.slider_parts:
+                if rect.left <= x < rect.right and rect.top <= y < rect.bottom:
+                    ident = self.elements[j].id
+                    return Detail("slider", note="press point", element_id=ident)
+        return None
 
     def _up_sign(self, i: int) -> str:
         """Return which sign makes the element a toolbar's up button, or ``""``.
@@ -2862,6 +2932,12 @@ def judge(
       ``:id/up``; or its content description or its label (as for
       ``number_only``) is exactly ``Navigate up``. The detail's ``note``
       names the sign and ``element_id`` the element.
+    * ``slider``: the element or a descendant is an adjustable control (its
+      class, after the last ``.`` and ``$``, ends with ``SeekBar``,
+      ``RatingBar`` or ``Slider``), or the press point lies inside the part
+      on the display of such a control anywhere on the screen (unless
+      ``skip_sliders`` is False). The detail's ``element_id`` is the slider
+      and ``note`` is ``subtree`` or ``press point``.
     * ``deny_word``: a deny word is found in the deny scope: the element and
       its descendants, the whole subtree of every clickable ancestor
       (nested rows and cards are all in scope), and, for every hit target, its

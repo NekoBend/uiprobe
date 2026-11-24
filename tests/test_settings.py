@@ -326,6 +326,7 @@ def test_the_defaults_round_trip(tmp_path):
     assert loaded.skip_two_target_rows is True
     assert loaded.skip_rows_with_buttons is False
     assert loaded.skip_navigate_up is True
+    assert loaded.skip_sliders is True
     assert loaded.min_visible_px == MIN_VISIBLE_PX == 8
     assert loaded.edge_top_px == API36_TOP_PX
     assert loaded.edge_bottom_px == API36_BOTTOM_PX
@@ -2104,13 +2105,15 @@ def test_the_generated_file_has_an_empty_except_list():
 def test_the_generated_file_holds_the_version_2_values_plus_the_later_keys():
     # The values are those `uiprobe init` wrote at defaults version 2
     # (tests/data/settings_v2.toml), plus the empty except list and, with
-    # version 3, the two row rules and, with version 4, the up-button rule.
+    # version 3, the two row rules and, with version 4, the up-button and
+    # slider rules.
     current = tomllib.loads(render_default_settings())
     assert current["deny"].pop("except") == []
     assert current.pop("defaults_version") == 4
     assert current["rules"].pop("skip_two_target_rows") is True
     assert current["rules"].pop("skip_rows_with_buttons") is False
     assert current["rules"].pop("skip_navigate_up") is True
+    assert current["rules"].pop("skip_sliders") is True
     older = tomllib.loads(v2_text())
     assert older.pop("defaults_version") == 2
     assert current == older
@@ -2262,6 +2265,7 @@ def test_settings_built_with_the_earlier_fields_still_work(tmp_path):
         "skip_two_target_rows",
         "skip_rows_with_buttons",
         "skip_navigate_up",
+        "skip_sliders",
     ]
 
 
@@ -2350,7 +2354,9 @@ def test_version_3_added_no_list_defaults():
     assert settings._LATER_RULES["skip_rows_with_buttons"] == 3
 
 
-# -- the up-button rule (defaults version 4) -----------------------------------------
+# -- the up-button and slider rules (defaults version 4) -----------------------------
+
+V4_RULES = ["skip_navigate_up", "skip_sliders"]
 
 
 def v3_text() -> str:
@@ -2358,6 +2364,7 @@ def v3_text() -> str:
     assert "defaults_version = 3\n" in text
     assert "skip_two_target_rows = true\n" in text
     assert "skip_navigate_up" not in text
+    assert "skip_sliders" not in text
     return text
 
 
@@ -2374,55 +2381,58 @@ def test_the_version_3_file_loads_as_the_current_defaults(tmp_path):
 
 
 @pytest.mark.parametrize("version", [1, 2, 3])
-def test_an_older_file_without_the_up_rule_loads_it_on(tmp_path, version):
+def test_an_older_file_without_the_version_4_rules_loads_them_on(tmp_path, version):
     text = (v1_text, v2_text, v3_text)[version - 1]()
-    assert "skip_navigate_up" not in text
     loaded = load_settings(write(tmp_path, text))
     assert loaded.defaults_version == version
-    assert loaded.skip_navigate_up is True
+    assert (loaded.skip_navigate_up, loaded.skip_sliders) == (True, True)
     assert loaded.warnings == ()
-    assert settings.policy_from_settings(loaded).skip_navigate_up is True
+    policy = settings.policy_from_settings(loaded)
+    assert (policy.skip_navigate_up, policy.skip_sliders) == (True, True)
 
 
+@pytest.mark.parametrize("key", V4_RULES)
 @pytest.mark.parametrize("version", [1, 2, 3])
-def test_an_older_file_may_turn_the_up_rule_off(tmp_path, version):
+def test_an_older_file_may_turn_a_version_4_rule_off(tmp_path, version, key):
     text = (v1_text, v2_text, v3_text)[version - 1]()
-    text = text.replace("[rules]\n", "[rules]\nskip_navigate_up = false\n", 1)
+    text = text.replace("[rules]\n", f"[rules]\n{key} = false\n", 1)
     loaded = load_settings(write(tmp_path, text))
-    assert loaded.skip_navigate_up is False
-    assert settings.policy_from_settings(loaded).skip_navigate_up is False
+    assert getattr(loaded, key) is False
+    assert getattr(settings.policy_from_settings(loaded), key) is False
+    other = next(k for k in V4_RULES if k != key)
+    assert getattr(loaded, other) is True
 
 
-def test_a_version_4_file_needs_the_up_rule(tmp_path):
+@pytest.mark.parametrize("key", V4_RULES)
+def test_a_version_4_file_needs_each_version_4_rule(tmp_path, key):
     text = render_default_settings()
-    assert "skip_navigate_up = true\n" in text
+    assert f"{key} = true\n" in text
     refused(
-        write(tmp_path, text.replace("skip_navigate_up = true\n", "")),
-        "[rules] skip_navigate_up",
+        write(tmp_path, text.replace(f"{key} = true\n", "")),
+        f"[rules] {key}",
         "is missing",
     )
 
 
-def test_a_version_4_file_gives_the_up_rule_as_written(tmp_path):
-    text = render_default_settings().replace(
-        "skip_navigate_up = true", "skip_navigate_up = false"
-    )
+@pytest.mark.parametrize("key", V4_RULES)
+def test_a_version_4_file_gives_each_version_4_rule_as_written(tmp_path, key):
+    text = render_default_settings().replace(f"{key} = true", f"{key} = false")
     loaded = load_settings(write(tmp_path, text))
-    assert loaded.skip_navigate_up is False
-    assert settings.policy_from_settings(loaded).skip_navigate_up is False
+    assert getattr(loaded, key) is False
+    assert getattr(settings.policy_from_settings(loaded), key) is False
 
 
-def test_the_up_rule_must_be_a_bool(tmp_path):
-    text = render_default_settings().replace(
-        "skip_navigate_up = true", "skip_navigate_up = 1"
-    )
-    refused(write(tmp_path, text), "[rules] skip_navigate_up")
+@pytest.mark.parametrize("key", V4_RULES)
+def test_a_version_4_rule_must_be_a_bool(tmp_path, key):
+    text = render_default_settings().replace(f"{key} = true", f"{key} = 1")
+    refused(write(tmp_path, text), f"[rules] {key}")
 
 
-def test_the_generated_file_writes_the_up_rule_in_the_rules_table():
+def test_the_generated_file_writes_the_version_4_rules_in_the_rules_table():
     text = render_default_settings()
     rules = text.split("[rules]\n")[1].split("[limits]")[0]
     assert "skip_navigate_up = true\n" in rules
+    assert "skip_sliders = true\n" in rules
 
 
 def test_version_4_added_no_list_defaults():
@@ -2437,5 +2447,6 @@ def test_version_4_added_no_list_defaults():
         assert [
             item for version, item in getattr(settings, table) if version == 4
         ] == []
-    assert settings._LATER_RULES["skip_navigate_up"] == 4
-    assert settings._LATER_RULE_VALUES["skip_navigate_up"] is True
+    for key in V4_RULES:
+        assert settings._LATER_RULES[key] == 4
+        assert settings._LATER_RULE_VALUES[key] is True
