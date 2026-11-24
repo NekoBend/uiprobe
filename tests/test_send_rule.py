@@ -131,6 +131,22 @@ def off_target_back(device: Device, android: FakeAndroid, monkeypatch) -> None:
     monkeypatch.setattr(device, "key", key)
 
 
+# Added to the fake's `dumpsys window`: a second display without focus.
+SECOND_DISPLAY = (
+    "  Display: mDisplayId=0 (organized)\n"
+    "  Display: mDisplayId=1 (organized)\n"
+    "  mCurrentFocus=null\n"
+    "  mTopFocusedDisplayId=0\n"
+)
+
+
+def two_displays(device: Device, android: FakeAndroid, monkeypatch) -> None:
+    """The small app on a device with two displays, the tap window check off
+    (the row's policy): the launch goes out, no tap or BACK does."""
+    del device, monkeypatch
+    android.extra_dumpsys["window"] = SECOND_DISPLAY
+
+
 class Row(NamedTuple):
     """A scenario, the sending path it must send, and its policy options."""
 
@@ -147,6 +163,7 @@ ROWS: dict[str, Row] = {
     "launch": Row("launch", plain, {}),
     "force-stop": Row("force-stop", cover_after_browse, {}),
     "start": Row("start", cover_after_browse, {}),
+    "launch-two-displays": Row("launch", two_displays, {"check_tap_window": False}),
 }
 
 
@@ -431,6 +448,8 @@ def test_no_caller_code_runs_between_the_final_comparison_and_the_send(
     if row.scenario is off_target_back:
         # Some of its BACKs went to the other app's screens.
         assert any(package != SHOP for package in OFF_TARGET_BACKS)
+    if row.scenario is two_displays:
+        assert sends.get("tap", 0) == sends.get("back", 0) == 0
 
 
 # --- tests of the test ---
