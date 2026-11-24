@@ -107,7 +107,14 @@ from uiprobe.crawl import (
     _Prints,
 )
 from uiprobe.crawl_preview import check_package
-from uiprobe.device import PIN_NOT_PROVEN, PIN_WAIT_STOPPED, SEND_STOPPED, _monotonic
+from uiprobe.device import (
+    PIN_NOT_PROVEN,
+    PIN_WAIT_STOPPED,
+    SEND_STOPPED,
+    _monotonic,
+    displays_seen,
+    forget_displays,
+)
 from uiprobe.errors import (
     DeviceNotFoundError,
     DumpError,
@@ -966,11 +973,8 @@ class _Run:
         # tap point is the guard: without it, a tap or BACK is not sent. Any
         # read of this device in the run that showed several displays counts
         # (the observation's too), and this reason comes before the others.
-        unchecked = (
-            isinstance(action, Tap | Back)
-            and not self.policy.check_tap_window
-            and self.device._displays_seen()  # noqa: SLF001 - internal to uiprobe
-        )
+        guard = isinstance(action, Tap | Back) and not self.policy.check_tap_window
+        unchecked = guard and displays_seen(self.device)
         if unchecked:
             before = focus = None
             self.gate_focus_details = {"cause": FOCUS_CAUSE_SEVERAL_DISPLAYS}
@@ -1058,6 +1062,12 @@ class _Run:
             return NOT_SENT_RECONNECTED, seen
         if late:
             return NOT_SENT_TIME_LIMIT, None
+        # uiprobe's own check once more, after the caller's clock (which may
+        # have read the device and shown several displays first); no caller
+        # code runs from here to the request.
+        if why is None and guard and displays_seen(self.device):
+            self.gate_focus_details = {"cause": FOCUS_CAUSE_SEVERAL_DISPLAYS}
+            why = NOT_SENT_FOCUS_UNKNOWN
         return why, seen
 
     def launch_gate(self) -> str | None:
@@ -1628,6 +1638,7 @@ def _crawl_on(
     repins_before: int,
 ) -> CrawlResult:
     """`crawl` after its arguments were checked: pin, check, run."""
+    forget_displays(device)  # several displays seen count within one run
     device.pin_transport()
     _check_device(device, allow_real_device=allow_real_device)
     # The app's uid, which a tap's window must have (Policy.check_tap_window),

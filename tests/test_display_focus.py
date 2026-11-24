@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING
 import pytest
 
 from tests.fake_device import El, FakeAndroid, Screen
-from uiprobe.device import Device, FocusedWindow
+from uiprobe.device import Device, FocusedWindow, displays_seen
 from uiprobe.errors import LaunchFailedError
 
 if TYPE_CHECKING:
@@ -87,6 +87,11 @@ LAUNCHER_BLOCK = (
     f"    mOwnerUid=10120 showForAllUsers=false package={LAUNCHER} appop=NONE\n"
 )
 LAUNCHER_WINDOW = FocusedWindow(LAUNCHER, LAUNCHER_TITLE, "bcd234", 0, 10120)
+# The windows dump of two displays, and of one (the launcher on display 0).
+TWO_BLOCKS = LAUNCHER_BLOCK + APP_BLOCK
+ONE_BLOCKS = (
+    LAUNCHER_BLOCK.replace("    mDisplayId=1 ", "    mDisplayId=0 ") + APP_BLOCK
+)
 # Another package, named only by the activity dump.
 OTHER = "com.example.other"
 OTHER_RECORD = f"ActivityRecord{{aaa111 u0 {OTHER}/.Main t20}}"
@@ -101,12 +106,17 @@ ACTIVITY_DUMP = (
 
 
 def make(
-    fake_adb: FakeAdbServer, window: str, activities: str = ACTIVITY_DUMP
+    fake_adb: FakeAdbServer,
+    window: str,
+    activities: str = ACTIVITY_DUMP,
+    windows: str | None = None,
 ) -> tuple[FakeAndroid, Device]:
+    """A fake with these dumps; the windows dump has, by default, the
+    launcher's window on display 1 and the app's on display 0."""
     screens = (Screen("main", f"{APP}/.MainActivity", (El((0, 0, 9, 9), text="Hi"),)),)
     android = FakeAndroid(fake_adb, SERIAL, screens, start="main", api=36)
     android.override(WINDOW, window.encode())
-    android.override(WINDOWS, (LAUNCHER_BLOCK + APP_BLOCK).encode())
+    android.override(WINDOWS, (windows or TWO_BLOCKS).encode())
     android.override(ACTIVITIES, activities.encode())
     return android, Device(adb_server=fake_adb.address)
 
@@ -449,7 +459,7 @@ AS_BEFORE = [
 def test_dumps_without_display_headers_read_as_before(
     fake_adb, window, foreground, focus
 ):
-    _, device = make(fake_adb, window)
+    _, device = make(fake_adb, window, windows=ONE_BLOCKS)
     assert device.foreground() == foreground
     assert device.focused_window() == focus
 
@@ -497,9 +507,12 @@ def test_the_owner_block_of_each_display_is_told_apart(fake_adb):
     # One display: the launcher window's own block gives its owner. Two
     # displays with top 0: the same window, on display 1, is not read.
     android, device = make(
-        fake_adb, f"  mCurrentFocus={LAUNCHER_FOCUS}\n  mFocusedApp={LAUNCHER_RECORD}\n"
+        fake_adb,
+        f"  mCurrentFocus={LAUNCHER_FOCUS}\n  mFocusedApp={LAUNCHER_RECORD}\n",
+        windows=ONE_BLOCKS,
     )
     assert device.focused_window() == LAUNCHER_WINDOW
+    android.override(WINDOWS, TWO_BLOCKS.encode())
     two = window_dump(
         display(1, LAUNCHER_FOCUS, LAUNCHER_RECORD), display(0, "null", APP_RECORD)
     )
@@ -685,26 +698,42 @@ def test_reads_of_one_call_that_disagree_give_unknown(fake_adb, texts):
     android, device = make(fake_adb, texts[0])
     android.override(WINDOW, two_then_one(*texts))
     assert device.focused_window() is None
-    assert device._displays_seen()
+    assert displays_seen(device)
 
 
-def test_the_windows_read_counts_too(fake_adb):
-    # The full dump shows one display; the windows dump names display 1.
-    android, device = make(fake_adb, GENUINE)
-    android.override(
-        WINDOWS, (LAUNCHER_BLOCK + APP_BLOCK + "  mTopFocusedDisplayId=1\n").encode()
-    )
+@pytest.mark.parametrize(
+    "windows",
+    [
+        ONE_BLOCKS + "  mTopFocusedDisplayId=1\n",  # names display 1
+        TWO_BLOCKS,  # window blocks on displays 0 and 1, top line exact 0
+        TWO_BLOCKS + "  mTopFocusedDisplayId=0\n",
+        # A forged block line can only add a display.
+        ONE_BLOCKS + "  Window #9 Window{9 u0 x}:\n    mDisplayId=7 taskId=1\n",
+    ],
+    ids=["top-1", "blocks-on-two", "blocks-on-two-top-0", "forged-block"],
+)
+def test_the_windows_read_counts_too(fake_adb, windows):
+    # The full dump shows one display; only the windows dump shows several.
+    _, device = make(fake_adb, GENUINE, windows=windows)
     assert device.focused_window() is None
-    assert device._displays_seen()
+    assert displays_seen(device)
 
 
-def test_an_exact_top_line_in_the_windows_read_is_not_several(fake_adb):
-    android, device = make(fake_adb, GENUINE)
-    android.override(
-        WINDOWS, (LAUNCHER_BLOCK + APP_BLOCK + "  mTopFocusedDisplayId=0\n").encode()
+def test_one_display_in_every_read_is_not_several(fake_adb):
+    _, device = make(
+        fake_adb, GENUINE, windows=ONE_BLOCKS + "  mTopFocusedDisplayId=0\n"
     )
     assert device.focused_window() == APP_WINDOW
-    assert not device._displays_seen()
+    assert not displays_seen(device)
+
+
+def test_a_nonzero_top_line_in_the_windows_read_gives_unknown(fake_adb):
+    # The full dumps show two displays with display 0 focused; the windows
+    # read names display 1.
+    android, device = make(fake_adb, OPEN)
+    assert device.focused_window() == APP_WINDOW
+    android.override(WINDOWS, (TWO_BLOCKS + "  mTopFocusedDisplayId=1\n").encode())
+    assert device.focused_window() is None
 
 
 @pytest.mark.parametrize(
@@ -850,3 +879,80 @@ def test_one_display_with_the_check_off_sends_the_back(tmp_path, fake_adb):
     android, _, driver, _, observation = gate_run(tmp_path, fake_adb, "")
     driver.send(Back(), observation)
     assert [i.kind for i in android.inputs] == ["key"]
+
+
+def test_a_caller_clock_that_first_shows_two_displays_sends_nothing(tmp_path, fake_adb):
+    # The gate's reads show one display; the caller's clock, called after
+    # them, reads the foreground on a dump that now shows two. uiprobe's own
+    # check after the final comparison refuses the BACK.
+    from tests.test_crawl_driver import SCREENS, TRANSPORT, Clock, _gate_run
+    from uiprobe.crawl import Back
+    from uiprobe.guards import Policy
+
+    android = FakeAndroid(
+        fake_adb, SERIAL, SCREENS, start="home", transport_id=TRANSPORT, api=36
+    )
+    device = Device(adb_server=fake_adb.address, pin=True)
+    armed: list[int] = []
+    before_flip: list[bool] = []
+
+    class ReadingClock(Clock):
+        def monotonic(self) -> float:
+            if armed:
+                armed[0] += 1
+                if armed[0] == 2:  # the call after the gate's reads
+                    before_flip.append(displays_seen(device))
+                    android.extra_dumpsys["window"] = SECOND_DISPLAY
+                    device.foreground()
+            return super().monotonic()
+
+    driver, _, observation = _gate_run(
+        tmp_path, device, ReadingClock(), policy=Policy(check_tap_window=False)
+    )
+    armed.append(0)
+    driver.send(Back(), observation)
+    assert before_flip == [False]  # the early check could not see it
+    assert android.inputs == []
+    end = last_end(tmp_path)
+    assert (end["reason"], end["details"]) == ("focus_unknown", CAUSE)
+
+
+def test_the_last_check_is_not_caller_code(tmp_path, fake_adb, monkeypatch):
+    # The check after the final comparison calls uiprobe's own function, not
+    # a method a Device subclass could replace.
+    from uiprobe import crawl_driver
+    from uiprobe.crawl import Back
+
+    calls: list[str] = []
+    real = crawl_driver.displays_seen
+
+    def spy(device: Device) -> bool:
+        calls.append(type(device).__name__)
+        return real(device)
+
+    monkeypatch.setattr(crawl_driver, "displays_seen", spy)
+    android, _, driver, _, observation = gate_run(tmp_path, fake_adb, "")
+    driver.send(Back(), observation)
+    assert calls == ["Device", "Device"]  # the early check and the last one
+    assert not hasattr(Device, "_displays_seen")
+    assert [i.kind for i in android.inputs] == ["key"]
+
+
+def test_a_new_run_starts_without_the_displays_seen(tmp_path, fake_adb):
+    from tests.test_crawl_driver import SCREENS, TRANSPORT, Clock, run
+    from uiprobe.crawl import Limits
+    from uiprobe.guards import Policy
+
+    android = FakeAndroid(
+        fake_adb, SERIAL, SCREENS, start="home", transport_id=TRANSPORT, api=36
+    )
+    android.extra_dumpsys["window"] = SECOND_DISPLAY
+    device = Device(adb_server=fake_adb.address, pin=True)
+    policy = Policy(check_tap_window=False)
+    run(device, Clock(), tmp_path / "one", limits=Limits(actions=3), policy=policy)
+    assert displays_seen(device)
+    assert android.inputs == []
+    android.extra_dumpsys["window"] = ""
+    run(device, Clock(), tmp_path / "two", limits=Limits(actions=3), policy=policy)
+    assert not displays_seen(device)
+    assert android.inputs  # the second run, on one display, pressed

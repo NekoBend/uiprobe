@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import itertools
 import os
 import re
 import secrets
@@ -1217,14 +1218,24 @@ _CURRENT_FOCUS_EXACT: Final = re.compile(
 def _several_displays(lines: list[str]) -> bool:
     """Whether a `dumpsys window` dump is read as one with several displays.
 
-    More than one header line, or a top line other than the exact
-    ``  mTopFocusedDisplayId=0`` that single-display devices print.
+    More than one header line, a top line other than the exact
+    ``  mTopFocusedDisplayId=0`` that single-display devices print, or window
+    blocks on more than one display (the exact ``    mDisplayId=N`` line right
+    below a window block's header). A forged line can only add a display.
     """
     headers = sum(1 for line in lines if _DISPLAY_HEADER_FIELD.search(line))
-    return headers > 1 or any(
+    if headers > 1 or any(
         _TOP_FOCUSED_DISPLAY_FIELD in line and line != _TOP_FOCUSED_DISPLAY_ZERO
         for line in lines
-    )
+    ):
+        return True
+    displays = {
+        match[1]
+        for head, below in itertools.pairwise(lines)
+        if _WINDOW_HEAD_HASH.match(head)
+        and (match := _WINDOW_DISPLAY.match(below)) is not None
+    }
+    return len(displays) > 1
 
 
 def _dump_lines(text: str) -> list[str]:
@@ -1252,6 +1263,16 @@ def _names_other_display(lines: list[str]) -> bool:
             return False
         values.add(match[1])
     return len(values) == 1 and values.isdisjoint({"0", "-1"})
+
+
+def _names_a_display(lines: list[str]) -> bool:
+    """Whether an exact ``mTopFocusedDisplayId`` line names a display other
+    than 0 (another display has the focus)."""
+    return any(
+        (match := _TOP_FOCUSED_DISPLAY.fullmatch(line)) is not None and match[1] != "0"
+        for line in lines
+        if _TOP_FOCUSED_DISPLAY_FIELD in line and len(line) <= _MAX_DUMPSYS_LINE
+    )
 
 
 def _display_zero_focused(lines: list[str]) -> bool:
@@ -1371,6 +1392,8 @@ _WINDOW_HEAD: Final = re.compile(
 # there counts as a header of that hash (a title that holds ``Window{<hash>``
 # further on does not).
 _WINDOW_HEAD_HASH: Final = re.compile(r"  Window #[0-9]+ Window\{([0-9a-f]+) ")
+# The line below a window block's header names the window's display.
+_WINDOW_DISPLAY: Final = re.compile(r"    mDisplayId=(0|[1-9][0-9]{0,9}) ")
 # The system writes this line; 24 has mShowToOwnerOnly, 30 and 36 showForAllUsers.
 _WINDOW_OWNER: Final = re.compile(
     r"    mOwnerUid=(?P<uid>[0-9]{1,10})"
@@ -1379,6 +1402,21 @@ _WINDOW_OWNER: Final = re.compile(
     r"(?:\.[A-Za-z][A-Za-z0-9_]{0,254}){0,64})"
     r" appop=[A-Z_]{1,64}"
 )
+
+
+def displays_seen(device: Device) -> bool:
+    """Whether a ``dumpsys window`` read (the full dump or ``windows``) of
+    `device` has shown several displays since `forget_displays`.
+
+    A module function, not a method, so a subclass cannot replace it: the
+    crawl asks it after its final comparison, where no caller code may run.
+    """
+    return device._several_seen  # noqa: SLF001 - uiprobe's own state
+
+
+def forget_displays(device: Device) -> None:
+    """Start a new run: no read of `device` has shown several displays yet."""
+    device._several_seen = False  # noqa: SLF001 - uiprobe's own state
 
 
 def _read_current_focus(text: str) -> tuple[str, str, str] | None:
@@ -3275,7 +3313,10 @@ class Device:
         if focus is None:
             return None
         windows = self._shell("dumpsys window windows")
-        if self._note_dump(_dump_lines(windows)) and not several:
+        windows_lines = _dump_lines(windows)
+        if (self._note_dump(windows_lines) and not several) or _names_a_display(
+            windows_lines
+        ):
             return None
         found = _read_window_owner(windows, *focus, display_zero=several)
         # Read the focus again: a window that took it between the two dumps
@@ -3633,16 +3674,12 @@ class Device:
 
     def _note_dump(self, lines: list[str]) -> bool:
         """Whether a ``dumpsys window`` read shows several displays; once one
-        has, `_displays_seen` stays True for the life of this object."""
+        has, `displays_seen` stays True until `forget_displays` (a crawl run
+        calls it when it starts)."""
         several = _several_displays(lines)
         if several:
             self._several_seen = True
         return several
-
-    def _displays_seen(self) -> bool:
-        """Whether any ``dumpsys window`` read (the full dump or ``windows``)
-        of this object has shown several displays (see `_several_displays`)."""
-        return self._several_seen
 
     def _focused_component(self, package: str) -> tuple[str, str] | None:
         """Return the focused component, only when it belongs to `package`.
