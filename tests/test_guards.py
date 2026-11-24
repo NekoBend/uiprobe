@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import ast
+import importlib
+import inspect
 import random
 import time
+import typing
 import unicodedata
 from collections import Counter
 from dataclasses import fields, replace
@@ -38,7 +41,8 @@ PKG = "com.example.shop"
 DISPLAY = (320, 640)
 CLICK = ("clickable",)
 BUTTON = "android.widget.Button"
-GUARDS_PY = Path(guards.__file__)
+GUARDS_DIR = Path(guards.__file__).parent
+GUARDS_FILES = sorted(GUARDS_DIR.glob("*.py"), key=lambda path: path.name)
 
 
 def root(bounds=(0, 0, 320, 640), *, package=PKG):
@@ -1247,7 +1251,8 @@ def test_property_only_labeled_elements_are_pressed_by_default() -> None:
 # -- imports ---------------------------------------------------------------------------
 
 
-def test_guards_imports_only_allowed_modules() -> None:
+@pytest.mark.parametrize("path", GUARDS_FILES, ids=lambda path: path.name)
+def test_guards_imports_only_allowed_modules(path: Path) -> None:
     allowed = {
         "__future__",
         "collections.abc",
@@ -1256,8 +1261,14 @@ def test_guards_imports_only_allowed_modules() -> None:
         "typing",
         "unicodedata",
         "uiprobe.model",
+        "uiprobe.guards.constants",
+        "uiprobe.guards.judge",
+        "uiprobe.guards.matching",
+        "uiprobe.guards.policy",
+        "uiprobe.guards.tree",
+        "uiprobe.guards.words",
     }
-    tree = ast.parse(GUARDS_PY.read_text(encoding="utf-8"))
+    tree = ast.parse(path.read_text(encoding="utf-8"))
     imported: set[str] = set()
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
@@ -1268,6 +1279,50 @@ def test_guards_imports_only_allowed_modules() -> None:
     assert imported <= allowed
     names = {n.id for n in ast.walk(tree) if isinstance(n, ast.Name)}
     assert not names & {"open", "exec", "eval", "__import__"}
+
+
+def test_the_guards_package_holds_exactly_the_known_files() -> None:
+    assert [path.name for path in GUARDS_FILES] == [
+        "__init__.py",
+        "constants.py",
+        "judge.py",
+        "matching.py",
+        "policy.py",
+        "tree.py",
+        "words.py",
+    ]
+
+
+def test_every_annotation_in_the_guards_package_resolves() -> None:
+    # Names that were only imported for type checking in the single module;
+    # a test may supply them, nothing else may be missing at run time.
+    from collections.abc import Iterable, Sequence
+
+    from uiprobe.model import Element, Screen
+
+    extra = {
+        "Iterable": Iterable,
+        "Sequence": Sequence,
+        "Element": Element,
+        "Screen": Screen,
+    }
+    functions = []
+    for name in ("constants", "judge", "matching", "policy", "tree", "words"):
+        module = importlib.import_module(f"uiprobe.guards.{name}")
+        for value in vars(module).values():
+            if getattr(value, "__module__", None) != module.__name__:
+                continue
+            if inspect.isclass(value):
+                functions += [
+                    member
+                    for member in vars(value).values()
+                    if inspect.isfunction(member)
+                ]
+            elif inspect.isfunction(value):
+                functions.append(value)
+    assert len(functions) > 100
+    for function in functions:
+        typing.get_type_hints(function, localns=extra)
 
 
 def test_replace_keeps_validation() -> None:
@@ -3293,7 +3348,7 @@ def test_there_are_no_builtin_exception_words() -> None:
 def builtin_exc(monkeypatch: pytest.MonkeyPatch) -> None:
     """Treat the test exception words as built-in ones (there are none)."""
     keys = frozenset(guards._exception_key(word) for word in EXC)
-    monkeypatch.setattr(guards, "_BUILTIN_EXCEPTION_KEYS", keys)
+    monkeypatch.setattr(guards.matching, "_BUILTIN_EXCEPTION_KEYS", keys)
 
 
 @pytest.mark.parametrize(
@@ -3951,13 +4006,13 @@ def test_texts_with_only_invisible_characters_are_passed_over(parts) -> None:
 
 def _count_calls(monkeypatch, name):
     calls: list[str] = []
-    original = getattr(guards, name)
+    original = getattr(guards.matching, name)
 
     def counted(*args):
         calls.append(name)
         return original(*args)
 
-    monkeypatch.setattr(guards, name, counted)
+    monkeypatch.setattr(guards.matching, name, counted)
     return calls
 
 
