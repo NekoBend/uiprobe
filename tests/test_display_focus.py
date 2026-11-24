@@ -17,6 +17,7 @@ import pytest
 
 from tests.fake_device import El, FakeAndroid, Screen
 from uiprobe.device import Device, FocusedWindow
+from uiprobe.errors import LaunchFailedError
 
 if TYPE_CHECKING:
     from tests.fake_adb_server import FakeAdbServer
@@ -374,30 +375,13 @@ def test_forged_lines_never_give_a_forged_answer(fake_adb, window, activities):
     genuine = LAUNCHER if LAUNCHER_RECORD in activities.split("\n")[1] else APP
     assert device.foreground() in {genuine, None}
     focus = device.focused_window()
-    assert focus is None or focus.owner == genuine
+    assert focus in {None, APP_WINDOW if genuine == APP else LAUNCHER_WINDOW}
 
 
 def test_headers_on_both_sides_give_the_genuine_foreground(fake_adb):
     _, device = make(fake_adb, BOTH_SIDES, resumed(LAUNCHER_RECORD))
     assert device.foreground() == LAUNCHER
     assert device.focused_window() is None
-
-
-# --- the focused app record ---
-
-
-@pytest.mark.parametrize(
-    "line",
-    [
-        f"  mFocusedApp={APP_RECORD}}}",
-        f"  mFocusedApp=AppWindowToken{{1 token=Token{{2 {APP_RECORD}}}",
-        f"  mFocusedApp=AppWindowToken{{1 token=Token{{2 {APP_RECORD}}}}}}}",
-    ],
-    ids=["record-extra-brace", "token-one-brace-short", "token-extra-brace"],
-)
-def test_a_focused_app_record_with_wrong_braces_is_not_read(fake_adb, line):
-    _, device = make(fake_adb, line + "\n", "nothing\n")
-    assert device.foreground() is None
 
 
 # Dumps of a single display (no or one header line, and no
@@ -454,6 +438,10 @@ AS_BEFORE = [
     (SINGLE + "  mCurrentFocus=Window{1 u0 y}\n", APP, None),
     (SINGLE + "  mCurrentFocus=null\n", APP, None),
     (SINGLE.replace(f"  mFocusedApp={APP_RECORD}\n", ""), APP, APP_WINDOW),
+    # Closing braces are read as before: one to three after the record.
+    (f"  mFocusedApp={OTHER_RECORD}}}\n", OTHER, None),
+    (f"  mFocusedApp=AppWindowToken{{1 token=Token{{2 {OTHER_RECORD}}}\n", OTHER, None),
+    (f"  mFocusedApp={OTHER_RECORD}}}}}}}\n", APP, None),
 ]
 
 
@@ -670,3 +658,195 @@ def test_a_crawl_on_two_displays_needs_the_tap_window_check(tmp_path, fake_adb, 
         assert refused[0]["details"] == {
             "cause": "several_displays_need_tap_window_check"
         }
+
+
+# --- round N: the reading is decided once, and seen displays stay seen ---
+
+
+def two_then_one(*texts: str):
+    """A response that gives `texts` in turn, then the last one again."""
+    queue = list(texts)
+
+    def answer(_command: str) -> bytes:
+        return (queue.pop(0) if len(queue) > 1 else queue[0]).encode()
+
+    return answer
+
+
+@pytest.mark.parametrize(
+    "texts",
+    [
+        (GENUINE, OPEN),  # one display first, then several
+        (OPEN, GENUINE),  # several first, then one
+    ],
+    ids=["one-then-several", "several-then-one"],
+)
+def test_reads_of_one_call_that_disagree_give_unknown(fake_adb, texts):
+    android, device = make(fake_adb, texts[0])
+    android.override(WINDOW, two_then_one(*texts))
+    assert device.focused_window() is None
+    assert device._displays_seen()
+
+
+def test_the_windows_read_counts_too(fake_adb):
+    # The full dump shows one display; the windows dump names display 1.
+    android, device = make(fake_adb, GENUINE)
+    android.override(
+        WINDOWS, (LAUNCHER_BLOCK + APP_BLOCK + "  mTopFocusedDisplayId=1\n").encode()
+    )
+    assert device.focused_window() is None
+    assert device._displays_seen()
+
+
+def test_an_exact_top_line_in_the_windows_read_is_not_several(fake_adb):
+    android, device = make(fake_adb, GENUINE)
+    android.override(
+        WINDOWS, (LAUNCHER_BLOCK + APP_BLOCK + "  mTopFocusedDisplayId=0\n").encode()
+    )
+    assert device.focused_window() == APP_WINDOW
+    assert not device._displays_seen()
+
+
+@pytest.mark.parametrize(
+    "windows",
+    [
+        (LAUNCHER_BLOCK + APP_BLOCK).replace("\n", "\r\r\n"),
+        LAUNCHER_BLOCK + APP_BLOCK[:-1] + "\r",
+    ],
+    ids=["double-cr", "final-cr-without-lf"],
+)
+def test_the_owner_read_on_several_displays_cuts_one_cr_only(fake_adb, windows):
+    android, device = make(fake_adb, OPEN)
+    assert device.focused_window() == APP_WINDOW
+    android.override(WINDOWS, windows.encode())
+    assert device.focused_window() is None
+
+
+@pytest.mark.parametrize(
+    ("window", "named"),
+    [
+        (CLOSED, True),
+        (
+            CLOSED.replace("  mTopFocusedDisplayId=1", "  mTopFocusedDisplayId=1 "),
+            False,
+        ),
+        (CLOSED.replace("  mTopFocusedDisplayId=1\n", ""), False),
+        (CLOSED + "  mTopFocusedDisplayId=2\n", False),
+        (
+            CLOSED.replace("  mTopFocusedDisplayId=1", "  mTopFocusedDisplayId=-1"),
+            False,
+        ),
+    ],
+    ids=["top-1", "top-malformed", "top-missing", "top-disagrees", "top-invalid"],
+)
+def test_launch_names_another_display_only_from_an_exact_top_line(
+    fake_adb, window, named
+):
+    android, device = make(fake_adb, window)
+    android.override(
+        re.compile(r"^cmd package resolve-activity .*"),
+        f"{APP}/.MainActivity\nuiprobe-exit:0\n".encode(),
+    )
+    with pytest.raises(LaunchFailedError) as caught:
+        device.launch(APP, timeout=0)
+    message = str(caught.value)
+    assert ("another display, perhaps the cover screen" in message) is named
+    assert "not in front" in message
+
+
+def gate_run(tmp_path, fake_adb, extra: str):
+    """A crawl run with the tap window check off, after its launch and first
+    observation; `extra` is added to the fake's `dumpsys window`."""
+    from tests.test_crawl_driver import SCREENS, TRANSPORT, Clock, _gate_run
+    from uiprobe.guards import Policy
+
+    android = FakeAndroid(
+        fake_adb, SERIAL, SCREENS, start="home", transport_id=TRANSPORT, api=36
+    )
+    android.extra_dumpsys["window"] = extra
+    device = Device(adb_server=fake_adb.address, pin=True)
+    driver, engine, observation = _gate_run(
+        tmp_path, device, Clock(), policy=Policy(check_tap_window=False)
+    )
+    return android, device, driver, engine, observation
+
+
+def last_end(tmp_path) -> dict:
+    from tests.test_crawl_driver import lines
+
+    return lines(tmp_path / "run" / "transitions.jsonl")[-1]
+
+
+def last_start(tmp_path) -> dict:
+    from tests.test_crawl_driver import lines
+
+    starts = [r for r in lines(tmp_path / "run" / "transitions.jsonl") if "action" in r]
+    return starts[-1]
+
+
+CAUSE = {"cause": "several_displays_need_tap_window_check"}
+
+
+@pytest.mark.parametrize("kind", ["tap", "back"])
+def test_the_gate_refuses_unchecked_input_on_two_displays(tmp_path, fake_adb, kind):
+    from uiprobe.crawl import Back, Tap
+
+    android, _, driver, engine, observation = gate_run(
+        tmp_path, fake_adb, SECOND_DISPLAY
+    )
+    action = engine.next(observation) if kind == "tap" else Back()
+    assert isinstance(action, Tap | Back)
+    driver.send(action, observation)
+    assert android.inputs == []
+    assert last_start(tmp_path)["action"]["kind"] == kind
+    end = last_end(tmp_path)
+    assert (end["reason"], end["details"]) == ("focus_unknown", CAUSE)
+
+
+def test_a_relaunch_is_sent_and_a_back_after_it_is_not(tmp_path, fake_adb):
+    from uiprobe.crawl import Back, Relaunch
+
+    android, _, driver, _, observation = gate_run(tmp_path, fake_adb, SECOND_DISPLAY)
+    stopped = list(android.stopped)
+    driver.send(Relaunch(), observation)
+    assert android.stopped != stopped  # the relaunch went out
+    assert last_start(tmp_path)["action"]["kind"] == "relaunch"
+    observation = driver.observe()
+    driver.send(Back(), observation)
+    assert android.inputs == []
+    assert last_start(tmp_path)["action"]["kind"] == "back"
+    end = last_end(tmp_path)
+    assert (end["reason"], end["details"]) == ("focus_unknown", CAUSE)
+
+
+def test_displays_seen_in_the_observation_stay_seen_in_the_gate(tmp_path, fake_adb):
+    from uiprobe.crawl import Back
+
+    android, _, driver, _, observation = gate_run(tmp_path, fake_adb, SECOND_DISPLAY)
+    android.extra_dumpsys["window"] = ""  # the gate's reads show one display
+    driver.send(Back(), observation)
+    assert android.inputs == []
+    end = last_end(tmp_path)
+    assert (end["reason"], end["details"]) == ("focus_unknown", CAUSE)
+
+
+def test_the_cause_comes_before_the_other_reasons(tmp_path, fake_adb, monkeypatch):
+    from uiprobe.crawl import Back
+
+    android, device, driver, _, observation = gate_run(
+        tmp_path, fake_adb, SECOND_DISPLAY
+    )
+    monkeypatch.setattr(device, "keyboard_shown", lambda: True)
+    monkeypatch.setattr(device, "foreground", lambda: None)
+    driver.send(Back(), observation)
+    assert android.inputs == []
+    end = last_end(tmp_path)
+    assert (end["reason"], end["details"]) == ("focus_unknown", CAUSE)
+
+
+def test_one_display_with_the_check_off_sends_the_back(tmp_path, fake_adb):
+    from uiprobe.crawl import Back
+
+    android, _, driver, _, observation = gate_run(tmp_path, fake_adb, "")
+    driver.send(Back(), observation)
+    assert [i.kind for i in android.inputs] == ["key"]

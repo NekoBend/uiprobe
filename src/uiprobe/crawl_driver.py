@@ -954,7 +954,6 @@ class _Run:
         # For a tap: the focused window before and after the dump must be the
         # same window of the app, so the dump shows that window (uiautomator
         # dumps the focused window: seen on API 24, 30 and 36 with the shade).
-        self.device._take_display_note()  # noqa: SLF001 - internal to uiprobe
         before = self.device.focused_window() if tap else None
         screen = self.dump() if tap else None
         foreground = self.device.foreground()
@@ -964,12 +963,15 @@ class _Run:
         self.gate_focus_details = None
         # With several displays the focus reading is best effort against
         # window titles that forge lines, so the check of the window at the
-        # tap point is the guard: without it, a tap or BACK is not sent.
-        if (
+        # tap point is the guard: without it, a tap or BACK is not sent. Any
+        # read of this device in the run that showed several displays counts
+        # (the observation's too), and this reason comes before the others.
+        unchecked = (
             isinstance(action, Tap | Back)
             and not self.policy.check_tap_window
-            and self.device._take_display_note() is not None  # noqa: SLF001
-        ):
+            and self.device._displays_seen()  # noqa: SLF001 - internal to uiprobe
+        )
+        if unchecked:
             before = focus = None
             self.gate_focus_details = {"cause": FOCUS_CAUSE_SEVERAL_DISPLAYS}
         seen = _Seen(Observation(screen, foreground, keyboard, now), focus)
@@ -983,6 +985,7 @@ class _Run:
             allowed = self.engine.recheck(action, seen.observation)
             owners = {None if f is None else f.owner for f in (before, focus)}
             checks = (
+                (unchecked, NOT_SENT_FOCUS_UNKNOWN),
                 (keyboard is None, NOT_SENT_KEYBOARD_UNKNOWN),
                 (keyboard is True, NOT_SENT_KEYBOARD_SHOWN),
                 (before is None or focus is None, NOT_SENT_FOCUS_UNKNOWN),
@@ -1010,6 +1013,7 @@ class _Run:
                 and self.on_target(before.screen, before.foreground)
             )
             checks = (
+                (unchecked, NOT_SENT_FOCUS_UNKNOWN),
                 (before is None, NOT_SENT_CHANGED),  # not reached: a launch only
                 (foreground is None, NOT_SENT_FOREGROUND_UNKNOWN),
                 (focus is None, NOT_SENT_FOCUS_UNKNOWN),
