@@ -106,6 +106,7 @@ ROW_RULES: Final = frozenset(
         "hex_form",
         "portal_missing",
         "samsung_fields",
+        "samsung_flags",
         "region_missing",
         "region_format",
         "region_reversed",

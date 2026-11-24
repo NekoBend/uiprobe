@@ -201,7 +201,7 @@ def test_ctrl_c_writes_the_run_and_exits_130(fake_adb, capsys, tmp_path, monkeyp
 def test_an_unreadable_tap_window_explains_the_option(
     fake_adb, android, capsys, tmp_path, monkeypatch
 ):
-    monkeypatch.setattr(Device, "window_at", lambda _self, _point: "line_format")
+    monkeypatch.setattr(Device, "window_at", lambda _self, _point, **_kw: "line_format")
     out = tmp_path / "run"
     code, text, err = press(capsys, fake_adb, "--press", "--out", str(out))
     assert (code, err) == (0, "")
