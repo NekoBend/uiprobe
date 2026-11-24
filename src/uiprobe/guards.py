@@ -165,9 +165,10 @@ Six crawl rules, each a separate check that a
   again. The press point of a candidate is always the centre of its visible
   part, so a candidate whose press point lies inside the part on the display
   of any slider on the screen (whatever its size) is refused as well, even
-  when the slider is not in its subtree. Compose draws its slider as
-  ``android.widget.SeekBar``, so the same class rule finds it. A
-  ``ProgressBar`` is not refused (it shows a value and takes no input).
+  when the slider is not in its subtree. How a Jetpack Compose slider is
+  reported in a dump has not been checked; the class rule finds it only if
+  it is reported with one of these class names. A ``ProgressBar`` is not
+  refused (it shows a value and takes no input).
 
 Neither row rule sees a row with no structural sign: a saved Wi-Fi network
 row whose press reconnects, with no divider and no button inside, is still
