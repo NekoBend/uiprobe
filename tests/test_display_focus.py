@@ -2,8 +2,10 @@
 
 The shapes follow a foldable at API 37: `dumpsys window` prints a block per
 display, in no fixed order, each with its own ``mCurrentFocus`` and
-``mFocusedApp``, and one ``mTopFocusedDisplayId`` further on. The values are
-made up.
+``mFocusedApp``, and one ``mTopFocusedDisplayId`` further on; `dumpsys
+activity activities` prints ``mFocusedApp`` once per display but
+``topResumedActivity`` and ``ResumedActivity`` once each. The values are made
+up.
 """
 
 from __future__ import annotations
@@ -86,12 +88,14 @@ ACTIVITY_DUMP = (
 )
 
 
-def make(fake_adb: FakeAdbServer, window: str) -> tuple[FakeAndroid, Device]:
+def make(
+    fake_adb: FakeAdbServer, window: str, activities: str = ACTIVITY_DUMP
+) -> tuple[FakeAndroid, Device]:
     screens = (Screen("main", f"{APP}/.MainActivity", (El((0, 0, 9, 9), text="Hi"),)),)
     android = FakeAndroid(fake_adb, SERIAL, screens, start="main", api=36)
     android.override(WINDOW, window.encode())
     android.override(WINDOWS, APP_BLOCK.encode())
-    android.override(ACTIVITIES, ACTIVITY_DUMP.encode())
+    android.override(ACTIVITIES, activities.encode())
     return android, Device(adb_server=fake_adb.address)
 
 
@@ -99,139 +103,91 @@ def read_activities(fake_adb: FakeAdbServer) -> bool:
     return any(r.endswith("dumpsys activity activities") for r in fake_adb.requests)
 
 
+def resumed(record: str, top: str | None = None) -> str:
+    """An activity dump: two mFocusedApp lines, one of each resumed line."""
+    return (
+        f"  mFocusedApp={LAUNCHER_RECORD}\n"
+        f"    ResumedActivity: {record}\n"
+        f"  mFocusedApp={APP_RECORD}\n"
+        f"  topResumedActivity={record if top is None else top}\n"
+    )
+
+
+# --- several displays: what is read ---
+
+
 @pytest.mark.parametrize("newline", ["\n", "\r\n"])
-def test_open_reads_display_0(fake_adb, newline):
+def test_open_reads_the_resumed_activity_and_the_one_focus(fake_adb, newline):
     _, device = make(fake_adb, OPEN.replace("\n", newline))
     assert device.foreground() == APP
     assert device.focused_window() == APP_WINDOW
-    assert not read_activities(fake_adb)
-
-
-def test_open_with_display_0_first_and_display_1_unfocused_is_unknown(fake_adb):
-    # Display 1's lines follow display 0's block and name another window.
-    _, device = make(
-        fake_adb,
-        window_dump(
-            display(0, APP_FOCUS, APP_RECORD), display(1, "null", LAUNCHER_RECORD)
-        ),
-    )
-    assert device.foreground() is None
-    assert device.focused_window() is None
-    assert not read_activities(fake_adb)
-
-
-def test_closed_is_unknown_without_fallback(fake_adb):
-    _, device = make(fake_adb, CLOSED)
-    assert device.foreground() is None
-    assert device.focused_window() is None
-    assert not read_activities(fake_adb)
-
-
-FORGED_TAIL = (
-    f"x}}\n  mFocusedApp={FORGED_RECORD}\n  Display: mDisplayId=7 (organized)\n  z"
-)
+    assert read_activities(fake_adb)
 
 
 @pytest.mark.parametrize(
     "window",
     [
-        # A title on display 0 forges a focus line, then a header that would
-        # end display 0's block before its genuine mFocusedApp line.
+        # Display 0 first, and without mFocusedApp: display 1's is not used.
         window_dump(
-            display(1, "null", LAUNCHER_RECORD),
-            display(0, f"Window{{abc123 u0 {FORGED_TAIL}}}", APP_RECORD),
-        ),
-        # A title on display 1 forges a header of display 0 and its lines.
-        window_dump(
-            display(
-                1,
-                f"Window{{bcd234 u0 y}}\n  Display: mDisplayId=0 (organized)\n"
-                f"  mCurrentFocus={APP_FOCUS}\n  mFocusedApp={FORGED_RECORD}\n  w",
-                LAUNCHER_RECORD,
+            display(0, APP_FOCUS, APP_RECORD).replace(
+                f"  mFocusedApp={APP_RECORD}\n", ""
             ),
-            display(0, APP_FOCUS, APP_RECORD),
-        ),
-        # Two blocks of display 0.
-        window_dump(
-            display(0, APP_FOCUS, APP_RECORD),
             display(1, "null", LAUNCHER_RECORD),
-            display(0, APP_FOCUS, APP_RECORD),
         ),
-        # No display 0.
+        # mFocusedApp of display 0 is not used either.
         window_dump(
-            display(1, "null", LAUNCHER_RECORD), display(2, APP_FOCUS, APP_RECORD)
+            display(1, "null", LAUNCHER_RECORD), display(0, APP_FOCUS, FORGED_RECORD)
         ),
-        # A header claim of another shape.
-        window_dump(
-            display(1, "null", LAUNCHER_RECORD, "  Display: mDisplayId=1 (other)"),
-            display(0, APP_FOCUS, APP_RECORD),
-        ),
-        window_dump(
-            display(1, "null", LAUNCHER_RECORD, "  Display: mDisplayId=01"),
-            display(0, APP_FOCUS, APP_RECORD),
-        ),
-        window_dump(
-            display(1, "null", LAUNCHER_RECORD, "Display: mDisplayId=1"),
-            display(0, APP_FOCUS, APP_RECORD),
-        ),
-        # mTopFocusedDisplayId: two that disagree, malformed, missing.
-        window_dump(
-            display(1, "null", LAUNCHER_RECORD),
-            display(0, APP_FOCUS, APP_RECORD),
-            top=("0", "1"),
-        ),
-        window_dump(
-            display(1, "null", LAUNCHER_RECORD),
-            display(0, APP_FOCUS, APP_RECORD),
-            top=("1", "0"),
-        ),
-        window_dump(
-            display(1, "null", LAUNCHER_RECORD),
-            display(0, APP_FOCUS, APP_RECORD),
-            top=("0", "0x"),
-        ),
-        window_dump(
-            display(1, "null", LAUNCHER_RECORD),
-            display(0, APP_FOCUS, APP_RECORD),
-            top=("00",),
-        ),
-        window_dump(
-            display(1, "null", LAUNCHER_RECORD),
-            display(0, APP_FOCUS, APP_RECORD),
-            top=(),
-        ),
+        window_dump(display(1, "null", LAUNCHER_RECORD), display(0, APP_FOCUS, "null")),
     ],
-    ids=[
-        "forged-header-in-display-0",
-        "forged-display-0-in-display-1",
-        "duplicate-display-0",
-        "no-display-0",
-        "header-other-suffix",
-        "header-leading-zero",
-        "header-no-indent",
-        "top-disagrees",
-        "top-disagrees-first",
-        "top-malformed",
-        "top-leading-zero",
-        "top-missing",
-    ],
+    ids=["display-0-first-without-app", "display-0-app-other", "display-0-app-null"],
 )
-def test_untrusted_two_display_dump_is_unknown(fake_adb, window):
-    _, device = make(fake_adb, window)
-    assert device.foreground() is None
-    assert device.focused_window() is None
-    assert not read_activities(fake_adb)
-
-
-def test_a_forged_header_alone_cannot_hide_display_0s_lines(fake_adb):
-    # The genuine lines after the forged header still count, and agree.
-    title = "x}\n  Display: mDisplayId=7 (organized)\n  z"
-    window = window_dump(
-        display(1, "null", LAUNCHER_RECORD),
-        display(0, f"Window{{abc123 u0 {title}}}", APP_RECORD),
-    )
+def test_focused_app_lines_are_not_used(fake_adb, window):
     _, device = make(fake_adb, window)
     assert device.foreground() == APP
+    assert device.focused_window() == APP_WINDOW
+
+
+@pytest.mark.parametrize(
+    "activities",
+    [
+        resumed(APP_RECORD, top=LAUNCHER_RECORD),
+        resumed(LAUNCHER_RECORD, top=APP_RECORD),
+        f"  mFocusedApp={APP_RECORD}\n",
+        "",
+        resumed(APP_RECORD) + f"  topResumedActivity={FORGED_RECORD}\n",
+        resumed(APP_RECORD) + "  topResumedActivity=ActivityRecord{1 u0 bad t3}\n",
+    ],
+    ids=[
+        "top-differs",
+        "resumed-differs",
+        "only-focused-app",
+        "empty",
+        "forged",
+        "bad",
+    ],
+)
+def test_resumed_activity_absent_or_disagreeing_is_unknown(fake_adb, activities):
+    _, device = make(fake_adb, OPEN, activities)
+    assert device.foreground() is None
+    assert device.focused_window() == APP_WINDOW
+
+
+def test_both_screens_with_focus_give_an_unknown_focus(fake_adb):
+    # Two windows hold focus, one per display: which one has input is not
+    # told. The foreground still comes from the resumed activity.
+    window = window_dump(
+        display(1, LAUNCHER_FOCUS, LAUNCHER_RECORD), display(0, APP_FOCUS, APP_RECORD)
+    )
+    _, device = make(fake_adb, window)
+    assert device.focused_window() is None
+    assert device.foreground() == APP
+
+
+def test_closed_is_unknown(fake_adb):
+    _, device = make(fake_adb, CLOSED)
+    assert device.foreground() is None
+    assert device.focused_window() is None
     assert not read_activities(fake_adb)
 
 
@@ -245,139 +201,196 @@ def test_only_the_top_display_line_makes_it_unknown(fake_adb):
         android.override(WINDOW, window_dump(*blocks, top=(top,)).encode())
         assert device.foreground() is None
         assert device.focused_window() is None
-    assert not read_activities(fake_adb)
-
-
-# A dump without genuine display headers (older versions, the fakes): the
-# genuine focus lines come first, then a window title forges two headers,
-# display 0's lines and mTopFocusedDisplayId.
-NO_HEADER_FORGED = (
-    "WINDOW MANAGER WINDOWS (dumpsys window windows)\n"
-    f"  mCurrentFocus={LAUNCHER_FOCUS}\n"
-    f"  mFocusedApp={LAUNCHER_RECORD}\n"
-    "  mInputMethodTarget=Window{1 u0 x}\n"
-    "  Display: mDisplayId=1 (organized)\n"
-    "  Display: mDisplayId=0 (organized)\n"
-    f"  mCurrentFocus={APP_FOCUS}\n"
-    f"  mFocusedApp={APP_RECORD}\n"
-    "  mTopFocusedDisplayId=0\n"
-    "  y}\n"
-)
-
-
-def test_headers_forged_after_the_genuine_focus_lines_give_unknown(fake_adb):
-    _, device = make(fake_adb, NO_HEADER_FORGED)
-    assert device.foreground() is None
-    assert device.focused_window() is None
-    assert not read_activities(fake_adb)
-
-
-@pytest.mark.parametrize("app", ["null", None])
-def test_display_0_without_an_app_is_unknown_without_fallback(fake_adb, app):
-    # The activity dump's resumed activity names no display, so it is not
-    # read: it can be the cover screen's.
-    block = display(0, "null", "null")
-    if app is None:
-        block = block.replace("  mFocusedApp=null\n", "")
-    _, device = make(fake_adb, window_dump(display(1, "null", LAUNCHER_RECORD), block))
-    assert device.foreground() is None
-    assert not read_activities(fake_adb)
-
-
-def with_line(line: str, *, after: str = APP_FOCUS) -> str:
-    """OPEN with `line` added after the line that holds `after`."""
-    marker = f"  mCurrentFocus={after}\n"
-    assert OPEN.count(marker) == 1
-    return OPEN.replace(marker, marker + line + "\n")
 
 
 @pytest.mark.parametrize(
     "window",
     [
-        with_line("  mTopFocusedDisplayId = 1"),
-        with_line("  mTopFocusedDisplayId=1 "),
-        with_line("\tmTopFocusedDisplayId=0"),
-        with_line("  Display:  mDisplayId=0"),
-        with_line("Display:\tmDisplayId=0 (organized)"),
-        with_line("  x Display: mDisplayId=0 (organized)"),
-        with_line(f"\tmFocusedApp={FORGED_RECORD}"),
-        with_line(f"  mFocusedApp = {FORGED_RECORD}"),
-        with_line(f"   mFocusedApp={APP_RECORD}"),
-        with_line(f"  mFocusedApp={APP_RECORD} "),
-        with_line(f"\tmCurrentFocus={APP_FOCUS}"),
-        with_line(f"  mCurrentFocus: {APP_FOCUS}"),
-        with_line(f"  mCurrentFocus={APP_FOCUS} "),
-        with_line("  mCurrentFocus=nul"),
-        # A malformed claim on display 1 counts too.
-        OPEN.replace(
-            f"  mFocusedApp={LAUNCHER_RECORD}\n",
-            f"  mFocusedApp={LAUNCHER_RECORD}\n\tmFocusedApp=x\n",
-        ),
-        # A focus line before the first header.
-        f"  mCurrentFocus={APP_FOCUS}\n" + OPEN,
-        f"  mFocusedApp={APP_RECORD}\n" + OPEN,
+        window_dump(
+            *(display(1, "null", LAUNCHER_RECORD), display(0, APP_FOCUS, APP_RECORD)),
+            top=top,
+        )
+        for top in [
+            ("0", "1"),
+            ("1", "0"),
+            ("0 ",),
+            ("00",),
+            ("0x",),
+            (" 0",),
+            (),
+        ]
+    ]
+    + [
+        OPEN.replace("  mTopFocusedDisplayId=0", "  mTopFocusedDisplayId = 0"),
+        OPEN.replace("  mTopFocusedDisplayId=0", "\tmTopFocusedDisplayId=0"),
+        OPEN.replace("  mTopFocusedDisplayId=0", "  mTopFocusedDisplayId: 0"),
+        OPEN + "  see mTopFocusedDisplayId=0\n",
+        # An exact header and a spaced one, with top 1, take this path too.
+        "  Display: mDisplayId=0 (organized)\n"
+        f"  mCurrentFocus={APP_FOCUS}\n"
+        f"  mFocusedApp={APP_RECORD}\n"
+        "  Display:  mDisplayId=1\n"
+        "  mCurrentFocus=null\n"
+        "  mTopFocusedDisplayId=1\n",
     ],
     ids=[
-        "top-spaced",
+        "top-disagrees",
+        "top-disagrees-first",
         "top-trailing-space",
+        "top-leading-zero",
+        "top-hex",
+        "top-three-spaces",
+        "top-missing",
+        "top-spaced",
         "top-tab",
-        "header-two-spaces",
-        "header-tab",
-        "header-mid-line",
-        "app-tab",
-        "app-spaced",
-        "app-three-spaces",
-        "app-trailing-space",
-        "focus-tab",
-        "focus-colon",
-        "focus-trailing-space",
-        "focus-not-null",
-        "malformed-on-display-1",
-        "focus-before-first-header",
-        "app-before-first-header",
+        "top-colon",
+        "top-mid-line",
+        "spaced-header-top-1",
     ],
 )
-def test_malformed_claims_on_two_displays_give_unknown(fake_adb, window):
+def test_malformed_or_missing_top_line_is_unknown(fake_adb, window):
     _, device = make(fake_adb, window)
     assert device.foreground() is None
     assert device.focused_window() is None
     assert not read_activities(fake_adb)
 
 
-def test_activity_dump_with_two_focused_apps_reads_the_resumed_activity(fake_adb):
-    _, device = make(fake_adb, "WINDOW MANAGER WINDOWS (dumpsys window windows)\n")
-    assert device.foreground() == APP
-    assert read_activities(fake_adb)
+@pytest.mark.parametrize(
+    "line",
+    [
+        f"\tmCurrentFocus={APP_FOCUS}",
+        f"  mCurrentFocus = {APP_FOCUS}",
+        f"  mCurrentFocus: {APP_FOCUS}",
+        f"   mCurrentFocus={APP_FOCUS}",
+        f"  mCurrentFocus={APP_FOCUS} ",
+        "  mCurrentFocus=nul",
+        "  mCurrentFocus=null ",
+        "\tmCurrentFocus=null",
+        "  x mCurrentFocus=Window{1 u0 y}",
+    ],
+)
+def test_a_malformed_focus_claim_gives_an_unknown_focus(fake_adb, line):
+    _, device = make(fake_adb, OPEN + line + "\n")
+    assert device.focused_window() is None
+
+
+# --- several displays: forged lines never give a forged answer ---
+
+FORGED_TAIL = (
+    f"x}}\n  mFocusedApp={FORGED_RECORD}\n  Display: mDisplayId=7 (organized)\n  z"
+)
+# A dump without genuine headers: the launcher is in front, and window titles
+# on both sides of its focus lines forge headers, a focus and top 0.
+BOTH_SIDES = (
+    "WINDOW MANAGER WINDOWS (dumpsys window windows)\n"
+    "  Window #4 Window{1 u0 a}\n"
+    "  Display: mDisplayId=1 (organized)\n"
+    "  b}:\n"
+    f"  mCurrentFocus={LAUNCHER_FOCUS}\n"
+    f"  mFocusedApp={LAUNCHER_RECORD}\n"
+    "  mInputMethodTarget=Window{2 u0 c}\n"
+    "  Display: mDisplayId=0 (organized)\n"
+    f"  mCurrentFocus={APP_FOCUS}\n"
+    f"  mFocusedApp={APP_RECORD}\n"
+    "  mTopFocusedDisplayId=0\n"
+    "  d}\n"
+)
 
 
 @pytest.mark.parametrize(
-    "header",
+    ("window", "activities"),
     [
-        "  Display: mDisplayId=0 (organized)",
-        "  Display: mDisplayId=0",
-        # One header claim keeps today's reading, whatever its shape.
-        "  Display: mDisplayId=0 rootTasks=2",
+        # A title on display 0 forges a focus line and a header.
+        (
+            window_dump(
+                display(1, "null", LAUNCHER_RECORD),
+                display(0, f"Window{{abc123 u0 {FORGED_TAIL}}}", APP_RECORD),
+            ),
+            ACTIVITY_DUMP,
+        ),
+        # A title on display 1 forges a header of display 0 and its lines.
+        (
+            window_dump(
+                display(
+                    1,
+                    f"Window{{bcd234 u0 y}}\n  Display: mDisplayId=0 (organized)\n"
+                    f"  mCurrentFocus=Window{{ffff u0 {APP_TITLE}}}\n"
+                    f"  mFocusedApp={FORGED_RECORD}\n  w",
+                    LAUNCHER_RECORD,
+                ),
+                display(0, APP_FOCUS, APP_RECORD),
+            ),
+            ACTIVITY_DUMP,
+        ),
+        # Two blocks of display 0, and extra headers.
+        (
+            window_dump(
+                display(0, APP_FOCUS, APP_RECORD),
+                display(1, "null", LAUNCHER_RECORD),
+                display(0, APP_FOCUS, FORGED_RECORD),
+                display(7, "null", FORGED_RECORD),
+            ),
+            ACTIVITY_DUMP,
+        ),
+        # Forged top 0 on a closed phone.
+        (CLOSED + "  mTopFocusedDisplayId=0\n", ACTIVITY_DUMP),
+        # Forged headers on both sides of the genuine focus lines.
+        (BOTH_SIDES, resumed(LAUNCHER_RECORD)),
+        # Forged top 0 in a dump without headers: the genuine lines count.
+        (
+            f"  mCurrentFocus={LAUNCHER_FOCUS}\n  mFocusedApp={LAUNCHER_RECORD}\n"
+            f"  mTopFocusedDisplayId=0\n  mCurrentFocus={APP_FOCUS}\n",
+            resumed(LAUNCHER_RECORD),
+        ),
+        (
+            f"  mCurrentFocus={LAUNCHER_FOCUS}\n  mFocusedApp={LAUNCHER_RECORD}\n"
+            f"  mTopFocusedDisplayId=0\n  mFocusedApp={APP_RECORD}\n",
+            resumed(LAUNCHER_RECORD),
+        ),
+    ],
+    ids=[
+        "forged-header-in-display-0",
+        "forged-display-0-in-display-1",
+        "extra-headers",
+        "forged-top-on-closed",
+        "headers-on-both-sides",
+        "forged-top-focus-no-headers",
+        "forged-top-app-no-headers",
     ],
 )
-def test_one_display_block_reads_as_before(fake_adb, header):
-    # No mTopFocusedDisplayId is needed, and lines outside the block count.
-    window = (
-        "WINDOW MANAGER DISPLAY CONTENTS (dumpsys window displays)\n"
-        f"{header}\n"
-        f"  mCurrentFocus={APP_FOCUS}\n"
-        "WINDOW MANAGER WINDOWS (dumpsys window windows)\n"
-        f"  mFocusedApp={APP_RECORD}\n"
-    )
-    android, device = make(fake_adb, window)
-    assert device.foreground() == APP
-    assert device.focused_window() == APP_WINDOW
-    android.override(WINDOW, (window + f"  mFocusedApp={FORGED_RECORD}\n").encode())
+def test_forged_lines_never_give_a_forged_answer(fake_adb, window, activities):
+    _, device = make(fake_adb, window, activities)
+    genuine = LAUNCHER if LAUNCHER_RECORD in activities.split("\n")[1] else APP
+    assert device.foreground() in {genuine, None}
+    focus = device.focused_window()
+    assert focus is None or (genuine == APP and focus == APP_WINDOW)
+
+
+def test_headers_on_both_sides_give_the_genuine_foreground(fake_adb):
+    _, device = make(fake_adb, BOTH_SIDES, resumed(LAUNCHER_RECORD))
+    assert device.foreground() == LAUNCHER
+    assert device.focused_window() is None
+
+
+# --- the focused app record ---
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        f"  mFocusedApp={APP_RECORD}}}",
+        f"  mFocusedApp=AppWindowToken{{1 token=Token{{2 {APP_RECORD}}}",
+        f"  mFocusedApp=AppWindowToken{{1 token=Token{{2 {APP_RECORD}}}}}}}",
+    ],
+    ids=["record-extra-brace", "token-one-brace-short", "token-extra-brace"],
+)
+def test_a_focused_app_record_with_wrong_braces_is_not_read(fake_adb, line):
+    _, device = make(fake_adb, line + "\n", "nothing\n")
     assert device.foreground() is None
-    assert not read_activities(fake_adb)
 
 
-# Dumps with no display header line of the narrow form (single-display
-# devices, older versions, the fakes) read exactly as before display blocks
+# Dumps with no display header lines and no mTopFocusedDisplayId (single
+# displays, older versions, the fakes) read exactly as before display blocks
 # were told apart: these results were checked against that earlier reader
 # (a7e8052), and must not change.
 GENUINE = (
@@ -392,14 +405,14 @@ AS_BEFORE = [
     (GENUINE + f"\tmFocusedApp={FORGED_RECORD}\n", APP, APP_WINDOW),
     (GENUINE + f"   mFocusedApp={FORGED_RECORD}\n", APP, APP_WINDOW),
     (GENUINE + f"  mFocusedApp = {FORGED_RECORD}\n", APP, APP_WINDOW),
-    (GENUINE + "  mTopFocusedDisplayId = 1\n", APP, APP_WINDOW),
-    (GENUINE + "  mTopFocusedDisplayId=1\n", APP, APP_WINDOW),
+    (GENUINE + f"mFocusedApp={FORGED_RECORD}\n", APP, APP_WINDOW),
+    (GENUINE + "  Window #2 Window{1 u0 mCurrentFocus=x}:\n", APP, APP_WINDOW),
     (GENUINE + "  Display:  mDisplayId=0\n", APP, APP_WINDOW),
-    (GENUINE + "  Display:  mDisplayId=0\n  Display:  mDisplayId=1\n", APP, APP_WINDOW),
     (GENUINE + "  Display: mDisplayId=1 (organized)\n", APP, APP_WINDOW),
     (GENUINE + f"  mFocusedApp={FORGED_RECORD}\n", None, APP_WINDOW),
     (GENUINE + "  mCurrentFocus=Window{1 u0 y}\n", APP, None),
     (GENUINE + "\tmCurrentFocus=Window{1 u0 y}\n", APP, None),
+    (GENUINE + "  mCurrentFocus=null\n", APP, None),
     (GENUINE + "  mFocusedApp=null\n", None, APP_WINDOW),
     ("", APP, None),
     ("  mFocusedApp=null\n", APP, None),
@@ -412,7 +425,7 @@ AS_BEFORE = [
         APP,
         APP_WINDOW,
     ),
-    (NO_HEADER_FORGED.split("  Display:")[0], LAUNCHER, None),
+    (BOTH_SIDES.split("  mInputMethodTarget")[0], LAUNCHER, None),
 ]
 
 
