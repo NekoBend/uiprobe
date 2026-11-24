@@ -161,6 +161,7 @@ def test_with_deny_words_copies_every_other_field() -> None:
         skip_two_target_rows=False,
         skip_rows_with_buttons=True,
         skip_navigate_up=False,
+        skip_sliders=False,
     )
     copy = original.with_deny_words(["rent"])
     assert copy is not original
@@ -817,9 +818,22 @@ def test_every_reason_together_in_the_fixed_order() -> None:
     assert reasons(seventh, "e2") == ("row_with_button",)
     eighth = run([el("e2", desc="Navigate up")])
     assert reasons(eighth, "e2") == ("navigate_up",)
+    ninth = run([el("e2", desc="Volume", cls="android.widget.SeekBar")])
+    assert reasons(ninth, "e2") == ("slider",)
     seen = {
         r
-        for j in (first, second, third, fourth, huge, fifth, sixth, seventh, eighth)
+        for j in (
+            first,
+            second,
+            third,
+            fourth,
+            huge,
+            fifth,
+            sixth,
+            seventh,
+            eighth,
+            ninth,
+        )
         for d in j.decisions
         for r in d.reasons
     }
@@ -829,7 +843,7 @@ def test_every_reason_together_in_the_fixed_order() -> None:
 
 def test_reasons_follow_the_order_of_reasons_constant() -> None:
     assert get_args(guards.Reason) == REASONS
-    assert len(set(REASONS)) == len(REASONS) == 19
+    assert len(set(REASONS)) == len(REASONS) == 20
     order = {reason: index for index, reason in enumerate(REASONS)}
     policy = Policy(avoid=edge_areas(DISPLAY))
     elements = [
@@ -4323,3 +4337,150 @@ def test_the_up_reason_comes_with_the_other_reasons_in_order() -> None:
     elements = toolbar()
     elements[1] = replace(elements[1], bounds=Bounds(0, 24, 56, 80))
     assert reasons(run(elements), "e3") == ("navigate_up", "screen_edge")
+
+
+# -- sliders ---------------------------------------------------------------------------
+
+SEEK_BAR = "android.widget.SeekBar"
+PHONE = (1080, 2400)
+
+
+def run_phone(elements, *, policy=None):
+    """Judge `elements` on a 1080 x 2400 display, as on the Samsung phone."""
+    top = Element(
+        "e1", None, "android.widget.FrameLayout", Bounds(0, 0, *PHONE), package=PKG
+    )
+    screen = Screen(
+        serial="R3CT00000000",
+        captured_at=datetime(2026, 11, 17, tzinfo=UTC),
+        package=PKG,
+        activity=".Main",
+        api_level=36,
+        display=PHONE,
+        elements=(top, *elements),
+    )
+    return judge(screen, PKG, policy or Policy(), foreground=PKG)
+
+
+def vibration_row(*, bar_flags=("focusable",)) -> list[Element]:
+    """The "Notification vibration" row of the Samsung phone's Settings, as
+    reported: a clickable row holding an icon and a SeekBar with a content
+    description; the row's press point (540, 2241) lies on the SeekBar."""
+    row = el("e2", cls="android.widget.LinearLayout", bounds=(30, 2136, 1050, 2346))
+    icon = el(
+        "e3",
+        parent="e2",
+        cls="android.widget.ImageView",
+        bounds=(54, 2199, 138, 2283),
+        flags=(),
+    )
+    bar = el(
+        "e4",
+        parent="e2",
+        cls=SEEK_BAR,
+        desc="Notification vibration",
+        bounds=(168, 2199, 1050, 2283),
+        flags=bar_flags,
+    )
+    return [row, icon, bar]
+
+
+def test_the_samsung_vibration_row_is_refused_for_its_slider() -> None:
+    found = decision(run_phone(vibration_row()), "e2")
+    assert found.point == (540, 2241)
+    assert found.reasons == ("slider",)
+    assert [(d.reason, d.note, d.element_id) for d in found.details] == [
+        ("slider", "subtree", "e4")
+    ]
+
+
+def test_a_clickable_seek_bar_is_refused_itself() -> None:
+    judgement = run_phone(vibration_row(bar_flags=("clickable", "focusable")))
+    assert reasons(judgement, "e4") == ("slider",)
+    assert decision(judgement, "e4").details[0].element_id == "e4"
+    assert reasons(judgement, "e2") == ("slider",)
+
+
+@pytest.mark.parametrize(
+    "cls",
+    [
+        SEEK_BAR,
+        "android.widget.AbsSeekBar",
+        "androidx.appcompat.widget.AppCompatSeekBar",
+        "android.widget.RatingBar",
+        "androidx.appcompat.widget.AppCompatRatingBar",
+        "com.google.android.material.slider.Slider",
+        "com.google.android.material.slider.RangeSlider",
+        "com.example.Widgets$VolumeSlider",
+    ],
+)
+def test_every_adjustable_control_is_a_slider(cls) -> None:
+    row = el("e2", cls="android.widget.LinearLayout", bounds=(0, 100, 320, 200))
+    control = el(
+        "e3", parent="e2", cls=cls, desc="Level", bounds=(0, 300, 320, 340), flags=()
+    )
+    found = decision(run([row, control]), "e2")
+    assert found.reasons == ("slider",)
+    assert found.details[0].element_id == "e3"
+
+
+@pytest.mark.parametrize(
+    "cls",
+    [
+        "android.widget.ProgressBar",
+        "com.example.SliderLayout",
+        "com.example.SeekBarRow",
+        "android.widget.TextView",
+    ],
+)
+def test_other_classes_are_not_sliders(cls) -> None:
+    row = el("e2", cls="android.widget.LinearLayout", bounds=(0, 100, 320, 200))
+    inner = el(
+        "e3", parent="e2", cls=cls, desc="Level", bounds=(0, 120, 320, 180), flags=()
+    )
+    assert reasons(run([row, inner]), "e2") == ()
+
+
+def test_a_press_point_on_a_slider_outside_the_subtree_is_refused() -> None:
+    # The slider is drawn below the row, so the row's press point lies on it
+    # although the row does not hold it; the press-point logic always takes
+    # the centre, so it cannot step aside.
+    bar = el("e2", cls=SEEK_BAR, desc="Volume", bounds=(0, 140, 320, 160), flags=())
+    row = el("e3", text="Volume", bounds=(0, 100, 320, 200))
+    other = el("e4", text="Ringtone", bounds=(0, 200, 320, 300))
+    judgement = run([bar, row, other])
+    found = decision(judgement, "e3")
+    assert found.point == (160, 150)
+    assert found.reasons == ("slider",)
+    assert [(d.note, d.element_id) for d in found.details] == [("press point", "e2")]
+    # A row next to the slider, whose press point is off it, is pressable.
+    assert reasons(judgement, "e4") == ()
+
+
+def test_a_row_without_a_slider_is_not_refused() -> None:
+    row = el("e5", cls="android.widget.LinearLayout", bounds=(30, 1900, 1050, 2100))
+    title = el(
+        "e6", parent="e5", text="Sound mode", bounds=(168, 1940, 1050, 2000), flags=()
+    )
+    judgement = run_phone([*vibration_row(), row, title])
+    assert reasons(judgement, "e5") == ()
+    assert reasons(judgement, "e2") == ("slider",)
+
+
+def test_the_slider_switch_restores_the_old_decisions() -> None:
+    assert Policy().skip_sliders is True
+    elements = vibration_row(bar_flags=("clickable", "focusable"))
+    on = run_phone(elements)
+    off = run_phone(elements, policy=Policy(skip_sliders=False))
+    for a, b in zip(on.decisions, off.decisions, strict=True):
+        assert b.reasons == tuple(r for r in a.reasons if r != "slider")
+        assert b.details == tuple(d for d in a.details if d.reason != "slider")
+    assert (reasons(off, "e2"), reasons(off, "e4")) == ((), ())
+
+
+def test_the_slider_reason_follows_navigate_up() -> None:
+    assert REASONS[REASONS.index("navigate_up") + 1] == "slider"
+    assert REASONS[REASONS.index("slider") + 1] == "deny_word"
+    elements = vibration_row()
+    elements[2] = replace(elements[2], content_desc="Delete")
+    assert reasons(run_phone(elements), "e2") == ("slider", "deny_word")
