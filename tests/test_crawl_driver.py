@@ -723,8 +723,8 @@ def test_an_unreadable_launcher_ends_the_crawl_at_the_first_launch(
 ):
     # The launcher is read right before the first start: when it cannot be
     # read, the start is not sent and the run ends with error. With restart
-    # it is read after the force-stop, as for a relaunch: the app was
-    # stopped, and the launch ends as start_not_sent.
+    # it is read in the gate of the force-stop too, so nothing at all is
+    # sent: the app is not force-stopped either.
     android.override(re.compile(r"^cmd package"), b"No activity found\n")
     out = tmp_path / "run"
     with pytest.raises(LaunchFailedError) as info:
@@ -734,19 +734,16 @@ def test_an_unreadable_launcher_ends_the_crawl_at_the_first_launch(
         "reason": "launcher_unreadable",
         "output": "No activity found",
     }
-    sent = [c for c in commands(fake_adb) if c.startswith(("am ", "input "))]
-    assert sent == ([f"am force-stop {SHOP}; echo uiprobe-exit:$?"] if restart else [])
+    assert not any(c.startswith(("am ", "input ")) for c in commands(fake_adb))
+    assert android.stopped == []
     records = lines(out / "transitions.jsonl")
+    assert len(records) == 2
     assert (records[-1]["not_sent"], records[-1]["reason"]) == (
         True,
-        "start_not_sent" if restart else "launcher_unreadable",
+        "launcher_unreadable",
     )
     summary = (out / "summary.txt").read_text(encoding="utf-8")
-    stopped = (
-        f"{SHOP} was force-stopped at the start of the run but not started"
-        " (launcher_unreadable)"
-    )
-    assert (stopped in summary) is restart
+    assert "force-stopped" not in summary
     assert json.loads((out / "run.json").read_text(encoding="utf-8"))[
         "stop_reason"
     ] == ("error")
@@ -1343,7 +1340,7 @@ def test_a_start_whose_launcher_read_ends_past_the_limit_is_not_sent(
     # The injected clock moves only during the first launch's launcher read,
     # past the 1-minute limit (uiprobe's own clock does not move). The clock
     # is read after that read, before the last comparison: no start. With
-    # restart the read comes after the force-stop, which went out.
+    # restart that read is in the gate of the force-stop: nothing is sent.
     def slow_read(command: str):
         clock.now += 61.0
         return android._shell(command)
@@ -1353,12 +1350,75 @@ def test_a_start_whose_launcher_read_ends_past_the_limit_is_not_sent(
     result = run(device, clock, out, limits=Limits(minutes=1), restart=restart)
     assert result.stop_reason == "max_duration"
     assert not [c for _, _, c in fake_adb.commands if c.startswith("am start")]
-    assert android.stopped == ([SHOP] if restart else [])
+    assert android.stopped == []
+    records = lines(out / "transitions.jsonl")
+    assert (records[-1]["not_sent"], records[-1]["reason"]) == (True, "time_limit")
+
+
+def test_a_first_launch_whose_read_after_the_force_stop_ends_late_sends_no_start(
+    tmp_path, device, android, clock, fake_adb
+):
+    # With restart the launcher is read twice: in the gate of the force-stop,
+    # and after the force-stop, before the start. The second read ends past
+    # the limit: the force-stop went out, the start does not.
+    reads: list[str] = []
+
+    def slow_second_read(command: str):
+        reads.append(command)
+        if len(reads) == 2:
+            clock.now += 61.0
+        return android._shell(command)
+
+    android.override(re.compile(r"^cmd package"), slow_second_read)
+    out = tmp_path / "run"
+    result = run(device, clock, out, limits=Limits(minutes=1))
+    assert result.stop_reason == "max_duration"
+    assert len(reads) == 2
+    assert android.stopped == [SHOP]
+    assert not [c for _, _, c in fake_adb.commands if c.startswith("am start")]
     records = lines(out / "transitions.jsonl")
     assert (records[-1]["not_sent"], records[-1]["reason"]) == (
         True,
-        "start_not_sent" if restart else "time_limit",
+        "start_not_sent",
     )
+
+
+def test_a_launcher_unreadable_only_after_the_first_force_stop_sends_no_start(
+    tmp_path, device, android, clock, fake_adb
+):
+    # The read in the gate of the force-stop works; the read after the
+    # force-stop fails. The app was force-stopped, the start is not sent, the
+    # launch ends as start_not_sent and the run with launch_failed.
+    reads: list[str] = []
+
+    def second_read_fails(command: str):
+        reads.append(command)
+        if len(reads) == 1:
+            return android._shell(command)
+        return b"No activity found\n"
+
+    android.override(re.compile(r"^cmd package"), second_read_fails)
+    out = tmp_path / "run"
+    with pytest.raises(LaunchFailedError) as info:
+        run(device, clock, out)
+    assert info.value.details["reason"] == "launcher_unreadable"
+    assert len(reads) == 2
+    assert android.stopped == [SHOP]
+    assert changing_commands(fake_adb) == [RESOLVE, FORCE_STOP, RESOLVE]
+    records = lines(out / "transitions.jsonl")
+    assert len(records) == 2
+    assert records[0]["restart"] is True
+    assert (records[-1]["not_sent"], records[-1]["reason"]) == (
+        True,
+        "start_not_sent",
+    )
+    summary = (out / "summary.txt").read_text(encoding="utf-8")
+    assert (
+        f"{SHOP} was force-stopped at the start of the run but not started"
+        " (launcher_unreadable)" in summary
+    )
+    run_json = json.loads((out / "run.json").read_text(encoding="utf-8"))
+    assert run_json["stop_reason"] == "error"
 
 
 def test_a_relaunch_whose_launcher_read_ends_past_the_limit_sends_no_start(
@@ -3242,8 +3302,9 @@ def test_the_first_launch_force_stops_then_starts_as_one_action(
     out = tmp_path / "run"
     result = run(device, clock, out, limits=Limits(actions=1))
     assert (result.stop_reason, result.actions) == ("max_actions", 1)
-    # As a relaunch: the force-stop, then the launcher read, then the start.
-    assert changing_commands(fake_adb) == [FORCE_STOP, RESOLVE, START]
+    # The launcher read of the gate, the force-stop, then, as a relaunch,
+    # the launcher read again and the start (which uses the second read).
+    assert changing_commands(fake_adb) == [RESOLVE, FORCE_STOP, RESOLVE, START]
     assert android.stopped == [SHOP]
     assert android.screen.name == "main"  # the app's first screen
     records = lines(out / "transitions.jsonl")
@@ -3337,7 +3398,8 @@ def test_a_stop_or_the_time_limit_before_the_first_force_stop_sends_nothing(
     result = run(device, clock, out, stop=lambda: end == "stop" and bool(in_gate))
     assert in_gate
     assert result.stop_reason == ("interrupted" if end == "stop" else "max_duration")
-    assert changing_commands(fake_adb) == []
+    # Only the gate's launcher read, when stop() did not skip it.
+    assert [c for c in changing_commands(fake_adb) if c != RESOLVE] == []
     records = lines(out / "transitions.jsonl")
     reason = "stopped" if end == "stop" else "time_limit"
     assert (records[-1]["not_sent"], records[-1]["reason"]) == (True, reason)

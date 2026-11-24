@@ -49,8 +49,10 @@ caller runs between that comparison and the input: `stop`, `sleep` and the
 run folder writes all come before the reads or after the input. The
 force-stop of the first launch (the default, ``restart=True``) has the gate
 of a relaunch's force-stop without the screen reads, as there is no
-observation yet (`_Run.restart_gate`); then the first launch goes on exactly
-as a relaunch (`_Run.relaunch`): `stop`, the time, the pin check, `stop`,
+observation yet but with the launcher read of the first launch's gate, so
+an app whose launcher cannot be read is not force-stopped
+(`_Run.restart_gate`); then the first launch goes on exactly as a relaunch
+(`_Run.relaunch`): `stop`, the time, the pin check, `stop`,
 the launcher read, the time, the last comparison, the start. The time
 limit is also turned into a value of uiprobe's own clock (`_Run.now`) and
 checked by the device, with the pin, on the request's own connection right
@@ -1085,19 +1087,26 @@ class _Run:
 
     def restart_gate(self) -> str | None:
         """The end of the gate of the first launch's force-stop, after the
-        pin check: `stop` again (the check can take long), the time again,
-        then the last comparison.
+        pin check: `stop` again (the check can take long), the launcher read,
+        the time again (the read can take long too), then the last
+        comparison, as in `launch_gate`.
 
         It is the gate of a relaunch's force-stop without the reads of the
         screen, which compare it with the observation it was chosen on: the
-        first launch has none. The launcher activity is read after the
-        force-stop, right before the start, as for a relaunch.
+        first launch has none. The launcher activity is read here so that an
+        app whose launcher cannot be read is not force-stopped: nothing is
+        sent, and the run ends as a first launch without the force-stop does
+        (`read_start_component`). The start does not use this read: the
+        launcher activity is read again after the force-stop, right before
+        the start, as for a relaunch.
         """
         epoch = self.device.pin_epoch
         stopped = self.stopped()  # asked again after the pin check
+        read = stopped or self.read_start_component(None)
+        self.start_component = None  # the start uses the read after the stop
         now = self.now()
         late = now >= self.deadline or self.past()
-        if not self.final_check("force-stop", epoch):
+        if not read or not self.final_check("force-stop", epoch):
             return NOT_SENT_RECONNECTED
         if stopped:
             return NOT_SENT_STOPPED
@@ -1537,17 +1546,20 @@ def crawl(
     first screen; what the app had not saved is lost. It is one action of
     kind ``launch``, counted once, whose start line has ``restart: true``,
     and it passes the checks of a relaunch: the force-stop goes out only
-    after `stop`, the time limit and the pin were checked, and the start
-    only after they were checked again. When `stop` or the time limit ends
-    the run between the two, the start is not sent (``start_not_sent``) and
-    the summary says the app was stopped but not started. ``restart=False``
-    sends only the start, so the crawl begins on the screen the app shows
-    now. Earlier versions behaved as ``restart=False``. Every launch and
-    relaunch reads the app's launcher activity with ``cmd package
-    resolve-activity`` right before its start and starts it with ``am start
-    -W`` (`Device.launch`); when it cannot be read, the start is not sent and
-    the run ends with `LaunchFailedError` (``launcher_unreadable``). Unless
-    `allow_real_device` is True, the device must answer that it is an
+    after `stop`, the time limit and the pin were checked and the launcher
+    activity was read (when it cannot be read, nothing is sent), and the
+    start only after they were checked and read again. When `stop` or the
+    time limit ends the run between the two, the start is not sent
+    (``start_not_sent``) and the summary says the app was stopped but not
+    started. ``restart=False`` sends only the start, so the crawl begins on
+    the screen the app shows now. Earlier versions behaved as
+    ``restart=False``. Every launch and relaunch reads the app's launcher
+    activity with ``cmd package resolve-activity`` right before its start
+    and starts it with ``am start -W`` (`Device.launch`); when it cannot be
+    read, the start is not sent and the run ends with `LaunchFailedError`
+    (``launcher_unreadable``). With `restart` the launcher activity is also
+    read before the force-stop: when that read fails, nothing is sent.
+    Unless `allow_real_device` is True, the device must answer that it is an
     emulator; an answer that cannot be read counts as a real device.
 
     Every action passes the gate described in the module docstring right

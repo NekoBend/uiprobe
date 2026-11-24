@@ -405,17 +405,15 @@ def test_an_unreadable_launcher_activity_starts_nothing(
     error = json.loads(text)["error"]
     assert error["code"] == "launch_failed"
     assert error["details"]["reason"] == "launcher_unreadable"
-    # The launcher is read after the first launch's force-stop: the app was
-    # stopped, and nothing was started or pressed.
-    assert device_writes(fake_adb) == [
-        f"shell:am force-stop {SHOP}; echo uiprobe-exit:$?"
-    ]
+    # The launcher is read before the first launch's force-stop: nothing was
+    # stopped, started or pressed.
+    assert device_writes(fake_adb) == []
     assert android.inputs == []
     records = [
         json.loads(line)
         for line in (out / "transitions.jsonl").read_text("utf-8").splitlines()
     ]
-    assert records[-1]["reason"] == "start_not_sent"
+    assert records[-1]["reason"] == "launcher_unreadable"
 
 
 @pytest.mark.usefixtures("here", "android")
