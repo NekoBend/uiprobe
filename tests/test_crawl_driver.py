@@ -1383,6 +1383,7 @@ def test_the_policy_copy_keeps_every_field():
         "skip_two_target_rows": False,
         "skip_rows_with_buttons": True,
         "skip_navigate_up": False,
+        "skip_sliders": False,
     }
     assert set(values) == {f.name for f in fields(Policy)}
     default = Policy()
@@ -3255,3 +3256,63 @@ def test_with_the_up_rule_off_the_crawl_presses_up_and_stays_shallow(
     assert taps == [("top", (160, 220)), ("network", (44, 52))]
     assert result.stop_reason == "exhausted"
     assert result.screens == 2
+
+
+# --- a row with a slider ---
+
+SLIDER_SCREENS = (
+    Screen("home", "com.example.launcher/.Home", (El((0, 0, 320, 640)),)),
+    Screen(
+        "sound",
+        f"{SHOP}/.Sound",
+        (
+            El((0, 0, 320, 100), text="Sound"),
+            # The fake renders its elements flat: the SeekBar is drawn first,
+            # under the row, and the row's press point (160, 230) lies on it,
+            # as on the phone where a tap on the row moved the slider.
+            El(
+                (60, 215, 320, 245),
+                desc="Notification vibration",
+                cls="android.widget.SeekBar",
+                focusable=True,
+            ),
+            El(
+                (0, 200, 320, 260),
+                text="Vibration",
+                cls="android.widget.LinearLayout",
+                go="sound",
+            ),
+            button(300, "Ringtone", "ringtone"),
+        ),
+    ),
+    Screen("ringtone", f"{SHOP}/.Ringtone", (El((0, 0, 320, 100), text="Ringtone"),)),
+)
+
+
+def crawl_sound(
+    fake_adb: FakeAdbServer, clock: Clock, out: Path, policy: Policy
+) -> FakeAndroid:
+    android = FakeAndroid(
+        fake_adb, SERIAL, SLIDER_SCREENS, start="home", transport_id=TRANSPORT
+    )
+    device = Device(adb_server=fake_adb.address)
+    run(device, clock, out, limits=Limits(actions=12), policy=policy)
+    return android
+
+
+def test_a_row_whose_press_point_is_on_a_slider_is_not_tapped(
+    tmp_path, fake_adb, clock
+):
+    android = crawl_sound(fake_adb, clock, tmp_path / "run", Policy())
+    taps = [(i.screen, i.point) for i in android.inputs if i.kind == "tap"]
+    assert taps == [("sound", (160, 320))]
+    rows = lines(tmp_path / "run" / "skipped.jsonl")
+    assert [
+        r["reasons"] for r in rows if r["element"]["bounds"] == [0, 200, 320, 260]
+    ] == [["slider"]]
+
+
+def test_with_the_slider_rule_off_the_slider_row_is_tapped(tmp_path, fake_adb, clock):
+    android = crawl_sound(fake_adb, clock, tmp_path / "run", Policy(skip_sliders=False))
+    taps = {(i.screen, i.point) for i in android.inputs if i.kind == "tap"}
+    assert taps == {("sound", (160, 230)), ("sound", (160, 320))}
