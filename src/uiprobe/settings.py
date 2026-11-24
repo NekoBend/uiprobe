@@ -4,11 +4,12 @@ The defaults are written out in a TOML file, ``uiprobe.toml``, that
 ``uiprobe init`` creates and that users edit freely. This module holds the
 file format, the generator (`render_default_settings`,
 `write_default_settings`) and a strict reader (`load_settings`). ``uiprobe crawl``
-(the preview) reads the file for its no-press defaults, through
-`policy_from_settings`, and ``uiprobe key`` reads the keys it refuses. The crawl
-limits are not used to press (``crawl --press`` takes its own small limits),
-and ``press = true`` only makes ``crawl`` refuse to run unless ``--press`` or
-``--dry-run`` is given.
+reads the file for its no-press defaults, through `policy_from_settings`, and
+``uiprobe key`` reads the keys it refuses. ``press = true`` makes ``crawl``
+press without ``--press`` (``--dry-run`` still previews), and a pressing crawl
+takes the ``[limits]`` that no option overrides. The limits ``uiprobe init``
+writes (`_DEFAULT_DEPTH`, `_DEFAULT_ACTIONS`, `_DEFAULT_MINUTES`) are also the
+command line's defaults when no file value applies.
 
 What the file holds: the deny words and their exception words, the confirm
 words, the phrases that mark a
@@ -84,7 +85,9 @@ Reading is race-resistant (`_read_bytes`): the path is opened once, read-only
 every check and every byte comes from that descriptor: regular file, size at most
 `MAX_SETTINGS_BYTES`, at most `MAX_SETTINGS_BYTES` + 1 bytes read, size and
 times unchanged after the read, and the path still naming the same file
-(st_dev, st_ino). A symbolic link is followed at the open. What remains: a path
+(st_dev, st_ino). The path is opened as given, not as `pathlib` normalises
+it, so ``rules.toml/.`` fails on POSIX as it does for any program instead of
+reading ``rules.toml``. A symbolic link is followed at the open. What remains: a path
 switched before the open names another file, which is then fully checked; on
 Windows st_ctime is the creation time, so a same-size rewrite that restores the
 modification time is not detected there.
@@ -198,6 +201,9 @@ _REFUSE_PREFIXES: Final[tuple[tuple[int, str], ...]] = tuple(
     (_LATER_PREFIXES.get(prefix, 1), prefix) for prefix in DEVICE_WIDE_KEY_PREFIXES
 )
 
+# The crawl limits: what `uiprobe init` writes under [limits] and what a
+# pressing crawl uses when neither an option nor the file gives a value. The
+# command line imports these, so both always agree.
 _DEFAULT_DEPTH: Final = 5
 _DEFAULT_ACTIONS: Final = 300
 _DEFAULT_MINUTES: Final = 30
@@ -206,7 +212,9 @@ _KEY_NAME: Final = re.compile(r"KEYCODE_[A-Z0-9_]{1,40}")
 _UTF8_BOM: Final = b"\xef\xbb\xbf"
 _UTF16_BOMS: Final = (b"\xff\xfe", b"\xfe\xff")
 
-_TOP_KEYS: Final = frozenset({"format_version", "defaults_version", "press"})
+_TOP_KEYS: Final = frozenset(
+    {"format_version", "defaults_version", "press", "runs_dir"}
+)
 _BOOL_RULES: Final = (
     "tap_unlabeled",
     "skip_number_only",
@@ -290,7 +298,9 @@ class Settings:
     keyword or by position, still works. ``skip_two_target_rows`` (default
     True) and ``skip_rows_with_buttons`` (default False), added with defaults
     version 3, and ``skip_navigate_up`` and ``skip_sliders`` (both default
-    True), added with defaults version 4, follow it for the same reason.
+    True), added with defaults version 4, and ``runs_dir`` (default None, an
+    optional key that needed no new defaults version), follow it for the same
+    reason.
     """
 
     source: Path
@@ -322,6 +332,59 @@ class Settings:
     skip_rows_with_buttons: bool = False
     skip_navigate_up: bool = True
     skip_sliders: bool = True
+    # The optional top-level key runs_dir: the folder that gets the run
+    # folders of a pressing crawl without --out (None: not set).
+    runs_dir: str | None = None
+
+
+def _separators() -> str:
+    """The path separators of this platform: also a backslash on Windows."""
+    return "/\\" if sys.platform == "win32" else "/"
+
+
+def _folder_form_base(path: str) -> str | None:
+    """Return `path` without a trailing separator or ``.`` part, if it has one.
+
+    ``rules.toml/``, ``rules.toml/.`` and ``rules.toml/./`` are the folder
+    form of ``rules.toml``; None means `path` has no such ending. On Windows a
+    backslash counts as a separator too. The end is scanned by index, once.
+    """
+    separators = _separators()
+    end = len(path)
+    while end:
+        if path[end - 1] in separators:
+            end -= 1
+        elif end >= 2 and path[end - 1] == "." and path[end - 2] in separators:
+            end -= 2
+        else:
+            break
+    return None if end == len(path) else path[:end]
+
+
+def _without_trailing_separators(
+    path: str,
+    *,
+    windows: bool | None = None,
+    splitdrive: Callable[[str], tuple[str, str]] = os.path.splitdrive,
+) -> str:
+    """Return `path` without trailing separators, keeping a root (``/``, ``C:\\``).
+
+    A path made only of separators is kept exactly as written: on POSIX
+    ``//`` can be a root of its own, and on Windows it starts a UNC name.
+    `windows` and `splitdrive` default to this platform's rules (tests pass
+    Windows ones). The end is scanned by index, once.
+    """
+    if windows is None:
+        windows = sys.platform == "win32"
+    separators = "/\\" if windows else "/"
+    if all(char in separators for char in path):
+        return path
+    drive = splitdrive(path)[0] if windows else ""
+    keep = len(drive) + 1  # the drive and one separator: the root
+    end = len(path)
+    while end > keep and path[end - 1] in separators:
+        end -= 1
+    return path[:end]
 
 
 def policy_from_settings(
@@ -425,9 +488,13 @@ def render_default_settings() -> str:
         "",
         f"format_version = {FORMAT_VERSION}",
         f"defaults_version = {DEFAULTS_VERSION}",
-        "# Not used to press: crawl presses only with --press. With true, crawl",
-        "# refuses to run unless --press or --dry-run is given.",
+        "# With true, crawl presses for real without --press (it still needs",
+        "# --out DIR, or runs_dir below, and --allow-real-device on a device",
+        "# that is not an emulator); --dry-run previews instead.",
         "press = false",
+        "# The folder that gets the run folders of a pressing crawl without --out",
+        "# (relative to the folder of this file; it must exist):",
+        '# runs_dir = "uiprobe-runs"',
         "",
         "[deny]",
         "# Never press an element that contains one of these words.",
@@ -484,6 +551,8 @@ def render_default_settings() -> str:
         f"edge_side_px = {API36_SIDE_PX}",
         "",
         "[limits]",
+        "# The limits of a pressing crawl; --depth, --actions and --minutes",
+        "# override them for one run.",
         f"depth = {_DEFAULT_DEPTH}",
         f"actions = {_DEFAULT_ACTIONS}",
         f"minutes = {_DEFAULT_MINUTES}",
@@ -866,12 +935,13 @@ def _close_quietly(fd: int) -> None:
         return  # nothing is lost by failing to close a read-only descriptor
 
 
-def _read_bytes(path: Path, shown: str) -> bytes:
+def _read_bytes(path: str | os.PathLike[str], shown: str) -> bytes:
     """Read the settings file `path` (at most one byte more than the limit).
 
-    The path is opened once; every check and every byte comes from that
-    descriptor, never from the path again (the path is only stat-ed at the end
-    to see that it still names the opened file).
+    The path is opened once, as given (a str is not normalised, so a trailing
+    ``/.`` after a file fails as it does for any program); every check and
+    every byte comes from that descriptor, never from the path again (the path
+    is only stat-ed at the end to see that it still names the opened file).
     """
 
     def fail(text: str) -> SettingsError:
@@ -887,7 +957,7 @@ def _read_bytes(path: Path, shown: str) -> bytes:
         # Windows cannot open a directory (PermissionError): name it as POSIX
         # does. Only the message is chosen here; no byte is read.
         try:
-            kind = path.stat().st_mode
+            kind = os.stat(path).st_mode  # noqa: PTH116 - the path as given
         except (OSError, ValueError):
             kind = stat.S_IFREG
         if not stat.S_ISREG(kind):
@@ -900,7 +970,7 @@ def _read_bytes(path: Path, shown: str) -> bytes:
 
 
 def _read_descriptor(
-    fd: int, path: Path, fail: Callable[[str], SettingsError]
+    fd: int, path: str | os.PathLike[str], fail: Callable[[str], SettingsError]
 ) -> bytes:
     changed = "the file changed while it was read; try again"
     try:
@@ -928,7 +998,7 @@ def _read_descriptor(
     if total != before.st_size or _file_identity(after) != _file_identity(before):
         raise fail(changed)
     try:
-        named = path.stat()
+        named = os.stat(path)  # noqa: PTH116 - the path as given, not Path()
     except FileNotFoundError:
         raise fail(changed) from None
     except (OSError, ValueError) as error:
@@ -952,6 +1022,27 @@ def _decode(data: bytes, shown: str) -> str:
         line = data.count(b"\n", 0, error.start) + 1
         msg = f"{shown}: line {line} is not valid UTF-8; save the file as UTF-8"
         raise SettingsError(msg) from error
+
+
+def _runs_dir(parsed: dict[str, object], reader: _Reader) -> str | None:
+    """Read the optional ``runs_dir``: a non-empty path that names a folder."""
+    if "runs_dir" not in parsed:
+        return None
+    value = parsed["runs_dir"]
+    if not isinstance(value, str):
+        raise reader.fail("runs_dir", "must be a string (a folder path)")
+    if not value:
+        raise reader.fail("runs_dir", "must not be empty")
+    if "\0" in value:
+        raise reader.fail("runs_dir", "must not hold a null character")
+    # Trailing separators only say "a folder", which runs_dir names anyway;
+    # a "/." ending stays refused: in --config that form hid a file.
+    value = _without_trailing_separators(value)
+    base = _folder_form_base(value)
+    if base is not None and value.endswith("."):
+        hint = f"; write {_value_text(base)}" if base else ""
+        raise reader.fail("runs_dir", f'must not end with "/."{hint}')
+    return value
 
 
 def load_settings(path: str | os.PathLike[str]) -> Settings:
@@ -985,9 +1076,15 @@ def load_settings(path: str | os.PathLike[str]) -> Settings:
         SettingsError: The file cannot be read or is invalid; the message
             names the file and the key.
     """
-    location = Path(path)
+    # One string for the read and for `Settings.source`, so a PathLike that
+    # answers differently each time cannot name two files.
+    given = os.fspath(path)
+    location = Path(given)
     reader = _Reader(location)
-    data = _read_bytes(location, reader.shown)
+    # Open the path as given: Path() drops a trailing "/." (and "."
+    # components), so "rules.toml/." would read rules.toml, which no other
+    # program would. Messages about the read name the path as given.
+    data = _read_bytes(given, _shown(given))
     text = _decode(data, reader.shown)
     try:
         parsed = tomllib.loads(text)
@@ -1004,6 +1101,7 @@ def load_settings(path: str | os.PathLike[str]) -> Settings:
         parsed, "", "defaults_version", 1, DEFAULTS_VERSION
     )
     press = reader.boolean(parsed, "", "press")
+    runs_dir = _runs_dir(parsed, reader)
 
     deny = reader.table(parsed, "deny", _TABLE_KEYS["deny"])
     deny_listed = reader.strings(deny, "deny", "words", _word_identity)
@@ -1102,6 +1200,7 @@ def load_settings(path: str | os.PathLike[str]) -> Settings:
         format_version=format_version,
         defaults_version=defaults_version,
         press=press,
+        runs_dir=runs_dir,
         deny_words=deny_words,
         deny_exceptions=deny_exceptions,
         confirm_words=_merge(

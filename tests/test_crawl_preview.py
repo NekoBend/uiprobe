@@ -344,7 +344,7 @@ def test_text_output(fake_adb, capsys):
     code, out, err = crawl(capsys, fake_adb)
     assert (code, err) == (0, "")
     lines = out.splitlines()
-    assert lines.pop() == DRY_RUN_LAST
+    pop_ending(lines)
     assert re.fullmatch(
         rf"preview for {re.escape(SHOP)} on screen s-[0-9a-f]+; nothing was pressed",
         lines[0],
@@ -384,7 +384,7 @@ def test_text_output_with_empty_lists(fake_adb, android, capsys):
     code, out, _ = crawl(capsys, fake_adb)
     assert code == 0
     lines = out.splitlines()
-    assert lines.pop() == DRY_RUN_LAST
+    pop_ending(lines)
     assert lines[3:] == ["would press (0):", "would not press (0):"]
 
 
@@ -420,7 +420,7 @@ def test_other_app_in_front_exits_zero_with_everything_skipped(
     code, out, err = crawl(capsys, fake_adb)
     assert (code, err) == (0, "")
     lines = out.splitlines()
-    assert lines.pop() == DRY_RUN_LAST
+    pop_ending(lines)
     assert lines[2] == f"foreground: {OTHER}, keyboard: hidden"
     assert lines[3:5] == ["would press (0):", "would not press (7):"]
     for line in lines[5:]:
@@ -652,14 +652,29 @@ PRESS_MESSAGE = "--press needs --out DIR, the new folder to record the run into"
 
 def file_press_message(path: str) -> str:
     return (
-        f"the settings file {path} says press = true, but a crawl presses only"
-        " when --press is given: add --press and --out DIR to press, or"
-        " --dry-run to preview"
+        f"the settings file {path} says press = true, so this crawl presses and"
+        " needs --out DIR, the new folder to record the run into; add --dry-run"
+        " to preview instead"
     )
 
 
 DEFAULT_LAST = "nothing was pressed: this was a preview (the default)"
 DRY_RUN_LAST = "nothing was pressed: this was a preview (--dry-run)"
+# The switch lines after a preview on an emulator with the file's press = false.
+GUIDANCE = [
+    "to press this time: add --press --out DIR to the same command",
+    f"to always press: set press = true in {SETTINGS_FILE}, and runs_dir (the folder"
+    " that gets the run folders) or --out DIR on each run",
+]
+
+
+def pop_ending(lines: list[str], last: str = DRY_RUN_LAST) -> None:
+    """Check and remove the closing line and the switch lines of a preview."""
+    to_press, to_always = GUIDANCE
+    if last == DRY_RUN_LAST:
+        to_press = to_press.replace("add --press", "remove --dry-run and add --press")
+    assert lines[-3:] == [last, to_press, to_always]
+    del lines[-3:]
 
 
 def set_press(folder: Path) -> None:
@@ -674,11 +689,10 @@ def test_crawl_without_a_switch_previews(fake_adb, android, capsys):
     assert (code, err) == (0, "")
     code2, out_dry, err2 = invoke(capsys, fake_adb, "crawl", SHOP, "--dry-run")
     assert (code2, err2) == (0, "")
-    body, last = out.rstrip("\n").rsplit("\n", 1)
-    body_dry, last_dry = out_dry.rstrip("\n").rsplit("\n", 1)
-    assert body == body_dry
-    assert last == DEFAULT_LAST
-    assert last_dry == DRY_RUN_LAST
+    lines, lines_dry = out.splitlines(), out_dry.splitlines()
+    pop_ending(lines, DEFAULT_LAST)
+    pop_ending(lines_dry, DRY_RUN_LAST)
+    assert lines == lines_dry
     assert_read_only(fake_adb, android)
 
 
@@ -711,7 +725,7 @@ def test_press_is_refused_before_any_contact(
     assert android.inputs == []
 
 
-def test_press_in_the_file_is_refused_without_dry_run(
+def test_press_in_the_file_without_out_is_refused(
     fake_adb, android, capsys, settings_dir, connections
 ):
     set_press(settings_dir)
@@ -734,7 +748,7 @@ def test_press_in_the_file_with_press_names_the_file_and_dry_run(
     assert connections == []
     assert android.inputs == []
     # Each suggested retry: replacing --press with --dry-run previews; removing
-    # only --press is still refused because the file asks for pressing.
+    # only --press is still refused because the file presses and needs --out.
     code, out, err = invoke(capsys, fake_adb, "crawl", SHOP)
     assert (code, out) == (2, "")
     assert err == f"uiprobe: error: {file_press_message(SETTINGS_FILE)}\n"
@@ -749,7 +763,7 @@ def test_press_in_the_file_with_press_names_the_file_and_dry_run(
     )
     code, out, err = invoke(capsys, fake_adb, "crawl", SHOP)
     assert (code, err) == (0, "")
-    assert out.rstrip("\n").endswith(DEFAULT_LAST)
+    pop_ending(out.splitlines(), DEFAULT_LAST)
 
 
 @pytest.mark.parametrize("name", ["odd\u202e.toml", "two\nlines.toml"])
@@ -816,7 +830,11 @@ def test_press_in_the_file_allows_dry_run(fake_adb, android, capsys, settings_di
     set_press(settings_dir)
     code, out, err = invoke(capsys, fake_adb, "crawl", SHOP, "--dry-run")
     assert (code, err) == (0, "")
-    assert out.rstrip("\n").endswith(DRY_RUN_LAST)
+    # --dry-run is what keeps this run from pressing: no switch lines follow.
+    assert out.splitlines()[-1] == DRY_RUN_LAST
+    assert "to press this time" not in out
+    assert "to always press" not in out
+    assert "--allow-real-device" not in out
     assert_read_only(fake_adb, android)
 
 
@@ -838,7 +856,7 @@ def test_press_is_refused_after_the_file_is_checked(
     assert connections == []
 
 
-def test_press_in_the_file_is_refused_in_json(
+def test_press_in_the_file_without_out_is_refused_in_json(
     fake_adb, android, capsys, settings_dir, connections
 ):
     set_press(settings_dir)
@@ -1060,7 +1078,8 @@ def test_crawl_help_says_the_preview_is_the_default(capsys):
     assert code == 0
     assert "The preview is the default" in out
     assert "--dry-run forces the preview" in out
-    assert "--press runs a pressing crawl" in out
+    assert "--press, or press = true in the settings file, runs a pressing" in out
+    assert "also when the settings file says press = true" in out
     assert "presses nothing" in out
     assert "screen showing now" in out
     assert "cannot be combined with --press" in out
@@ -1134,7 +1153,7 @@ def test_number_only_and_toggle_in_text(fake_adb, android, capsys):
     code, out, err = crawl(capsys, fake_adb)
     assert (code, err) == (0, "")
     lines = out.splitlines()
-    assert lines.pop() == DRY_RUN_LAST
+    pop_ending(lines)
     assert lines[3:] == [
         "would press (1):",
         '  e4 TextView "Page 2" [tap] center=160,245',

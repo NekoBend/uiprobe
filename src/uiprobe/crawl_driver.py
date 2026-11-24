@@ -1851,9 +1851,28 @@ def _crawl_on(
         # Asked only while the device waits for a renumbered transport.
         device.set_pin_watch(run.waiting_stopped)
         return _drive(run, writer)
+    except BaseException as error:
+        _mark_own_run_folder(error)
+        raise
     finally:
-        with contextlib.suppress(RunFolderError):
-            writer.close()
+        try:
+            with contextlib.suppress(RunFolderError):
+                writer.close()
+        except BaseException as error:  # an interrupt while it closes
+            _mark_own_run_folder(error)
+            raise
+
+
+def _mark_own_run_folder(error: BaseException) -> None:
+    """Say on `error` that this run made its folder and wrote run-start.json.
+
+    For the command line only: the name is private, not part of the
+    documented API, and a literal, so that the source checks can see it
+    touches no module. An error that refuses the attribute keeps its
+    identity and stays unmarked.
+    """
+    with contextlib.suppress(Exception):
+        setattr(error, "_uiprobe_own_run_folder", True)  # noqa: B010
 
 
 def _drive(run: _Run, writer: RunWriter) -> CrawlResult:

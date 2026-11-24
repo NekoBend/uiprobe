@@ -21,10 +21,9 @@ import os
 import re
 import stat
 import sys
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
-from pathlib import Path
-from typing import TYPE_CHECKING, Final, NoReturn, TextIO, override
+from typing import TYPE_CHECKING, Final, Literal, NoReturn, TextIO, override
 
 from uiprobe import __version__
 from uiprobe._json import dumps
@@ -65,15 +64,22 @@ from uiprobe.pngfile import (
     PngInterruptedError,
     check_new_path,
     check_png,
+    depends_on_a_drive_folder,
     save_png,
 )
+from uiprobe.runlog import RunFolderError, _check_folder, _new_folder
 from uiprobe.settings import (
+    _DEFAULT_ACTIONS,
+    _DEFAULT_DEPTH,
+    _DEFAULT_MINUTES,
     SETTINGS_FILE,
     IncompleteFileError,
     InterruptedFileError,
     Settings,
     SettingsError,
+    _folder_form_base,
     _shown,
+    _without_trailing_separators,
     load_settings,
     policy_from_settings,
     write_default_settings,
@@ -92,13 +98,26 @@ __all__ = ["main", "run"]
 FIND_SCHEMA = "uiprobe.find/1"
 CRAWL_RUN_SCHEMA = "uiprobe.crawl_run/1"
 # The limits of a pressing crawl from the command line: (lowest, highest,
-# default, what). The defaults are small on purpose, so a bare --press ends
-# soon; the settings file's [limits] are the preview's and are not used here.
-_PRESS_LIMITS: dict[str, tuple[int, int, int, str]] = {
-    "depth": (1, 50, 3, "how deep it taps on one path (does not end the run)"),
-    "actions": (1, 10000, 30, "the most sent actions (launch, taps, BACK, restarts)"),
-    "minutes": (1, 1440, 5, "the longest run in minutes"),
+# what). Each value is the option, else the settings file's [limits], else
+# _DEFAULT_LIMITS, the values `uiprobe init` writes (see `_press_limits`).
+_PRESS_LIMITS: dict[str, tuple[int, int, str]] = {
+    "depth": (1, 50, "how deep it taps on one path (does not end the run)"),
+    "actions": (1, 10000, "the most sent actions (launch, taps, BACK, restarts)"),
+    "minutes": (1, 1440, "the longest run in minutes"),
 }
+_DEFAULT_LIMITS: Final[dict[str, int]] = {
+    "depth": _DEFAULT_DEPTH,
+    "actions": _DEFAULT_ACTIONS,
+    "minutes": _DEFAULT_MINUTES,
+}
+# Where a limit of a pressing run came from (the "limits_source" values).
+_LimitSource = Literal["option", "file", "default"]
+# Why a run presses (the "press_source" values): --press, or press = true.
+_PressSource = Literal["option", "file"]
+# Where the run folder came from (the "out_source" values): --out, or runs_dir.
+_OutSource = Literal["option", "file"]
+# The most names tried in runs_dir for one run: NAME, then NAME-2 to NAME-99.
+_MAX_RUN_NAME = 99
 _PRESS_SETTLE = 1.0
 
 
@@ -553,11 +572,13 @@ def _add_crawl_parser(add_parser: Callable[..., argparse.ArgumentParser]) -> Non
             " lists what a crawl of PACKAGE would press and what it would skip,"
             " with the reasons. It presses nothing, does not start the app and"
             " writes no file on this computer. --dry-run forces the preview."
-            " --press runs a pressing crawl: it starts the app, presses what the"
-            " rules allow, presses BACK and restarts the app, and records every"
-            " step in the new folder --out DIR. It presses only on an emulator"
-            " unless --allow-real-device is given, and stops after a few actions"
-            " unless --depth, --actions or --minutes say otherwise."
+            " --press, or press = true in the settings file, runs a pressing"
+            " crawl: it starts the app, presses what the rules allow, presses"
+            " BACK and restarts the app, and records every step in a new run"
+            " folder: --out DIR, or one inside runs_dir of the settings file."
+            " It presses only on an emulator unless"
+            " --allow-real-device is given, and stops at the settings file's"
+            " [limits] unless --depth, --actions or --minutes say otherwise."
             f" The rules come from the settings file (./{SETTINGS_FILE}"
             " or --config PATH); without one the command stops. Create it with"
             " uiprobe init."
@@ -569,8 +590,9 @@ def _add_crawl_parser(add_parser: Callable[..., argparse.ArgumentParser]) -> Non
         "--dry-run",
         action="store_true",
         help=(
-            "force the preview (the default): judge the screen showing now;"
-            " cannot be combined with --press"
+            "force the preview (the default): judge the screen showing now,"
+            " also when the settings file says press = true; cannot be"
+            " combined with --press"
         ),
     )
     crawl.add_argument(
@@ -578,7 +600,8 @@ def _add_crawl_parser(add_parser: Callable[..., argparse.ArgumentParser]) -> Non
         action="store_true",
         help=(
             "press for real: start the app and press what the rules allow;"
-            " needs --out; cannot be combined with --dry-run"
+            " needs --out DIR, or runs_dir in the settings file; cannot be"
+            " combined with --dry-run"
         ),
     )
     _add_press_options(crawl)
@@ -602,40 +625,44 @@ def _add_crawl_parser(add_parser: Callable[..., argparse.ArgumentParser]) -> Non
 
 
 def _add_press_options(crawl: argparse.ArgumentParser) -> None:
-    """The options that only a pressing crawl (--press) takes."""
+    """The options that only a pressing crawl (--press or press = true) takes."""
     crawl.add_argument(
         "--out",
         metavar="DIR",
-        help="with --press: the new run folder to record into (must not exist)",
+        help="when pressing: the new run folder to record into (must not exist)",
     )
-    for name, (low, high, default, what) in _PRESS_LIMITS.items():
+    for name, (low, high, what) in _PRESS_LIMITS.items():
         crawl.add_argument(
             f"--{name}",
             type=_bounded_int(f"--{name}", low, high),
             metavar="N",
-            help=f"with --press: {what}, {low} to {high} (default {default})",
+            help=(
+                f"when pressing: {what}, {low} to {high} (default: [limits]"
+                f" {name} of the settings file; uiprobe init writes"
+                f" {_DEFAULT_LIMITS[name]})"
+            ),
         )
     crawl.add_argument(
         "--settle",
         type=_settle_seconds,
         metavar="SEC",
-        help=f"with --press: the pause after a tap or BACK (default {_PRESS_SETTLE})",
+        help=f"when pressing: the pause after a tap or BACK (default {_PRESS_SETTLE})",
     )
     crawl.add_argument(
         "--screenshots",
         action="store_true",
-        help="with --press: also save a screenshot of each new screen",
+        help="when pressing: also save a screenshot of each new screen",
     )
     crawl.add_argument(
         "--allow-real-device",
         action="store_true",
-        help="with --press: also press on a device that is not an emulator",
+        help="when pressing: also press on a device that is not an emulator",
     )
     crawl.add_argument(
         "--back-on-other-screens",
         action="store_true",
         help=(
-            "with --press: press BACK on a screen of another app (by default the"
+            "when pressing: press BACK on a screen of another app (by default the"
             " app is restarted instead and nothing goes to the other app)"
         ),
     )
@@ -643,7 +670,7 @@ def _add_press_options(crawl: argparse.ArgumentParser) -> None:
         "--no-tap-window-check",
         action="store_true",
         help=(
-            "with --press: do not read which window takes a tap at its point (by"
+            "when pressing: do not read which window takes a tap at its point (by"
             " default a tap goes out only when a window of the app takes it)"
         ),
     )
@@ -651,7 +678,7 @@ def _add_press_options(crawl: argparse.ArgumentParser) -> None:
         "--no-restart",
         action="store_true",
         help=(
-            "with --press: start from the screen the app shows now (by default"
+            "when pressing: start from the screen the app shows now (by default"
             " the app is stopped first with am force-stop, then its launcher"
             " activity is started; what it had not saved is lost)"
         ),
@@ -959,21 +986,35 @@ def _cmd_swipe(args: argparse.Namespace) -> int:
     return 0
 
 
-def _load_settings(path: str) -> Settings:
-    """Read the settings file `path`; warnings go to stderr, errors are usage errors."""
+def _load_settings(path: str, *, warn: bool = True) -> Settings:
+    """Read the settings file `path`; warnings go to stderr, errors are usage errors.
+
+    With `warn` False the caller writes the warnings (`_settings_warnings`).
+    """
     try:
         settings = load_settings(path)
     except SettingsError as exc:
         raise _UsageError(_printable(str(exc))) from None
-    for warning in settings.warnings:
-        _emit(f"uiprobe: warning: {_printable(warning)}", stream=sys.stderr)
+    if warn:
+        _settings_warnings(settings)
     return settings
 
 
+def _settings_warnings(settings: Settings) -> None:
+    """Write the warnings about the settings file to stderr."""
+    for warning in settings.warnings:
+        _emit(f"uiprobe: warning: {_printable(warning)}", stream=sys.stderr)
+
+
 def _is_missing(path: str) -> bool:
-    """Tell whether nothing is at `path`; a broken link or entry counts as there."""
+    """Tell whether nothing is at `path`; a broken link or entry counts as there.
+
+    The path is looked up as given, not normalised by `Path` (which drops a
+    trailing ``/.``), so ``rules.toml/.`` after a file is missing, as the
+    settings reader, which opens it as given, would find it.
+    """
     try:
-        Path(path).lstat()
+        os.lstat(path)
     except (FileNotFoundError, NotADirectoryError):
         return True
     except (OSError, ValueError):
@@ -982,17 +1023,28 @@ def _is_missing(path: str) -> bool:
 
 
 def _check_config_path(path: str | None) -> None:
-    """Refuse a ``--config`` value that ends with a path separator.
+    """Refuse a ``--config`` value that ends with a path separator or ``/.``.
 
-    A folder-like name such as ``rules.toml/`` would otherwise lose its slash
-    when turned into a path and name the file ``rules.toml``.
+    A folder-like name such as ``rules.toml/`` or ``rules.toml/.`` would
+    otherwise lose its ending when turned into a path and name the file
+    ``rules.toml``. The message names the file itself, never an init command
+    for the folder form.
     """
-    if path is not None and path.endswith(("/", "\\") if _ON_WINDOWS else "/"):
-        msg = (
-            f"--config {_shown(path)}: a settings file path cannot end with "
-            "a path separator"
-        )
-        raise _UsageError(msg)
+    if path is None:
+        return
+    file = _folder_form_base(path)
+    if file is None:
+        return
+    msg = (
+        f"--config {_shown(path)}: a settings file path cannot end with a path"
+        ' separator or "/." (that is the folder form of a path)'
+    )
+    if file:
+        hint = _hint_path(file)
+        if hint == "PATH":
+            hint = "PATH, the same path without that ending"
+        msg += f"; to use the file, give --config {hint}"
+    raise _UsageError(msg)
 
 
 def _key_settings(args: argparse.Namespace) -> Settings | None:
@@ -1005,12 +1057,17 @@ def _key_settings(args: argparse.Namespace) -> Settings | None:
     return _load_settings(SETTINGS_FILE)
 
 
-def _create_line(path: str) -> str:
-    """Return the command that creates ``path``; a path needing quoting gives PATH."""
+def _hint_path(path: str) -> str:
+    """Return `path` for a printed hint; one that needs shell quoting gives PATH."""
     pattern = _PLAIN_WINDOWS_PATH_RE if _ON_WINDOWS else _PLAIN_PATH_RE
     if pattern.fullmatch(str(path)) is None:
-        return "uiprobe init PATH"
-    return f"uiprobe init {path}"
+        return "PATH"
+    return path
+
+
+def _create_line(path: str) -> str:
+    """Return the command that creates ``path``; a path needing quoting gives PATH."""
+    return f"uiprobe init {_hint_path(path)}"
 
 
 def _crawl_settings(args: argparse.Namespace) -> Settings:
@@ -1029,10 +1086,10 @@ def _crawl_settings(args: argparse.Namespace) -> Settings:
             # Name the looked-for path only when it needs no shell quoting.
             create = _create_line(path)
         # Keep a --dry-run or --press the caller gave: a file that says
-        # press = true is refused without --dry-run, and --press stays visible.
+        # press = true presses without --dry-run, and --press stays visible.
         switch = " --dry-run" if args.dry_run else ""
         name = f"uiprobe crawl {args.package}{switch} --config PATH"
-        if args.press:
+        if args.press or any(given for _option, given in _press_only(args)):
             # A pressing run has more options (--out, limits, device) than a
             # line could repeat safely: name the one thing to add.
             name = "add --config PATH to the same command"
@@ -1045,7 +1102,8 @@ def _crawl_settings(args: argparse.Namespace) -> Settings:
             ),
             {"looked_for": looked, "create": create, "name_one": name},
         )
-    return _load_settings(path)
+    # The caller writes the warnings once it knows whether the run presses.
+    return _load_settings(path, warn=False)
 
 
 def _cmd_key(args: argparse.Namespace) -> int:
@@ -1145,14 +1203,223 @@ def _cmd_launch(args: argparse.Namespace) -> int:
     return 0
 
 
-def _crawl_policy(args: argparse.Namespace) -> tuple[Policy, Settings]:
-    """Check the crawl options, read the settings and build the policy.
+@dataclass(frozen=True)
+class _CrawlSetup:
+    """What a crawl runs with, decided before any device is contacted.
 
-    No device is contacted.
+    ``press_source`` is None for the preview, else why the run presses;
+    ``out`` is the run folder of a pressing run and ``out_source`` where it
+    came from (both None for the preview).
+    """
+
+    policy: Policy
+    settings: Settings
+    press_source: _PressSource | None
+    out: str | None
+    out_source: _OutSource | None
+
+
+def _refuse_press_only(args: argparse.Namespace, why: str) -> None:
+    """Refuse the first option that only a pressing run takes, if one was given."""
+    given = [option for option, value in _press_only(args) if value]
+    if given:
+        msg = f"{given[0]} is used only when the crawl presses{why}"
+        raise _UsageError(msg)
+
+
+# The run folder rule below is also named in the switch lines of
+# `_preview_guidance` ("add --press" with runs_dir, else "--press --out DIR",
+# and the "to always press" line): update them, their tests and
+# docs/crawl.md when this rule changes.
+def _file_press_out(
+    args: argparse.Namespace, settings: Settings, press_source: _PressSource
+) -> tuple[str, _OutSource]:
+    """Return the run folder of a pressing run and where it came from.
+
+    The rule is the same for --press and press = true: --out when given
+    (relative to the working folder); else a new folder inside the settings
+    file's runs_dir, named ``PACKAGE-YYYYMMDD-HHMMSS`` in local time, with
+    ``-2`` to ``-99`` added when that name is taken; else a usage error that
+    asks for --out. The parent must exist and be a folder, not a link; only
+    the run folder is made in it, later, by `crawl_run` with a create-only
+    mkdir (a folder that appears there before that ends the run unshared).
+
+    Raises:
+        _UsageError: No --out and no runs_dir.
+        RunFolderError: The runs_dir folder is missing, not a folder or a
+            link, or every name up to ``-99`` is taken.
+    """
+    if args.out is not None:
+        return args.out, "option"
+    shown_file = _shown(str(settings.source))
+    if settings.runs_dir is None:
+        if press_source == "option":
+            msg = "--press needs --out DIR, the new folder to record the run into"
+        else:
+            msg = (
+                f"the settings file {shown_file} says press = true, so this"
+                " crawl presses and needs --out DIR, the new folder to record"
+                " the run into; add --dry-run to preview instead"
+            )
+        raise _UsageError(msg)
+    parent = _runs_dir_parent(args, settings.runs_dir, shown_file)
+    base = f"{args.package}-{_run_stamp()}"  # a plain str: see _crawl_policy
+    for number in range(1, _MAX_RUN_NAME + 1):
+        name = base if number == 1 else f"{base}-{number}"
+        candidate = os.path.join(parent, name)  # noqa: PTH118 - kept as given
+        try:
+            check_new_path(candidate)
+        except FileExistsError:
+            continue
+        except (OSError, ValueError) as error:
+            msg = f"cannot check the run folder {_shown(candidate)}: {error}"
+            raise RunFolderError(msg, details={"path": candidate}) from None
+        return candidate, "file"
+    msg = (
+        f"cannot make a run folder in {_shown(parent)} (runs_dir in"
+        f" {shown_file}): {base} and {base}-2 to {base}-{_MAX_RUN_NAME} all"
+        " exist; remove some, or add --out DIR"
+    )
+    raise RunFolderError(msg, details={"path": parent})
+
+
+def _run_folder_parent(
+    folder: str,
+    *,
+    windows: bool | None = None,
+    splitdrive: Callable[[str], tuple[str, str]] = os.path.splitdrive,
+    dirname: Callable[[str], str] = os.path.dirname,
+) -> str:
+    """Return the folder that `folder` goes in, ignoring trailing separators.
+
+    ``runs/new/`` goes in ``runs``; a root stays a root. `windows`,
+    `splitdrive` and `dirname` default to this platform's rules (tests pass
+    the other platform's).
+    """
+    stripped = _without_trailing_separators(
+        folder, windows=windows, splitdrive=splitdrive
+    )
+    return dirname(stripped)
+
+
+def _check_run_folder_leaf(
+    folder: str,
+    *,
+    windows: bool | None = None,
+    splitdrive: Callable[[str], tuple[str, str]] = os.path.splitdrive,
+) -> None:
+    """Refuse `folder` when something is at it once trailing separators go.
+
+    ``taken/`` names the file or dangling link ``taken`` as a folder; the
+    lookup of ``taken/`` itself fails, so the name without the separators is
+    checked as `check_new_path` checks a path. Nothing is created.
+    """
+    stripped = _without_trailing_separators(
+        folder, windows=windows, splitdrive=splitdrive
+    )
+    if stripped != folder:
+        _check_folder(stripped)
+
+
+def _check_run_folder_parent(folder: str) -> None:
+    """Refuse the run folder `folder` when its parent is missing or no folder.
+
+    `folder` is absolute (as `_new_folder` returns it). Links above it are
+    followed, as when the run makes the folder. Nothing is created.
+    """
+    parent = _run_folder_parent(folder)
+    try:
+        info = os.stat(parent)  # noqa: PTH116 - the path as given
+    except (FileNotFoundError, NotADirectoryError):
+        msg = (
+            f"cannot make the run folder {_shown(folder)}: the folder it goes in,"
+            f" {_shown(parent)}, does not exist; create it, or name another one"
+        )
+        raise RunFolderError(msg, details={"path": folder}) from None
+    except (OSError, ValueError) as error:
+        msg = f"cannot check the folder {_shown(parent)}: {error}"
+        raise RunFolderError(msg, details={"path": folder}) from None
+    if not stat.S_ISDIR(info.st_mode):
+        msg = (
+            f"cannot make the run folder {_shown(folder)}: {_shown(parent)} is not"
+            " a folder"
+        )
+        raise RunFolderError(msg, details={"path": folder})
+
+
+def _run_stamp() -> str:
+    """The local time for a run folder name: YYYYMMDD-HHMMSS, no zone."""
+    return f"{datetime.now().astimezone():%Y%m%d-%H%M%S}"
+
+
+def _runs_dir_parent(args: argparse.Namespace, runs_dir: str, shown_file: str) -> str:
+    """Return the runs_dir folder, checked: it exists, is a folder, is no link.
+
+    A relative runs_dir counts from the folder of the settings file, taken
+    from the path as given (--config, or ./uiprobe.toml); ``~`` is not
+    expanded. Links in earlier parts of the path are followed, as for --out.
+    """
+    if depends_on_a_drive_folder(runs_dir):
+        msg = (
+            f"runs_dir {_shown(runs_dir)} in {shown_file} depends on a drive's"
+            " own working folder; give a full path with its drive, or a path"
+            " relative to the settings file"
+        )
+        raise RunFolderError(msg, details={"path": runs_dir})
+    config = SETTINGS_FILE if args.config is None else args.config
+    parent = os.path.join(os.path.dirname(config), runs_dir)  # noqa: PTH118, PTH120
+    where = f"{_shown(parent)} (runs_dir in {shown_file})"
+    try:
+        info = os.lstat(parent)
+    except (FileNotFoundError, NotADirectoryError):
+        msg = (
+            f"the folder for run folders {where} does not exist; create that"
+            " folder, or add --out DIR"
+        )
+        raise RunFolderError(msg, details={"path": parent}) from None
+    except (OSError, ValueError) as error:
+        msg = f"cannot check the folder for run folders {where}: {error}"
+        raise RunFolderError(msg, details={"path": parent}) from None
+    # A link or a Windows junction is refused here. Only these are checked:
+    # os.lstat reports just the name-surrogate reparse points (symbolic links
+    # and junctions) as links, and other reparse points, such as cloud-file
+    # placeholders, are resolved by the system, so refusing on the reparse
+    # point attribute alone would refuse ordinary synced folders.
+    # The lstat result decides first (a junction is a mount point reparse
+    # point), so a swap after it cannot pass; isjunction is a second check.
+    mount_point = getattr(stat, "IO_REPARSE_TAG_MOUNT_POINT", object())
+    if (
+        stat.S_ISLNK(info.st_mode)
+        or getattr(info, "st_reparse_tag", 0) == mount_point
+        or os.path.isjunction(parent)
+    ):
+        msg = (
+            f"the folder for run folders {where} is a link or junction; give"
+            " the folder it points to in runs_dir, or add --out DIR"
+        )
+        raise RunFolderError(msg, details={"path": parent})
+    if not stat.S_ISDIR(info.st_mode):
+        msg = (
+            f"the folder for run folders {where} is not a folder; fix runs_dir,"
+            " or add --out DIR"
+        )
+        raise RunFolderError(msg, details={"path": parent})
+    return parent
+
+
+def _crawl_policy(args: argparse.Namespace) -> _CrawlSetup:
+    """Check the crawl options, read the settings, decide whether it presses.
+
+    A run presses when --press is given, or when the settings file says
+    press = true and --dry-run is not given. What the options alone decide is
+    checked before the file is read. No device is contacted.
     """
     if args.press and args.dry_run:
         msg = "--press and --dry-run cannot be combined"
         raise _UsageError(msg)
+    # A plain str, whatever the subclass (as crawl_run does), for the check,
+    # the run folder's name and the run itself.
+    args.package = str.__str__(args.package)
     try:
         check_package(args.package)
     except ValueError as exc:
@@ -1163,28 +1430,44 @@ def _crawl_policy(args: argparse.Namespace) -> tuple[Policy, Settings]:
         except ValueError:
             msg = f"--deny word is empty after normalization: {word!r}"
             raise _UsageError(msg) from None
-    if not args.press:
-        given = [option for option, value in _press_only(args) if value]
-        if given:
-            msg = f"{given[0]} is used only with --press"
-            raise _UsageError(msg)
-    elif args.out is None:
-        msg = "--press needs --out DIR, the new folder to record the run into"
-        raise _UsageError(msg)
+    if args.dry_run:
+        _refuse_press_only(args, ", and --dry-run never presses")
     settings = _crawl_settings(args)
-    if settings.press and not (args.press or args.dry_run):
-        msg = (
-            f"the settings file {_shown(str(settings.source))} says press = true,"
-            " but a crawl presses only when --press is given: add --press and"
-            " --out DIR to press, or --dry-run to preview"
+    press_source: _PressSource | None = None
+    if args.press:
+        press_source = "option"
+    elif settings.press and not args.dry_run:
+        press_source = "file"
+    if press_source is not None:
+        # Before the settings warnings: a pressing run whose plan cannot be
+        # shown is refused before anything is written, as with --press, where
+        # this was checked before the file was read.
+        _check_plan_stream(args)
+    _settings_warnings(settings)
+    if press_source is None and not args.dry_run:
+        _refuse_press_only(
+            args,
+            ": add --press, or set press = true in the settings file"
+            f" {_shown(str(settings.source))}",
         )
-        raise _UsageError(msg)
+    out: str | None = None
+    out_source: _OutSource | None = None
+    if press_source is not None:
+        # --out, else runs_dir, else a usage error: only _file_press_out decides.
+        out, out_source = _file_press_out(args, settings, press_source)
+        # Refusal only, before the device is contacted: the same checks the
+        # run makes before it creates the folder, and that its parent is an
+        # existing folder (nothing is created here; the run's own checks and
+        # its create-only mkdir still follow).
+        folder = _new_folder(out)
+        _check_run_folder_leaf(folder)
+        _check_run_folder_parent(folder)
     policy = policy_from_settings(
         settings,
         extra_deny=args.deny,
         tap_unlabeled=True if args.tap_unlabeled else None,
     )
-    return policy, settings
+    return _CrawlSetup(policy, settings, press_source, out, out_source)
 
 
 def _detail_text(decision: Decision, detail: Detail) -> str:
@@ -1231,7 +1514,13 @@ def _decision_center(screen: Screen, decision: Decision) -> tuple[int, int] | No
     return decision.point
 
 
-def _preview_text(result: Preview, settings_path: str, *, dry_run: bool) -> str:
+def _preview_text(
+    result: Preview,
+    settings_path: str,
+    *,
+    dry_run: bool,
+    guidance: Sequence[str] = (),
+) -> str:
     screen = result.screen
     shown = {True: "shown", False: "hidden", None: "unknown"}[result.keyboard_shown]
     foreground = "unknown" if result.foreground is None else result.foreground
@@ -1256,13 +1545,46 @@ def _preview_text(result: Preview, settings_path: str, *, dry_run: bool) -> str:
         + _reasons_text(d)
         for d in skipped
     )
-    # Guidance on how to switch to a pressing run (--press, or
-    # press = true in the settings file, plus --allow-real-device on a real
-    # device) is printed here once the pressing crawl exists. Until then no
-    # command is printed, because every pressing command is refused.
     how = "--dry-run" if dry_run else "the default"
     lines.append(f"nothing was pressed: this was a preview ({how})")
+    lines.extend(guidance)
     return "\n".join(lines)
+
+
+def _preview_guidance(
+    args: argparse.Namespace, settings: Settings, device: Device
+) -> list[str]:
+    """How to switch from this preview to a pressing run; empty when none applies.
+
+    A file that says press = true was overridden by --dry-run, so the switch
+    is to remove that option (and add --out DIR unless the file has runs_dir)
+    and nothing is printed. Otherwise the lines say what to add to the same
+    command for this run (so its other options, such as -s, --deny and
+    --config, stay as they were: --press, and --out DIR unless the file has
+    runs_dir) and what makes every run press, and, unless the device answers
+    that it is an emulator, --allow-real-device.
+    """
+    if settings.press:
+        return []
+    # These lines follow the run folder rule of _file_press_out; change both
+    # together.
+    add = "--press" if settings.runs_dir is not None else "--press --out DIR"
+    this_time = f"add {add} to the same command"
+    if args.dry_run:
+        this_time = "remove --dry-run and " + this_time
+    lines = [
+        f"to press this time: {this_time}",
+        "to always press: set press = true in"
+        f" {_printable(_shown(str(settings.source)))}, and runs_dir (the folder"
+        " that gets the run folders) or --out DIR on each run",
+    ]
+    try:
+        emulator = device.is_emulator()
+    except UiprobeError:
+        emulator = False  # unknown: name the option, which is then needed
+    if not emulator:
+        lines.append("on a real device also add --allow-real-device")
+    return lines
 
 
 def _detail_json(detail: Detail) -> dict[str, object]:
@@ -1299,27 +1621,41 @@ def _preview_json(result: Preview, settings_path: str) -> dict[str, object]:
     return payload
 
 
-def _cmd_crawl(args: argparse.Namespace) -> int:
-    if args.press and (sys.stderr if args.json else sys.stdout) is None:
-        # Before anything else writes (a settings warning would go to stdout).
+def _check_plan_stream(args: argparse.Namespace) -> None:
+    """Refuse a pressing run whose plan cannot be shown (a closed stream)."""
+    if (sys.stderr if args.json else sys.stdout) is None:
         stream = "stderr" if args.json else "stdout"
         msg = f"the plan cannot be shown: {stream} is closed, so nothing was pressed"
         raise _UsageError(msg)
-    policy, settings = _crawl_policy(args)
+
+
+def _cmd_crawl(args: argparse.Namespace) -> int:
     if args.press:
-        return _cmd_crawl_press(args, policy)
-    settings_path = str(settings.source)
+        # Before anything else writes (a settings warning would go to stdout).
+        _check_plan_stream(args)
+    setup = _crawl_policy(args)  # checks the plan stream of press = true too
+    if setup.press_source is not None:
+        # Again right before the device is made: whatever wrote in between
+        # (the settings warnings) may have closed the stream.
+        _check_plan_stream(args)
+        return _cmd_crawl_press(args, setup)
+    settings_path = str(setup.settings.source)
     device = Device(
         _single_serial(args),
         adb_server=args.adb_server,
         adb=args.adb,
         start_server=args.start_server,
     )
-    result = make_preview(device, args.package, policy)
+    result = make_preview(device, args.package, setup.policy)
     if args.json:
         _emit(dumps(_preview_json(result, settings_path), indent=2))
     else:
-        _emit(_preview_text(result, settings_path, dry_run=args.dry_run))
+        guidance = _preview_guidance(args, setup.settings, device)
+        _emit(
+            _preview_text(
+                result, settings_path, dry_run=args.dry_run, guidance=guidance
+            )
+        )
     return 0
 
 
@@ -1356,33 +1692,66 @@ def _settle_seconds(text: str) -> float:
     return value
 
 
-def _press_limits(args: argparse.Namespace) -> Limits:
+def _press_limits(
+    args: argparse.Namespace, settings: Settings | None
+) -> tuple[Limits, dict[str, _LimitSource]]:
+    """Return the limits of a pressing run and where each one came from.
+
+    Each of depth, actions and minutes is the option when it was given, else
+    the settings file's [limits] value (every defaults version holds them),
+    else `_DEFAULT_LIMITS`, the value `uiprobe init` writes.
+    """
     given = {"depth": args.depth, "actions": args.actions, "minutes": args.minutes}
+    from_file = (
+        None
+        if settings is None
+        else {
+            "depth": settings.depth,
+            "actions": settings.actions,
+            "minutes": settings.minutes,
+        }
+    )
     values: dict[str, int] = {}
-    for name, (low, high, default, _what) in _PRESS_LIMITS.items():
-        value = given[name]
-        value = default if value is None else value
+    sources: dict[str, _LimitSource] = {}
+    for name, (low, high, _what) in _PRESS_LIMITS.items():
+        source: _LimitSource
+        if given[name] is not None:
+            value, source = given[name], "option"
+        elif from_file is not None:
+            value, source = from_file[name], "file"
+        else:
+            value, source = _DEFAULT_LIMITS[name], "default"
         if not low <= value <= high:
-            msg = f"--{name} must be from {low} to {high}, got {value}"
+            msg = (
+                f"the {name} limit must be from {low} to {high}, got {value}"
+                f" ({_limit_source_text(name, source)})"
+            )
             raise _UsageError(msg)
         values[name] = value
-    return Limits(**values)
+        sources[name] = source
+    return Limits(**values), sources
+
+
+def _limit_source_text(name: str, source: str) -> str:
+    """Where a limit came from, as the plan text says it."""
+    return {"option": f"--{name}", "file": "settings file"}.get(source, "default")
 
 
 def _press_settle(args: argparse.Namespace) -> float:
     return _PRESS_SETTLE if args.settle is None else args.settle
 
 
-def _cmd_crawl_press(args: argparse.Namespace, policy: Policy) -> int:
-    """Run a pressing crawl into ``--out`` and report how it ended."""
-    limits = _press_limits(args)
+def _cmd_crawl_press(args: argparse.Namespace, setup: _CrawlSetup) -> int:
+    """Run a pressing crawl into its run folder and report how it ended."""
+    limits, limits_source = _press_limits(args, setup.settings)
     settle = _press_settle(args)
     policy = replace(
-        policy,
+        setup.policy,
         back_on_other_screens=args.back_on_other_screens,
         check_tap_window=not args.no_tap_window_check,
     )
-    out: str = args.out
+    assert setup.out is not None  # noqa: S101 - _crawl_policy sets it to press
+    out: str = setup.out
     shown_out = _shown(out)
     device = Device(
         _single_serial(args),
@@ -1411,12 +1780,15 @@ def _cmd_crawl_press(args: argparse.Namespace, policy: Policy) -> int:
     plan: dict[str, object] = {
         "package": args.package,
         "device": {"serial": device.serial, "emulator": emulator},
+        "press_source": setup.press_source,
         "limits": {
             "depth": limits.depth,
             "actions": limits.actions,
             "minutes": limits.minutes,
         },
+        "limits_source": limits_source,
         "out": out,
+        "out_source": setup.out_source,
         "back_on_other_screens": policy.back_on_other_screens,
         "check_tap_window": policy.check_tap_window,
         "screenshots": args.screenshots,
@@ -1428,9 +1800,11 @@ def _cmd_crawl_press(args: argparse.Namespace, policy: Policy) -> int:
     if plan_stream is None:  # a closed stream at start: refuse before pressing
         msg = "the plan cannot be shown: " + ("stderr" if args.json else "stdout")
         raise _UsageError(msg + " is closed, so nothing was pressed")
-    _emit(_press_plan_text(plan), stream=plan_stream)
+    _emit(
+        _press_plan_text(plan, settings=str(setup.settings.source)),
+        stream=plan_stream,
+    )
     _flush(plan_stream)
-    existed = Path(out).exists() or Path(out).is_symlink()
     try:
         result = crawl_run(
             device,
@@ -1446,9 +1820,9 @@ def _cmd_crawl_press(args: argparse.Namespace, policy: Policy) -> int:
             settle=settle,
             restart=not args.no_restart,
         )
-    except KeyboardInterrupt:
+    except KeyboardInterrupt as exc:
         # crawl_run wrote run.json with "interrupted" when it still could.
-        if existed or not Path(out).exists():
+        if not _made_by_this_run(exc):
             return _fail(INTERRUPTED, "interrupted", as_json=args.json)
         msg = f"interrupted; the run so far is in {shown_out}"
         return _fail(INTERRUPTED, msg, as_json=args.json, details={"out": out})
@@ -1457,7 +1831,7 @@ def _cmd_crawl_press(args: argparse.Namespace, policy: Policy) -> int:
         # nothing was written or sent; say it in the command's words.
         raise _cli_not_emulator(device, exc) from None
     except UiprobeError as exc:
-        if not existed and Path(out).exists():  # made by this run
+        if _made_by_this_run(exc):
             exc.details.setdefault("out", out)
         raise
     moves = result.repins  # as run.json counts them
@@ -1469,6 +1843,22 @@ def _cmd_crawl_press(args: argparse.Namespace, policy: Policy) -> int:
     else:
         _emit(_press_result_text(result, hints, moves))
     return 0
+
+
+def _made_by_this_run(error: BaseException) -> bool:
+    """Whether a failed run may name its run folder in the error.
+
+    Only when `crawl_run` itself made the folder and wrote ``run-start.json``
+    completely: it then sets ``_uiprobe_own_run_folder`` on the error it
+    raises (see `uiprobe.crawl_driver._crawl_on`). Nothing is inferred from
+    what is on the disk, which another program can change.
+    """
+    own = getattr(error, "_uiprobe_own_run_folder", False) is True
+    # Read once: an error object raised again by a later run (a reused
+    # KeyboardInterrupt, say) must not carry this run's folder into it.
+    with contextlib.suppress(Exception):
+        setattr(error, "_uiprobe_own_run_folder", False)  # noqa: B010
+    return own
 
 
 def _flush(stream: TextIO) -> None:
@@ -1516,11 +1906,9 @@ def _press_device_check(device: Device, *, allow_real_device: bool) -> bool | No
         return None
 
 
-def _press_plan_text(plan: dict[str, object]) -> str:
+def _press_plan_text(plan: dict[str, object], *, settings: str) -> str:
     device = plan["device"]
-    limits = plan["limits"]
     assert isinstance(device, dict)  # noqa: S101 - built above
-    assert isinstance(limits, dict)  # noqa: S101
     kind = {True: "emulator", False: "real device"}.get(
         device["emulator"], "emulator check unreadable"
     )
@@ -1528,9 +1916,9 @@ def _press_plan_text(plan: dict[str, object]) -> str:
         [
             f"pressing on {_printable(str(device['serial']))} ({kind}):"
             f" {_printable(str(plan['package']))}",
-            f"limits: depth {limits['depth']}, actions {limits['actions']},"
-            f" minutes {limits['minutes']}",
-            f"run folder: {_shown(str(plan['out']))}",
+            _press_because_text(plan, settings),
+            _press_limits_text(plan),
+            _press_out_text(plan, settings),
             "BACK on screens of other apps: "
             + ("yes" if plan["back_on_other_screens"] else "no (restart the app)"),
             "check the window at each tap point: "
@@ -1538,6 +1926,36 @@ def _press_plan_text(plan: dict[str, object]) -> str:
             _RESTART_PLAN[bool(plan["restart"])],
         ]
     )
+
+
+def _press_because_text(plan: dict[str, object], settings: str) -> str:
+    """The plan line that says why the run presses."""
+    if plan["press_source"] == "file":
+        return f"pressing because: press = true in {_printable(_shown(settings))}"
+    return "pressing because: --press"
+
+
+def _press_out_text(plan: dict[str, object], settings: str) -> str:
+    """The plan line with the run folder and where it came from."""
+    source = (
+        f"runs_dir in {_printable(_shown(settings))}"
+        if plan["out_source"] == "file"
+        else "--out"
+    )
+    return f"run folder: {_shown(str(plan['out']))} ({source})"
+
+
+def _press_limits_text(plan: dict[str, object]) -> str:
+    """The plan line with each limit and where it came from."""
+    limits = plan["limits"]
+    sources = plan["limits_source"]
+    assert isinstance(limits, dict)  # noqa: S101 - built in _cmd_crawl_press
+    assert isinstance(sources, dict)  # noqa: S101
+    shown = ", ".join(
+        f"{name} {limits[name]} ({_limit_source_text(name, sources[name])})"
+        for name in _PRESS_LIMITS
+    )
+    return f"limits: {shown}"
 
 
 # The plan line about the first action, by whether it force-stops the app.
