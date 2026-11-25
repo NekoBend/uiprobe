@@ -129,3 +129,18 @@ def test_ordinary_settings_rows_stay_pressable(label: str) -> None:
 def test_state_changing_labels_are_refused(label: str) -> None:
     judgement = _run([el("b", text=label, package=SETTINGS)])
     assert reasons(judgement, "b") == ("deny_word",), label
+
+
+def test_separate_buttons_in_the_same_bar_stay_pressable() -> None:
+    judgement = _run(_button_bar("Forget", "Edit", "Cancel"))
+    assert reasons(judgement, "a1") == ("deny_word",)
+    assert reasons(judgement, "a2") == ()
+    assert reasons(judgement, "a3") == ()
+
+
+@pytest.mark.parametrize(
+    "label",
+    ["Unpaired devices", "Disconnection history", "Revoked certificates", "切断履歴"],
+)
+def test_the_accepted_over_blocks_are_refused(label: str) -> None:
+    assert reasons(_run([el("b", text=label, package=SETTINGS)]), "b") == ("deny_word",)

@@ -933,7 +933,11 @@ def _exceptions(
                 "[deny] except",
                 f"{_value_text(exception)} equals the deny word {_value_text(word)};"
                 " an exception cannot let its own deny word through: to let it"
-                " through, remove the deny word instead",
+                " through, remove the deny word instead. If this file was written"
+                " by an older uiprobe, the deny word may be a default that a later"
+                f" defaults version added (current: {DEFAULTS_VERSION}, which added"
+                " forget, disconnect and others): drop the word from [deny] except"
+                " (it is now a default deny word), or add it to [deny] remove",
             )
         else:
             warnings.append(

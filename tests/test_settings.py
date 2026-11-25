@@ -2783,3 +2783,24 @@ def test_a_version_7_file_without_a_version_7_word_does_not_get_it_back(tmp_path
     assert '"forget"' not in text
     loaded = load_settings(write(tmp_path, text))
     assert "forget" not in loaded.deny_words
+
+
+def test_a_version_6_file_with_a_version_7_word_as_exception_names_both_remedies(
+    tmp_path,
+):
+    text = v6_text().replace("except = []", 'except = ["forget"]', 1)
+    message = refused(write(tmp_path, text), "[deny] except", "forget")
+    assert "defaults version" in message
+    assert "drop the word from [deny] except" in message
+    assert "add it to [deny] remove" in message
+
+
+def test_both_remedies_for_a_version_7_word_used_as_exception_load(tmp_path):
+    dropped = load_settings(write(tmp_path, v6_text()))
+    assert "forget" in dropped.deny_words
+    assert "forget" not in dropped.deny_exceptions
+    text = v6_text().replace("except = []", 'except = ["forget"]', 1)
+    text = text.replace("remove = []", 'remove = ["forget"]', 1)  # deny
+    kept = load_settings(write(tmp_path, text))
+    assert "forget" not in kept.deny_words
+    assert "forget" not in kept.deny_exceptions
