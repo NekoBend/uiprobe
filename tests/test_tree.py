@@ -13,7 +13,7 @@ import pytest
 
 from uiprobe import cli
 from uiprobe.crawl import Limits, fingerprint_of
-from uiprobe.crawl_tree import TREE_SCHEMA, read_tree
+from uiprobe.crawl_tree import CUT_WARNING, GATE_WARNING, TREE_SCHEMA, read_tree
 from uiprobe.model import Bounds, Element, Screen
 from uiprobe.runlog import RunFolderError, RunWriter
 
@@ -124,8 +124,9 @@ class Folder:
 
     def start(self, kind, from_screen=None, element=None, **more):
         self.action += 1
+        point = (5, 5) if kind == "tap" else None  # a tap always has its point
         self.writer.write_transition_start(
-            self.action, kind, from_screen, element, **more
+            self.action, kind, from_screen, element, point, **more
         )
         return self.action
 
@@ -366,18 +367,6 @@ def test_a_run_without_run_json_still_shows(tmp_path, capsys):
     assert run["finished"] is False
     assert run["stop_reason"] is None
     assert run["actions"] == 1 + 1
-
-
-def test_a_damaged_line_is_a_warning_and_the_rest_is_shown(tmp_path, capsys):
-    folder = full_run(tmp_path)
-    path = folder.path / "transitions.jsonl"
-    path.write_bytes(b"{not json\n" + path.read_bytes())
-    code, out, err = run_tree(capsys, str(folder.path))
-    assert code == 0
-    assert out.splitlines() == FULL_TEXT
-    assert "transitions.jsonl line" in err
-    _, out, _ = run_tree(capsys, str(folder.path), "--json")
-    assert any("transitions.jsonl" in w for w in json.loads(out)["warnings"])
 
 
 def test_a_missing_skipped_file_is_not_an_error(tmp_path, capsys):
@@ -780,19 +769,6 @@ def test_deep_nesting_and_bad_bytes_are_warnings(tmp_path, capsys):
     assert "run-start.json is not valid UTF-8 JSON" in err
 
 
-def test_empty_records_are_warnings(tmp_path, capsys):
-    folder = full_run(tmp_path)
-    log = folder.path / "transitions.jsonl"
-    log.write_bytes(log.read_bytes() + b"{}\n")
-    (folder.path / "run.json").write_text("{}", encoding="utf-8")
-    code, out, _ = run_tree(capsys, str(folder.path), "--json")
-    data = json.loads(out)
-    assert code == 0
-    assert data["run"]["finished"] is False
-    assert "transitions.jsonl has a line that is not a transition" in data["warnings"]
-    assert "run.json is not a run end record (no stop_reason)" in data["warnings"]
-
-
 def test_a_pressed_row_is_named_by_its_own_recorded_element(tmp_path, capsys):
     folder = Folder(tmp_path)
     old = make_screen(
@@ -1001,29 +977,6 @@ def test_texts_are_capped_and_nesting_is_bounded(tmp_path, capsys):
     assert all(len(r["texts"]) <= 50 for r in rows)
     assert len(rows[0]["texts"]) == 50
     assert rows[0]["name"] == "t3"
-
-
-def test_an_end_line_must_say_exactly_one_thing(tmp_path, capsys):
-    folder = Folder(tmp_path)
-    home = home_screen()
-    home_id = folder.screen(home)
-    folder.start("launch")
-    folder.end(home_id)
-    folder.start("tap", home_id, home.elements[2])
-    folder.writer.close()
-    _append(
-        folder.path / "transitions.jsonl",
-        {
-            "schema": "uiprobe.transition_end/1",
-            "action_id": 2,
-            "to_screen_id": home_id,
-            "dump_failed": True,
-        },
-    )
-    code, out, err = run_tree(capsys, str(folder.path))
-    assert code == 0
-    assert "├─ Network → (結果不明)" in out.splitlines()
-    assert "action 2 has an end line that is not understood" in err
 
 
 def test_skip_reasons_must_be_a_list_of_strings(tmp_path, capsys):
@@ -1290,7 +1243,12 @@ def _raw_run(tmp_path: Path, lines: list) -> tuple[Path, str]:
     end = {"schema": "uiprobe.transition_end/1"}
     tap = {
         "kind": "tap",
-        "element": {"id": "e3", "class": "android.widget.LinearLayout"},
+        "point": [5, 5],
+        "element": {
+            "id": "e3",
+            "class": "android.widget.LinearLayout",
+            "bounds": [0, 0, 1, 1],
+        },
     }
     table = {"S": start, "E": end}
     out = []
@@ -1300,7 +1258,13 @@ def _raw_run(tmp_path: Path, lines: list) -> tuple[Path, str]:
             continue
         kind, number, extra = item
         body = extra(home_id, tap)
-        out.append(json.dumps({**table[kind], "action_id": number, **body}).encode())
+        line = {
+            **table[kind],
+            "recorded_at": "2026-03-01T09:30:15+09:00",
+            "action_id": number,
+            **body,
+        }
+        out.append(json.dumps(line).encode())
     (folder.path / "transitions.jsonl").write_bytes(b"\n".join(out) + b"\n")
     return folder.path, home_id
 
@@ -1332,47 +1296,6 @@ def test_the_clean_sequence_is_another_app(tmp_path, capsys):
     )
     _, out, _ = run_tree(capsys, str(path))
     assert "├─ Network → 別のアプリ" in out.splitlines()
-
-
-def test_a_damaged_line_after_the_end_makes_the_tap_unknown(tmp_path, capsys):
-    path, _ = _raw_run(
-        tmp_path,
-        [
-            ("S", 1, _tap_start),
-            ("E", 1, _tap_end_other),
-            b"{broken",
-            ("S", 2, _relaunch_off),
-        ],
-    )
-    code, out, err = run_tree(capsys, str(path))
-    assert code == 0
-    assert "├─ Network → (結果不明)" in out.splitlines()
-    assert "別のアプリ" not in out
-    assert "action 1 has repeated, misplaced or interrupted lines" in err
-
-
-def test_a_damaged_line_between_start_and_end_makes_the_tap_unknown(tmp_path, capsys):
-    path, _ = _raw_run(
-        tmp_path,
-        [("S", 1, _tap_start), b"[1]", ("E", 1, _tap_end_other)],
-    )
-    _, out, _ = run_tree(capsys, str(path))
-    assert "├─ Network → (結果不明)" in out.splitlines()
-
-
-def test_a_repeated_start_line_makes_the_tap_unknown(tmp_path, capsys):
-    path, _ = _raw_run(
-        tmp_path,
-        [
-            ("S", 1, _tap_start),
-            ("S", 1, _tap_start),
-            ("E", 1, _tap_end_other),
-            ("S", 2, _relaunch_off),
-        ],
-    )
-    _, out, _ = run_tree(capsys, str(path))
-    assert "├─ Network → (結果不明)" in out.splitlines()
-    assert "別のアプリ" not in out
 
 
 def test_a_lone_surrogate_is_escaped_in_the_json_output(tmp_path, capsys):
@@ -1424,11 +1347,12 @@ def _relaunch_same_package(_sid, _tap):
     }
 
 
-def _unknown_and_no_edge(tmp_path, capsys, lines):
+def _unknown_and_no_edge(tmp_path, capsys, lines, *, gated=True):
     path, home_id = _raw_run(tmp_path, lines)
-    code, out, _ = run_tree(capsys, str(path))
+    code, out, err = run_tree(capsys, str(path))
     assert code == 0
     assert "├─ Network → (結果不明)" in out.splitlines()
+    assert err.splitlines() == ([f"uiprobe: warning: {GATE_WARNING}"] if gated else [])
     _, out, _ = run_tree(capsys, str(path), "--json")
     data = json.loads(out)
     network = next(
@@ -1437,46 +1361,6 @@ def _unknown_and_no_edge(tmp_path, capsys, lines):
     assert network["to"] == {"unknown": True}
     assert network["pressed"] is False
     return data
-
-
-def test_an_end_before_its_start_is_unknown(tmp_path, capsys):
-    _unknown_and_no_edge(
-        tmp_path, capsys, [("E", 1, _tap_end_ok), ("S", 1, _tap_start)]
-    )
-
-
-def test_two_end_lines_are_unknown_even_if_one_is_not_sent(tmp_path, capsys):
-    _unknown_and_no_edge(
-        tmp_path,
-        capsys,
-        [
-            ("S", 1, _tap_start),
-            ("E", 1, _tap_end_not_sent),
-            ("E", 1, _tap_end_ok),
-        ],
-    )
-
-
-def test_a_not_sent_end_is_not_sent_only_when_the_rule_holds(tmp_path, capsys):
-    path, _ = _raw_run(tmp_path, [("S", 1, _tap_start), ("E", 1, _tap_end_not_sent)])
-    _, out, _ = run_tree(capsys, str(path))
-    assert "├─ Network → (送らなかった: covered_by_other)" in out.splitlines()
-    path2 = tmp_path / "second"
-    path2.mkdir()
-    path, _ = _raw_run(
-        path2,
-        [("S", 1, _tap_start), b"{broken", ("E", 1, _tap_end_not_sent)],
-    )
-    _, out, _ = run_tree(capsys, str(path))
-    assert "├─ Network → (結果不明)" in out.splitlines()
-
-
-def test_a_start_line_without_action_next_to_a_tap_makes_it_unknown(tmp_path, capsys):
-    _unknown_and_no_edge(
-        tmp_path,
-        capsys,
-        [("S", 1, _tap_start), ("E", 1, _tap_end_other), ("S", 2, _no_action)],
-    )
 
 
 def test_off_target_naming_the_target_package_is_unknown(tmp_path, capsys):
@@ -1488,26 +1372,283 @@ def test_off_target_naming_the_target_package_is_unknown(tmp_path, capsys):
             ("E", 1, _tap_end_other),
             ("S", 2, _relaunch_same_package),
         ],
+        gated=False,
     )
 
 
-def test_an_unknown_tap_gives_its_destination_no_edge(tmp_path, capsys):
+# --- the all-or-nothing gate on transitions.jsonl ---
+
+
+def _log(folder: Folder) -> Path:
+    return folder.path / "transitions.jsonl"
+
+
+def _edit(folder: Folder, edit) -> None:
+    """Change the lines of transitions.jsonl: `edit` gets the list of byte lines
+    (without the final newline) and returns the new list."""
+    raw = _log(folder).read_bytes()
+    lines = raw.split(b"\n")[:-1]
+    _log(folder).write_bytes(b"\n".join(edit(lines)) + b"\n")
+
+
+def _change(index: int, **changes):
+    """An edit that sets keys of line `index` (None removes a key)."""
+
+    def edit(lines):
+        data = json.loads(lines[index])
+        for key, value in changes.items():
+            if value is None:
+                data.pop(key, None)
+            else:
+                data[key] = value
+        return [*lines[:index], json.dumps(data).encode(), *lines[index + 1 :]]
+
+    return edit
+
+
+# line numbers (from 0) in full_run: 0 launch start, 1 its end, 2 start of the tap
+# on Network, 3 its end, 4 and 5 the tap on Back home, ...
+BAD_LOGS = {
+    "a blank line": lambda ls: [*ls[:3], b"", *ls[3:]],
+    "an extra key on a start line": _change(2, extra=1),
+    "a bool as the action id": _change(2, action_id=True),
+    "a string as the action id": _change(2, action_id="2"),
+    "an action id of 0": _change(0, action_id=0),
+    "a time that is not a time": _change(2, recorded_at="yesterday"),
+    "a wrong schema name": _change(2, schema="uiprobe.transition_start/2"),
+    "dump_failed as a string": _change(3, dump_failed="false"),
+    "a missing action": _change(2, action=None),
+    "an action that is not an object": _change(2, action="tap"),
+    "an off_target on a tap": _change(2, off_target={"package": "com.other.app"}),
+    "a restart on a tap": _change(2, restart=True),
+    "a tap without from_screen_id": _change(2, from_screen_id=None),
+    "an end before its start": lambda ls: [ls[0], ls[1], ls[3], ls[2], *ls[4:]],
+    "two end lines": lambda ls: [*ls[:4], ls[3], *ls[4:]],
+    "a repeated start line": lambda ls: [*ls[:3], ls[2], *ls[3:]],
+    "an id that does not rise": _change(4, action_id=1),
+    "a line that is not an object": lambda ls: [*ls[:4], b"[1]", *ls[4:]],
+    "a damaged complete line": lambda ls: [*ls[:4], b"{broken", *ls[4:]],
+    "an empty object": lambda ls: [*ls[:4], b"{}", *ls[4:]],
+    "a start line without action next to an end": lambda ls: [
+        *ls[:4],
+        json.dumps(
+            {
+                "schema": "uiprobe.transition_start/1",
+                "recorded_at": "2026-03-01T09:30:15+09:00",
+                "action_id": 99,
+            }
+        ).encode(),
+        *ls[4:],
+    ],
+}
+
+
+@pytest.mark.parametrize("name", sorted(BAD_LOGS))
+def test_any_line_off_the_shape_means_no_press_results(tmp_path, capsys, name):
+    folder = full_run(tmp_path)
+    _edit(folder, BAD_LOGS[name])
+    home_id = home_screen().screen_id
+    code, out, err = run_tree(capsys, str(folder.path), "--json")
+    data = json.loads(out)
+    assert code == 0
+    assert err == ""
+    assert data["warnings"] == [GATE_WARNING]
+    assert data["root"] == home_id
+    assert data["unreached"] == sorted(
+        [NETWORK.screen_id, ABOUT.screen_id], key=list(data["screens"]).index
+    )
+    for node in data["screens"].values():
+        for element in node["elements"]:
+            assert element.get("pressed", False) is False
+            assert element.get("to", {"unknown": True}) == {"unknown": True}
+    code, out, err = run_tree(capsys, str(folder.path))
+    assert code == 0
+    assert err == f"uiprobe: warning: {GATE_WARNING}\n"
+    assert out.count("(押した行からは辿れなかった画面") == 2
+    for ending in ("→ (同じ画面)", "→ 別のアプリ", "→ 次の画面", "(送らなかった"):
+        assert ending not in out
+
+
+def test_a_file_that_fails_still_shows_the_rows_that_were_tapped(tmp_path, capsys):
+    folder = full_run(tmp_path)
+    _edit(folder, BAD_LOGS["a blank line"])
+    _, out, _ = run_tree(capsys, str(folder.path))
+    lines = out.splitlines()
+    assert "├─ Network → (結果不明)" in lines
+    assert "├─ Same → (結果不明)" in lines
+    assert "├─ Wi-Fi ·" in lines
+
+
+def test_a_file_that_passes_shows_its_results(tmp_path, capsys):
+    folder = full_run(tmp_path)
+    code, out, err = run_tree(capsys, str(folder.path))
+    assert (code, err) == (0, "")
+    assert out.splitlines() == FULL_TEXT
+
+
+def test_an_empty_or_missing_log_passes(tmp_path, capsys):
+    folder = full_run(tmp_path)
+    _log(folder).write_bytes(b"")
+    _, _, err = run_tree(capsys, str(folder.path))
+    assert err == ""
+    _log(folder).unlink()
+    _, _, err = run_tree(capsys, str(folder.path))
+    assert err == ""
+
+
+def test_an_end_that_is_dump_failed_or_failed_passes(tmp_path, capsys):
     folder = Folder(tmp_path)
     home = home_screen()
     home_id = folder.screen(home)
-    about_id = folder.screen(ABOUT)
+    folder.start("launch", restart=True)
+    folder.end(home_id)
+    folder.tap(home, 3, dump_failed=True)
+    folder.start("relaunch", home_id)
+    folder.end(failed="start_timeout")
+    folder.writer.close()
+    code, out, err = run_tree(capsys, str(folder.path))
+    assert (code, err) == (0, "")
+    assert "├─ Network → (読めなかった)" in out.splitlines()
+
+
+def test_a_final_start_line_with_no_end_is_only_that_tap_unknown(tmp_path, capsys):
+    folder = Folder(tmp_path)
+    home = home_screen()
+    home_id = folder.screen(home)
+    network_id = folder.screen(NETWORK)
     folder.start("launch")
     folder.end(home_id)
-    folder.tap(home, 3, about_id)
+    folder.tap(home, 3, network_id)
+    folder.tap(home, 6, home_id)
+    folder.start("tap", home_id, home.elements[11])  # the run ended right here
     folder.writer.close()
-    _append(
-        folder.path / "transitions.jsonl",
-        {"schema": "uiprobe.transition_end/1", "action_id": 2, "not_sent": True},
+    code, out, err = run_tree(capsys, str(folder.path))
+    lines = out.splitlines()
+    assert (code, err) == (0, "")
+    assert "├─ Network" in lines
+    assert "├─ About → (同じ画面)" in lines
+    assert "├─ Same → (結果不明)" in lines
+
+
+def _cut_run(tmp_path: Path, keep: int) -> Folder:
+    """A run of three taps whose transitions.jsonl is cut `keep` bytes short of
+    its end, as a crash in the middle of the last write leaves it."""
+    folder = Folder(tmp_path)
+    home = make_screen(
+        ".Home",
+        [
+            el(1, cls="FrameLayout"),
+            el(2, 1, cls="LinearLayout", flags=CLICK),
+            el(3, 2, text="Network"),
+            el(4, 1, cls="LinearLayout", flags=CLICK),
+            el(5, 4, text="日本語の名前"),
+        ],
     )
-    _, out, _ = run_tree(capsys, str(folder.path), "--json")
-    data = json.loads(out)
-    network = next(
-        e for e in data["screens"][home_id]["elements"] if e["name"] == "Network"
+    home_id = folder.screen(home)
+    folder.start("launch")
+    folder.end(home_id)
+    folder.start(
+        "tap",
+        home_id,
+        {
+            "id": "e2",
+            "class": "android.widget.LinearLayout",
+            "text": "Network",
+            "bounds": [0, 0, 1, 1],
+        },
     )
-    assert network["to"] == {"unknown": True}
-    assert about_id in data["unreached"]  # no edge led there
+    folder.end(home_id)
+    folder.start(
+        "tap",
+        home_id,
+        {
+            "id": "e4",
+            "class": "android.widget.LinearLayout",
+            "text": "日本語の名前",
+            "bounds": [0, 0, 1, 1],
+        },
+    )
+    folder.end(home_id)
+    folder.writer.close()
+    data = _log(folder).read_bytes()
+    _log(folder).write_bytes(data[: len(data) - keep])
+    return folder
+
+
+def test_a_last_end_line_cut_short_leaves_only_that_tap_unknown(tmp_path, capsys):
+    folder = _cut_run(tmp_path, keep=30)
+    code, out, err = run_tree(capsys, str(folder.path))
+    lines = out.splitlines()
+    assert code == 0
+    assert err == f"uiprobe: warning: {CUT_WARNING}\n"
+    assert "├─ Network → (同じ画面)" in lines
+    assert "└─ 日本語の名前 → (結果不明)" in lines
+
+
+def test_a_last_start_line_cut_short_is_ignored(tmp_path, capsys):
+    folder = _cut_run(tmp_path, keep=0)
+    data = _log(folder).read_bytes()
+    last_start = data.rstrip(b"\n").rsplit(b"\n", 2)[0]  # up to the 3rd action's start
+    cut = data.rindex(b'"action_id": 3, "action"')
+    _log(folder).write_bytes(data[: cut + 20])
+    assert not _log(folder).read_bytes().endswith(b"\n")
+    code, out, err = run_tree(capsys, str(folder.path))
+    lines = out.splitlines()
+    assert code == 0
+    assert err == f"uiprobe: warning: {CUT_WARNING}\n"
+    assert "├─ Network → (同じ画面)" in lines
+    assert "└─ 日本語の名前 ·" in lines
+    assert last_start
+
+
+def test_a_line_cut_in_the_middle_of_a_character_is_cut_short(tmp_path, capsys):
+    folder = _cut_run(tmp_path, keep=0)
+    data = _log(folder).read_bytes()
+    cut = data.rindex("日本語".encode()) + 1  # inside the first character's bytes
+    cut = (
+        data.rindex(b'"action_id": 3, "action"')
+        + data[data.rindex(b'"action_id": 3, "action"') :].index("日".encode())
+        + 1
+    )
+    _log(folder).write_bytes(data[:cut])
+    code, out, err = run_tree(capsys, str(folder.path))
+    assert code == 0
+    assert err == f"uiprobe: warning: {CUT_WARNING}\n"
+    assert "├─ Network → (同じ画面)" in out.splitlines()
+
+
+def test_a_complete_last_line_without_its_newline_passes(tmp_path, capsys):
+    folder = _cut_run(tmp_path, keep=0)
+    data = _log(folder).read_bytes()
+    _log(folder).write_bytes(data.rstrip(b"\n"))
+    code, out, err = run_tree(capsys, str(folder.path))
+    assert (code, err) == (0, "")
+    assert "└─ 日本語の名前 → (同じ画面)" in out.splitlines()
+
+
+def test_a_cut_line_that_is_not_last_fails_the_gate(tmp_path, capsys):
+    folder = _cut_run(tmp_path, keep=0)
+    data = _log(folder).read_bytes()
+    lines = data.split(b"\n")
+    lines[2] = lines[2][:40]  # a line cut short, with its newline after it
+    _log(folder).write_bytes(b"\n".join(lines))
+    _, _, err = run_tree(capsys, str(folder.path))
+    assert err == f"uiprobe: warning: {GATE_WARNING}\n"
+
+
+def test_off_target_does_not_make_a_screen_with_a_target_file_another_app(
+    tmp_path, capsys
+):
+    folder = Folder(tmp_path)
+    home = home_screen()
+    home_id = folder.screen(home)
+    folder.start("launch")
+    folder.end(home_id)
+    folder.tap(home, 3, home_id)
+    folder.start("relaunch", home_id, off_target_package="com.other.app")
+    folder.end(home_id)
+    folder.writer.close()
+    _, out, err = run_tree(capsys, str(folder.path))
+    assert err == ""
+    assert "├─ Network → (同じ画面)" in out.splitlines()
+    assert "別のアプリ" not in out

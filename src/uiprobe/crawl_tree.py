@@ -132,7 +132,6 @@ class _Tap:
     element_id: str
     end: dict[str, object] | None
     element: dict[str, object]
-    ambiguous: bool = False
 
 
 class _Warnings:
@@ -540,8 +539,6 @@ def _tap_of(
     start_line: dict[str, object],
     action: dict[str, object],
     end: dict[str, object] | None,
-    *,
-    ambiguous: bool,
 ) -> _Tap | None:
     """The tap a start line records, or None when it names no screen or element."""
     from_id = _screen_id(start_line.get("from_screen_id"))
@@ -553,7 +550,7 @@ def _tap_of(
         or not isinstance(element_id, str)
     ):
         return None
-    return _Tap(action_id, from_id, element_id, end, element, ambiguous)
+    return _Tap(action_id, from_id, element_id, end, element)
 
 
 @dataclass(slots=True)
@@ -573,149 +570,378 @@ def _rank(tap: _Tap) -> int:
     return 2 if _not_sent(tap) else 0
 
 
-def _end_is_valid(end: dict[str, object]) -> bool:
-    """An end line says exactly one of: a screen, dump_failed, not_sent, failed."""
-    said = (
-        _screen_id(end.get("to_screen_id")) is not None,
-        end.get("dump_failed") is True,
-        end.get("not_sent") is True,
-        end.get("failed") is True,
+_START: Final = "uiprobe.transition_start/1"
+_END: Final = "uiprobe.transition_end/1"
+_STAMP: Final = re.compile(
+    r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:[+-]\d{2}:\d{2}(?::\d{2})?)?"
+)
+_KINDS: Final = frozenset({"launch", "tap", "back", "relaunch"})
+_ELEMENT_STRINGS: Final = ("text", "resource_id", "content_desc", "hint", "parent")
+GATE_WARNING: Final = (
+    "transitions.jsonl is not in the shape uiprobe writes; no press results are shown"
+)
+CUT_WARNING: Final = (
+    "transitions.jsonl ends with a line that was cut short; the line is ignored"
+)
+
+
+def _is_int(value: object) -> bool:
+    return type(value) is int
+
+
+def _is_text(value: object) -> bool:
+    return type(value) is str
+
+
+def _keys_ok(line: dict[str, object], required: set[str], optional: set[str]) -> bool:
+    keys = set(line)
+    return required <= keys <= required | optional
+
+
+def _stamped(line: dict[str, object], schema: str) -> bool:
+    stamp = line.get("recorded_at")
+    return (
+        line.get("schema") == schema
+        and _is_text(stamp)
+        and _STAMP.fullmatch(str(stamp)) is not None
+        and _is_int(line.get("action_id"))
+        and int(str(line["action_id"])) >= 1
     )
-    return sum(said) == 1
+
+
+def _element_ok(element: object) -> bool:
+    """The form of `Element.to_dict`: what a tap's start line holds."""
+    if not isinstance(element, dict):
+        return False
+    allowed = {"id", "class", "bounds", "flags", *_ELEMENT_STRINGS}
+    bounds = element.get("bounds")
+    flags = element.get("flags", [])
+    return (
+        _keys_ok(element, {"id", "class", "bounds"}, allowed)
+        and _is_text(element["id"])
+        and _is_text(element["class"])
+        and all(_is_text(element[k]) for k in _ELEMENT_STRINGS if k in element)
+        and isinstance(bounds, list)
+        and len(bounds) == 4
+        and all(_is_int(n) for n in bounds)
+        and isinstance(flags, list)
+        and all(_is_text(f) for f in flags)
+    )
+
+
+def _action_ok(line: dict[str, object]) -> str | None:
+    """Why the ``action`` and the keys around it are not as uiprobe writes a
+    start line, or None."""
+    action = line["action"]
+    if not isinstance(action, dict) or not _keys_ok(
+        action, {"kind"}, {"point", "element"}
+    ):
+        return "action"
+    kind = action["kind"]
+    point = action.get("point")
+    has_from = "from_screen_id" in line
+    checks = (
+        (kind not in _KINDS, "action.kind"),
+        (
+            "point" in action
+            and not (
+                isinstance(point, list)
+                and len(point) == 2
+                and all(_is_int(n) for n in point)
+            ),
+            "action.point",
+        ),
+        ("element" in action and not _element_ok(action["element"]), "action.element"),
+        (has_from and _screen_id(line["from_screen_id"]) is None, "from_screen_id"),
+        (kind == "tap" and not (has_from and "point" in action), "tap fields"),
+        (kind != "tap" and ("point" in action or "element" in action), "tap fields"),
+        (kind == "launch" and (has_from or "off_target" in line), "launch fields"),
+        (
+            "restart" in line and not (line["restart"] is True and kind == "launch"),
+            "restart",
+        ),
+    )
+    return next((why for bad, why in checks if bad), None)
+
+
+def _off_target_ok(line: dict[str, object]) -> bool:
+    if "off_target" not in line:
+        return True
+    other = line["off_target"]
+    action = line["action"]
+    kind = action["kind"] if isinstance(action, dict) else None  # type: ignore[index]
+    return (
+        kind in ("back", "relaunch")
+        and "from_screen_id" in line
+        and isinstance(other, dict)
+        and _keys_ok(other, {"package"}, {"foreground", "focus"})
+        and all(_is_text(v) for v in other.values())
+    )
+
+
+def _start_problem(line: dict[str, object]) -> str | None:
+    """Why `line` is not a start line as uiprobe writes it, or None."""
+    if not _keys_ok(
+        line,
+        {"schema", "recorded_at", "action_id", "action"},
+        {"from_screen_id", "off_target", "restart"},
+    ):
+        return "start line keys"
+    if not _stamped(line, _START):
+        return "start line schema, time or action_id"
+    problem = _action_ok(line)
+    if problem is None and not _off_target_ok(line):
+        problem = "off_target"
+    return problem
+
+
+def _end_problem(line: dict[str, object]) -> str | None:
+    """Why `line` is not an end line as uiprobe writes it, or None."""
+    base = {"schema", "recorded_at", "action_id"}
+    if not _stamped(line, _END):
+        return "end line schema, time or action_id"
+    if "failed" in line:
+        ok = (
+            _keys_ok(line, base | {"failed", "reason", "outcome"}, set())
+            and line["failed"] is True
+            and _is_text(line["reason"])
+            and line["outcome"] == "unknown"
+        )
+        return None if ok else "failed end line"
+    if "not_sent" in line:
+        details = line.get("details", {"x": 0})
+        ok = (
+            _keys_ok(line, base | {"not_sent", "reason"}, {"details"})
+            and line["not_sent"] is True
+            and _is_text(line["reason"])
+            and isinstance(details, dict)
+            and bool(details)
+            and all(_is_text(k) for k in details)
+            and all(_is_text(v) or _is_int(v) for v in details.values())
+        )
+        return None if ok else "not_sent end line"
+    if line.get("dump_failed") is True:
+        ok = _keys_ok(line, base | {"dump_failed"}, set())
+        return None if ok else "dump_failed end line"
+    if line.get("dump_failed") is False:
+        ok = _keys_ok(line, base | {"dump_failed", "to_screen_id"}, set())
+        ok = ok and _screen_id(line.get("to_screen_id")) is not None
+        return None if ok else "end line with a screen"
+    return "end line without a result"
+
+
+def _line_problem(line: dict[str, object]) -> str | None:
+    schema = line.get("schema")
+    if schema == _START:
+        return _start_problem(line)
+    if schema == _END:
+        return _end_problem(line)
+    return "schema"
+
+
+def _sequence_problem(entries: list[dict[str, object]]) -> tuple[int, str] | None:
+    """The first line (counted from 1) that breaks the strict alternation of
+    start and end lines, ids rising: ``S1 E1 S2 E2 ...`` with a last start line
+    that may have no end line."""
+    open_id: object = None
+    last_id = 0
+    for number, line in enumerate(entries, 1):
+        action_id = int(str(line["action_id"]))
+        if line["schema"] == _START:
+            if open_id is not None:
+                return number, "a start line while an action is open"
+            if action_id <= last_id:
+                return number, "an action id that does not rise"
+            open_id = last_id = action_id
+        elif open_id != action_id:
+            return number, "an end line that does not close the open action"
+        else:
+            open_id = None
+    return None
 
 
 @dataclass(slots=True)
 class _Lines:
+    """What transitions.jsonl says. `trusted` is False when any line is not in
+    the shape uiprobe writes (see `_check_transitions`); then `starts` holds the
+    start lines that are valid by themselves, with no end lines, so every tap
+    is unknown, and `root_hint` the screen of the first valid launch end."""
+
     starts: dict[int, dict[str, object]] = field(default_factory=dict)
     ends: dict[int, dict[str, object]] = field(default_factory=dict)
     order: list[int] = field(default_factory=list)
     # per action: the package of an off_target start line that comes right
     # after its end line, decided on the screen that end line names
     off_after: dict[int, str] = field(default_factory=dict)
-    # actions whose record cannot be trusted (see `_transition_lines`)
-    ambiguous: set[int] = field(default_factory=set)
+    trusted: bool = True
+    root_hint: str | None = None
+    problem: tuple[int, str] | None = None  # the first line that failed, if any
+    cut: bool = False  # the last line was cut short and is ignored
 
 
-def _transition_lines(base: Path, warnings: _Warnings) -> _Lines:
-    """Read transitions.jsonl in physical order and decide which actions can be
-    trusted. One rule: an action is trusted only when it has exactly one start
-    line and exactly one end line, the start comes before the end, and no
-    damaged or non-record line sits between them or on the one line right after
-    the end (the line that off_target evidence comes from). Any other action is
-    ambiguous: its result is unknown."""
-    found = _Lines()
-    start_at: dict[int, list[int]] = {}
-    end_at: dict[int, list[int]] = {}
-    bad: list[int] = []
-    explained: set[int] = set()
-    previous_end: tuple[int, str | None] | None = None
-    for index, line in enumerate(_lines(base / "transitions.jsonl", warnings), 1):
-        follows, previous_end = previous_end, None
-        action_id = _action_id(line.get("action_id")) if line is not None else None
-        schema = line.get("schema") if line is not None else None
-        if (
-            line is None
-            or action_id is None
-            or schema not in ("uiprobe.transition_start/1", "uiprobe.transition_end/1")
-            or (
-                schema == "uiprobe.transition_start/1"
-                and not isinstance(line.get("action"), dict)
-            )
-        ):
-            if line is not None:
-                warnings.append("transitions.jsonl has a line that is not a transition")
-            bad.append(index)
-        elif schema == "uiprobe.transition_start/1":
-            if action_id not in found.starts:
-                found.order.append(action_id)
-                found.starts[action_id] = line
-            start_at.setdefault(action_id, []).append(index)
-            _note_off(found, line, follows)
+def _split_transitions(data: bytes) -> tuple[list[bytes], bytes | None]:
+    """The complete lines of the file, and a last line with no newline (which
+    may have been cut short by a crash)."""
+    parts = data.split(b"\n")
+    return parts[:-1], (parts[-1] or None)
+
+
+def _parse_line(raw: bytes) -> dict[str, object] | None:
+    if raw != raw.strip():
+        return None
+    try:
+        value = _loads(raw)
+    except ValueError:
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def _check_transitions(data: bytes) -> _Lines:
+    """Trust the file only if every line is exactly as uiprobe writes it.
+
+    The shapes come from `RunWriter.write_transition_start` and
+    `write_transition_end`, and the order from the crawl driver: one start line
+    then one end line per action, ids rising, no blank or extra lines. uiprobe
+    can end the file in these ways, all accepted: after an end line (a normal,
+    dump-failed, not-sent or failed end); after a start line with no end (Ctrl+C,
+    the time limit, an error, a power loss after the start line was written;
+    only that last tap is unknown); in the middle of a line (the last line has no
+    newline and is not complete: it is ignored, and an end line cut short leaves
+    its start line without an end line).
+    """
+    complete, last = _split_transitions(data)
+    raws = list(complete)
+    cut = False
+    if last is not None:
+        parsed = _parse_line(last)
+        if parsed is not None and _line_problem(parsed) is None:
+            raws.append(last)  # complete, only its newline is missing
         else:
-            end_at.setdefault(action_id, []).append(index)
-            if _end_is_valid(line):
-                found.ends.setdefault(action_id, line)
-                previous_end = (action_id, _screen_id(line.get("to_screen_id")))
-            else:
-                explained.add(action_id)
-                found.ambiguous.add(action_id)
-                warnings.append(
-                    f"action {action_id} has an end line that is not understood,"
-                    " so its result is unknown"
-                )
-    _judge(found, start_at, end_at, bad)
-    for action_id in sorted(found.ambiguous - explained):
-        warnings.append(
-            f"action {action_id} has repeated, misplaced or interrupted lines,"
-            " so its result is unknown"
-        )
-    for action_id in sorted(set(end_at) - set(found.starts)):
-        warnings.append(f"action {action_id} has an end line but no start line")
+            cut = True
+    entries: list[dict[str, object]] = []
+    parsed: list[dict[str, object]] = []
+    problem: tuple[int, str] | None = None
+    for number, raw in enumerate(raws, 1):
+        line = _parse_line(raw)
+        why = "not a JSON object, or blank" if line is None else _line_problem(line)
+        if line is not None:
+            parsed.append(line)
+        if line is None or why is not None:
+            problem = problem or (number, why or "line")
+            continue
+        entries.append(line)
+    found = _Lines()
+    if problem is None:
+        problem = _sequence_problem(entries)
+    found.problem = problem
+    found.trusted = problem is None
+    if found.trusted:
+        _collect(found, entries)
+    else:
+        _collect_rough(found, parsed)
+    found.cut = cut
     return found
 
 
-def _judge(
-    found: _Lines,
-    start_at: dict[int, list[int]],
-    end_at: dict[int, list[int]],
-    bad: list[int],
-) -> None:
-    """Mark the actions that break the rule of `_transition_lines`."""
-    damaged = set(bad)
-    for action_id in found.order:
-        starts = start_at[action_id]
-        ends = end_at.get(action_id, [])
-        if not ends and len(starts) == 1:
-            continue  # no end line: unknown already, nothing else to say
-        first, last = starts[0], ends[-1] if ends else 0
-        inside = any(first < b < ends[0] for b in bad) if len(ends) == 1 else False
-        if (
-            len(starts) != 1
-            or len(ends) != 1
-            or first > last
-            or inside
-            or (last + 1) in damaged
+def _collect(found: _Lines, entries: list[dict[str, object]]) -> None:
+    """Fill `found` from a file that passed: the start and end lines, and the
+    off_target evidence right after an end line."""
+    previous: dict[str, object] | None = None
+    for line in entries:
+        action_id = int(str(line["action_id"]))
+        if line["schema"] == _START:
+            found.order.append(action_id)
+            found.starts[action_id] = line
+            _note_off(found, line, previous)
+        else:
+            found.ends[action_id] = line
+        previous = line
+
+
+def _collect_rough(found: _Lines, parsed: list[dict[str, object]]) -> None:
+    """A file that failed: no end line is used, so no tap has a result. Only the
+    taps are taken, from any line that names a screen and an element, so that
+    their rows show as unknown; the first launch's end line gives the root."""
+    launches: set[int] = set()
+    for line in parsed:
+        action = line.get("action")
+        action_id = line.get("action_id")
+        if not _is_int(action_id):
+            continue
+        if line.get("schema") == _START and isinstance(action, dict):
+            element = action.get("element")
+            if action.get("kind") == "launch":
+                launches.add(int(str(action_id)))
+            elif (
+                action.get("kind") == "tap"
+                and _screen_id(line.get("from_screen_id")) is not None
+                and isinstance(element, dict)
+                and _is_text(element.get("id"))
+                and action_id not in found.starts
+            ):
+                found.order.append(int(str(action_id)))
+                found.starts[int(str(action_id))] = line
+        elif (
+            line.get("schema") == _END
+            and found.root_hint is None
+            and action_id in launches
         ):
-            found.ambiguous.add(action_id)
+            found.root_hint = _screen_id(line.get("to_screen_id"))
 
 
 def _note_off(
-    found: _Lines, line: dict[str, object], follows: tuple[int, str | None] | None
+    found: _Lines, line: dict[str, object], previous: dict[str, object] | None
 ) -> None:
+    """An off_target start line right after an end line, decided on the screen
+    that end line names, is the evidence that the screen belongs to another app."""
     other = line.get("off_target")
-    package = _str_or_none(other.get("package")) if isinstance(other, dict) else None
-    decided_on = _screen_id(line.get("from_screen_id"))
-    if follows and package and decided_on and follows[1] == decided_on:
-        found.off_after[follows[0]] = package
+    if previous is None or previous["schema"] != _END or not isinstance(other, dict):
+        return
+    to = _screen_id(previous.get("to_screen_id"))
+    if to is not None and line.get("from_screen_id") == to:
+        found.off_after[int(str(previous["action_id"]))] = str(other["package"])
+
+
+def _read_transitions(base: Path, warnings: _Warnings) -> _Lines:
+    """Read transitions.jsonl; see `_check_transitions` for what is trusted."""
+    path = base / "transitions.jsonl"
+    try:
+        data = _read_bytes(path, MAX_LOG_BYTES)
+    except FileNotFoundError:
+        return _Lines()  # written at the first line, so absent when there was none
+    except _UnreadableError as exc:
+        warnings.append(f"{path.name} {exc}")
+        return _Lines()
+    found = _check_transitions(data)
+    if not found.trusted:
+        warnings.append(GATE_WARNING)
+    elif found.cut:
+        warnings.append(CUT_WARNING)
+    return found
 
 
 def _read_moves(base: Path, warnings: _Warnings) -> _Moves:
     """The taps of transitions.jsonl, and the screen the launch led to."""
-    lines = _transition_lines(base, warnings)
+    lines = _read_transitions(base, warnings)
     taps: dict[tuple[str, str], list[_Tap]] = {}
-    root: str | None = None
+    root: str | None = lines.root_hint
     first_from: str | None = None
     for action_id in lines.order:
         start_line = lines.starts[action_id]
-        action = start_line.get("action")
-        if not isinstance(action, dict):
-            continue
+        action = start_line["action"]
+        assert isinstance(action, dict)  # noqa: S101 (checked by the gate)
         end = lines.ends.get(action_id)
-        kind = action.get("kind")
+        kind = action["kind"]
         if kind == "launch" and root is None and end is not None:
             root = _screen_id(end.get("to_screen_id"))
         if kind != "tap":
             continue
-        tap = _tap_of(
-            action_id, start_line, action, end, ambiguous=action_id in lines.ambiguous
-        )
+        tap = _tap_of(action_id, start_line, action, end)
         if tap is None:
-            warnings.append(f"action {action_id} is a tap with no screen or element")
             continue
         first_from = first_from or tap.from_screen_id
         taps.setdefault((tap.from_screen_id, tap.element_id), []).append(tap)
-    off_after = {a: p for a, p in lines.off_after.items() if a not in lines.ambiguous}
-    return _Moves(taps, root, first_from, len(lines.order), off_after)
+    return _Moves(taps, root, first_from, len(lines.order), lines.off_after)
 
 
 def _sent_target(tap: _Tap) -> str | None:
@@ -928,7 +1154,7 @@ def _rename(row: Row, element: dict[str, object]) -> None:
 def _unknown(tap: _Tap) -> bool:
     """A tap whose start line has no end line, or whose sending failed: it may
     or may not have reached the device."""
-    return tap.ambiguous or tap.end is None or bool(tap.end.get("failed"))
+    return tap.end is None or bool(tap.end.get("failed"))
 
 
 def _not_sent(tap: _Tap) -> bool:
