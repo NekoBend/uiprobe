@@ -562,6 +562,7 @@ class RunWriter:
         off_target_foreground: str | None = None,
         off_target_focus: str | None = None,
         restart: bool = False,
+        replay: bool = False,
     ) -> None:
         """Write the line that says an action is about to be sent.
 
@@ -580,10 +581,16 @@ class RunWriter:
         starts it: the line then has ``restart: true`` (the key is absent
         otherwise).
 
+        `replay` is True for a tap that presses an element again to get back
+        down to a screen after a relaunch (a path replay): the line then has
+        ``replay: true`` (the key is absent otherwise). It needs `kind`
+        ``tap``.
+
         Raises:
-            TypeError: `restart` is not a bool.
+            TypeError: `restart` or `replay` is not a bool.
             ValueError: `off_target_foreground` or `off_target_focus` is given
-                without `off_target_package`.
+                without `off_target_package`, or `replay` is True for a kind
+                other than ``tap``.
         """
         line: dict[str, object] = {
             "schema": TRANSITION_START_SCHEMA,
@@ -618,6 +625,14 @@ class RunWriter:
             raise TypeError(msg)
         if restart:
             line["restart"] = True
+        if not isinstance(replay, bool):
+            msg = "replay must be a bool"
+            raise TypeError(msg)
+        if replay:
+            if action["kind"] != "tap":
+                msg = "replay needs the kind tap"
+                raise ValueError(msg)
+            line["replay"] = True
         self._append("transitions.jsonl", _json_text(line) + "\n", start=True)
 
     def write_transition_end(

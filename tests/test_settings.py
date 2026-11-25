@@ -283,6 +283,9 @@ V2_FILE = DATA / "settings_v2.toml"
 # The file that `uiprobe init` wrote at defaults version 3 (rendered at
 # revision a7e8052, before version 4 existed), unchanged.
 V3_FILE = DATA / "settings_v3.toml"
+# The file that `uiprobe init` wrote at defaults version 4 (rendered at
+# revision 9e322cd, before version 5 existed), unchanged.
+V4_FILE = DATA / "settings_v4.toml"
 
 
 def write(tmp_path: Path, text: str | bytes, name: str = SETTINGS_FILE) -> Path:
@@ -312,7 +315,7 @@ def test_the_defaults_round_trip(tmp_path):
     loaded = load_settings(default_file(tmp_path))
     assert loaded.source == tmp_path / SETTINGS_FILE
     assert loaded.format_version == 1
-    assert loaded.defaults_version == CURRENT == 4
+    assert loaded.defaults_version == CURRENT == 5
     assert loaded.press is False
     assert loaded.deny_words == DEFAULT_DENY_WORDS
     assert loaded.deny_exceptions == DEFAULT_DENY_EXCEPTIONS
@@ -342,7 +345,7 @@ def test_the_rendered_file_layout():
     assert text.startswith("# uiprobe settings")
     assert text.endswith("\n")
     assert "\r" not in text
-    assert "format_version = 1\ndefaults_version = 4\n" in text
+    assert "format_version = 1\ndefaults_version = 5\n" in text
     assert "press = false\n" in text
     for table in (
         "[deny]",
@@ -1018,8 +1021,8 @@ def test_numbers_at_the_limits_are_accepted(tmp_path, old, new):
     [
         ("format_version = 1", "format_version = 2", "format_version"),
         ("format_version = 1", "format_version = 0", "format_version"),
-        ("defaults_version = 4", "defaults_version = 0", "defaults_version"),
-        ("defaults_version = 4", "defaults_version = 5", "defaults_version"),
+        ("defaults_version = 5", "defaults_version = 0", "defaults_version"),
+        ("defaults_version = 5", "defaults_version = 6", "defaults_version"),
     ],
 )
 def test_versions_out_of_range_are_refused(tmp_path, old, new, key):
@@ -1817,7 +1820,7 @@ def _digit_limit() -> Iterator[None]:
 def _huge_cases() -> list[tuple[str, str, str]]:
     cases = [
         ("format_version = 1", f"format_version = {HUGE}", "format_version"),
-        ("defaults_version = 4", f"defaults_version = {HUGE}", "defaults_version"),
+        ("defaults_version = 5", f"defaults_version = {HUGE}", "defaults_version"),
     ]
     for old, key in [
         ("min_visible_px = 8", "min_visible_px"),
@@ -2106,10 +2109,11 @@ def test_the_generated_file_holds_the_version_2_values_plus_the_later_keys():
     # The values are those `uiprobe init` wrote at defaults version 2
     # (tests/data/settings_v2.toml), plus the empty except list and, with
     # version 3, the two row rules and, with version 4, the up-button and
-    # slider rules.
+    # slider rules and, with version 5, the replay rule.
     current = tomllib.loads(render_default_settings())
     assert current["deny"].pop("except") == []
-    assert current.pop("defaults_version") == 4
+    assert current.pop("defaults_version") == 5
+    assert current["rules"].pop("replay_path") is True
     assert current["rules"].pop("skip_two_target_rows") is True
     assert current["rules"].pop("skip_rows_with_buttons") is False
     assert current["rules"].pop("skip_navigate_up") is True
@@ -2266,6 +2270,7 @@ def test_settings_built_with_the_earlier_fields_still_work(tmp_path):
         "skip_rows_with_buttons",
         "skip_navigate_up",
         "skip_sliders",
+        "replay_path",
         "runs_dir",
     ]
 
@@ -2306,7 +2311,7 @@ def test_a_current_file_gives_the_row_rules_as_written(tmp_path):
         .replace("skip_rows_with_buttons = false", "skip_rows_with_buttons = true")
     )
     loaded = load_settings(write(tmp_path, text))
-    assert loaded.defaults_version == 4
+    assert loaded.defaults_version == 5
     assert (loaded.skip_two_target_rows, loaded.skip_rows_with_buttons) == (False, True)
     policy = settings.policy_from_settings(loaded)
     assert (policy.skip_two_target_rows, policy.skip_rows_with_buttons) == (False, True)
@@ -2323,7 +2328,7 @@ def test_a_current_file_needs_the_row_rules(tmp_path, key):
 
 def test_the_generated_file_writes_both_row_rules():
     text = render_default_settings()
-    assert "defaults_version = 4\n" in text
+    assert "defaults_version = 5\n" in text
     rules = text.split("[rules]\n")[1].split("[limits]")[0]
     assert "skip_two_target_rows = true\n" in rules
     assert "skip_rows_with_buttons = false\n" in rules
@@ -2334,9 +2339,9 @@ def test_a_newer_defaults_version_is_refused_with_its_number(tmp_path):
     # What an older uiprobe says about a file that `uiprobe init` writes now
     # (the message of the defaults_version range check names both numbers).
     text = render_default_settings().replace(
-        "defaults_version = 4", "defaults_version = 5"
+        "defaults_version = 5", "defaults_version = 6"
     )
-    refused(write(tmp_path, text), "defaults_version", "must be from 1 to 4, not 5")
+    refused(write(tmp_path, text), "defaults_version", "must be from 1 to 5, not 6")
 
 
 def test_version_3_added_no_list_defaults():
@@ -2376,7 +2381,7 @@ def test_the_version_3_file_loads_as_the_current_defaults(tmp_path):
     (tmp_path / "now").mkdir()
     current = load_settings(default_file(tmp_path / "now"))
     assert (
-        dataclasses.replace(loaded, source=current.source, defaults_version=4)
+        dataclasses.replace(loaded, source=current.source, defaults_version=5)
         == current
     )
 
@@ -2451,3 +2456,105 @@ def test_version_4_added_no_list_defaults():
     for key in V4_RULES:
         assert settings._LATER_RULES[key] == 4
         assert settings._LATER_RULE_VALUES[key] is True
+
+
+# -- the replay rule (defaults version 5) --------------------------------------------
+
+
+def v4_text() -> str:
+    text = V4_FILE.read_text(encoding="utf-8")
+    assert "defaults_version = 4\n" in text
+    assert "skip_sliders = true\n" in text
+    assert "replay_path" not in text
+    return text
+
+
+def test_the_version_4_file_loads_as_the_current_defaults(tmp_path):
+    loaded = load_settings(write(tmp_path, v4_text()))
+    assert loaded.defaults_version == 4
+    assert loaded.warnings == ()
+    (tmp_path / "now").mkdir()
+    current = load_settings(default_file(tmp_path / "now"))
+    assert (
+        dataclasses.replace(loaded, source=current.source, defaults_version=5)
+        == current
+    )
+
+
+@pytest.mark.parametrize("version", [1, 2, 3, 4])
+def test_an_older_file_without_replay_path_loads_it_on(tmp_path, version):
+    text = (v1_text, v2_text, v3_text, v4_text)[version - 1]()
+    loaded = load_settings(write(tmp_path, text))
+    assert loaded.defaults_version == version
+    assert loaded.replay_path is True
+    assert loaded.warnings == ()
+    assert settings.policy_from_settings(loaded).replay_path is True
+
+
+@pytest.mark.parametrize("version", [1, 2, 3, 4])
+def test_an_older_file_may_turn_replay_path_off(tmp_path, version):
+    text = (v1_text, v2_text, v3_text, v4_text)[version - 1]()
+    text = text.replace("[rules]\n", "[rules]\nreplay_path = false\n", 1)
+    loaded = load_settings(write(tmp_path, text))
+    assert loaded.replay_path is False
+    assert settings.policy_from_settings(loaded).replay_path is False
+
+
+def test_a_version_5_file_needs_replay_path(tmp_path):
+    text = render_default_settings()
+    assert "replay_path = true\n" in text
+    refused(
+        write(tmp_path, text.replace("replay_path = true\n", "")),
+        "[rules] replay_path",
+        "is missing",
+    )
+
+
+def test_a_version_5_file_gives_replay_path_as_written(tmp_path):
+    text = render_default_settings().replace(
+        "replay_path = true", "replay_path = false"
+    )
+    loaded = load_settings(write(tmp_path, text))
+    assert loaded.replay_path is False
+    assert settings.policy_from_settings(loaded).replay_path is False
+
+
+def test_replay_path_must_be_a_bool(tmp_path):
+    text = render_default_settings().replace("replay_path = true", "replay_path = 1")
+    refused(write(tmp_path, text), "[rules] replay_path")
+
+
+def test_the_generated_file_writes_replay_path_in_the_rules_table():
+    text = render_default_settings()
+    rules = text.split("[rules]\n")[1].split("[limits]")[0]
+    assert "replay_path = true\n" in rules
+    # the comment above it says what false returns to the earlier behaviour
+    comment = rules.split("replay_path = true")[0]
+    assert "returns both the path replay" in comment
+    assert "when only a badge changed" in comment
+
+
+def test_version_5_added_no_list_defaults():
+    for table in (
+        "_DENY_WORDS",
+        "_DENY_EXCEPTIONS",
+        "_CONFIRM_WORDS",
+        "_IRREVERSIBLE_PHRASES",
+        "_REFUSE_KEYS",
+        "_REFUSE_PREFIXES",
+    ):
+        assert [
+            item for version, item in getattr(settings, table) if version == 5
+        ] == []
+    assert settings._LATER_RULES["replay_path"] == 5
+    assert settings._LATER_RULE_VALUES["replay_path"] is True
+
+
+def test_policy_replay_path_defaults_on_and_must_be_a_bool():
+    from uiprobe.guards import Policy
+
+    assert Policy().replay_path is True
+    assert Policy().with_deny_words(["zzz"]).replay_path is True
+    assert Policy(replay_path=False).with_deny_words(["zzz"]).replay_path is False
+    with pytest.raises(TypeError, match="replay_path must be a bool"):
+        Policy(replay_path=1)  # ty: ignore[invalid-argument-type]

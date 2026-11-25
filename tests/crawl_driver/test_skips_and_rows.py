@@ -351,7 +351,10 @@ def test_with_the_up_rule_off_the_crawl_presses_up_and_stays_shallow(
     tmp_path, fake_adb, clock
 ):
     android, result = crawl_subpages(
-        fake_adb, clock, tmp_path / "run", Policy(skip_navigate_up=False)
+        fake_adb,
+        clock,
+        tmp_path / "run",
+        Policy(skip_navigate_up=False, replay_path=False),
     )
     taps = [(i.screen, i.point) for i in android.inputs if i.kind == "tap"]
     # As before the rule: the up button is the first candidate of the sub-page,

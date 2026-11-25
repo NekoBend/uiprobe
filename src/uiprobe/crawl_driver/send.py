@@ -177,6 +177,7 @@ class _SendMixin(_RunState):
             off_target_foreground=foreground,
             off_target_focus=focus,
             restart=isinstance(action, Launch) and self.restart,
+            replay=isinstance(action, Tap) and self.engine.is_replay(action),
         )
 
     def close_unsent(self, reason: str) -> None:

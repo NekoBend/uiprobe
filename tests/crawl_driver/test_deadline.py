@@ -476,6 +476,7 @@ def test_the_policy_copy_keeps_every_field():
         "skip_rows_with_buttons": True,
         "skip_navigate_up": False,
         "skip_sliders": False,
+        "replay_path": False,
     }
     assert set(values) == {f.name for f in fields(Policy)}
     default = Policy()

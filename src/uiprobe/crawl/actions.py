@@ -33,6 +33,8 @@ TAP_NOT_SENT: Final = "tap_not_sent"
 # without a sent tap before the crawl stops; failed dumps in a row before
 # the crawl stops.
 BACK_LIMIT: Final = 2
+# Failed replays of one goal screen before the goal is dropped.
+MAX_REPLAY_FAILURES: Final = 2
 MAX_RELAUNCHES: Final = 3
 # The largest depth limit `Limits` accepts; it bounds the placeholder path an
 # unpredicted BACK landing builds.
@@ -209,7 +211,8 @@ class Transition:
     When the next action is withdrawn (`CrawlEngine.withdraw`), the screen
     seen before it does not count: ``to_screen_id`` is the screen of the
     fresh observation that `next` gets after the withdrawal (a driver's own
-    record may keep the earlier one).
+    record may keep the earlier one). ``replay`` is True for a tap that
+    presses an element again to get back down after a relaunch.
     """
 
     action_id: int
@@ -219,6 +222,7 @@ class Transition:
     fingerprint: str | None = None
     point: tuple[int, int] | None = None
     dump_failed: bool = False
+    replay: bool = False
 
 
 @dataclass(frozen=True, slots=True)

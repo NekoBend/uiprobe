@@ -74,7 +74,7 @@ def test_random_graphs_keep_every_rule_and_terminate() -> None:
         keys = [
             (t.from_screen_id, t.fingerprint)
             for t in eng.records.transitions
-            if t.kind == "tap"
+            if t.kind == "tap" and not t.replay  # a replay presses again
         ]
         assert len(keys) == len(set(keys))
         for node in nodes:

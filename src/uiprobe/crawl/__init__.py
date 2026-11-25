@@ -66,6 +66,26 @@ where screen ids change are listed under the stated limits below.
   so a driver that never sends a tap still ends the crawl. Both `recheck` and
   `tap_sent` accept only the very `Tap` instance ``next`` returned, never an
   equal one.
+* Path replay (``Policy.replay_path``, on by default). A relaunch loses the
+  path. The engine remembers, for each target screen reached by a sent tap
+  one level below another, the first tap that led there (the parent's id and
+  the element's fingerprint). When a new root is seen after a relaunch, the
+  goal is the deepest screen of the path just before it that still had an
+  untried pressable element (a goal kept from a failed replay comes first),
+  and the engine returns ordinary `Tap` actions for the recorded elements,
+  each found by its fingerprint among the elements judge puts in
+  ``pressable`` now: on the root whatever its id, then on each recorded child
+  by its recorded id. These taps are rechecked, gated, sent, counted and
+  limited like every tap (`CrawlEngine.is_replay` tells the driver, which
+  records ``replay: true``). A replay is abandoned when the screen is not the
+  one the route expects, the element is missing, not pressable or refused by
+  the recheck, a tap lands elsewhere, the depth limit would be passed or the
+  refusal bounds are reached; the crawl then goes on from the screen it is
+  on, and a goal whose replay failed twice is dropped. The same switch makes
+  the "already tried" marks also under a badge-free screen key (leaving out
+  elements whose resource id contains ``badge`` and what is below them), so a
+  row tried with a badge is not pressed again without it. The relaunch limit
+  is unchanged.
 * Pressing. The engine presses only an element that
   `uiprobe.guards.judge` put in ``pressable`` for that exact observation, at
   the point judge gave; judge runs on every target observation where the

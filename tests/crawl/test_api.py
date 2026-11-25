@@ -118,6 +118,7 @@ def test_only_the_listed_action_types_exist() -> None:
         "Records",
         "_Pending",
         "_Plan",
+        "_Replay",
         "_State",
     }
     words = ("text", "key", "swipe", "long", "press", "input", "scroll")

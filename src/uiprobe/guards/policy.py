@@ -140,6 +140,13 @@ class Policy:
     before each tap and sends the tap only to a window of the app; when it
     cannot be read, nothing is sent.
 
+    ``replay_path`` (default True) is read by the pressing crawl only, not by
+    `judge`. True lets the crawl, after a relaunch, press again the rows that it
+    pressed before to get back down to a screen that still has rows to try (a
+    path replay), and counts a row seen with and without a badge (an element
+    whose resource id contains ``badge``) as one row. False gives the crawl
+    that does neither.
+
     ``edges`` holds the sizes in pixels ``(top, bottom, left, right)`` that
     `judge` turns into `edge_areas` of each screen's display when ``avoid`` is
     None; None keeps the API 36 sizes. An explicit ``avoid`` wins over
@@ -157,8 +164,8 @@ class Policy:
             ``edges`` is not four non-negative integers, or ``min_visible_px``
             is not an integer of at least 1.
         TypeError: ``edges`` is not a sequence, ``deny_exceptions`` is one
-            string, or ``back_on_other_screens`` or ``check_tap_window`` is
-            not a bool.
+            string, or ``back_on_other_screens``, ``check_tap_window`` or
+            ``replay_path`` is not a bool.
     """
 
     deny_words: tuple[str, ...] = DEFAULT_DENY_WORDS
@@ -179,6 +186,7 @@ class Policy:
     skip_rows_with_buttons: bool = False
     skip_navigate_up: bool = True
     skip_sliders: bool = True
+    replay_path: bool = True
 
     def __post_init__(self) -> None:
         if type(self.back_on_other_screens) is not bool:
@@ -186,6 +194,9 @@ class Policy:
             raise TypeError(msg)
         if type(self.check_tap_window) is not bool:
             msg = "check_tap_window must be a bool"
+            raise TypeError(msg)
+        if type(self.replay_path) is not bool:
+            msg = "replay_path must be a bool"
             raise TypeError(msg)
         for word in (*self.deny_words, *self.confirm_words, *self.irreversible_phrases):
             _check_word(word)
@@ -245,6 +256,7 @@ class Policy:
             skip_rows_with_buttons=self.skip_rows_with_buttons,
             skip_navigate_up=self.skip_navigate_up,
             skip_sliders=self.skip_sliders,
+            replay_path=self.replay_path,
         )
 
 

@@ -2139,3 +2139,26 @@ def test_a_skip_detail_must_belong_to_a_word_reason_of_the_line(
     with pytest.raises(ValueError, match="one of the line's reasons"):
         writer.write_skip(ID_A, "fp1", reasons, {}, [detail])
     assert names(tmp_path / "run") == ["run-start.json"]
+
+
+def test_a_tap_start_line_may_say_it_is_a_replay(tmp_path):
+    writer = make(tmp_path)
+    writer.write_transition_start(1, "tap", "s-0123456789ab", replay=True)
+    writer.write_transition_start(2, "tap", "s-0123456789ab")
+    writer.write_transition_start(3, "tap", "s-0123456789ab", replay=False)
+    first, second, third = (
+        json.loads(line)
+        for line in (writer.path / "transitions.jsonl").read_text().splitlines()
+    )
+    assert first["replay"] is True
+    assert "replay" not in second  # absent unless it was a replay
+    assert "replay" not in third
+
+
+def test_a_replay_needs_the_tap_kind_and_a_bool(tmp_path):
+    writer = make(tmp_path)
+    with pytest.raises(ValueError, match="replay needs the kind tap"):
+        writer.write_transition_start(1, "back", "s-0123456789ab", replay=True)
+    with pytest.raises(TypeError, match="replay must be a bool"):
+        writer.write_transition_start(1, "tap", "s-0123456789ab", replay=1)  # ty: ignore[invalid-argument-type]
+    assert not (writer.path / "transitions.jsonl").exists()

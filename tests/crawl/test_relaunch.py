@@ -37,6 +37,7 @@ from uiprobe.crawl import (
     Tap,
     fingerprint_of,
 )
+from uiprobe.guards import Policy
 
 # -- range ---------------------------------------------------------------------
 
@@ -169,10 +170,15 @@ def test_a_relaunch_off_target_leaves_the_rest_of_that_screen_unvisited() -> Non
         Node("b"),
         Node("perm", (("Allow", "b"),), package=PERMISSION),
     ]
+    # (the path replay, Policy.replay_path, is what removes this cost)
+    phone = Phone(nodes)
+    log = drive(engine(policy=Policy(replay_path=False)), phone)
+    assert log[-1] == Stop("exhausted")
+    assert "b" not in phone.visited
     phone = Phone(nodes)
     log = drive(engine(), phone)
     assert log[-1] == Stop("exhausted")
-    assert "b" not in phone.visited
+    assert "b" in phone.visited
     phone = Phone(nodes)
     log = drive(back_engine(), phone)
     assert log[-1] == Stop("exhausted")
