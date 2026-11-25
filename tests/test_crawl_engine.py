@@ -41,7 +41,10 @@ POLICY = Policy()
 LooseLimits: Any = Limits
 LooseObservation: Any = Observation
 LooseTap: Any = Tap
-CRAWL_PY = Path(crawl.__file__)
+CRAWL_DIR = Path(crawl.__file__).parent
+CRAWL_FILES = sorted(
+    CRAWL_DIR.rglob("*.py"), key=lambda path: path.relative_to(CRAWL_DIR).as_posix()
+)
 
 
 # -- building screens ----------------------------------------------------------
@@ -2067,7 +2070,7 @@ def test_only_the_listed_action_types_exist() -> None:
         for name, value in vars(crawl).items()
         if isinstance(value, type)
         and is_dataclass(value)
-        and value.__module__ == crawl.__name__
+        and value.__module__.startswith(crawl.__name__ + ".")
     }
     assert defined == {
         "Launch",
@@ -2116,26 +2119,37 @@ APPROVED = {
     "dataclasses",
     "hashlib",
     "typing",
+    "uiprobe.crawl.actions",
+    "uiprobe.crawl.engine",
+    "uiprobe.crawl.prints",
     "uiprobe.guards",
     "uiprobe.model",
 }
 
 
 def test_crawl_py_imports_only_approved_modules_and_never_calls_replace() -> None:
-    tree = ast.parse(CRAWL_PY.read_text(encoding="utf-8"))
-    imported: set[str] = set()
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Import):
-            imported.update(alias.name for alias in node.names)
-        elif isinstance(node, ast.ImportFrom):
-            assert node.level == 0
-            assert node.module is not None
-            imported.add(node.module)
-            if node.module == "uiprobe":
-                imported.update(f"uiprobe.{alias.name}" for alias in node.names)
-        elif isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
-            assert node.func.attr != "replace"
-    assert imported <= APPROVED
+    # Every file of the package: the modules inside it are approved, nothing else new.
+    assert [path.relative_to(CRAWL_DIR).as_posix() for path in CRAWL_FILES] == [
+        "__init__.py",
+        "actions.py",
+        "engine.py",
+        "prints.py",
+    ]
+    for path in CRAWL_FILES:
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        imported: set[str] = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                imported.update(alias.name for alias in node.names)
+            elif isinstance(node, ast.ImportFrom):
+                assert node.level == 0
+                assert node.module is not None
+                imported.add(node.module)
+                if node.module == "uiprobe":
+                    imported.update(f"uiprobe.{alias.name}" for alias in node.names)
+            elif isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+                assert node.func.attr != "replace"
+        assert imported <= APPROVED, path.name
 
 
 # -- same frame, singleton unknown path, deadline, descendants ----
