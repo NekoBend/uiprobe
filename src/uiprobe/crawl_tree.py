@@ -145,24 +145,14 @@ def _read_bytes(path: Path, limit: int) -> bytes:
         raise _UnreadableError(
             f"is over {limit // (1024 * 1024)} MiB, so it is skipped"
         )
-    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+    # Checked by lstat just before the read, not at the open itself: the guard
+    # of the sources allows no read-only open here. A program with the run
+    # folder's own rights could swap the file in between; it could as well read
+    # the target itself.
     try:
-        descriptor = os.open(path, flags)
+        data = path.read_bytes()
     except OSError as exc:
         raise _UnreadableError(exc.strerror or "cannot be read") from None
-    try:
-        opened = os.fstat(descriptor)
-        if not stat.S_ISREG(opened.st_mode) or (
-            (opened.st_ino, opened.st_dev) != (before.st_ino, before.st_dev)
-            and before.st_ino != 0
-        ):
-            raise _UnreadableError("changed while it was opened")
-        with os.fdopen(descriptor, "rb", closefd=False) as handle:
-            data = handle.read(limit + 1)
-    except OSError as exc:
-        raise _UnreadableError(exc.strerror or "cannot be read") from None
-    finally:
-        os.close(descriptor)
     if len(data) > limit:
         raise _UnreadableError(
             f"is over {limit // (1024 * 1024)} MiB, so it is skipped"
