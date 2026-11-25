@@ -1246,7 +1246,8 @@ def _rename(row: Row, element: dict[str, object]) -> None:
         row.texts = (name, *(t for t in row.texts if t != name))
         row.name = name
         row.name_from = "text"
-    elif isinstance(desc, str) and desc.strip():
+    elif isinstance(desc, str) and desc.strip() and row.name_from != "text":
+        # A visible text anywhere in the row wins over a description.
         row.name = desc.strip()
         row.name_from = "content_desc"
 
@@ -1315,7 +1316,7 @@ def _element_dict(row: Row) -> dict[str, object]:
         "element_id": row.element_id,
         "kind": row.kind,
         "class": row.class_name,
-        "name": row.name,
+        "name": f'"{row.name}"' if row.name_from == "content_desc" else row.name,
         "name_from": row.name_from,
         "texts": list(row.texts),
     }

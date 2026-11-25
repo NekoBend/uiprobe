@@ -27,6 +27,10 @@ LEGEND_DESC = (
     '"..." = the element has no visible text; this is its accessibility description'
 )
 LEGEND_ARROW = "→ PACKAGE = pressing it opened that app"
+LEGEND_EMPTY = (
+    "(screen with no named rows) = the screen it led to has no row with a name "
+    "(see --json)"
+)
 LEGEND_AGAIN = (
     "(pressed again) = the row above was pressed again and led to the screen below"
 )
@@ -187,7 +191,8 @@ def run_tree(capsys, *argv: str) -> tuple[int, str, str]:
 
 
 SUMMARY = (
-    "left out of the tree (see --json): rows not sent: 1, "
+    "left out of the tree (see --json): rows that stayed on the same screen: 1, "
+    "rows not sent: 1, "
     "rows whose next screen could not be read: 1, texts outside rows: 2, "
     "unnamed elements: 1"
 )
@@ -196,6 +201,7 @@ FULL_TEXT = [
     "├─ Network",
     "│  ├─ Back home",
     "│  └─ Info",
+    "│     └─ (screen with no named rows)",
     "├─ About",
     '├─ "Menu" ·',
     "├─ Wi-Fi ·",
@@ -206,6 +212,7 @@ FULL_TEXT = [
     LEGEND,
     LEGEND_DESC,
     LEGEND_ARROW,
+    LEGEND_EMPTY,
     SUMMARY,
 ]
 
@@ -270,7 +277,7 @@ def test_rows_named_only_by_a_description_follow_the_switch(
         e["name"]
         for e in json.loads(out)["screens"][home_screen().screen_id]["elements"]
     ]
-    assert "Menu" in names  # the JSON never changes
+    assert '"Menu"' in names  # the JSON never changes
     assert LEGEND not in out  # and it has no legend
     assert "left out" not in out
 
@@ -342,7 +349,11 @@ def test_the_legend_has_a_line_for_each_mark_that_appears(tmp_path, capsys):
     folder.tap(home, 2, sid)
     folder.finish()
     _, out, _ = run_tree(capsys, str(folder.path))
-    assert out.splitlines() == ["com.example.app (com.example.app)", "└─ Same"]
+    assert out.splitlines() == [
+        "com.example.app (com.example.app)",
+        "└─ Same",
+        "left out of the tree (see --json): rows that stayed on the same screen: 1",
+    ]
 
 
 def test_pressed_again_has_its_heading_and_its_legend_line(tmp_path, capsys):
@@ -370,24 +381,122 @@ def test_another_app_without_a_package_adds_nothing():
     assert _note({"other_app": "com.a\x1bb"}, "other_app") == " → com.a\\x1bb"
 
 
-def test_a_unicode_space_in_a_name_is_escaped_like_any_non_printable(tmp_path, capsys):
-    folder = Folder(tmp_path)
-    screen = make_screen(
+def _two_screens():
+    home = make_screen(
         ".Home",
         [
             el(1, cls="FrameLayout"),
-            el(2, 1, cls="Button", text="Nov 25\u2009\u2013\u2009Dec 24", flags=CLICK),
+            el(2, 1, cls="ImageButton", flags=CLICK),
+            el(3, 1, cls="LinearLayout", flags=CLICK),
+            el(4, 3, text="Go"),
         ],
     )
-    sid = folder.screen(screen)
+    return home
+
+
+def test_an_unnamed_button_keeps_its_line_when_a_later_tap_opened_a_screen(
+    tmp_path, capsys
+):
+    folder = Folder(tmp_path)
+    home = _two_screens()
+    home_id = folder.screen(home)
+    network_id = folder.screen(NETWORK)
+    folder.start("launch")
+    folder.end(home_id)
+    folder.tap(home, 2, home_id)  # first it changed nothing
+    folder.tap(home, 2, network_id)  # then it opened a screen
+    folder.finish()
+    _, out, _ = run_tree(capsys, str(folder.path))
+    lines = out.splitlines()
+    assert lines[1] == "├─ [icon: ImageButton]"
+    assert lines[2:5] == [
+        "│  └─ (pressed again)",
+        "│     ├─ Back home ·",
+        "│     └─ Info ·",
+    ]
+    assert not any("not reached from a pressed row" in line for line in lines)
+
+
+def test_a_retry_that_went_to_another_app_or_failed_is_shown_or_counted(
+    tmp_path, capsys
+):
+    folder = Folder(tmp_path)
+    home = _two_screens()
+    home_id = folder.screen(home)
+    network_id = folder.screen(NETWORK)
+    folder.start("launch")
+    folder.end(home_id)
+    folder.tap(home, 3, network_id)
+    folder.tap(home, 3, OTHER_SCREEN)
+    folder.start("relaunch", OTHER_SCREEN, off_target_package="com.other.app")
+    folder.end(home_id)
+    folder.tap(home, 3, dump_failed=True)
+    folder.finish()
+    _, out, _ = run_tree(capsys, str(folder.path))
+    lines = out.splitlines()
+    assert lines[2:5] == [
+        "   ├─ Back home ·",
+        "   ├─ Info ·",
+        "   └─ (pressed again) → com.other.app",
+    ]
+    assert "→ PACKAGE" in out
+    assert lines[-1].endswith(
+        "rows whose next screen could not be read: 1, unnamed elements: 1"
+    )
+
+
+def test_a_visible_text_wins_over_the_description_of_the_pressed_row(tmp_path, capsys):
+    folder = Folder(tmp_path)
+    home = make_screen(
+        ".Home",
+        [
+            el(1, cls="FrameLayout"),
+            el(2, 1, cls="LinearLayout", desc="Cart", flags=CLICK),
+            el(3, 2, text="Open"),
+        ],
+    )
+    sid = folder.screen(home)
+    folder.start("launch")
+    folder.end(sid)
+    folder.tap(home, 2, sid)
+    folder.finish()
+    _, out, _ = run_tree(capsys, str(folder.path))
+    assert "└─ Open" in out.splitlines()
+    assert "Cart" not in out
+    _, out, _ = run_tree(capsys, str(folder.path), "--json")
+    element = json.loads(out)["screens"][sid]["elements"][0]
+    assert (element["name"], element["name_from"]) == ("Open", "text")
+
+
+def test_double_quotes_in_a_description_are_escaped_in_the_text_tree_only(
+    tmp_path, capsys
+):
+    folder = Folder(tmp_path)
+    home = make_screen(
+        ".Home",
+        [
+            el(1, cls="FrameLayout"),
+            el(2, 1, cls="ImageButton", desc='Say "hi"', flags=CLICK),
+        ],
+    )
+    sid = folder.screen(home)
     folder.start("launch")
     folder.end(sid)
     folder.finish()
     _, out, _ = run_tree(capsys, str(folder.path))
-    assert "└─ Nov 25\\u2009\u2013\\u2009Dec 24 ·" in out.splitlines()
+    assert '└─ "Say \\"hi\\"" ·' in out.splitlines()
     _, out, _ = run_tree(capsys, str(folder.path), "--json")
-    name = json.loads(out)["screens"][sid]["elements"][0]["name"]
-    assert name == "Nov 25\u2009\u2013\u2009Dec 24"  # the JSON keeps it as is
+    element = json.loads(out)["screens"][sid]["elements"][0]
+    assert element["name"] == '"Say "hi""'  # the JSON name is as before
+    assert element["name_from"] == "content_desc"
+
+
+def test_a_screen_without_named_rows_is_marked_under_its_row(tmp_path, capsys):
+    folder = full_run(tmp_path)
+    _, out, _ = run_tree(capsys, str(folder.path))
+    lines = out.splitlines()
+    assert "│     └─ (screen with no named rows)" in lines
+    assert LEGEND_EMPTY in lines
 
 
 def test_a_row_is_named_by_its_first_text_only(tmp_path, capsys):
@@ -480,8 +589,8 @@ def test_json_shape(tmp_path, capsys):
     assert by_name["Wi-Fi"]["action_id"] is None
     assert by_name["Wi-Fi"]["reasons"] == ["toggle"]
     assert "to" not in by_name["Wi-Fi"]
-    assert by_name["Menu"]["texts"] == []
-    assert by_name["Menu"]["name_from"] == "content_desc"
+    assert by_name['"Menu"']["texts"] == []
+    assert by_name['"Menu"']["name_from"] == "content_desc"
     assert by_name["[icon: ImageButton]"]["name_from"] == "none"
     assert by_name["Welcome"]["name_from"] == "text"
     assert by_name["[icon: ImageButton]"]["reasons"] == []

@@ -25,6 +25,10 @@ LEGEND_DESC: Final = (
     '"..." = the element has no visible text; this is its accessibility description'
 )
 LEGEND_ARROW: Final = "→ PACKAGE = pressing it opened that app"
+LEGEND_EMPTY: Final = (
+    "(screen with no named rows) = the screen it led to has no row with a name "
+    "(see --json)"
+)
 LEGEND_AGAIN: Final = (
     "(pressed again) = the row above was pressed again and led to the screen below"
 )
@@ -61,7 +65,7 @@ NOTES_IN_TEXT: Final = frozenset({"other_app"})
 # tree under any value, so that screen keeps its place.
 DESC_ONLY_ROWS: Final = "quoted"
 
-_COUNTED: Final = ("other_app", "not_sent", "unknown", "not_read")
+_COUNTED: Final = ("other_app", "same_screen", "not_sent", "unknown", "not_read")
 
 
 @dataclass(slots=True)
@@ -115,12 +119,19 @@ def _note(to: dict[str, object], kind: str) -> str | None:
     return " → (could not be read)"
 
 
+def _endings(row: Row) -> list[dict[str, object]]:
+    """Every ending of the taps on a row: the main one, then the retries."""
+    return ([row.to] if row.to is not None else []) + list(row.also_to)
+
+
 def _keeps_line(row: Row) -> bool:
-    """Whether a row has a line in the text tree."""
+    """Whether a row has a line in the text tree. A row that has no name there
+    (or none by `DESC_ONLY_ROWS`) still has one when any of its taps reached a
+    screen, so that a pressed path never disappears."""
     if row.name_from == "none" or (
         row.name_from == "content_desc" and DESC_ONLY_ROWS == "json_only"
     ):
-        return row.to is not None and "screen_id" in row.to
+        return any("screen_id" in e for e in _endings(row))
     return True
 
 
@@ -131,7 +142,7 @@ def _row_line(
     `tally`, for the legend."""
     name = _label(row.name)
     if row.name_from == "content_desc" and DESC_ONLY_ROWS == "quoted":
-        name = f'"{name}"'
+        name = '"' + name.translate({ord('"'): '\\"'}) + '"'
         tally.marks.add("desc")
     line = name + (note or "")
     if note is not None and row.to is not None and "other_app" in row.to:
@@ -158,12 +169,18 @@ def _entries(
             continue
         kept = _keeps_line(row)
         note = None
-        if row.to is not None:
+        if row.to is not None and _kind_of(row.to) != "screen":
             kind = _kind_of(row.to)
-            if kind != "screen":
-                note = _note(row.to, kind) if kind in NOTES_IN_TEXT and kept else None
-                if note is None and kind in _COUNTED:
-                    tally.ends[kind] = tally.ends.get(kind, 0) + 1
+            note = _note(row.to, kind) if kind in NOTES_IN_TEXT and kept else None
+        # Each kind of result that no line shows is counted once for the row.
+        left_out = {
+            kind
+            for to in _endings(row)
+            if (kind := _kind_of(to)) in _COUNTED
+            and not (kept and kind in NOTES_IN_TEXT and _note(to, kind) is not None)
+        }
+        for kind in left_out:
+            tally.ends[kind] = tally.ends.get(kind, 0) + 1
         if not kept:
             if row.name_from == "none":
                 tally.unnamed += 1
@@ -177,6 +194,7 @@ def _entries(
 
 _SUMMARY: Final = (
     ("other_app", "rows that led to another app"),
+    ("same_screen", "rows that stayed on the same screen"),
     ("not_sent", "rows not sent"),
     ("unknown", "rows with an unknown result"),
     ("not_read", "rows whose next screen could not be read"),
@@ -252,19 +270,32 @@ class _Renderer:
         target = to.get("screen_id")
         if isinstance(target, str):
             if target not in self.expanded:
-                below = self.open_screen(target, entry.name)
+                below = self.screen_below(target, entry.name)
             elif "screen_above" in NOTES_IN_TEXT:
                 depth, text = items[-1]
                 shown = f" → (screen shown above: {self.expanded[target]})"
                 if self.ids:
                     shown += f" {_printable(target)}"
                 items[-1] = (depth, text + shown)
-        again = [
-            _Entry("(pressed again)", e, again=True, name=entry.name)
-            for e in entry.more
-            if isinstance(e.get("screen_id"), str)
-        ]
+        again: list[_Entry] = []
+        for e in entry.more:
+            kind = _kind_of(e)
+            if kind == "screen":
+                again.append(_Entry("(pressed again)", e, again=True, name=entry.name))
+            elif kind in NOTES_IN_TEXT and (note := _note(e, kind)) is not None:
+                self.tally.marks.update(
+                    {"again", "arrow"} if kind == "other_app" else {"again"}
+                )
+                again.append(_Entry("(pressed again)" + note))
         return [*below, *again]
+
+    def screen_below(self, sid: str, name: str) -> list[_Entry]:
+        """The entries of a screen a row led to; a marker when it has none."""
+        entries = self.open_screen(sid, name)
+        if not entries:
+            self.tally.marks.add("empty")
+            entries = [_Entry("(screen with no named rows)")]
+        return entries
 
     def run(self, sid: str, name: str) -> None:
         """List the screen `sid` and everything first reached below it."""
@@ -284,7 +315,7 @@ class _Renderer:
                     continue
                 items.append((depth, entry.text))
                 self.tally.marks.add("again")
-                below = self.open_screen(target, entry.name)
+                below = self.screen_below(target, entry.name)
             else:
                 items.append((depth, entry.text))
                 below = self.below_of(entry, items)
@@ -319,6 +350,7 @@ def render_text(tree: RunTree, *, ids: bool = False, why: bool = False) -> list[
         ("desc", LEGEND_DESC),
         ("arrow", LEGEND_ARROW),
         ("again", LEGEND_AGAIN),
+        ("empty", LEGEND_EMPTY),
     ):
         if mark in drawn.tally.marks:
             drawn.lines.append(text)
