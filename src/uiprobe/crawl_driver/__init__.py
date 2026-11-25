@@ -165,6 +165,7 @@ from uiprobe.crawl_driver.helpers import (  # noqa: F401
     _Ended,
     _failure_word,
     _flag,
+    _hide_password_notes,
     _ints,
     _kind,
     _plain_policy,

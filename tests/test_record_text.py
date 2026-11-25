@@ -365,3 +365,72 @@ def test_the_gate_refuses_hidden_details_that_do_not_fit(tmp_path):
 
     edit_lines(base, not_blank)
     assert GATE_WARNING in read_tree(base).warnings
+
+
+def test_flags_given_as_a_tuple_still_mark_a_password_field(tmp_path):
+    w = writer(tmp_path)
+    given = {
+        "id": "e9",
+        "class": "X",
+        "text": "hunter2",
+        "bounds": [0, 0, 1, 1],
+        "flags": ("clickable", "password"),
+    }
+    w.write_transition_start(1, "tap", HOME.screen_id, given, (5, 5))
+    element = records(tmp_path)[0]["action"]["element"]
+    assert element["text"] == ""
+    assert element["hidden"] == ["text"]
+    assert "hunter2" not in read(tmp_path, "transitions.jsonl")
+
+
+def test_a_skip_detail_may_carry_its_own_hidden_note(tmp_path):
+    w = writer(tmp_path)
+    detail = {
+        "reason": "confirm_button",
+        "word": "delete",
+        "note": "",
+        "hidden": ["note"],
+    }
+    w.write_skip(HOME.screen_id, "f-1", ["confirm_button"], HOME.elements[1], [detail])
+    assert json.loads(read(tmp_path, "skipped.jsonl"))["details"][0] == {
+        "reason": "confirm_button",
+        "word": "delete",
+        "note": "",
+        "hidden": ["note"],
+    }
+    bad = {**detail, "note": "visible"}
+    with pytest.raises(ValueError, match="hidden may only be"):
+        w.write_skip(HOME.screen_id, "f-2", ["confirm_button"], HOME.elements[1], [bad])
+
+
+def skip_folder(tmp_path: Path, *, record_text: bool) -> Path:
+    w = writer(tmp_path, record_text=record_text)
+    w.write_screen(HOME)
+    for index in (1, 2):  # the Sign in button and the password field
+        element = HOME.elements[index]
+        w.write_skip(
+            HOME.screen_id,
+            fingerprint_of(HOME, element),
+            ["deny_word"] if index == 1 else ["password_field"],
+            element,
+        )
+    w.finish("exhausted", screens=1, actions=0)
+    return tmp_path / "run"
+
+
+def test_the_tree_matches_skip_lines_by_element_id_when_texts_are_blanked(tmp_path):
+    tree = read_tree(skip_folder(tmp_path, record_text=False))
+    node = tree.screens[HOME.screen_id]
+    reasons = {r.element_id: r.reasons for r in node.rows if r.kind == "row"}
+    assert reasons["e2"] == ("deny_word",)
+    assert reasons["e3"] == ("password_field",)
+    assert node.unmatched == []
+
+
+def test_the_tree_matches_a_password_skip_by_element_id_with_texts_recorded(tmp_path):
+    tree = read_tree(skip_folder(tmp_path, record_text=True))
+    node = tree.screens[HOME.screen_id]
+    reasons = {r.element_id: r.reasons for r in node.rows if r.kind == "row"}
+    assert reasons["e2"] == ("deny_word",)  # matched by fingerprint as before
+    assert reasons["e3"] == ("password_field",)
+    assert node.unmatched == []

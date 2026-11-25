@@ -946,3 +946,71 @@ def test_screenshots_with_the_file_key_are_refused_before_any_contact(
     assert not out.exists()
     assert android.inputs == []
     assert fake_adb.requests == []
+
+
+# -- device text in errors ---------------------------------------------------------
+
+REPLY = "MARKERreply 'Window{abc u0 MARKERtitle}'"
+HIDDEN_REPLY = "(device text not shown: record_text = false)"
+
+
+@pytest.fixture
+def failing_after_main(fake_adb, android, monkeypatch):
+    """Once the first app screen shows, the adb server answers FAIL with REPLY."""
+    original = android.show
+
+    def show(name: str) -> None:
+        original(name)
+        if name == "main":
+            for request in (
+                f"host:transport-id:{TRANSPORT}",
+                f"host:transport:{SERIAL}",
+            ):
+                fake_adb.fail_request(request, REPLY)
+
+    monkeypatch.setattr(android, "show", show)
+
+
+@pytest.mark.usefixtures("here", "failing_after_main")
+def test_an_error_reply_is_shown_when_texts_are_recorded(fake_adb, capsys, tmp_path):
+    code, _text, err = press(capsys, fake_adb, "--press", "--out", str(tmp_path / "r"))
+    assert code == 10
+    assert REPLY in err
+
+
+@pytest.mark.usefixtures("here", "failing_after_main")
+def test_an_error_reply_is_hidden_when_texts_are_not_recorded(
+    fake_adb, capsys, tmp_path
+):
+    out = tmp_path / "r"
+    code, text, err = press(
+        capsys, fake_adb, "--press", "--out", str(out), "--no-record-text"
+    )
+    assert code == 10
+    assert err == (f"uiprobe: error: adb server refused the request: {HIDDEN_REPLY}\n")
+    found = (
+        text
+        + err
+        + "".join(p.read_text(encoding="utf-8") for p in out.rglob("*") if p.is_file())
+    )
+    assert "MARKER" not in found
+
+
+@pytest.mark.usefixtures("here", "failing_after_main")
+def test_an_error_reply_is_hidden_in_json_too(fake_adb, capsys, tmp_path):
+    code, text, err = press(
+        capsys,
+        fake_adb,
+        "--press",
+        "--out",
+        str(tmp_path / "r"),
+        "--no-record-text",
+        "--json",
+    )
+    assert code == 10
+    assert "MARKER" not in text + err
+    error = json.loads(err.strip().splitlines()[-1] if not text.strip() else text)
+    body = error["error"]
+    assert body["code"] == "adb_error"
+    assert HIDDEN_REPLY in body["message"]
+    assert body["details"]["message"] == HIDDEN_REPLY

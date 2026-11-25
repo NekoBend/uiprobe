@@ -119,7 +119,7 @@ def _press_settle(args: argparse.Namespace) -> float:
     return _PRESS_SETTLE if args.settle is None else args.settle
 
 
-def _cmd_crawl_press(args: argparse.Namespace, setup: _CrawlSetup) -> int:
+def _cmd_crawl_press(args: argparse.Namespace, setup: _CrawlSetup) -> int:  # noqa: PLR0912, PLR0915 - one error path per kind of failure
     """Run a pressing crawl into its run folder and report how it ended."""
     limits, limits_source = _press_limits(args, setup.settings)
     settle = _press_settle(args)
@@ -223,11 +223,27 @@ def _cmd_crawl_press(args: argparse.Namespace, setup: _CrawlSetup) -> int:
     except NotEmulatorError as exc:
         # The check inside crawl_run answered differently from the first one:
         # nothing was written or sent; say it in the command's words.
-        raise _cli_not_emulator(device, exc) from None
+        refusal = _cli_not_emulator(device, exc)
+        if not record_text:
+            _hide_device_text(refusal)
+        raise refusal from None
     except UiprobeError as exc:
         if _made_by_this_run(exc):
             exc.details.setdefault("out", out)
+        if not record_text:
+            _hide_device_text(exc)
         raise
+    except Exception as exc:
+        if record_text or isinstance(exc, _UsageError | BrokenPipeError):
+            raise
+        # Whatever an unexpected error says may hold text from the device.
+        name = type(exc).__name__
+        hidden = UiprobeError(
+            f"unexpected {name} {_DEVICE_TEXT_HIDDEN}", details={"type": name}
+        )
+        if _made_by_this_run(exc):
+            hidden.details["out"] = out
+        raise hidden from None
     moves = result.repins  # as run.json counts them
     hints = _press_hints(
         result, package=args.package, back=policy.back_on_other_screens
@@ -237,6 +253,37 @@ def _cmd_crawl_press(args: argparse.Namespace, setup: _CrawlSetup) -> int:
     else:
         _emit(_press_result_text(result, hints, moves))
     return 0
+
+
+_DEVICE_TEXT_HIDDEN: Final = "(device text not shown: record_text = false)"
+# Detail keys that carry text the device sent (a reply, a command's output, a
+# window title, a line of a dumpsys listing, an error text it caused).
+_DEVICE_TEXT_KEYS: Final = ("output", "message", "error", "window", "line", "title")
+
+
+def _hide_device_text(error: UiprobeError) -> None:
+    """Replace the device's own text in `error`, for a run that records no texts.
+
+    The code, the exit status and uiprobe's own words stay; every value of a
+    detail in `_DEVICE_TEXT_KEYS` is replaced, also where the message or
+    another detail repeats it, by ``(device text not shown: record_text =
+    false)``.
+    """
+    texts = sorted(
+        {
+            v
+            for k in _DEVICE_TEXT_KEYS
+            if isinstance(v := error.details.get(k), str) and v
+        },
+        key=len,
+        reverse=True,
+    )
+    for text in texts:
+        error.message = error.message.replace(text, _DEVICE_TEXT_HIDDEN)
+        for key, value in error.details.items():
+            if isinstance(value, str):
+                error.details[key] = value.replace(text, _DEVICE_TEXT_HIDDEN)
+    error.args = (error.message, *error.args[1:])
 
 
 def _made_by_this_run(error: BaseException) -> bool:

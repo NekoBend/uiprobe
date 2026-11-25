@@ -215,7 +215,7 @@ def _check_skip_details(
         if not isinstance(item, Mapping):
             msg = f"an item of details must be a mapping, not {type(item).__name__}"
             raise TypeError(msg)
-        unknown = [key for key in item if key not in _SKIP_DETAIL_KEYS]
+        unknown = [key for key in item if key not in (*_SKIP_DETAIL_KEYS, "hidden")]
         if unknown or "reason" not in item:
             msg = (
                 "an item of details needs a reason and may hold only"
@@ -227,6 +227,11 @@ def _check_skip_details(
             for key in _SKIP_DETAIL_KEYS
             if key in item
         }
+        if "hidden" in item:
+            if item["hidden"] != ["note"] or item.get("note") != "":
+                msg = 'hidden may only be ["note"], with a note of ""'
+                raise ValueError(msg)
+            entry["hidden"] = ["note"]  # ty: ignore[invalid-assignment]
         if entry["reason"] not in _WORD_REASONS or entry["reason"] not in reasons:
             msg = (
                 "the reason of a detail must be one of the line's reasons and one"
@@ -249,7 +254,9 @@ def _hide_texts(data: dict[str, object], *, record_text: bool) -> dict[str, obje
     (in field order); a field that was empty stays as it was and is not named.
     """
     flags = data.get("flags")
-    password = isinstance(flags, list) and "password" in flags
+    password = isinstance(flags, list | tuple | set | frozenset) and (
+        "password" in flags
+    )
     names = _TEXT_FIELDS if not record_text else ("text",) if password else ()
     hidden = [name for name in names if data.get(name)]
     for name in hidden:
@@ -761,7 +768,7 @@ class RunWriter:
         fingerprint: str,
         reasons: Sequence[str],
         element: Element | Mapping[str, object],
-        details: Sequence[Mapping[str, str]] = (),
+        details: Sequence[Mapping[str, str | list[str]]] = (),
     ) -> bool:
         """Write one element that was not pressed, once per screen, fingerprint
         and reasons. Return False, writing nothing, for a repeat.

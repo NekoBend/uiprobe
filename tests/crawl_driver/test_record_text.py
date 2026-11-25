@@ -13,12 +13,13 @@ import pytest
 
 from tests.crawl_driver.helpers import (
     SERIAL,
+    SHOP,
     TRANSPORT,
     Clock,
     lines,
     run,
 )
-from tests.fake_device import FakeAndroid
+from tests.fake_device import El, FakeAndroid, Screen
 from tests.marker_screens import (
     HIDDEN_DESC,
     HIDDEN_HINT,
@@ -274,3 +275,40 @@ def test_screenshots_with_record_text_off_are_refused_before_anything(
 def test_record_text_must_be_a_bool(tmp_path: Path, device, clock):
     with pytest.raises(TypeError):
         run(device, clock, tmp_path / "run", record_text=1)  # ty: ignore[invalid-argument-type]
+
+
+def test_a_confirm_note_made_of_a_password_text_is_hidden_with_default_recording(
+    fake_adb, tmp_path: Path, clock
+):
+    code = "902184"
+    screens = (
+        Screen("home", "com.example.launcher/.Home", (El((0, 0, 320, 640)),)),
+        Screen(
+            "main",
+            f"{SHOP}/.Main",
+            (
+                El((0, 0, 320, 100), text="Delete account"),
+                El(
+                    (20, 200, 300, 240),
+                    text=f"OK {code}",
+                    cls="android.widget.EditText",
+                    password=True,
+                    focusable=True,
+                    go="main",
+                ),
+            ),
+        ),
+    )
+    FakeAndroid(fake_adb, SERIAL, screens, start="home", transport_id=TRANSPORT)
+    device = Device(adb_server=fake_adb.address, pin=True)
+    out = tmp_path / "run"
+    run(device, clock, out, limits=Limits(actions=4))
+    assert code not in every_text(out)
+    notes = [
+        d
+        for line in lines(out / "skipped.jsonl")
+        for d in line.get("details", [])
+        if d["reason"] == "confirm_button"
+    ]
+    assert notes, "the screen must give a confirm_button detail"
+    assert all(d["note"] == "" and d["hidden"] == ["note"] for d in notes)

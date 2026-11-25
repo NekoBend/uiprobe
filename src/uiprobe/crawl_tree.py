@@ -1022,6 +1022,10 @@ def _sent_target(tap: _Tap) -> str | None:
 class _Skips:
     by_screen: dict[str, dict[str, list[str]]]
     whole_screen: dict[str, list[str]]
+    # screen id -> element id -> fingerprint, from the ``element`` of a line.
+    # Used where texts are blanked in the records, so the fingerprint cannot
+    # be computed again from the screen file.
+    by_element: dict[str, dict[str, str]] = field(default_factory=dict)
 
 
 def _read_skips(base: Path, warnings: _Warnings) -> _Skips:
@@ -1047,6 +1051,10 @@ def _read_skips(base: Path, warnings: _Warnings) -> _Skips:
             bucket = skips.whole_screen.setdefault(sid, [])
         else:
             bucket = skips.by_screen.setdefault(sid, {}).setdefault(fingerprint, [])
+            element = line.get("element")
+            ident = element.get("id") if isinstance(element, dict) else None
+            if isinstance(ident, str):
+                skips.by_element.setdefault(sid, {}).setdefault(ident, fingerprint)
         bucket.extend(r for r in listed if r not in bucket)
     return skips
 
@@ -1089,7 +1097,12 @@ def _node(
         for row in rows:
             if row.kind != "row":
                 continue
-            fp = prints.of(by_id[row.element_id])
+            element = by_id[row.element_id]
+            fp = prints.of(element)
+            if fp not in by_fp and (not record_text or "password" in element.flags):
+                # The texts were blanked when the line was written, so the
+                # fingerprint cannot match; the element id of the line does.
+                fp = skips.by_element.get(sid, {}).get(row.element_id, fp)
             if fp in by_fp:
                 row.reasons = tuple(by_fp[fp])
                 seen.add(fp)
