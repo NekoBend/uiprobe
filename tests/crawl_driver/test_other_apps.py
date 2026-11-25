@@ -246,3 +246,34 @@ def test_a_relaunch_decided_on_the_apps_screen_has_no_off_target(
     driver.send(Relaunch(), observation)
     assert "off_target" not in _start_lines(tmp_path)[-1]
     assert android.stopped == [SHOP]
+
+
+# --- the packages the run landed on ---
+
+
+def test_a_relaunch_limit_counts_every_landing_on_another_app(
+    tmp_path, device, android, clock, monkeypatch
+):
+    _launch_under(monkeypatch, device, android, "ext1")
+    result = run(device, clock, tmp_path / "run")
+    assert result.stop_reason == "relaunch_limit"
+    # 3 relaunches, each decided on the other app's screen, and the stop on the 4th
+    assert result.other_apps == ((OTHER, 4),)
+
+
+def test_an_exhausted_run_has_no_other_apps(tmp_path, device, clock):
+    result = run(device, clock, tmp_path / "run")
+    assert result.other_apps == ()
+
+
+def test_landings_are_ranked_by_count_then_first_seen():
+    from uiprobe.crawl_driver.driver import _ranked
+
+    counts = {"b.first": 1, "a.second": 3, "c.third": 1, "d.fourth": 3}
+    assert _ranked(counts) == (
+        ("a.second", 3),
+        ("d.fourth", 3),
+        ("b.first", 1),
+        ("c.third", 1),
+    )
+    assert _ranked({}) == ()

@@ -633,7 +633,7 @@ def test_a_relaunch_limit_on_another_app_points_to_back(
     assert "stopped: relaunch_limit" in text
     [note] = [line for line in text.splitlines() if "--back-on-other-screens" in line]
     assert note.startswith("note: ")
-    assert f"(the last one: {OTHER})" in note
+    assert f"of other apps ({OTHER} 4 times); --back-on-other-screens" in note
     assert "reaches whichever window has the input focus" in note
     assert android.inputs == []  # no tap or key: only the launch and restarts
 
@@ -650,10 +650,14 @@ def test_the_relaunch_limit_hint_is_in_the_json_notes(
     result = json.loads(text)
     assert result["stop_reason"] == "relaunch_limit"
     assert len([n for n in result["notes"] if "--back-on-other-screens" in n]) == 1
+    assert result["other_apps"] == [{"package": OTHER, "count": 4}]
 
 
 def _result(
-    stop_reason: str, front: str | None, focus: str | None = None
+    stop_reason: str,
+    front: str | None,
+    focus: str | None = None,
+    other_apps: tuple[tuple[str, int], ...] | None = None,
 ) -> CrawlResult:
     return CrawlResult(
         Path("r"),
@@ -663,7 +667,41 @@ def _result(
         repin=True,
         last_foreground=front,
         last_focus=focus,
+        other_apps=(
+            ((front, 1),) if front is not None and other_apps is None else other_apps
+        )
+        or (),
     )
+
+
+def _parenthesis(other_apps: tuple[tuple[str, int], ...]) -> str:
+    result = _result("relaunch_limit", OTHER, other_apps=other_apps)
+    [hint] = [
+        h
+        for h in cli._press_hints(result, package=SHOP, back=False)
+        if "--back-on-other-screens" in h
+    ]
+    head, _, tail = hint.partition(" (")
+    assert head == "the restarts kept ending on screens of other apps"
+    inside, _, rest = tail.partition("); ")
+    assert rest.startswith("--back-on-other-screens presses BACK on such a screen")
+    return inside
+
+
+def test_the_relaunch_limit_hint_names_every_package_with_its_count():
+    many = (("com.settings.intel", 3), ("com.launcher", 1))
+    assert _parenthesis(many) == "com.settings.intel 3 times, com.launcher once"
+    assert _parenthesis((("com.launcher", 1),)) == "com.launcher once"
+    assert _parenthesis((("com.a", 2), ("com.b", 2))) == "com.a 2 times, com.b 2 times"
+
+
+def test_the_relaunch_limit_hint_escapes_package_names():
+    assert _parenthesis((("a\u202eb", 1),)) == "a\\u202eb once"
+
+
+def test_the_relaunch_limit_hint_needs_a_landing():
+    result = _result("relaunch_limit", OTHER, other_apps=())
+    assert cli._press_hints(result, package=SHOP, back=False) == []
 
 
 @pytest.mark.parametrize(

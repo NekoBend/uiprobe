@@ -415,6 +415,14 @@ _RESTART_PLAN: Final = {
 _SYSTEM_UI: Final = "com.android.systemui"
 
 
+def _other_apps_text(other_apps: tuple[tuple[str, int], ...]) -> str:
+    """The packages the run landed on, each with its count, as one list."""
+    return ", ".join(
+        f"{_printable(name)} {'once' if count == 1 else f'{count} times'}"
+        for name, count in other_apps
+    )
+
+
 def _press_hints(result: CrawlResult, *, package: str, back: bool) -> list[str]:
     """Advice for the endings a real device runs into; only those that apply.
 
@@ -450,13 +458,14 @@ def _press_hints(result: CrawlResult, *, package: str, back: bool) -> list[str]:
         and not back
         and front is not None
         and front != package
+        and result.other_apps
     ):
         hints.append(
-            "the restarts kept ending on screens of other apps (the last one:"
-            f" {_printable(front)}); --back-on-other-screens presses BACK on such"
-            " a screen (up to twice before it restarts the app), and that BACK"
-            " reaches whichever window has the input focus, not the app being"
-            " crawled"
+            "the restarts kept ending on screens of other apps"
+            f" ({_other_apps_text(result.other_apps)}); --back-on-other-screens"
+            " presses BACK on such a screen (up to twice before it restarts the"
+            " app), and that BACK reaches whichever window has the input focus,"
+            " not the app being crawled"
         )
     if (
         result.stop_reason == "relaunch_limit"
@@ -506,5 +515,8 @@ def _press_json(
         "not_sent": dict(result.not_sent),
         "repins": moves,
         "repin": result.repin,
+        "other_apps": [
+            {"package": name, "count": count} for name, count in result.other_apps
+        ],
         "notes": hints,
     }
