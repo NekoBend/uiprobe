@@ -44,7 +44,10 @@ version 3 must have both, and an older uiprobe refuses a version 3 file
 written at version 4 must have both, and an older uiprobe refuses a version 4
 file. Version 5 added the rule ``replay_path`` (a missing one reads True); a
 file written at version 5 must have it, and an older uiprobe refuses a version 5
-file.
+file. Version 6 added the top-level key ``record_text`` (a missing one reads
+True); a file written at version 6 must have it, and an older uiprobe refuses a
+version 6 file. It is about the run folder, not about judging: with false the
+records of a pressing crawl hold no screen text (see `uiprobe.crawl_driver`).
 
 ``[deny] except`` holds exception words (see `uiprobe.guards.word_matches`): a
 deny-word hit that lies completely inside one of them, where it stands as a
@@ -146,7 +149,7 @@ __all__ = [
 
 SETTINGS_FILE: Final = "uiprobe.toml"
 FORMAT_VERSION: Final = 1
-DEFAULTS_VERSION: Final = 5
+DEFAULTS_VERSION: Final = 6
 MAX_SETTINGS_BYTES: Final = 1024 * 1024
 
 # Every default list item with the defaults version that introduced it. Each
@@ -165,7 +168,8 @@ MAX_SETTINGS_BYTES: Final = 1024 * 1024
 # of its phrases and the rule refuse_irreversible_screens. Version 3 added the
 # rules skip_two_target_rows and skip_rows_with_buttons (no list items).
 # Version 4 added the rules skip_navigate_up and skip_sliders (no list items).
-# Version 5 added the rule replay_path (no list items).
+# Version 5 added the rule replay_path (no list items). Version 6 added the
+# top-level key record_text (no list items; a missing one reads True).
 _LATER_DENY: Final[dict[str, int]] = {
     "やり直": 2,
     "元に戻": 2,
@@ -175,7 +179,7 @@ _LATER_DENY: Final[dict[str, int]] = {
 # The [deny] except list has no built-in words. One added later starts at the
 # next defaults version (raise DEFAULTS_VERSION with it); before that, the
 # test that no default is tagged beyond the current version fails.
-_FIRST_EXCEPT: Final = 6
+_FIRST_EXCEPT: Final = 7
 _LATER_EXCEPT: Final[dict[str, int]] = {}
 _LATER_CONFIRM: Final[dict[str, int]] = {}
 # The [irreversible] table came with version 2, so its items start there.
@@ -216,7 +220,7 @@ _UTF8_BOM: Final = b"\xef\xbb\xbf"
 _UTF16_BOMS: Final = (b"\xff\xfe", b"\xfe\xff")
 
 _TOP_KEYS: Final = frozenset(
-    {"format_version", "defaults_version", "press", "runs_dir"}
+    {"format_version", "defaults_version", "press", "runs_dir", "record_text"}
 )
 _BOOL_RULES: Final = (
     "tap_unlabeled",
@@ -258,6 +262,9 @@ _LATER_RULES: Final[dict[str, int]] = {
     "skip_sliders": 4,
     "replay_path": 5,
 }
+# Top-level keys a later version added, with that version (a missing one reads
+# True).
+_LATER_TOP: Final[dict[str, int]] = {"record_text": 6}
 _LATER_RULE_VALUES: Final[dict[str, bool]] = {
     "refuse_irreversible_screens": True,
     "skip_two_target_rows": True,
@@ -305,7 +312,8 @@ class Settings:
     True) and ``skip_rows_with_buttons`` (default False), added with defaults
     version 3, and ``skip_navigate_up`` and ``skip_sliders`` (both default
     True), added with defaults version 4, ``replay_path`` (default True), added
-    with defaults version 5, and ``runs_dir`` (default None, an
+    with defaults version 5, ``record_text`` (default True), added with
+    defaults version 6, and ``runs_dir`` (default None, an
     optional key that needed no new defaults version), follow it for the same
     reason.
     """
@@ -345,6 +353,9 @@ class Settings:
     # Added with defaults version 5, after runs_dir so that a Settings built
     # by position with the earlier fields keeps working.
     replay_path: bool = True
+    # Added with defaults version 6: False keeps screen text out of the
+    # records of a pressing crawl. Not a Policy field: it does not judge.
+    record_text: bool = True
 
 
 def _separators() -> str:
@@ -503,6 +514,11 @@ def render_default_settings() -> str:
         "# --out DIR, or runs_dir below, and --allow-real-device on a device",
         "# that is not an emulator); --dry-run previews instead.",
         "press = false",
+        "# With false, the records of a pressing crawl (screens, transitions,",
+        "# summary) hold no screen text; texts that were there are written as",
+        '# empty strings and named under "hidden". Screenshots then need true.',
+        "# Password fields are always hidden, whatever this says.",
+        "record_text = true",
         "# The folder that gets the run folders of a pressing crawl without --out",
         "# (relative to the folder of this file; it must exist):",
         '# runs_dir = "uiprobe-runs"',
@@ -1128,6 +1144,12 @@ def load_settings(path: str | os.PathLike[str]) -> Settings:
     )
     press = reader.boolean(parsed, "", "press")
     runs_dir = _runs_dir(parsed, reader)
+    record_text = reader.boolean(
+        parsed,
+        "",
+        "record_text",
+        True if defaults_version < _LATER_TOP["record_text"] else None,
+    )
 
     deny = reader.table(parsed, "deny", _TABLE_KEYS["deny"])
     deny_listed = reader.strings(deny, "deny", "words", _word_identity)
@@ -1227,6 +1249,7 @@ def load_settings(path: str | os.PathLike[str]) -> Settings:
         defaults_version=defaults_version,
         press=press,
         runs_dir=runs_dir,
+        record_text=record_text,
         deny_words=deny_words,
         deny_exceptions=deny_exceptions,
         confirm_words=_merge(

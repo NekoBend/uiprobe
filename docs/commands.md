@@ -17,6 +17,8 @@ emulator-5554     device        sdk_gphone64_x86_64
 
 Print the screen that is showing on the device as a tree:
 
+`dump` prints to the terminal and is not a run folder: it keeps every text, the text of password fields included. The same holds for the text a dry run (`uiprobe crawl PACKAGE`) prints. Only the records of a pressing crawl hide texts (see [What is recorded of a screen's texts](run-folder.md#what-is-recorded-of-a-screens-texts)).
+
 ```console
 $ uiprobe -s emulator-5554 dump
 com.example.shop/.LoginActivity  (s-23512491bbaf)
@@ -461,7 +463,7 @@ com.android.settings (com.android.settings)
 - Screens that no tap led to (reached by a BACK or a relaunch, or the same screen read again with a different id) follow the tree, each under a line that names its id, and so does anything only they lead to.
 - `--ids` adds a line with the screen id and activity to each screen, and the package of another app. `--why` adds the reasons from `skipped.jsonl` to each row that was not pressed, such as `· [toggle]`.
 - The reasons are matched to rows by recomputing each element's fingerprint from its screen file, as the crawl did. A fingerprint that matches no row is not dropped: the screen gets a line `(N 件は対応する行が見つからない)`, and `--json` lists them as `unmatched`. A row that was clickable only at a later visit under the same screen id has no fingerprint match in the screen file, so its skip entry stays unmatched. A screen with more than 2000 elements is not matched: its skip entries are counted as `(N 件は対応を調べていない: 部品が多すぎる)` and listed in `unmatched` with `why: "too_many_elements"`.
-- If `run-start.json` has `"record_text": false`, the run folder holds no screen texts: the tree shows only the structure (`[row: CLASS]`, `[icon: CLASS]`) and the first line says so. A password field always shows as `[password field]`.
+- If `run-start.json` has `"record_text": false`, the run folder holds no screen texts: the tree shows only the structure (`[row: CLASS]`, `[icon: CLASS]`) and the first line says so. A password field always shows as `[password field]`, also in a run folder whose texts were recorded: the writer blanks its text and names it under `hidden`, and the tree reads that key and the hidden `window` of a `covered_by_other` line as the writer produces them (a `hidden` that does not fit makes the transitions check fail, with the warning it gives for any other malformed line).
 - Texts come from the app, so control and bidirectional characters appear as an escape (`\xNN` or `\uXXXX`), as in the other text output.
 - A folder that does not exist or has no usable `run-start.json` is a usage error (exit status 2). A line or file that is damaged, not UTF-8, nested too deeply or refused as above (`run.json`, `transitions.jsonl`, `skipped.jsonl` or a screen file) is a warning on stderr (a `warnings` list in `--json`; they are counted as they happen and the first 20 are kept, followed by `and N more warnings`) and the rest is shown, except that `run-start.json` (it must be a `uiprobe.run_start/1` record with a package) is a usage error. A row keeps at most 50 texts. A line that is not a transition or skip record is a warning too, and so is a `run.json` without `stop_reason` (then `finished` is `false`). The exit status is 0 with warnings. A missing `transitions.jsonl` or `skipped.jsonl` is not a warning, because the crawl makes each at its first line; a missing `run.json` only means the run did not end normally (`finished` is `false` in `--json`).
 

@@ -119,10 +119,24 @@ def _press_settle(args: argparse.Namespace) -> float:
     return _PRESS_SETTLE if args.settle is None else args.settle
 
 
-def _cmd_crawl_press(args: argparse.Namespace, setup: _CrawlSetup) -> int:
+def _cmd_crawl_press(args: argparse.Namespace, setup: _CrawlSetup) -> int:  # noqa: PLR0912, PLR0915 - one error path per kind of failure
     """Run a pressing crawl into its run folder and report how it ended."""
     limits, limits_source = _press_limits(args, setup.settings)
     settle = _press_settle(args)
+    record_text = setup.settings.record_text and not args.no_record_text
+    if args.screenshots and not record_text:
+        origin = (
+            "--no-record-text"
+            if args.no_record_text
+            else "record_text = false in "
+            + _printable(_shown(str(setup.settings.source)))
+        )
+        msg = (
+            f"--screenshots cannot be used with {origin}: a screenshot shows the"
+            " text of the screen, so the run would record it after all"
+            " (nothing was pressed or written)"
+        )
+        raise _UsageError(msg)
     policy = replace(
         setup.policy,
         back_on_other_screens=args.back_on_other_screens,
@@ -171,6 +185,7 @@ def _cmd_crawl_press(args: argparse.Namespace, setup: _CrawlSetup) -> int:
         "check_tap_window": policy.check_tap_window,
         "screenshots": args.screenshots,
         "restart": not args.no_restart,
+        "record_text": record_text,
     }
     # The plan is out (and flushed) before the first request that changes the
     # device; with --json it goes to stderr, so stdout stays one JSON document.
@@ -197,6 +212,7 @@ def _cmd_crawl_press(args: argparse.Namespace, setup: _CrawlSetup) -> int:
             allow_real_device=args.allow_real_device,
             settle=settle,
             restart=not args.no_restart,
+            record_text=record_text,
         )
     except KeyboardInterrupt as exc:
         # crawl_run wrote run.json with "interrupted" when it still could.
@@ -207,11 +223,27 @@ def _cmd_crawl_press(args: argparse.Namespace, setup: _CrawlSetup) -> int:
     except NotEmulatorError as exc:
         # The check inside crawl_run answered differently from the first one:
         # nothing was written or sent; say it in the command's words.
-        raise _cli_not_emulator(device, exc) from None
+        refusal = _cli_not_emulator(device, exc)
+        if not record_text:
+            _hide_device_text(refusal)
+        raise refusal from None
     except UiprobeError as exc:
         if _made_by_this_run(exc):
             exc.details.setdefault("out", out)
+        if not record_text:
+            _hide_device_text(exc)
         raise
+    except Exception as exc:
+        if record_text or isinstance(exc, _UsageError | BrokenPipeError):
+            raise
+        # Whatever an unexpected error says may hold text from the device.
+        name = type(exc).__name__
+        hidden = UiprobeError(
+            f"unexpected {name} {_DEVICE_TEXT_HIDDEN}", details={"type": name}
+        )
+        if _made_by_this_run(exc):
+            hidden.details["out"] = out
+        raise hidden from None
     moves = result.repins  # as run.json counts them
     hints = _press_hints(
         result, package=args.package, back=policy.back_on_other_screens
@@ -221,6 +253,37 @@ def _cmd_crawl_press(args: argparse.Namespace, setup: _CrawlSetup) -> int:
     else:
         _emit(_press_result_text(result, hints, moves))
     return 0
+
+
+_DEVICE_TEXT_HIDDEN: Final = "(device text not shown: record_text = false)"
+# Detail keys that carry text the device sent (a reply, a command's output, a
+# window title, a line of a dumpsys listing, an error text it caused).
+_DEVICE_TEXT_KEYS: Final = ("output", "message", "error", "window", "line", "title")
+
+
+def _hide_device_text(error: UiprobeError) -> None:
+    """Replace the device's own text in `error`, for a run that records no texts.
+
+    The code, the exit status and uiprobe's own words stay; every value of a
+    detail in `_DEVICE_TEXT_KEYS` is replaced, also where the message or
+    another detail repeats it, by ``(device text not shown: record_text =
+    false)``.
+    """
+    texts = sorted(
+        {
+            v
+            for k in _DEVICE_TEXT_KEYS
+            if isinstance(v := error.details.get(k), str) and v
+        },
+        key=len,
+        reverse=True,
+    )
+    for text in texts:
+        error.message = _DEVICE_TEXT_HIDDEN.join(error.message.split(text))
+        for key, value in error.details.items():
+            if isinstance(value, str):
+                error.details[key] = _DEVICE_TEXT_HIDDEN.join(value.split(text))
+    error.args = (error.message, *error.args[1:])
 
 
 def _made_by_this_run(error: BaseException) -> bool:
@@ -292,6 +355,14 @@ def _press_plan_text(plan: dict[str, object], *, settings: str) -> str:
             "check the window at each tap point: "
             + ("yes" if plan["check_tap_window"] else "no"),
             _RESTART_PLAN[bool(plan["restart"])],
+            *(
+                []
+                if plan.get("record_text", True)
+                else [
+                    "texts of the screens will not be recorded (password fields"
+                    " are never recorded); the run folder holds no screen text"
+                ]
+            ),
         ]
     )
 

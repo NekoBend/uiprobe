@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -9,13 +10,13 @@ from uiprobe.crawl import Back, Launch, Observation, Relaunch, Tap, _Prints
 from uiprobe.crawl_driver.constants import _FIRST_APP_UID, _MAX_SECONDS, INTERRUPTED
 from uiprobe.errors import DeviceNotFoundError, LaunchFailedError, UiprobeError
 from uiprobe.guards import Policy, judge
-from uiprobe.model import Bounds
+from uiprobe.model import Bounds, Element
 
 if TYPE_CHECKING:
     from uiprobe.crawl import Action, SkippedElement
     from uiprobe.device import FocusedWindow
     from uiprobe.inputwindows import InputWindow
-    from uiprobe.model import Element, Screen
+    from uiprobe.model import Screen
     from uiprobe.packageuid import PackageUid
 
 
@@ -195,6 +196,57 @@ def _element_of(screen: Screen | None, element_id: str) -> Element | None:
     if screen is None:
         return None
     return next((e for e in screen.elements if e.id == element_id), None)
+
+
+_HIT_TARGET = re.compile(r"\(hit target ([^()\s]+)\)\Z")
+
+
+def _hide_password_notes(
+    details: list[dict[str, str]],
+    screen: Screen | None,
+    body: Element | dict[str, object],
+) -> list[dict[str, str]]:
+    """Blank a detail's ``note`` when its label may come from a password field.
+
+    A ``confirm_button`` note is the confirm label of the element that was hit:
+    the one named by ``(hit target eN)`` at its end, else the skipped element
+    itself. The label can come from that element or a descendant, so the note
+    is hidden (``""`` with ``hidden: ["note"]``, whatever ``record_text`` is)
+    when that element or one below it has the ``password`` flag. When the
+    screen or the element is not known, any password element on the screen
+    counts. The real note stays in memory; only what is written changes.
+    """
+    elements = () if screen is None else screen.elements
+    passwords = {e.id for e in elements if "password" in e.flags}
+    if not passwords:
+        return details
+    children: dict[str, list[str]] = {}
+    for element in elements:
+        if element.parent is not None:
+            children.setdefault(element.parent, []).append(element.id)
+
+    def below(root: str) -> set[str]:
+        found, stack = {root}, [root]
+        while stack:
+            for child in children.get(stack.pop(), []):
+                if child not in found:
+                    found.add(child)
+                    stack.append(child)
+        return found
+
+    own = body.id if isinstance(body, Element) else None
+    shown = []
+    for detail in details:
+        note = detail.get("note")
+        if note:
+            match = _HIT_TARGET.search(note)
+            root = match.group(1) if match else own
+            if root is None or below(root) & passwords:
+                detail = {k: v for k, v in detail.items() if k != "note"}
+                detail["note"] = ""
+                detail["hidden"] = ["note"]  # ty: ignore[invalid-assignment]
+        shown.append(detail)
+    return shown
 
 
 def _skipped_element(

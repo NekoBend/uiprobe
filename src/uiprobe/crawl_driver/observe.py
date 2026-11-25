@@ -6,7 +6,12 @@ from typing import TYPE_CHECKING
 
 from uiprobe.crawl import Observation, Tap, _ids_unique
 from uiprobe.crawl_driver.constants import INTERRUPTED
-from uiprobe.crawl_driver.helpers import _Ended, _Seen, _skipped_element
+from uiprobe.crawl_driver.helpers import (
+    _Ended,
+    _hide_password_notes,
+    _Seen,
+    _skipped_element,
+)
 from uiprobe.crawl_driver.state import _RunState
 from uiprobe.errors import DumpError, ScreenshotFailedError
 from uiprobe.guards import _WORD_REASONS
@@ -136,6 +141,10 @@ class _ObserveMixin(_RunState):
                 item, screens, found, package=self.package, policy=self.policy, tap=tap
             )
             details = [d.to_dict() for d in item.details if d.reason in _WORD_REASONS]
+            holder = next(
+                (s for s in screens if s and s.screen_id == item.screen_id), None
+            )
+            details = _hide_password_notes(details, holder, body)
             self.writer.write_skip(
                 item.screen_id, item.fingerprint, item.reasons, body, details
             )

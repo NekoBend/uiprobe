@@ -122,6 +122,7 @@ def crawl(
     clock: Callable[[], float] = time.monotonic,
     sleep: Callable[[float], None] = time.sleep,
     restart: bool = True,
+    record_text: bool = True,
 ) -> CrawlResult:
     """Crawl `package` on `device`, pressing what the guards allow, into `out`.
 
@@ -168,6 +169,16 @@ def crawl(
     the crawl ends with ``interrupted``.
     `clock` (monotonic seconds, at least 0 and below 2**40, as the engine
     requires) and `sleep` are replaceable for tests.
+    `record_text` (default True) False keeps the texts of screens out of the
+    run folder: every element's ``text``, ``content_desc`` and ``hint`` is
+    written as ``""`` and named in ``hidden``, ``summary.txt`` shows
+    ``[text not recorded]`` for labels, the window title of a
+    ``covered_by_other`` end line is blanked, and ``run-start.json`` says
+    ``record_text: false``. It is a setting of the records, not of judging:
+    the engine, the ids and the gate use the real texts, and only the writer
+    hides them (so it is a keyword here and not a `Policy` field). A password
+    field's text is hidden whatever this says. It cannot be combined with
+    `screenshots` (a picture shows the text): that is a `ValueError`.
     `screenshots` also saves a screenshot of each new screen; a screen that
     cannot be captured is noted in the summary and the crawl goes on. The
     image is taken after the dump, so it can differ if the app changed
@@ -189,7 +200,8 @@ def crawl(
 
     Raises:
         TypeError: An argument has the wrong type.
-        ValueError: `package` is not a valid package name, `settle` is
+        ValueError: `screenshots` and ``record_text=False`` are both set,
+            `package` is not a valid package name, `settle` is
             negative, not finite or not below 2**40, or `clock` returned a
             value outside [0, 2**40) before the run folder was made.
         NotEmulatorError: The device is not an emulator (or the check cannot
@@ -228,6 +240,13 @@ def crawl(
     _check_flag("screenshots", screenshots)
     _check_flag("allow_real_device", allow_real_device)
     _check_flag("restart", restart)
+    _check_flag("record_text", record_text)
+    if screenshots and not record_text:
+        msg = (
+            "screenshots cannot be combined with record_text=False: a screenshot"
+            " shows the text of the screen"
+        )
+        raise ValueError(msg)
     _check_clock("settle", settle)
     settle = (
         float.__float__(settle)
@@ -268,6 +287,7 @@ def crawl(
             sleep=sleep,
             repins_before=repins_before,
             restart=restart,
+            record_text=record_text,
         )
     finally:
         device.set_pin_watch(caller_watch)
@@ -288,6 +308,7 @@ def _crawl_on(
     sleep: Callable[[float], None],
     repins_before: int,
     restart: bool,
+    record_text: bool,
 ) -> CrawlResult:
     """`crawl` after its arguments were checked: pin, check, run."""
     forget_displays(device)  # several displays seen count within one run
@@ -320,6 +341,7 @@ def _crawl_on(
         repin=device.can_repin,
         check_tap_window=policy.check_tap_window,
         restart=restart,
+        record_text=record_text,
     )
     try:
         run = _Run(

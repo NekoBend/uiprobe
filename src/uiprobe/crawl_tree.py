@@ -373,6 +373,13 @@ def _parse_screen(data: object) -> tuple[Screen, str, str | None]:
             key: raw.get(key, "")
             for key in ("text", "resource_id", "content_desc", "hint")
         }
+        hidden = raw.get("hidden", [])
+        if not isinstance(hidden, list) or not all(isinstance(h, str) for h in hidden):
+            raise TypeError
+        if "text" in hidden and "password" in flags:
+            # The writer blanked a typed text; the marker stands for it, so
+            # the field still shows as a password row.
+            values["text"] = _PASSWORD_NAME
         if not (
             isinstance(raw["id"], str)
             and isinstance(raw["class"], str)
@@ -607,6 +614,7 @@ _STAMP: Final = re.compile(
 )
 _KINDS: Final = frozenset({"launch", "tap", "back", "relaunch"})
 _ELEMENT_STRINGS: Final = ("text", "resource_id", "content_desc", "hint", "parent")
+_HIDDEN_FIELDS: Final = ("text", "content_desc", "hint")
 GATE_WARNING: Final = (
     "transitions.jsonl is not in the shape uiprobe writes; no press results are shown"
 )
@@ -639,11 +647,27 @@ def _stamped(line: dict[str, object], schema: str) -> bool:
     )
 
 
+def _hidden_ok(element: dict[str, object]) -> bool:
+    """``hidden``, when present, names fields that were blanked: a non-empty
+    list of distinct names from `_HIDDEN_FIELDS`, in that order, each written
+    as an empty string."""
+    if "hidden" not in element:
+        return True
+    hidden = element["hidden"]
+    return (
+        isinstance(hidden, list)
+        and bool(hidden)
+        and hidden == [k for k in _HIDDEN_FIELDS if k in hidden]
+        and all(element.get(k) == "" for k in hidden)
+    )
+
+
 def _element_ok(element: object) -> bool:
-    """The form of `Element.to_dict`: what a tap's start line holds."""
+    """The form `RunWriter` writes for a tap's element: that of
+    `Element.to_dict`, plus ``hidden`` for blanked texts."""
     if not isinstance(element, dict):
         return False
-    allowed = {"id", "class", "bounds", "flags", *_ELEMENT_STRINGS}
+    allowed = {"id", "class", "bounds", "flags", "hidden", *_ELEMENT_STRINGS}
     bounds = element.get("bounds")
     flags = element.get("flags", [])
     return (
@@ -651,6 +675,7 @@ def _element_ok(element: object) -> bool:
         and _is_text(element["id"])
         and _is_text(element["class"])
         and all(_is_text(element[k]) for k in _ELEMENT_STRINGS if k in element)
+        and _hidden_ok(element)
         and isinstance(bounds, list)
         and len(bounds) == 4
         and all(_is_int(n) for n in bounds)
@@ -751,7 +776,11 @@ def _end_problem(line: dict[str, object]) -> str | None:
             and isinstance(details, dict)
             and bool(details)
             and all(_is_text(k) for k in details)
-            and all(_is_text(v) or _is_int(v) for v in details.values())
+            and all(
+                _is_text(v) or _is_int(v) or (k == "hidden" and v == ["window"])
+                for k, v in details.items()
+            )
+            and ("hidden" not in details or details.get("window") == "")
         )
         return None if ok else "not_sent end line"
     if line.get("dump_failed") is True:
@@ -993,6 +1022,10 @@ def _sent_target(tap: _Tap) -> str | None:
 class _Skips:
     by_screen: dict[str, dict[str, list[str]]]
     whole_screen: dict[str, list[str]]
+    # screen id -> element id -> fingerprint, from the ``element`` of a line.
+    # Used where texts are blanked in the records, so the fingerprint cannot
+    # be computed again from the screen file.
+    by_element: dict[str, dict[str, str]] = field(default_factory=dict)
 
 
 def _read_skips(base: Path, warnings: _Warnings) -> _Skips:
@@ -1018,6 +1051,10 @@ def _read_skips(base: Path, warnings: _Warnings) -> _Skips:
             bucket = skips.whole_screen.setdefault(sid, [])
         else:
             bucket = skips.by_screen.setdefault(sid, {}).setdefault(fingerprint, [])
+            element = line.get("element")
+            ident = element.get("id") if isinstance(element, dict) else None
+            if isinstance(ident, str):
+                skips.by_element.setdefault(sid, {}).setdefault(ident, fingerprint)
         bucket.extend(r for r in listed if r not in bucket)
     return skips
 
@@ -1060,7 +1097,12 @@ def _node(
         for row in rows:
             if row.kind != "row":
                 continue
-            fp = prints.of(by_id[row.element_id])
+            element = by_id[row.element_id]
+            fp = prints.of(element)
+            if fp not in by_fp and (not record_text or "password" in element.flags):
+                # The texts were blanked when the line was written, so the
+                # fingerprint cannot match; the element id of the line does.
+                fp = skips.by_element.get(sid, {}).get(row.element_id, fp)
             if fp in by_fp:
                 row.reasons = tuple(by_fp[fp])
                 seen.add(fp)
