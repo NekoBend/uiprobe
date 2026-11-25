@@ -48,6 +48,7 @@ from __future__ import annotations
 import ast
 import inspect
 import re
+import sys
 import textwrap
 from typing import TYPE_CHECKING, NamedTuple
 
@@ -487,6 +488,12 @@ def test_no_caller_code_runs_between_the_final_comparison_and_the_send(
 # --- tests of the test ---
 
 
+def method_globals(method: Callable[..., object]) -> dict[str, object]:
+    """The globals of the module that defines `method` (the gate's module for
+    `final_check` and `epoch_is`), which is where the edited copy must run."""
+    return vars(sys.modules[method.__module__])
+
+
 def clock_after_the_comparison(monkeypatch: pytest.MonkeyPatch) -> None:
     """Put ``self.clock()`` into the production `_Run.final_check`, as its
     first statement after the comparison (a violation of the rule)."""
@@ -495,7 +502,7 @@ def clock_after_the_comparison(monkeypatch: pytest.MonkeyPatch) -> None:
     assert source.count(anchor) == 1, "the comparison in final_check moved"
     source = source.replace(anchor, anchor + "    self.clock()\n")
     namespace: dict[str, object] = {}
-    exec(source, vars(crawl_driver), namespace)  # noqa: S102 - the meta-test edits the method
+    exec(source, method_globals(crawl_driver._Run.final_check), namespace)  # noqa: S102 - the meta-test edits the method
     monkeypatch.setattr(crawl_driver._Run, "final_check", namespace["final_check"])
 
 
@@ -511,7 +518,7 @@ def clock_after_the_equality(monkeypatch: pytest.MonkeyPatch) -> None:
         "    return result\n",
     )
     namespace: dict[str, object] = {}
-    exec(source, vars(crawl_driver), namespace)  # noqa: S102 - the meta-test edits the method
+    exec(source, method_globals(crawl_driver._Run.epoch_is), namespace)  # noqa: S102 - the meta-test edits the method
     monkeypatch.setattr(crawl_driver._Run, "epoch_is", namespace["epoch_is"])
 
 

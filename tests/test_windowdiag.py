@@ -28,6 +28,7 @@ import pytest
 
 from uiprobe import cli, crawl_driver
 from uiprobe.crawl_driver import CrawlResult, _app_window, _Run
+from uiprobe.crawl_driver import gate as gate_module
 from uiprobe.device import Device
 from uiprobe.inputwindows import (
     RULES,
@@ -1639,7 +1640,8 @@ def test_the_crawl_and_diagnose_share_one_app_window_test(monkeypatch):
         calls.append(package)
         return True
 
-    monkeypatch.setattr(crawl_driver, "_app_window", spy)
+    # `_Run.app_window` reads `_app_window` in the module that holds it.
+    monkeypatch.setattr(gate_module, "_app_window", spy)
     run = _Run.__new__(_Run)
     run.package = LAUNCHER
     window = parse_input_windows(SAMSUNG36)
