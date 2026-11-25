@@ -430,13 +430,50 @@ The two reads are separate requests. If another device takes the same serial bet
 
 The report does not name `PKG`: it is your own input and is not echoed, in text or JSON, so the notice (no device serial, app or window names, coordinates, accounts or network values) stays true, and window titles are still printed only with `--show-device-text`. The report still tells something about `PKG` on the device to anyone who knows which package you gave: whether a `samsungFlags=0x1` window is its own, and, through the note, whether its uid could be read (for example, whether it is installed). The first line still names `dumpsys input` only, the read the report describes.
 
+## Showing a crawl run as a tree
+
+`uiprobe tree RUN_DIR [--json] [--ids] [--why]` reads the run folder of a pressing crawl and prints what the crawl saw as a tree of screens. It reads only the files of the folder (`run-start.json`, `run.json` when it exists, `transitions.jsonl`, `skipped.jsonl` and `screens/*.json`); it contacts no device and no adb server, and it writes no file. RUN_DIR is used as given; inside it, links and non-regular files are refused. That holds for `screens` (a link or a Windows junction is refused), each screen file and each of the files above: a link, a file that is not a regular file (a FIFO, a folder) and a file with more than one name (a hard link) are never read. A screen file is opened only by the name the folder's listing shows for it. Each file is read for at most its limit plus one byte. A file over 64 MiB (`transitions.jsonl`, `skipped.jsonl`) or 8 MiB (a screen file, `run-start.json`, `run.json`) is skipped. It works on run folders of earlier versions too. It takes no device options: `-s`, `--adb`, `--adb-server` and `--no-start-server` are a usage error, as for `init`.
+
+```console
+$ uiprobe tree runs/20261125-101502
+com.android.settings (com.android.settings)
+├─ Search Settings ·
+├─ Network & internet
+│  ├─ "Navigate up" ·
+│  ├─ Internet
+│  │  ├─ [文字] Searching for networks…
+│  │  ├─ Add network ·
+│  │  └─ T-Mobile → (送らなかった: changed_before_press)
+│  ├─ Hotspot & tethering → 別のアプリ
+│  └─ Airplane mode → (同じ画面)
+├─ Connected devices
+│  └─ Pair new device → (上に出た画面: Network & internet)
+└─ [icon: ImageButton] ·
+· = 押していないので、その下は見ていない行
+```
+
+- The screens of the run are the nodes. The edges are the taps that were sent: a tap's start line names the screen and the element, its end line says where it led. BACK and a relaunch are not edges. The root is the screen the first launch led to; if that launch's screen could not be read, has no screen file in the folder, or there is no launch line, the root is the screen of the first recorded tap, and with no tap the tree has no root.
+- Every element of a screen is listed under that screen, pressed or not, in document order: each clickable element, and each text outside any clickable element, shown as `[文字] TEXT`. A row is named by the first non-empty text in it (the element, then its descendants, in document order); else its content description in quotes; else `[icon: CLASS]` with the short class name. The other texts of a row are in the `--json` output. In the text output a name longer than 200 characters is cut there and ends with a marker such as `…(+123 字)` (the "seen above" references use the cut name); `--json` keeps the full text.
+- A row that was pressed shows what the tap led to: the rows of the next screen, indented below it; `→ (同じ画面)` (the screen did not change); `→ 別のアプリ` (another app's screen, which has no file in the run folder); `→ (読めなかった)` (the screen after the tap could not be read); `→ (送らなかった: REASON)` (the tap was not sent, with the reason of its end line); or `→ (上に出た画面: NAME)` when that screen is already listed above, under the row NAME. Each screen is listed once, so loops end.
+- A row that was not pressed ends with ` ·`: nothing below it was looked at. The last line of the output says so. A row with an ending (including `→ (送らなかった: REASON)`, `→ (結果不明)` and `→ (読めなかった)`) has no ` ·`.
+- A tap whose start line has no end line (the run ended or failed while it was sent), or whose end line says `failed`, shows `→ (結果不明)`: it may or may not have reached the device, so the row is not counted as pressed (`to.unknown` in `--json`).
+- `transitions.jsonl` is trusted only as a whole: every line must be exactly as uiprobe writes it (valid JSON with no repeated key in an object, the exact schema names and key sets, a string `action.kind`, booleans as booleans, ids as integers or strings as in the writers, a start line then its end line for each action with ids rising, no blank or extra lines, and an `off_target` only on a BACK or relaunch start line that also has `from_screen_id`). The file may end after an end line (a normal, `dump_failed`, `not_sent` or `failed` end), after a start line with no end (Ctrl+C, the time limit, an error, a power loss: only that last tap shows `→ (結果不明)`), or in the middle of a line (the last line has no newline and is not valid JSON: it is ignored with a warning, and an end line cut short leaves its tap unknown; a last line that is valid JSON of the wrong shape, such as `{}`, fails the file). A screen file of another package than the run's, which uiprobe never writes, fails the file too. If any line fails, every pressed row shows `→ (結果不明)`, no edges are drawn (every screen except the root is listed as one no row led to), and the one warning is `transitions.jsonl is not in the shape uiprobe writes; no press results are shown`. `→ 別のアプリ` is shown only when the start line right after that tap's end line has an `off_target` decided on that very screen (its `from_screen_id` is the end line's screen) and names a non-empty package that differs from the run's package, and the screen has no file in the folder (an `off_target` that names the run's own package makes the tap unknown). A screen that is neither in the run folder nor named by an `off_target` as above is `(読めなかった)`; a later visit to the same screen is not evidence.
+- Screens that no tap led to (reached by a BACK or a relaunch, or the same screen read again with a different id) follow the tree, each under a line that names its id, and so does anything only they lead to.
+- `--ids` adds a line with the screen id and activity to each screen, and the package of another app. `--why` adds the reasons from `skipped.jsonl` to each row that was not pressed, such as `· [toggle]`.
+- The reasons are matched to rows by recomputing each element's fingerprint from its screen file, as the crawl did. A fingerprint that matches no row is not dropped: the screen gets a line `(N 件は対応する行が見つからない)`, and `--json` lists them as `unmatched`. A row that was clickable only at a later visit under the same screen id has no fingerprint match in the screen file, so its skip entry stays unmatched. A screen with more than 2000 elements is not matched: its skip entries are counted as `(N 件は対応を調べていない: 部品が多すぎる)` and listed in `unmatched` with `why: "too_many_elements"`.
+- If `run-start.json` has `"record_text": false`, the run folder holds no screen texts: the tree shows only the structure (`[row: CLASS]`, `[icon: CLASS]`) and the first line says so. A password field always shows as `[password field]`.
+- Texts come from the app, so control and bidirectional characters appear as an escape (`\xNN` or `\uXXXX`), as in the other text output.
+- A folder that does not exist or has no usable `run-start.json` is a usage error (exit status 2). A line or file that is damaged, not UTF-8, nested too deeply or refused as above (`run.json`, `transitions.jsonl`, `skipped.jsonl` or a screen file) is a warning on stderr (a `warnings` list in `--json`; they are counted as they happen and the first 20 are kept, followed by `and N more warnings`) and the rest is shown, except that `run-start.json` (it must be a `uiprobe.run_start/1` record with a package) is a usage error. A row keeps at most 50 texts. A line that is not a transition or skip record is a warning too, and so is a `run.json` without `stop_reason` (then `finished` is `false`). The exit status is 0 with warnings. A missing `transitions.jsonl` or `skipped.jsonl` is not a warning, because the crawl makes each at its first line; a missing `run.json` only means the run did not end normally (`finished` is `false` in `--json`).
+
+`--json` prints `uiprobe.crawl_tree/1`, described in [Output formats](output.md).
+
 ## Creating the settings file
 
 `uiprobe init [PATH]` creates the settings file `uiprobe.toml` (at `./uiprobe.toml` unless you give a path) and prints its path. It needs no device and no adb server, and it never overwrites a file. The file it writes says `press = false`, so `crawl` previews until you set `press = true` (then `crawl PACKAGE --out DIR` presses for real, see [Crawling an app](crawl.md)); it has `runs_dir` only as a comment, so a pressing run asks for `--out DIR` until you set `runs_dir` to an existing folder for the run folders, and its `[limits]` (depth 5, actions 300, minutes 30) are the limits of every pressing crawl that gives no `--depth`, `--actions` or `--minutes`. Details are in [Settings file](settings.md).
 
 ## Options
 
-These options work before or after the command, except for `init`, which accepts only `--json` from this table (see [Settings file](settings.md)), and `diagnose`, which takes them after its check (`uiprobe diagnose tap-window --json`) or before `diagnose`.
+These options work before or after the command, except for `init` and `tree`, which accept only `--json` from this table (see [Settings file](settings.md)), and `diagnose`, which takes them after its check (`uiprobe diagnose tap-window --json`) or before `diagnose`.
 
 | Option | Meaning |
 | --- | --- |

@@ -154,6 +154,7 @@ from uiprobe.cli.parser import (
     _UsageError,
     _VersionAction,
 )
+from uiprobe.cli.tree import _cmd_tree
 from uiprobe.crawl import Limits
 from uiprobe.crawl_driver import (
     CrawlResult,
@@ -244,6 +245,7 @@ _HANDLERS: dict[str, Callable[[argparse.Namespace], int]] = {
     "crawl": _cmd_crawl,
     "diagnose": _cmd_diagnose,
     "init": _cmd_init,
+    "tree": _cmd_tree,
 }
 
 
