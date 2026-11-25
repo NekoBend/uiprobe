@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import importlib
 import random
 from dataclasses import dataclass, fields, is_dataclass
 from datetime import UTC, datetime
@@ -2065,12 +2066,17 @@ def test_only_the_listed_action_types_exist() -> None:
     assert {f.name for f in fields(Stop)} == {"reason"}
     for kind in (Launch, Back, Relaunch, Reread):
         assert fields(kind) == ()
+    # Every module of the package that defines classes, not the re-exports.
     defined = {
         name
-        for name, value in vars(crawl).items()
+        for path in CRAWL_FILES
+        if path.name != "__init__.py"
+        for name, value in vars(
+            importlib.import_module(f"{crawl.__name__}.{path.stem}")
+        ).items()
         if isinstance(value, type)
         and is_dataclass(value)
-        and value.__module__.startswith(crawl.__name__ + ".")
+        and value.__module__ == f"{crawl.__name__}.{path.stem}"
     }
     assert defined == {
         "Launch",

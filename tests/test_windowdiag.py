@@ -28,7 +28,6 @@ import pytest
 
 from uiprobe import cli, crawl_driver
 from uiprobe.crawl_driver import CrawlResult, _app_window, _Run
-from uiprobe.crawl_driver import gate as gate_module
 from uiprobe.device import Device
 from uiprobe.inputwindows import (
     RULES,
@@ -1633,6 +1632,8 @@ def test_the_short_uid_note_is_the_given_sentence():
 
 def test_the_crawl_and_diagnose_share_one_app_window_test(monkeypatch):
     # cli calls the very function the crawl's _Run.app_window calls.
+    gate_module = sys.modules[_Run.app_window.__module__]
+    assert cli._app_window is vars(gate_module)["_app_window"]
     assert cli._app_window is crawl_driver._app_window
     calls: list[str] = []
 

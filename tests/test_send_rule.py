@@ -409,7 +409,10 @@ def check_complete(rows: dict[str, Row]) -> None:
     """Every sending path the crawl declares has a row, and no row more; BACK
     also has its row on another app's screen, and the first launch has a row
     with its force-stop and one without."""
-    declared = set(crawl_driver._SEND_PATHS)
+    # The binding the gate's `final_check` reads, not only the re-export.
+    gate_paths = method_globals(crawl_driver._Run.final_check)["_SEND_PATHS"]
+    assert gate_paths is crawl_driver._SEND_PATHS
+    declared = set(gate_paths)
     paths = {row.path for row in rows.values()}
     assert paths == declared, f"rows {sorted(paths)} != paths {sorted(declared)}"
     off_target = rows.get("back-off-target")
