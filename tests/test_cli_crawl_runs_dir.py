@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 
+from tests.crawl_driver.helpers import SCREENS, SERIAL, SHOP, TRANSPORT
 from tests.fake_device import FakeAndroid
 from tests.test_cli_crawl_settings_press import (
     FAST,
@@ -20,7 +21,6 @@ from tests.test_cli_crawl_settings_press import (
     settings_text,
     write_settings,
 )
-from tests.test_crawl_driver import SCREENS, SERIAL, SHOP, TRANSPORT
 from uiprobe import cli, crawl_driver, runlog
 from uiprobe import settings as settings_module
 from uiprobe.device import IDENTITY_COMMAND

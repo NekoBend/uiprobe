@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
+from tests.crawl_dry.helpers import SCREENS, SERIAL, SHOP
 from tests.fake_device import El, FakeAndroid, Screen
 from tests.guards.helpers import (
     DIALOG,
@@ -27,7 +28,6 @@ from tests.guards.helpers import (
     root,
     run,
 )
-from tests.test_crawl_preview import SCREENS, SERIAL, SHOP
 from uiprobe import Device, Policy, cli, settings
 from uiprobe.device import (
     DEVICE_WIDE_KEY_PREFIXES,

@@ -11,8 +11,8 @@ from typing import TYPE_CHECKING
 
 import pytest
 
+from tests.crawl_driver.helpers import SCREENS, SERIAL, SHOP, TRANSPORT
 from tests.fake_device import FakeAndroid
-from tests.test_crawl_driver import SCREENS, SERIAL, SHOP, TRANSPORT
 from uiprobe import cli
 from uiprobe import settings as settings_module
 from uiprobe.crawl import Limits
