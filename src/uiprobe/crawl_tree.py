@@ -690,6 +690,10 @@ def _action_ok(line: dict[str, object]) -> str | None:
             "restart" in line and not (line["restart"] is True and kind == "launch"),
             "restart",
         ),
+        (
+            "replay" in line and not (line["replay"] is True and kind == "tap"),
+            "replay",
+        ),
     )
     return next((why for bad, why in checks if bad), None)
 
@@ -714,7 +718,7 @@ def _start_problem(line: dict[str, object]) -> str | None:
     if not _keys_ok(
         line,
         {"schema", "recorded_at", "action_id", "action"},
-        {"from_screen_id", "off_target", "restart"},
+        {"from_screen_id", "off_target", "restart", "replay"},
     ):
         return "start line keys"
     if not _stamped(line, _START):

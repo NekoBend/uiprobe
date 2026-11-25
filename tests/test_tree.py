@@ -1527,6 +1527,10 @@ BAD_LOGS = {
     "an action that is not an object": _change(2, action="tap"),
     "an off_target on a tap": _change(2, off_target={"package": "com.other.app"}),
     "a restart on a tap": _change(2, restart=True),
+    "a replay that is false": _change(2, replay=False),
+    "a replay that is a string": _change(2, replay="true"),
+    "a replay on a launch": _change(0, replay=True),
+    "a replay on a relaunch": _change(14, replay=True),
     "a tap without from_screen_id": _change(2, from_screen_id=None),
     "an end before its start": lambda ls: [ls[0], ls[1], ls[3], ls[2], *ls[4:]],
     "two end lines": lambda ls: [*ls[:4], ls[3], *ls[4:]],
@@ -1590,6 +1594,52 @@ def test_a_file_that_passes_shows_its_results(tmp_path, capsys):
     code, out, err = run_tree(capsys, str(folder.path))
     assert (code, err) == (0, "")
     assert out.splitlines() == FULL_TEXT
+
+
+def _replay_run(tmp_path: Path, *, replay: bool) -> Folder:
+    """A run whose Network row is pressed again after a relaunch, as a path
+    replay (or the same run with that tap written as an ordinary one)."""
+    folder = Folder(tmp_path)
+    home = home_screen()
+    home_id = folder.screen(home)
+    network_id = folder.screen(NETWORK)
+    folder.start("launch")
+    folder.end(home_id)
+    folder.tap(home, 3, network_id)
+    folder.start("relaunch", network_id)
+    folder.end(home_id)
+    more = {"replay": True} if replay else {}
+    folder.start("tap", home_id, home.elements[2], **more)
+    folder.end(network_id)
+    folder.tap(NETWORK, 2, home_id)
+    folder.finish()
+    return folder
+
+
+def test_a_replay_tap_passes_the_gate_and_shows_as_an_ordinary_pressed_row(
+    tmp_path, capsys
+):
+    (tmp_path / "plain").mkdir()
+    (tmp_path / "flagged").mkdir()
+    plain = _replay_run(tmp_path / "plain", replay=False)
+    flagged = _replay_run(tmp_path / "flagged", replay=True)
+    start = [
+        json.loads(line)
+        for line in _log(flagged).read_text(encoding="utf-8").splitlines()
+        if '"replay"' in line
+    ]
+    assert [(s["action"]["kind"], s["replay"]) for s in start] == [("tap", True)]
+    code, out, err = run_tree(capsys, str(plain.path))
+    assert (code, err) == (0, "")
+    code, replay_out, err = run_tree(capsys, str(flagged.path))
+    assert (code, err) == (0, "")
+    assert replay_out == out
+    assert "├─ Network" in replay_out.splitlines()
+    assert "結果不明" not in replay_out
+    _, plain_json, _ = run_tree(capsys, str(plain.path), "--json")
+    _, flagged_json, _ = run_tree(capsys, str(flagged.path), "--json")
+    assert json.loads(flagged_json)["warnings"] == []
+    assert json.loads(flagged_json)["screens"] == json.loads(plain_json)["screens"]
 
 
 def test_an_empty_or_missing_log_passes(tmp_path, capsys):
