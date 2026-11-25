@@ -279,10 +279,10 @@ def _hide_device_text(error: UiprobeError) -> None:
         reverse=True,
     )
     for text in texts:
-        error.message = error.message.replace(text, _DEVICE_TEXT_HIDDEN)
+        error.message = _DEVICE_TEXT_HIDDEN.join(error.message.split(text))
         for key, value in error.details.items():
             if isinstance(value, str):
-                error.details[key] = value.replace(text, _DEVICE_TEXT_HIDDEN)
+                error.details[key] = _DEVICE_TEXT_HIDDEN.join(value.split(text))
     error.args = (error.message, *error.args[1:])
 
 
