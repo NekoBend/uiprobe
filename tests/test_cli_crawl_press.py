@@ -161,10 +161,15 @@ def test_a_real_device_runs_with_the_option(fake_adb, android, capsys, tmp_path)
         (["--allow-real-device"], f"--allow-real-device {NOT_PRESSING}"),
         (["--no-tap-window-check"], f"--no-tap-window-check {NOT_PRESSING}"),
         (["--no-restart"], f"--no-restart {NOT_PRESSING}"),
+        (["--no-record-text"], f"--no-record-text {NOT_PRESSING}"),
         (["--dry-run", "--out", "x"], f"--out {DRY_RUN_PRESS_ONLY}"),
         (["--dry-run", "--minutes", "3"], f"--minutes {DRY_RUN_PRESS_ONLY}"),
         (["--dry-run", "--screenshots"], f"--screenshots {DRY_RUN_PRESS_ONLY}"),
         (["--dry-run", "--no-restart"], f"--no-restart {DRY_RUN_PRESS_ONLY}"),
+        (
+            ["--dry-run", "--no-record-text"],
+            f"--no-record-text {DRY_RUN_PRESS_ONLY}",
+        ),
         (["--press"], "--press needs --out DIR, the new folder to record the run into"),
         (
             ["--press", "--out", "x", "--actions", "0"],
@@ -835,3 +840,109 @@ def test_the_plan_text_names_the_start_choice():
         " the app shows now"
     )
     assert restart[:-1] == kept[:-1]
+
+
+# -- record_text -------------------------------------------------------------------
+
+OFF_IN_FILE = ("record_text = true", "record_text = false")
+
+
+@pytest.mark.usefixtures("here", "android")
+def test_the_option_keeps_texts_out_of_the_records_and_says_so_in_the_plan(
+    fake_adb, capsys, tmp_path
+):
+    out = tmp_path / "run"
+    code, text, err = press(
+        capsys, fake_adb, "--press", "--out", str(out), "--no-record-text"
+    )
+    assert (code, err) == (0, "")
+    plan = text.splitlines()
+    wanted = (
+        "texts of the screens will not be recorded (password fields are never"
+        " recorded); the run folder holds no screen text"
+    )
+    assert wanted in plan
+    assert plan.index(wanted) < next(
+        i for i, line in enumerate(plan) if line.startswith("stopped: ")
+    )
+    begin = json.loads((out / "run-start.json").read_bytes())
+    assert begin["record_text"] is False
+    shown = "".join(
+        p.read_text(encoding="utf-8") for p in out.rglob("*") if p.is_file()
+    )
+    for word in ("Delete account", "Help page"):
+        assert word not in shown
+
+
+@pytest.mark.usefixtures("here", "android")
+def test_the_plan_is_silent_about_texts_when_they_are_recorded(
+    fake_adb, capsys, tmp_path
+):
+    out = tmp_path / "run"
+    code, text, err = press(capsys, fake_adb, "--press", "--out", str(out))
+    assert (code, err) == (0, "")
+    assert "recorded" not in text.split("stopped: ")[0]
+    assert json.loads((out / "run-start.json").read_bytes())["record_text"] is True
+
+
+@pytest.mark.usefixtures("android")
+def test_the_file_key_turns_texts_off(fake_adb, capsys, tmp_path, here):
+    (here / SETTINGS_FILE).write_text(
+        render_default_settings().replace(*OFF_IN_FILE), encoding="utf-8"
+    )
+    out = tmp_path / "run"
+    code, text, err = press(capsys, fake_adb, "--press", "--out", str(out))
+    assert (code, err) == (0, "")
+    assert "texts of the screens will not be recorded" in text
+    assert json.loads((out / "run-start.json").read_bytes())["record_text"] is False
+
+
+@pytest.mark.usefixtures("here", "android")
+def test_the_json_result_says_whether_texts_were_recorded(fake_adb, capsys, tmp_path):
+    out = tmp_path / "run"
+    code, text, _err = press(
+        capsys, fake_adb, "--press", "--out", str(out), "--no-record-text", "--json"
+    )
+    assert code == 0
+    assert json.loads(text)["record_text"] is False
+
+
+@pytest.mark.usefixtures("here")
+def test_screenshots_with_the_option_are_refused_before_any_contact(
+    fake_adb, android, capsys, tmp_path
+):
+    out = tmp_path / "run"
+    code, text, err = press(
+        capsys,
+        fake_adb,
+        "--press",
+        "--out",
+        str(out),
+        "--screenshots",
+        "--no-record-text",
+    )
+    assert (code, text) == (2, "")
+    assert err.startswith("uiprobe: error: --screenshots cannot be used with")
+    assert "--no-record-text" in err
+    assert "shows the text" in err
+    assert not out.exists()
+    assert android.inputs == []
+    assert fake_adb.requests == []
+
+
+def test_screenshots_with_the_file_key_are_refused_before_any_contact(
+    fake_adb, android, capsys, tmp_path, here
+):
+    (here / SETTINGS_FILE).write_text(
+        render_default_settings().replace(*OFF_IN_FILE), encoding="utf-8"
+    )
+    out = tmp_path / "run"
+    code, text, err = press(
+        capsys, fake_adb, "--press", "--out", str(out), "--screenshots"
+    )
+    assert (code, text) == (2, "")
+    assert "record_text = false in" in err
+    assert "shows the text" in err
+    assert not out.exists()
+    assert android.inputs == []
+    assert fake_adb.requests == []

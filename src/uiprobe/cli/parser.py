@@ -53,6 +53,7 @@ def _press_only(args: argparse.Namespace) -> list[tuple[str, bool]]:
         ("--back-on-other-screens", args.back_on_other_screens),
         ("--no-tap-window-check", args.no_tap_window_check),
         ("--no-restart", args.no_restart),
+        ("--no-record-text", args.no_record_text),
     ]
 
 
@@ -618,6 +619,16 @@ def _add_press_options(crawl: argparse.ArgumentParser) -> None:
             "when pressing: start from the screen the app shows now (by default"
             " the app is stopped first with am force-stop, then its launcher"
             " activity is started; what it had not saved is lost)"
+        ),
+    )
+    crawl.add_argument(
+        "--no-record-text",
+        action="store_true",
+        help=(
+            "when pressing: keep the texts of the screen out of the run folder"
+            " (text, content description and hint are written as empty strings;"
+            " password fields are always hidden); cannot be combined with"
+            " --screenshots"
         ),
     )
 

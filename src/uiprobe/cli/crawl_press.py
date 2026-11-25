@@ -123,6 +123,20 @@ def _cmd_crawl_press(args: argparse.Namespace, setup: _CrawlSetup) -> int:
     """Run a pressing crawl into its run folder and report how it ended."""
     limits, limits_source = _press_limits(args, setup.settings)
     settle = _press_settle(args)
+    record_text = setup.settings.record_text and not args.no_record_text
+    if args.screenshots and not record_text:
+        origin = (
+            "--no-record-text"
+            if args.no_record_text
+            else "record_text = false in "
+            + _printable(_shown(str(setup.settings.source)))
+        )
+        msg = (
+            f"--screenshots cannot be used with {origin}: a screenshot shows the"
+            " text of the screen, so the run would record it after all"
+            " (nothing was pressed or written)"
+        )
+        raise _UsageError(msg)
     policy = replace(
         setup.policy,
         back_on_other_screens=args.back_on_other_screens,
@@ -171,6 +185,7 @@ def _cmd_crawl_press(args: argparse.Namespace, setup: _CrawlSetup) -> int:
         "check_tap_window": policy.check_tap_window,
         "screenshots": args.screenshots,
         "restart": not args.no_restart,
+        "record_text": record_text,
     }
     # The plan is out (and flushed) before the first request that changes the
     # device; with --json it goes to stderr, so stdout stays one JSON document.
@@ -197,6 +212,7 @@ def _cmd_crawl_press(args: argparse.Namespace, setup: _CrawlSetup) -> int:
             allow_real_device=args.allow_real_device,
             settle=settle,
             restart=not args.no_restart,
+            record_text=record_text,
         )
     except KeyboardInterrupt as exc:
         # crawl_run wrote run.json with "interrupted" when it still could.
@@ -292,6 +308,14 @@ def _press_plan_text(plan: dict[str, object], *, settings: str) -> str:
             "check the window at each tap point: "
             + ("yes" if plan["check_tap_window"] else "no"),
             _RESTART_PLAN[bool(plan["restart"])],
+            *(
+                []
+                if plan.get("record_text", True)
+                else [
+                    "texts of the screens will not be recorded (password fields"
+                    " are never recorded); the run folder holds no screen text"
+                ]
+            ),
         ]
     )
 
