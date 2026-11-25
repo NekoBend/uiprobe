@@ -20,9 +20,9 @@ from typing import TYPE_CHECKING
 
 import pytest
 
+from tests.crawl_driver.helpers import SCREENS, SERIAL, TRANSPORT, Clock, run
 from tests.fake_adb_server import FakeAdbServer
 from tests.fake_device import FakeAndroid
-from tests.test_crawl_driver import SCREENS, SERIAL, TRANSPORT, Clock, run
 from uiprobe.adb import AdbClient
 from uiprobe.crawl import Limits
 from uiprobe.device import IDENTITY_COMMAND, Device

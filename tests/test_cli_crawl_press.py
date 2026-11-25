@@ -10,8 +10,8 @@ from typing import TYPE_CHECKING
 
 import pytest
 
+from tests.crawl_driver.helpers import OTHER, SCREENS, SERIAL, SHOP, TRANSPORT
 from tests.fake_device import FakeAndroid
-from tests.test_crawl_driver import OTHER, SCREENS, SERIAL, SHOP, TRANSPORT
 from uiprobe import cli
 from uiprobe.crawl_driver import CrawlResult
 from uiprobe.device import Device
