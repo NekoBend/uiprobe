@@ -186,3 +186,13 @@ Lines starting with `note:` follow when one of these happened:
 `--deny`, `--tap-unlabeled` and `--config` work as for the preview. The options above are used only when the crawl presses (with `--press`, or with `press = true` in the settings file and no `--dry-run`); given to a preview, each is a usage error: `--out is used only when the crawl presses: add --press, or set press = true in the settings file uiprobe.toml`, or with `--dry-run`, `--out is used only when the crawl presses, and --dry-run never presses` (checked before the file is read). Every value of `--actions`, `--depth`, `--minutes` and `--settle` is checked as it is read, so a wrong value is a usage error even when the option is given again later with a good one.
 
 Exit codes: 0 when the run ended by one of its stop reasons, also when nothing could be pressed; 130 on Ctrl+C, after the run folder's `run.json` was written with the stop reason `interrupted` when that was still possible (the message names the folder only when this run made it and wrote its `run-start.json`; a second Ctrl+C while `run.json` is written can leave the folder without it); 17 for a refused device; the other errors as for the other commands, with `details.out` naming the run folder when this run created it and wrote its `run-start.json` (a folder found at that name, or one this run made but could not write into, is not named). With `--json` the result is a `uiprobe.crawl_run/1` object on stdout (see [Output formats](output.md)), which holds the plan as well, with `press_source` and `limits_source`; the plan lines go to stderr then. If stdout (or, with `--json`, stderr) is closed when the command starts, it stops with a usage error before anything is sent. A plan written to a non-blocking pipe that is full can be lost without an error (Python does not report it); the run starts anyway.
+
+## Seeing the result as a tree
+
+`uiprobe tree RUN_DIR` shows a finished (or interrupted) run folder as a tree of screens: every row of each screen with its name, which rows were pressed and where they led, and which rows were not pressed (marked with ` ·`, nothing below them was looked at). It reads only the run folder, so it can be run again at any time, without a device. `--why` adds the reason each unpressed row was skipped, `--ids` adds screen ids and activities, and `--json` gives the same graph as data. See [Showing a crawl run as a tree](commands.md#showing-a-crawl-run-as-a-tree).
+
+```console
+$ uiprobe tree runs/first
+$ uiprobe tree runs/first --why
+$ uiprobe tree runs/first --json
+```
