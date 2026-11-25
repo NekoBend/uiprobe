@@ -126,14 +126,15 @@ def _endings(row: Row) -> list[dict[str, object]]:
     return ([row.to] if row.to is not None else []) + list(row.also_to)
 
 
-def _keeps_line(row: Row) -> bool:
+def _keeps_line(row: Row, *, folded: bool) -> bool:
     """Whether a row has a line in the text tree. A row that has no name there
     (or none by `DESC_ONLY_ROWS`) still has one when any of its taps reached a
-    screen, so that a pressed path never disappears."""
+    screen, so that a pressed path never disappears; so has a line with folded
+    elements when any part of it was pressed."""
     if row.name_from == "none" or (
         row.name_from == "content_desc" and DESC_ONLY_ROWS == "json_only"
     ):
-        return any("screen_id" in e for e in _endings(row))
+        return (folded and row.pressed) or any("screen_id" in e for e in _endings(row))
     return True
 
 
@@ -152,7 +153,7 @@ def _row_line(
     if not row.pressed:
         tally.marks.add("dot")
         line += " ·"
-        if why and row.reasons and row.to is None:
+        if why and row.reasons:
             line += " [" + ", ".join(_printable(r) for r in row.reasons) + "]"
     return line, name
 
@@ -171,8 +172,17 @@ def _merged(row: Row, folded: list[Row]) -> Row:
             if ending not in endings:
                 endings.append(ending)
     reasons = tuple(dict.fromkeys(x for r in group for x in r.reasons))
+    # The name: a visible text first, then a description, the row's own before
+    # a folded element's; else the row's own (a placeholder).
+    rank = {"text": 0, "content_desc": 1}
+    named = [r for r in group if r.name_from in rank]
+    best = min(named, key=lambda r: rank[r.name_from]) if named else row
+    if row.name_from == "password":
+        best = row
     return replace(
         row,
+        name=best.name,
+        name_from=best.name_from,
         pressed=any(r.pressed for r in group),
         to=endings[0] if endings else None,
         also_to=endings[1:],
@@ -199,7 +209,7 @@ def _entries(
         if row.kind == "text":
             tally.texts += 1
             continue
-        kept = _keeps_line(row)
+        kept = _keeps_line(row, folded=line_row.element_id in folds)
         note = None
         if row.to is not None and _kind_of(row.to) != "screen":
             kind = _kind_of(row.to)

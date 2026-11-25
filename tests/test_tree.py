@@ -647,6 +647,119 @@ def test_two_pressed_elements_of_one_line_use_the_pressed_again_form(tmp_path, c
     ]
 
 
+def test_a_named_folded_element_names_an_unnamed_outer_line(tmp_path, capsys):
+    folder = Folder(tmp_path)
+    home = make_screen(
+        ".Home",
+        [
+            el(1, cls="FrameLayout"),
+            el(2, 1, cls="LinearLayout", flags=CLICK),
+            el(3, 2, cls="Button", flags=CLICK),
+        ],
+    )
+    sid = folder.screen(home)
+    folder.start("launch")
+    folder.end(sid)
+    # The tap on the inner button was decided when it showed the text "Help".
+    folder.start(
+        "tap",
+        sid,
+        {
+            "id": "e3",
+            "class": "android.widget.Button",
+            "text": "Help",
+            "bounds": [0, 0, 10, 10],
+            "flags": ["clickable"],
+        },
+    )
+    folder.end(OTHER_SCREEN)
+    folder.start("relaunch", OTHER_SCREEN, off_target_package="com.help")
+    folder.end(sid)
+    folder.finish()
+    _, out, _ = run_tree(capsys, str(folder.path))
+    assert out.splitlines()[1] == "└─ Help → com.help"
+    assert "rows that led to another app" not in out
+
+
+def test_why_keeps_the_reasons_of_folded_elements_when_the_outer_tap_was_not_sent(
+    tmp_path, capsys
+):
+    folder = Folder(tmp_path)
+    home = _samsung_wifi()
+    sid = folder.screen(home)
+    folder.start("launch")
+    folder.end(sid)
+    folder.tap(home, 2, not_sent="covered_by_other")
+    folder.skip(home, 4, "toggle")
+    folder.finish()
+    _, out, _ = run_tree(capsys, str(folder.path), "--why")
+    assert out.splitlines()[1] == "└─ Wi-Fi · [toggle]"
+
+
+def test_a_container_that_is_not_clickable_in_the_screen_file_is_no_fold_target(
+    tmp_path, capsys
+):
+    folder = Folder(tmp_path)
+    home = make_screen(
+        ".Home",
+        [
+            el(1, cls="FrameLayout"),
+            el(2, 1, cls="LinearLayout"),
+            el(3, 2, text="Child", cls="Button", flags=CLICK),
+        ],
+    )
+    sid = folder.screen(home)
+    folder.start("launch")
+    folder.end(sid)
+    folder.tap(home, 2, sid)  # logged on the container, which is not clickable
+    folder.finish()
+    _, out, _ = run_tree(capsys, str(folder.path))
+    assert out.splitlines()[1:3] == ["├─ Child", "└─ Child ·"]
+    _, out, _ = run_tree(capsys, str(folder.path), "--json")
+    assert "folded_into" not in out
+
+
+def test_a_parent_cycle_folds_nothing(tmp_path, capsys):
+    folder = Folder(tmp_path)
+    screen = make_screen(
+        ".Home",
+        [
+            Element(
+                id="e1",
+                parent="e2",
+                class_name="android.widget.LinearLayout",
+                bounds=Bounds(0, 0, 10, 10),
+                text="One",
+                flags=CLICK,
+            ),
+            Element(
+                id="e2",
+                parent="e1",
+                class_name="android.widget.LinearLayout",
+                bounds=Bounds(0, 0, 10, 10),
+                text="Two",
+                flags=CLICK,
+            ),
+            Element(
+                id="e3",
+                parent="e1",
+                class_name="android.widget.Button",
+                bounds=Bounds(0, 0, 10, 10),
+                text="Three",
+                flags=CLICK,
+            ),
+        ],
+    )
+    sid = folder.screen(screen)
+    folder.start("launch")
+    folder.end(sid)
+    folder.finish()
+    _, out, _ = run_tree(capsys, str(folder.path))
+    assert out.splitlines()[1:4] == ["├─ One ·", "├─ One ·", "└─ Three ·"]
+    _, out, _ = run_tree(capsys, str(folder.path), "--json")
+    assert "folded_into" not in out
+
+
 def test_clickables_without_a_clickable_ancestor_stay_separate(tmp_path, capsys):
     folder = Folder(tmp_path)
     bar = make_screen(

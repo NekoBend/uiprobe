@@ -443,6 +443,42 @@ def _short_class(class_name: str) -> str:
     return class_name.rsplit(".", 1)[-1] or class_name
 
 
+def _outermost_clickable(screen: Screen, index: dict[str, int]) -> list[int | None]:
+    """For each element, the index of its outermost ancestor that is clickable
+    in the screen file, or None. An element whose chain of parents loops back
+    on itself, and everything below such a loop, has none."""
+    elements = screen.elements
+    clickable = ["clickable" in e.flags for e in elements]
+    parent = [index.get(p) if (p := e.parent) is not None else None for e in elements]
+    result: list[int | None] = [None] * len(elements)
+    state = [0] * len(elements)  # 0 new, 1 on the walk, 2 done
+    loops = [False] * len(elements)  # on a loop of parents, or below one
+    for start in range(len(elements)):
+        if state[start]:
+            continue
+        path: list[int] = []
+        node: int | None = start
+        while node is not None and state[node] == 0:
+            state[node] = 1
+            path.append(node)
+            node = parent[node]
+        looped = node is not None and (state[node] == 1 or loops[node])
+        for i in path:
+            state[i] = 2
+            loops[i] = looped
+        if looped:
+            continue  # the whole path stays None
+        for i in reversed(path):  # the top of the chain first
+            up = parent[i]
+            if up is not None:
+                result[i] = (
+                    result[up]
+                    if result[up] is not None
+                    else (up if clickable[up] else None)
+                )
+    return result
+
+
 def _rows_of(
     screen: Screen,
     tapped: set[str],
@@ -464,13 +500,7 @@ def _rows_of(
             up = index[element.parent]  # type: ignore[index]
             under_row[i] = is_row[up] or under_row[up]
     own = [e.text.strip() for e in elements]  # each element's text, once
-    outer: list[int | None] = [None] * len(elements)  # outermost row above
-    for i, element in enumerate(elements):
-        up = index.get(element.parent) if element.parent is not None else None
-        if up is not None and up < i:  # a parent comes first; no self or cycle
-            outer[i] = (
-                outer[up] if outer[up] is not None else (up if is_row[up] else None)
-            )
+    outer = _outermost_clickable(screen, index)
     rows: list[Row] = []
     for i, element in enumerate(elements):
         if is_row[i]:
