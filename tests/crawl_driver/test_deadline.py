@@ -27,13 +27,14 @@ from tests.fake_device import (
     FakeAndroid,
 )
 from uiprobe import crawl_driver
-from uiprobe import device as device_module
 from uiprobe.crawl import (
     CrawlEngine,
     Limits,
 )
 from uiprobe.crawl_driver import crawl
 from uiprobe.device import Device
+from uiprobe.device import pin as device_pin
+from uiprobe.device import state as device_state
 from uiprobe.errors import (
     LaunchFailedError,
 )
@@ -51,11 +52,9 @@ class Trusted:
     def __init__(self, monkeypatch: pytest.MonkeyPatch) -> None:
         self.now = 1000.0
         self.sleeps: list[tuple[float, float]] = []  # (when, how long)
-        monkeypatch.setattr(
-            device_module,
-            "time",
-            SimpleNamespace(monotonic=lambda: self.now, sleep=lambda _s: None),
-        )
+        fake_time = SimpleNamespace(monotonic=lambda: self.now, sleep=lambda _s: None)
+        monkeypatch.setattr(device_pin, "time", fake_time)
+        monkeypatch.setattr(device_state, "time", fake_time)
 
     def attach(self, device: Device) -> None:
         """Make the device's own clock and pauses (its waits) this clock."""
@@ -220,9 +219,9 @@ def test_the_shop_crawl_ends_as_on_main_with_scheduler_pauses_between_clock_read
     def sleep(seconds: float) -> None:
         now[0] += seconds
 
-    monkeypatch.setattr(
-        device_module, "time", SimpleNamespace(monotonic=monotonic, sleep=sleep)
-    )
+    fake_time = SimpleNamespace(monotonic=monotonic, sleep=sleep)
+    monkeypatch.setattr(device_pin, "time", fake_time)
+    monkeypatch.setattr(device_state, "time", fake_time)
     device._clock = monotonic
     device._sleep = sleep
     result = crawl(
