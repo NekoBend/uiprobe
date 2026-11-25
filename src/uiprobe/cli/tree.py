@@ -25,6 +25,7 @@ LEGEND_DESC: Final = (
     '"..." = the element has no visible text; this is its accessibility description'
 )
 LEGEND_ARROW: Final = "→ PACKAGE = pressing it opened that app"
+LEGEND_SEE: Final = "→ see: X = it led to a screen already shown under X"
 LEGEND_EMPTY: Final = (
     "(screen with no named rows) = the screen it led to has no row with a name "
     "(see --json)"
@@ -56,8 +57,8 @@ def _json_text(tree: RunTree) -> str:
 # Which notes after a pressed row's name stay in the text tree; the others are
 # in `--json` only (those the last line counts are counted there).
 # Kinds: "other_app", "same_screen", "not_sent", "unknown", "not_read" and
-# "screen_above" (the screen was already drawn above).
-NOTES_IN_TEXT: Final = frozenset({"other_app"})
+# "screen_above" (the screen was already drawn: `→ see: NAME`).
+NOTES_IN_TEXT: Final = frozenset({"other_app", "screen_above"})
 
 # Rows named only by a content description (no visible text): "show" lists them
 # by the description, "quoted" puts it in double quotes, "json_only" leaves
@@ -77,7 +78,8 @@ class _Tally:
     desc_only: int = 0
     unnamed: int = 0
     unmatched: int = 0
-    marks: set[str] = field(default_factory=set)  # dot, desc, arrow, again
+    marks: set[str] = field(default_factory=set)  # dot, desc, arrow, see, again
+    names: dict[str, int] = field(default_factory=dict)  # row names as listed
 
 
 @dataclass(slots=True)
@@ -188,6 +190,7 @@ def _entries(
                 tally.desc_only += 1
             continue
         line, name = _row_line(row, note, why=why, tally=tally)
+        tally.names[name] = tally.names.get(name, 0) + 1
         entries.append(_Entry(line, row.to, more=tuple(row.also_to), name=name))
     return entries
 
@@ -246,6 +249,9 @@ def _draw(items: list[tuple[int, str]]) -> list[str]:
     return lines
 
 
+_SEE: Final = re.compile("\x00([^\x00]*)\x00")  # a note waiting for its name
+
+
 class _Renderer:
     """Draws the tree: each screen is listed once, where it is first reached."""
 
@@ -254,15 +260,40 @@ class _Renderer:
         self.ids = ids
         self.why = why
         self.lines: list[str] = []
-        self.expanded: dict[str, str] = {}
+        self.expanded: dict[str, str] = {}  # screen id -> name of the opening row
+        self.paths: dict[str, tuple[str, ...]] = {}  # ... and the rows above it
         self.tally = _Tally()
 
-    def open_screen(self, sid: str, name: str) -> list[_Entry]:
+    def open_screen(self, sid: str, name: str, path: tuple[str, ...]) -> list[_Entry]:
         self.expanded[sid] = name
+        self.paths[sid] = path
         return _entries(self.tree, sid, ids=self.ids, why=self.why, tally=self.tally)
 
-    def below_of(self, entry: _Entry, items: list[tuple[int, str]]) -> list[_Entry]:
-        """The entries that go below a drawn row line."""
+    def see(self, sid: str) -> str:
+        """The note for a row that led to a screen that is already drawn. The
+        name waits (as NUL, the id, NUL) until the whole tree is drawn, since
+        whether it is ambiguous is known only then."""
+        self.tally.marks.add("see")
+        return f" → see: \x00{sid}\x00"
+
+    def seen_as(self, line: str) -> str:
+        """Put the names into the notes of a line."""
+
+        def name_of(match: re.Match[str]) -> str:
+            sid = match[1]
+            name = self.expanded[sid]
+            path = self.paths[sid]
+            if self.tally.names.get(name, 0) > 1 and path:
+                return " > ".join(path)
+            return name
+
+        return _SEE.sub(name_of, line)
+
+    def below_of(
+        self, entry: _Entry, items: list[tuple[int, str]], path: tuple[str, ...]
+    ) -> list[_Entry]:
+        """The entries that go below a drawn row line. `path` is the rows
+        above it."""
         to = entry.to
         if to is None:
             return []
@@ -270,13 +301,10 @@ class _Renderer:
         target = to.get("screen_id")
         if isinstance(target, str):
             if target not in self.expanded:
-                below = self.screen_below(target, entry.name)
+                below = self.screen_below(target, entry.name, (*path, entry.name))
             elif "screen_above" in NOTES_IN_TEXT:
                 depth, text = items[-1]
-                shown = f" → (screen shown above: {self.expanded[target]})"
-                if self.ids:
-                    shown += f" {_printable(target)}"
-                items[-1] = (depth, text + shown)
+                items[-1] = (depth, text + self.see(target))
         again: list[_Entry] = []
         for e in entry.more:
             kind = _kind_of(e)
@@ -289,38 +317,42 @@ class _Renderer:
                 again.append(_Entry("(pressed again)" + note))
         return [*below, *again]
 
-    def screen_below(self, sid: str, name: str) -> list[_Entry]:
+    def screen_below(self, sid: str, name: str, path: tuple[str, ...]) -> list[_Entry]:
         """The entries of a screen a row led to; a marker when it has none."""
-        entries = self.open_screen(sid, name)
+        entries = self.open_screen(sid, name, path)
         if not entries:
             self.tally.marks.add("empty")
             entries = [_Entry("(screen with no named rows)")]
         return entries
 
-    def run(self, sid: str, name: str) -> None:
+    def run(self, sid: str, name: str, path: tuple[str, ...] = ()) -> None:
         """List the screen `sid` and everything first reached below it."""
         items: list[tuple[int, str]] = []
-        frames = [(self.open_screen(sid, name), 0, 0)]
+        frames = [(self.open_screen(sid, name, path), 0, 0, path)]
         while frames:
-            entries, index, depth = frames.pop()
+            entries, index, depth, here = frames.pop()
             if index >= len(entries):
                 continue
-            frames.append((entries, index + 1, depth))
+            frames.append((entries, index + 1, depth, here))
             entry = entries[index]
             if entry.again:
                 assert entry.to is not None  # noqa: S101
                 target = entry.to["screen_id"]
                 assert isinstance(target, str)  # noqa: S101
-                if target in self.expanded:
-                    continue
-                items.append((depth, entry.text))
                 self.tally.marks.add("again")
-                below = self.screen_below(target, entry.name)
+                items.append((depth, entry.text))
+                if target in self.expanded:
+                    if "screen_above" in NOTES_IN_TEXT:
+                        items[-1] = (depth, entry.text + self.see(target))
+                    continue
+                below = self.screen_below(target, entry.name, here)
+                child = here
             else:
                 items.append((depth, entry.text))
-                below = self.below_of(entry, items)
+                below = self.below_of(entry, items, here)
+                child = (*here, entry.name)
             if below:
-                frames.append((below, 0, depth + 1))
+                frames.append((below, 0, depth + 1, child))
         self.lines.extend(_draw(items))
 
 
@@ -344,11 +376,13 @@ def render_text(tree: RunTree, *, ids: bool = False, why: bool = False) -> list[
     for sid in (*tree.unreached, *rest):
         if sid not in drawn.expanded:
             drawn.lines.append(_orphan_heading(tree, sid))
-            drawn.run(sid, _FIRST_SCREEN)
+            name = f"screen {_printable(sid)}"
+            drawn.run(sid, name, (name,))
     for mark, text in (
         ("dot", LEGEND),
         ("desc", LEGEND_DESC),
         ("arrow", LEGEND_ARROW),
+        ("see", LEGEND_SEE),
         ("again", LEGEND_AGAIN),
         ("empty", LEGEND_EMPTY),
     ):
@@ -357,7 +391,7 @@ def render_text(tree: RunTree, *, ids: bool = False, why: bool = False) -> list[
     summary = _summary(drawn.tally)
     if summary is not None:
         drawn.lines.append(summary)
-    return drawn.lines
+    return [drawn.seen_as(line) for line in drawn.lines]
 
 
 def _cmd_tree(args: argparse.Namespace) -> int:

@@ -27,6 +27,7 @@ LEGEND_DESC = (
     '"..." = the element has no visible text; this is its accessibility description'
 )
 LEGEND_ARROW = "→ PACKAGE = pressing it opened that app"
+LEGEND_SEE = "→ see: X = it led to a screen already shown under X"
 LEGEND_EMPTY = (
     "(screen with no named rows) = the screen it led to has no row with a name "
     "(see --json)"
@@ -199,10 +200,10 @@ SUMMARY = (
 FULL_TEXT = [
     "com.example.app (com.example.app)",
     "├─ Network",
-    "│  ├─ Back home",
+    "│  ├─ Back home → see: first screen",
     "│  └─ Info",
     "│     └─ (screen with no named rows)",
-    "├─ About",
+    "├─ About → see: Info",
     '├─ "Menu" ·',
     "├─ Wi-Fi ·",
     "├─ Same",
@@ -212,6 +213,7 @@ FULL_TEXT = [
     LEGEND,
     LEGEND_DESC,
     LEGEND_ARROW,
+    LEGEND_SEE,
     LEGEND_EMPTY,
     SUMMARY,
 ]
@@ -315,6 +317,8 @@ def test_the_notes_that_stay_in_the_text_follow_the_switch(
     monkeypatch.setattr("uiprobe.cli.tree.NOTES_IN_TEXT", frozenset())
     _, out, _ = run_tree(capsys, str(folder.path))
     lines = out.splitlines()
+    assert "├─ About" in lines
+    assert "see:" not in out
     assert "├─ Other app" in lines
     assert "→" not in out
     assert "rows that led to another app: 1" in lines[-1]
@@ -328,7 +332,7 @@ def test_the_notes_that_stay_in_the_text_follow_the_switch(
     assert "├─ Other app → com.other.app" in lines
     assert "├─ Broken → (could not be read)" in lines
     assert "└─ Blocked → (not sent: covered_by_other) ·" in lines
-    assert "├─ About → (screen shown above: Info)" in lines
+    assert "├─ About → see: Info" in lines
     assert lines[-1].endswith("texts outside rows: 2, unnamed elements: 1")
     assert "not sent" not in lines[-1]
 
@@ -489,6 +493,73 @@ def test_double_quotes_in_a_description_are_escaped_in_the_text_tree_only(
     element = json.loads(out)["screens"][sid]["elements"][0]
     assert element["name"] == '"Say "hi""'  # the JSON name is as before
     assert element["name_from"] == "content_desc"
+
+
+def _see_run(tmp_path, *, same_names, retry=False):
+    folder = Folder(tmp_path)
+
+    def screen(activity, rows):
+        elements = [el(1, cls="FrameLayout")]
+        for number, (text, clickable) in enumerate(rows, start=1):
+            elements.append(
+                el(
+                    number + 1,
+                    1,
+                    cls="Button",
+                    text=text,
+                    flags=CLICK if clickable else (),
+                )
+            )
+        return make_screen(activity, elements)
+
+    home = screen(".Home", [("A", True), ("B", True)])
+    first = screen(".First", [("Open" if same_names else "Open A", True)])
+    second = screen(".Second", [("Open" if same_names else "Open B", True)])
+    leaf = screen(".Leaf", [("Leaf", True)])
+    ids = [folder.screen(s) for s in (home, first, second, leaf)]
+    folder.start("launch")
+    folder.end(ids[0])
+    folder.tap(home, 2, ids[1])  # A
+    folder.tap(first, 2, ids[3])  # Open -> Leaf
+    folder.tap(home, 3, ids[2])  # B
+    folder.tap(second, 2, ids[3])  # Open -> Leaf again, listed already
+    if retry:
+        folder.tap(home, 2, ids[3])  # A again, now to Leaf
+    folder.finish()
+    return folder
+
+
+def test_a_row_that_led_to_a_listed_screen_names_the_row_that_opened_it(
+    tmp_path, capsys
+):
+    folder = _see_run(tmp_path, same_names=False)
+    _, out, _ = run_tree(capsys, str(folder.path))
+    lines = out.splitlines()
+    assert (
+        "│  └─ Open B → see: Open A" in lines or "   └─ Open B → see: Open A" in lines
+    )
+    assert out.count("Leaf") == 1  # the screen's rows are not repeated
+    assert LEGEND_SEE in lines
+    _, out, _ = run_tree(capsys, str(folder.path), "--json")
+    data = json.loads(out)
+    assert len(data["screens"]) == 4  # the JSON is unchanged: ids, not notes
+    assert "see" not in out
+
+
+def test_a_retry_to_a_listed_screen_is_a_pressed_again_line_with_the_note(
+    tmp_path, capsys
+):
+    folder = _see_run(tmp_path, same_names=False, retry=True)
+    _, out, _ = run_tree(capsys, str(folder.path))
+    assert any(
+        line.endswith("(pressed again) → see: Open A") for line in out.splitlines()
+    )
+
+
+def test_an_ambiguous_name_in_the_note_becomes_the_path_from_the_root(tmp_path, capsys):
+    folder = _see_run(tmp_path, same_names=True)
+    _, out, _ = run_tree(capsys, str(folder.path))
+    assert any(line.endswith("Open → see: A > Open") for line in out.splitlines())
 
 
 def test_a_screen_without_named_rows_is_marked_under_its_row(tmp_path, capsys):
@@ -1581,8 +1652,7 @@ def test_a_long_text_is_cut_in_the_text_tree_only(tmp_path, capsys):
     assert names == [long_text, "M" * 201, "E" * 200]
 
 
-def test_a_cut_name_is_used_in_a_seen_above_reference(tmp_path, capsys, monkeypatch):
-    monkeypatch.setattr("uiprobe.cli.tree.NOTES_IN_TEXT", frozenset({"screen_above"}))
+def test_a_cut_name_is_used_in_a_seen_above_reference(tmp_path, capsys):
     folder = Folder(tmp_path)
     home = make_screen(
         ".Home",
@@ -1605,7 +1675,7 @@ def test_a_cut_name_is_used_in_a_seen_above_reference(tmp_path, capsys, monkeypa
     _, out, _ = run_tree(capsys, str(folder.path))
     cut = "N" * 200 + "…(+50 chars)"
     assert f"├─ {cut}" in out.splitlines()
-    assert f"└─ Again → (screen shown above: {cut})" in out.splitlines()
+    assert f"└─ Again → see: {cut}" in out.splitlines()
 
 
 def test_warnings_are_counted_and_only_twenty_are_kept(tmp_path, capsys):
