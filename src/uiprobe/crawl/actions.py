@@ -33,6 +33,8 @@ TAP_NOT_SENT: Final = "tap_not_sent"
 # without a sent tap before the crawl stops; failed dumps in a row before
 # the crawl stops.
 BACK_LIMIT: Final = 2
+# Failed replays of one goal screen before the goal is dropped.
+MAX_REPLAY_FAILURES: Final = 2
 MAX_RELAUNCHES: Final = 3
 # The largest depth limit `Limits` accepts; it bounds the placeholder path an
 # unpredicted BACK landing builds.

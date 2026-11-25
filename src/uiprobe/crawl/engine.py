@@ -21,6 +21,7 @@ from uiprobe.crawl.actions import (
     MAX_DURATION,
     MAX_REFUSALS,
     MAX_RELAUNCHES,
+    MAX_REPLAY_FAILURES,
     MAX_VOLATILE,
     RELAUNCH_LIMIT,
     TAP_NOT_SENT,
@@ -46,7 +47,7 @@ from uiprobe.guards import _WORD_REASONS, MAX_ELEMENTS, Detail, judge
 from uiprobe.model import Screen  # noqa: TC001
 
 if TYPE_CHECKING:
-    from uiprobe.guards import Policy
+    from uiprobe.guards import Judgement, Policy
     from uiprobe.model import Element
 
 
@@ -62,6 +63,9 @@ class _Pending:
     keyboard: bool = False
     navigation: bool = False
     recorded: bool = False
+    replay: bool = False
+    element_id: str | None = None
+    bounds: tuple[int, ...] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -73,6 +77,52 @@ class _Plan:
     below: tuple[Element, ...]
     shape: tuple[object, ...]
     labels: tuple[tuple[str, str, str], ...]
+    # A tap that presses an element again to get back down (see `_Replay`).
+    replay: bool = False
+    # The badge-free (screen id, fingerprint) of the element, None with
+    # `Policy.replay_path` off or on a screen that is not judged.
+    bare: tuple[str, str] | None = None
+    # Which marks this proposal added (a deadline cancel removes only those).
+    new_full: bool = True
+    new_bare: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class _Way:
+    """A tap that led to a target screen one level deeper, as it was pressed.
+
+    ``parent`` is the screen it was pressed on, ``from_root`` says that this was
+    the root (path length 1). The element is remembered by its fingerprint, id,
+    bounds and press point.
+    """
+
+    parent: str
+    fingerprint: str
+    element_id: str
+    bounds: tuple[int, ...]
+    point: tuple[int, int]
+    from_root: bool
+
+
+@dataclass(frozen=True, slots=True)
+class _Replay:
+    """A route back down to a goal screen after a relaunch.
+
+    ``steps`` are the taps from the root, each a `_Way`; the first one was
+    pressed on the root, which may have another id now. ``done`` counts the
+    taps that landed where the route says. After step i the screen is the
+    ``parent`` of step i + 1, after the last one the goal.
+    """
+
+    goal: str
+    steps: tuple[_Way, ...]
+    done: int = 0
+
+    def expected_after(self, index: int) -> str:
+        """The screen id that the tap of step ``index`` must land on."""
+        if index + 1 == len(self.steps):
+            return self.goal
+        return self.steps[index + 1].parent
 
 
 @dataclass(frozen=True, slots=True)
@@ -109,6 +159,60 @@ class _State:
     deferred: str | None
     volatile_count: dict[str, int]
     label_run: int
+    bare_tried: set[tuple[str, str]]
+    route: dict[str, _Way]
+    untried: dict[str, int]
+    prior: list[str]
+    goal: str | None
+    replay: _Replay | None
+    replay_fails: dict[str, int]
+    replay_dropped: set[str]
+    replay_tap: Tap | None
+    replay_ids: set[int]
+    approved_bounds: tuple[int, ...] | None
+
+
+class _BadgeFree:
+    """A judged screen as it is without badges (``Policy.replay_path``).
+
+    A badge is an element whose resource id contains ``badge`` (any case);
+    the elements below one go with it. ``screen_id`` is the id of the screen
+    without them, and `key_of` the (screen id, fingerprint) of an element
+    computed without them, so a row that shows a badge inside it and the same
+    row without one have the same key. Built only for a screen that is judged,
+    and the elements are walked once.
+    """
+
+    def __init__(self, screen: Screen, prints: _Prints) -> None:
+        badges = {e.id for e in screen.elements if "badge" in e.resource_id.lower()}
+        self._kept: set[str] | None = None
+        self._prints = prints
+        self.screen_id = screen.screen_id
+        if not badges:
+            return
+        children: dict[str | None, list[str]] = {}
+        for element in screen.elements:
+            children.setdefault(element.parent, []).append(element.id)
+        stack = list(badges)
+        while stack:
+            for child in children.get(stack.pop(), ()):
+                if child not in badges:
+                    badges.add(child)
+                    stack.append(child)
+        kept = tuple(e for e in screen.elements if e.id not in badges)
+        bare = replace(screen, elements=kept)
+        self._kept = {e.id for e in kept}
+        self._prints = _Prints(bare)
+        self.screen_id = bare.screen_id
+
+    def key_of(self, element: Element, fingerprint: str) -> tuple[str, str] | None:
+        """The key of ``element`` (whose own fingerprint is ``fingerprint``), or
+        None when the element is a badge or lies below one."""
+        if self._kept is None:
+            return (self.screen_id, fingerprint)
+        if element.id not in self._kept:
+            return None
+        return (self.screen_id, self._prints.of(element))
 
 
 class CrawlEngine:
@@ -171,6 +275,18 @@ class CrawlEngine:
         self._deferred: str | None = None
         self._volatile_count: dict[str, int] = {}
         self._label_run = 0
+        # Path replay and the badge-free tried marks (`Policy.replay_path`).
+        self._bare_tried: set[tuple[str, str]] = set()
+        self._route: dict[str, _Way] = {}
+        self._untried: dict[str, int] = {}
+        self._prior: list[str] = []
+        self._goal: str | None = None
+        self._replay: _Replay | None = None
+        self._replay_fails: dict[str, int] = {}
+        self._replay_dropped: set[str] = set()
+        self._replay_tap: Tap | None = None
+        self._replay_ids: set[int] = set()
+        self._approved_bounds: tuple[int, ...] | None = None
         # The action `next` returned last, with the state from before that
         # call, while it can still be withdrawn.
         self._returned: tuple[Action, _State] | None = None
@@ -295,6 +411,17 @@ class CrawlEngine:
             deferred=self._deferred,
             volatile_count=dict(self._volatile_count),
             label_run=self._label_run,
+            bare_tried=set(self._bare_tried),
+            route=dict(self._route),
+            untried=dict(self._untried),
+            prior=list(self._prior),
+            goal=self._goal,
+            replay=self._replay,
+            replay_fails=dict(self._replay_fails),
+            replay_dropped=set(self._replay_dropped),
+            replay_tap=self._replay_tap,
+            replay_ids=set(self._replay_ids),
+            approved_bounds=self._approved_bounds,
         )
 
     def _restore(self, state: _State) -> None:
@@ -324,6 +451,17 @@ class CrawlEngine:
         self._deferred = state.deferred
         self._volatile_count = dict(state.volatile_count)
         self._label_run = state.label_run
+        self._bare_tried = set(state.bare_tried)
+        self._route = dict(state.route)
+        self._untried = dict(state.untried)
+        self._prior = list(state.prior)
+        self._goal = state.goal
+        self._replay = state.replay
+        self._replay_fails = dict(state.replay_fails)
+        self._replay_dropped = set(state.replay_dropped)
+        self._replay_tap = state.replay_tap
+        self._replay_ids = set(state.replay_ids)
+        self._approved_bounds = state.approved_bounds
 
     def _decide(self, observation: Observation) -> Action:
         """The body of `next`, after its checks."""
@@ -383,13 +521,18 @@ class CrawlEngine:
             # Time is up: the reserved tap is cancelled, not refused, and the
             # next call of next() stops the crawl.
             self._expired = True
-            self._tried.discard((tap.screen_id, tap.fingerprint))
+            # Only the marks this proposal added go; marks that were there
+            # before it (a replay tap was tried earlier) stay.
+            self._unmark_tried(tap.screen_id, tap.fingerprint, planned)
             return False
         if self._press_allowed(planned, observation):
             self._approved = tap
+            self._approved_bounds = tuple(planned.element.bounds.to_list())
             return True
-        self._tried.add((tap.screen_id, tap.fingerprint))
+        self._mark_tried(tap.screen_id, tap.fingerprint, planned.bare)
         self._add_skip(tap.screen_id, tap.fingerprint, (CHANGED_BEFORE_PRESS,))
+        if planned.replay:
+            self._abandon_replay()
         if self._only_labels_changed(planned, observation):
             # A label-only refusal has its own bound (MAX_VOLATILE per screen
             # id) and does not count toward MAX_REFUSALS.
@@ -427,13 +570,35 @@ class CrawlEngine:
         self._approved = None
         self._returned = None  # sent: it can no longer be withdrawn
         self._sent += 1
+        replay = tap is self._replay_tap
+        if replay:
+            self._replay_ids.add(self._sent)
         self._pending = _Pending(
-            self._sent, "tap", tap.screen_id, tap.fingerprint, tap.point
+            self._sent,
+            "tap",
+            tap.screen_id,
+            tap.fingerprint,
+            tap.point,
+            replay=replay,
+            element_id=tap.element_id,
+            bounds=self._approved_bounds,
         )
+        self._approved_bounds = None
         self._relaunches = 0
         self._refused = 0
         self._label_run = 0
         self._landed.clear()
+
+    @property
+    def replay_actions(self) -> frozenset[int]:
+        """The action ids of the taps that were path replay taps."""
+        return frozenset(self._replay_ids)
+
+    def is_replay(self, tap: Tap) -> bool:
+        """Say whether `tap` is a path replay tap: one that presses an element
+        again to get back down after a relaunch. The driver records it so. True
+        only for the very `Tap` instance that `next` returned last as one."""
+        return tap is self._replay_tap
 
     # -- internals ----------------------------------------------------------------
 
@@ -449,6 +614,10 @@ class CrawlEngine:
             unsent = self._planned.tap
         self._planned = None
         self._approved = None
+        self._approved_bounds = None
+        if unsent is not None and unsent is self._replay_tap:
+            self._abandon_replay()
+        self._replay_tap = None
         if unsent is not None:
             self._refused += 1
             self._add_skip(unsent.screen_id, unsent.fingerprint, (TAP_NOT_SENT,))
@@ -505,17 +674,26 @@ class CrawlEngine:
         self._pending = None
         kind = None if pending is None else pending.kind
         pressed_on = None if pending is None else pending.from_screen_id
-        if kind == "tap":
+        if pending is not None and kind == "tap":
             # A tap that stays on the screen it was pressed on pushes nothing.
             if not on_target or sid != pressed_on:
                 self._path.append(sid if on_target else _OFF)
+                if on_target and pressed_on is not None:
+                    self._note_way(sid, pressed_on, pending)
+            if pending.replay:
+                self._replay_landed(sid, on_target=on_target)
         elif pending is not None and kind == "back":
             # Only a navigation BACK leaves the screen on top of the path; an
             # off-target BACK leaves the path alone (see _settle_after_dialogs).
             if pending.navigation and len(self._path) > 1:
                 self._path.pop()
         elif kind in ("launch", "relaunch"):
+            if self._path:
+                self._prior = self._path
             self._path = []
+            # A replay that a relaunch cuts short has failed once; the goal
+            # stays until it is reached or dropped.
+            self._abandon_replay()
         if not on_target:
             return
         self._backs = 0
@@ -625,6 +803,7 @@ class CrawlEngine:
             self._depths[sid] = 1
             self._root = sid
             self._path = [sid]
+            self._start_replay(sid)
         elif tapped:
             depth = len(self._path)
             known = self._depths.get(sid)
@@ -720,6 +899,36 @@ class CrawlEngine:
             or self._volatile_count.get(sid, 0) >= MAX_VOLATILE
             or self._label_run >= MAX_VOLATILE
         )
+        tap = self._next_tap(screen, sid, judgement, prints, refused_out=refused_out)
+        if tap is not None:
+            return tap
+        if len(self._path) == 1:
+            return self._finish(EXHAUSTED)
+        return self._send_back(sid)
+
+    def _next_tap(
+        self,
+        screen: Screen,
+        sid: str,
+        judgement: Judgement,
+        prints: _Prints | None,
+        *,
+        refused_out: bool,
+    ) -> Tap | None:
+        """The next tap on this screen: the next step of a replay, else the
+        first element not tried yet; None when there is none."""
+        counting = self._policy.replay_path
+        bare = _BadgeFree(screen, prints) if counting and prints is not None else None
+        if self._replay is not None:
+            replayed = self._replay_step(
+                sid, judgement, prints, bare=bare, refused_out=refused_out
+            )
+            if replayed is not None:
+                return replayed
+        if counting:
+            self._untried[sid] = 0
+        chosen: _Plan | None = None
+        others: set[str] = set()
         if (
             prints is not None
             and len(self._path) < self._limits.depth
@@ -729,32 +938,255 @@ class CrawlEngine:
                 if decision.point is None:
                     continue
                 fingerprint = prints.of(decision.element)
-                if (sid, fingerprint) in self._tried:
+                key = (
+                    None if bare is None else bare.key_of(decision.element, fingerprint)
+                )
+                if self._is_tried(sid, fingerprint, key):
                     continue
                 shape = prints.shape(decision.element)
                 if (sid, shape) in self._volatile:
                     continue
-                return self._send_tap(
-                    sid,
-                    _Plan(
-                        Tap(sid, decision.element.id, fingerprint, decision.point),
-                        decision.element,
-                        prints.descendants(decision.element),
-                        shape,
-                        prints.labels(decision.element),
-                    ),
+                if chosen is not None:
+                    others.add(fingerprint)
+                    continue
+                chosen = _Plan(
+                    Tap(sid, decision.element.id, fingerprint, decision.point),
+                    decision.element,
+                    prints.descendants(decision.element),
+                    shape,
+                    prints.labels(decision.element),
+                    bare=key,
                 )
-        if len(self._path) == 1:
-            return self._finish(EXHAUSTED)
-        return self._send_back(sid)
+                if not counting:
+                    break
+        if chosen is None:
+            return None
+        if counting:
+            # The rows still untried here once this one is pressed: a
+            # relaunch may go back down to this screen for them.
+            others.discard(chosen.tap.fingerprint)
+            self._untried[sid] = len(others)
+        return self._send_tap(sid, chosen)
 
     def _send_tap(self, sid: str, plan: _Plan) -> Tap:
         tap = plan.tap
         # Nothing is counted and nothing is pending until tap_sent reports
         # that the tap was really sent.
-        self._tried.add((sid, tap.fingerprint))
+        plan = replace(
+            plan,
+            new_full=(sid, tap.fingerprint) not in self._tried,
+            new_bare=plan.bare is not None and plan.bare not in self._bare_tried,
+        )
+        self._mark_tried(sid, tap.fingerprint, plan.bare)
         self._planned = plan
         return tap
+
+    # -- the badge-free tried marks (Policy.replay_path) ----------------------------
+    # A row tried on a screen with a badge ("New") is the same row on that
+    # screen without it, whose id differs. With the switch on, every mark is
+    # also made under the badge-free key of the row (see `_BadgeFree`), and a
+    # row counts as tried when either mark is there. With the switch off `bare`
+    # is None, so only the full-id marks exist, as before. A separate switch for
+    # this part would only have to change where `_next_tap` builds `_BadgeFree`.
+
+    def _mark_tried(
+        self, sid: str, fingerprint: str, bare: tuple[str, str] | None
+    ) -> None:
+        self._tried.add((sid, fingerprint))
+        if bare is not None:
+            self._bare_tried.add(bare)
+
+    def _unmark_tried(self, sid: str, fingerprint: str, plan: _Plan) -> None:
+        if plan.new_full:
+            self._tried.discard((sid, fingerprint))
+        if plan.new_bare and plan.bare is not None:
+            self._bare_tried.discard(plan.bare)
+
+    def _is_tried(
+        self, sid: str, fingerprint: str, bare: tuple[str, str] | None
+    ) -> bool:
+        if (sid, fingerprint) in self._tried:
+            return True
+        if bare is not None and bare in self._bare_tried:
+            # Skipped only because of the badge-free mark: keep the full one.
+            self._tried.add((sid, fingerprint))
+            return True
+        return False
+
+    # -- path replay (Policy.replay_path) -------------------------------------------
+    # The principle: replay presses only (a) rows of the recorded route, each
+    # verified step by step from the root, or (b) untried rows that may be
+    # pressed. If (a) cannot be verified, the route is given up and the crawl
+    # falls back to (b).
+
+    def _note_way(self, sid: str, parent: str, pending: _Pending) -> None:
+        """Remember the first tap that landed on target screen ``sid`` one level
+        below ``parent``, with the element as it was pressed. A tap pressed on
+        the root (path length 2 now, with the root at the bottom) says so; the
+        root itself is never a child."""
+        if not self._policy.replay_path:
+            return
+        if (
+            pending.fingerprint is None
+            or pending.element_id is None
+            or pending.bounds is None
+            or pending.point is None
+        ):
+            return
+        if sid in self._route or sid in (self._root, parent):
+            return
+        self._route[sid] = _Way(
+            parent,
+            pending.fingerprint,
+            pending.element_id,
+            pending.bounds,
+            pending.point,
+            from_root=len(self._path) == 2 and self._path[0] == parent,
+        )
+
+    def _route_to(self, goal: str) -> tuple[_Way, ...] | None:
+        """The taps from the root down to ``goal``, or None.
+
+        Every link is verified: each screen of the chain has the tap that led
+        to it from the screen before, and the first tap was pressed on the
+        root. A chain that does not end at a root tap (unrooted), a loop and a
+        route too long to press on at the goal give None.
+        """
+        ways: list[_Way] = []
+        seen = {goal}
+        here = goal
+        while True:
+            way = self._route.get(here)
+            if way is None:
+                return None  # unrooted: the chain breaks before a root tap
+            ways.append(way)
+            if way.from_root:
+                break
+            if way.parent in seen:
+                return None
+            seen.add(way.parent)
+            here = way.parent
+        # The goal is pressed on only while the path is shorter than the limit.
+        if len(ways) + 1 >= self._limits.depth:
+            return None
+        ways.reverse()
+        return tuple(ways)
+
+    def _start_replay(self, root: str) -> None:
+        """At a new root: choose a goal and the route down to it.
+
+        A goal kept from an earlier replay that has not been reached or
+        dropped comes first; else it is the deepest screen of the path just
+        before the relaunch that still had a row to try. The root itself is
+        never a goal: nothing needs replaying for it. A relaunch that lands
+        directly on the goal (the new root has the goal's id) has reached it:
+        the goal ends there and no route row is pressed.
+        """
+        if not self._policy.replay_path:
+            return
+        prior, self._prior = self._prior, []
+        candidates = [] if self._goal is None else [self._goal]
+        candidates.extend(reversed(prior[1:]))
+        for sid in candidates:
+            if sid in self._replay_dropped or self._untried.get(sid, 0) < 1:
+                continue
+            if sid == root:
+                self._goal = None  # reached: go on with the untried rows
+                return
+            route = self._route_to(sid)
+            if route is not None:
+                self._goal = sid
+                self._replay = _Replay(sid, route)
+                return
+        self._goal = None
+
+    def _replay_step(
+        self,
+        sid: str,
+        judgement: Judgement,
+        prints: _Prints | None,
+        *,
+        bare: _BadgeFree | None,
+        refused_out: bool,
+    ) -> Tap | None:
+        """The next tap of the route, or None after abandoning the replay.
+
+        The element is found by its fingerprint among the elements that judge
+        puts in ``pressable`` on this very screen: exactly one must match, at
+        the recorded bounds and press point. The tap goes through `recheck`
+        like every other.
+        """
+        replay = self._replay
+        if replay is None:
+            return None
+        way = replay.steps[replay.done]
+        before = None if replay.done == 0 else way.parent
+        if (
+            prints is None
+            or refused_out
+            or len(self._path) != replay.done + 1
+            or len(self._path) >= self._limits.depth
+            or (before is not None and sid != before)
+        ):
+            self._abandon_replay()
+            return None
+        found = [
+            d
+            for d in judgement.pressable
+            if d.point is not None and prints.of(d.element) == way.fingerprint
+        ]
+        if len(found) == 1:
+            decision = found[0]
+            shape = prints.shape(decision.element)
+            if (
+                decision.point is not None
+                and decision.point == way.point
+                and tuple(decision.element.bounds.to_list()) == way.bounds
+                and (sid, shape) not in self._volatile
+            ):
+                tap = self._send_tap(
+                    sid,
+                    _Plan(
+                        Tap(sid, decision.element.id, way.fingerprint, decision.point),
+                        decision.element,
+                        prints.descendants(decision.element),
+                        shape,
+                        prints.labels(decision.element),
+                        replay=True,
+                        bare=None
+                        if bare is None
+                        else bare.key_of(decision.element, way.fingerprint),
+                    ),
+                )
+                self._replay_tap = tap
+                return tap
+        self._abandon_replay()
+        return None
+
+    def _replay_landed(self, sid: str, *, on_target: bool) -> None:
+        """A replay tap was sent and led to ``sid``: on the route, or not."""
+        replay = self._replay
+        if replay is None:
+            return
+        if not on_target or sid != replay.expected_after(replay.done):
+            self._abandon_replay()
+        elif replay.done + 1 == len(replay.steps):
+            self._replay = None
+            self._goal = None  # reached
+        else:
+            self._replay = replace(replay, done=replay.done + 1)
+
+    def _abandon_replay(self) -> None:
+        """Stop replaying; the crawl goes on as without a replay, from the
+        screen it is on. The second failure for a goal drops it."""
+        replay, self._replay = self._replay, None
+        if replay is None:
+            return
+        failures = self._replay_fails.get(replay.goal, 0) + 1
+        self._replay_fails[replay.goal] = failures
+        if failures >= MAX_REPLAY_FAILURES:
+            self._replay_dropped.add(replay.goal)
+            self._goal = None
 
     def _add_skip(
         self,

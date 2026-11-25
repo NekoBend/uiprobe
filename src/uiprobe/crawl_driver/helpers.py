@@ -134,6 +134,7 @@ def _plain_policy(policy: Policy) -> Policy:
         ),
         skip_navigate_up=_flag("skip_navigate_up", policy.skip_navigate_up),
         skip_sliders=_flag("skip_sliders", policy.skip_sliders),
+        replay_path=_flag("replay_path", policy.replay_path),
     )
 
 

@@ -42,6 +42,8 @@ version 3 must have both, and an older uiprobe refuses a version 3 file
 (its ``defaults_version`` is out of range there). Version 4 added the rules
 ``skip_navigate_up`` and ``skip_sliders`` (a missing one reads True); a file
 written at version 4 must have both, and an older uiprobe refuses a version 4
+file. Version 5 added the rule ``replay_path`` (a missing one reads True); a
+file written at version 5 must have it, and an older uiprobe refuses a version 5
 file.
 
 ``[deny] except`` holds exception words (see `uiprobe.guards.word_matches`): a
@@ -144,7 +146,7 @@ __all__ = [
 
 SETTINGS_FILE: Final = "uiprobe.toml"
 FORMAT_VERSION: Final = 1
-DEFAULTS_VERSION: Final = 4
+DEFAULTS_VERSION: Final = 5
 MAX_SETTINGS_BYTES: Final = 1024 * 1024
 
 # Every default list item with the defaults version that introduced it. Each
@@ -163,6 +165,7 @@ MAX_SETTINGS_BYTES: Final = 1024 * 1024
 # of its phrases and the rule refuse_irreversible_screens. Version 3 added the
 # rules skip_two_target_rows and skip_rows_with_buttons (no list items).
 # Version 4 added the rules skip_navigate_up and skip_sliders (no list items).
+# Version 5 added the rule replay_path (no list items).
 _LATER_DENY: Final[dict[str, int]] = {
     "やり直": 2,
     "元に戻": 2,
@@ -172,7 +175,7 @@ _LATER_DENY: Final[dict[str, int]] = {
 # The [deny] except list has no built-in words. One added later starts at the
 # next defaults version (raise DEFAULTS_VERSION with it); before that, the
 # test that no default is tagged beyond the current version fails.
-_FIRST_EXCEPT: Final = 5
+_FIRST_EXCEPT: Final = 6
 _LATER_EXCEPT: Final[dict[str, int]] = {}
 _LATER_CONFIRM: Final[dict[str, int]] = {}
 # The [irreversible] table came with version 2, so its items start there.
@@ -225,6 +228,7 @@ _BOOL_RULES: Final = (
     "skip_rows_with_buttons",
     "skip_navigate_up",
     "skip_sliders",
+    "replay_path",
 )
 # table -> key -> (lowest, highest) allowed value
 _INT_RANGES: Final[dict[str, dict[str, tuple[int, int]]]] = {
@@ -252,6 +256,7 @@ _LATER_RULES: Final[dict[str, int]] = {
     "skip_rows_with_buttons": 3,
     "skip_navigate_up": 4,
     "skip_sliders": 4,
+    "replay_path": 5,
 }
 _LATER_RULE_VALUES: Final[dict[str, bool]] = {
     "refuse_irreversible_screens": True,
@@ -259,6 +264,7 @@ _LATER_RULE_VALUES: Final[dict[str, bool]] = {
     "skip_rows_with_buttons": False,
     "skip_navigate_up": True,
     "skip_sliders": True,
+    "replay_path": True,
 }
 _TABLE_KEYS: Final[dict[str, frozenset[str]]] = {
     "deny": frozenset({"words", "except", "remove"}),
@@ -298,7 +304,8 @@ class Settings:
     keyword or by position, still works. ``skip_two_target_rows`` (default
     True) and ``skip_rows_with_buttons`` (default False), added with defaults
     version 3, and ``skip_navigate_up`` and ``skip_sliders`` (both default
-    True), added with defaults version 4, and ``runs_dir`` (default None, an
+    True), added with defaults version 4, ``replay_path`` (default True), added
+    with defaults version 5, and ``runs_dir`` (default None, an
     optional key that needed no new defaults version), follow it for the same
     reason.
     """
@@ -335,6 +342,9 @@ class Settings:
     # The optional top-level key runs_dir: the folder that gets the run
     # folders of a pressing crawl without --out (None: not set).
     runs_dir: str | None = None
+    # Added with defaults version 5, after runs_dir so that a Settings built
+    # by position with the earlier fields keeps working.
+    replay_path: bool = True
 
 
 def _separators() -> str:
@@ -429,6 +439,7 @@ def policy_from_settings(
         skip_rows_with_buttons=settings.skip_rows_with_buttons,
         skip_navigate_up=settings.skip_navigate_up,
         skip_sliders=settings.skip_sliders,
+        replay_path=settings.replay_path,
         refuse_dialog_confirm=settings.refuse_dialog_confirm,
         edges=(
             settings.edge_top_px,
@@ -545,6 +556,12 @@ def render_default_settings() -> str:
         "# Do not press a slider (a seek bar, a rating bar), a row that holds",
         "# one, or anything whose press point lies on one: a tap moves it.",
         "skip_sliders = true",
+        "# After a relaunch, press again the rows pressed before to get back down",
+        "# to a screen that still has rows to try, and count a row seen with and",
+        "# without a badge as one row. false returns both the path replay and the",
+        '# "do not press the same row twice when only a badge changed" behaviour',
+        "# to the earlier behaviour.",
+        "replay_path = true",
         f"min_visible_px = {MIN_VISIBLE_PX}",
         f"edge_top_px = {API36_TOP_PX}",
         f"edge_bottom_px = {API36_BOTTOM_PX}",
@@ -1235,6 +1252,7 @@ def load_settings(path: str | os.PathLike[str]) -> Settings:
         skip_rows_with_buttons=flags["skip_rows_with_buttons"],
         skip_navigate_up=flags["skip_navigate_up"],
         skip_sliders=flags["skip_sliders"],
+        replay_path=flags["replay_path"],
         min_visible_px=sizes["min_visible_px"],
         edge_top_px=sizes["edge_top_px"],
         edge_bottom_px=sizes["edge_bottom_px"],
