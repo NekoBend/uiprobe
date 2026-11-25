@@ -2270,8 +2270,8 @@ def test_settings_built_with_the_earlier_fields_still_work(tmp_path):
         "skip_rows_with_buttons",
         "skip_navigate_up",
         "skip_sliders",
-        "replay_path",
         "runs_dir",
+        "replay_path",
     ]
 
 
@@ -2558,3 +2558,18 @@ def test_policy_replay_path_defaults_on_and_must_be_a_bool():
     assert Policy(replay_path=False).with_deny_words(["zzz"]).replay_path is False
     with pytest.raises(TypeError, match="replay_path must be a bool"):
         Policy(replay_path=1)  # ty: ignore[invalid-argument-type]
+
+
+def test_replay_path_comes_after_runs_dir_so_positional_settings_still_work(tmp_path):
+    names = [f.name for f in dataclasses.fields(settings.Settings)]
+    assert names[-2:] == ["runs_dir", "replay_path"]
+    loaded = load_settings(default_file(tmp_path))
+    # Built by position with every field up to runs_dir, as before version 5:
+    # replay_path takes its default and runs_dir keeps its place.
+    values = [getattr(loaded, name) for name in names[:-1]]
+    by_position = settings.Settings(*values)
+    assert by_position.replay_path is True
+    assert by_position.runs_dir == loaded.runs_dir
+    assert by_position == loaded
+    off = dataclasses.replace(loaded, replay_path=False)
+    assert settings.policy_from_settings(off).replay_path is False

@@ -120,6 +120,7 @@ def test_only_the_listed_action_types_exist() -> None:
         "_Plan",
         "_Replay",
         "_State",
+        "_Way",
     }
     words = ("text", "key", "swipe", "long", "press", "input", "scroll")
     for name in defined:

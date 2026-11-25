@@ -211,8 +211,7 @@ class Transition:
     When the next action is withdrawn (`CrawlEngine.withdraw`), the screen
     seen before it does not count: ``to_screen_id`` is the screen of the
     fresh observation that `next` gets after the withdrawal (a driver's own
-    record may keep the earlier one). ``replay`` is True for a tap that
-    presses an element again to get back down after a relaunch.
+    record may keep the earlier one).
     """
 
     action_id: int
@@ -222,7 +221,6 @@ class Transition:
     fingerprint: str | None = None
     point: tuple[int, int] | None = None
     dump_failed: bool = False
-    replay: bool = False
 
 
 @dataclass(frozen=True, slots=True)

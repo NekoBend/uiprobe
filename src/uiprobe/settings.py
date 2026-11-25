@@ -339,10 +339,12 @@ class Settings:
     skip_rows_with_buttons: bool = False
     skip_navigate_up: bool = True
     skip_sliders: bool = True
-    replay_path: bool = True
     # The optional top-level key runs_dir: the folder that gets the run
     # folders of a pressing crawl without --out (None: not set).
     runs_dir: str | None = None
+    # Added with defaults version 5, after runs_dir so that a Settings built
+    # by position with the earlier fields keeps working.
+    replay_path: bool = True
 
 
 def _separators() -> str:
