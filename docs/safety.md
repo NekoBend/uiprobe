@@ -51,7 +51,7 @@ Details: [Commands](commands.md).
 
 A run folder holds screen text, which may be personal. Two protections exist; the rest is up to you.
 
-- A field with the `password` flag is always written without its text (`"text": ""` and `"hidden": ["text"]`), and `summary.txt` shows `[password field]`. Only the flag decides: an app that shows a code or password in a plain field (a one-time code, a PIN on a custom keypad) is not covered by this.
+- A field with the `password` flag is always written without its text (`"text": ""` and `"hidden": ["text"]`), and `summary.txt` shows `[password field]`. It applies to text in the records only: a screenshot (`--screenshots`) holds pixels, so a password field whose characters the app shows on screen has them in the PNG; `record_text` off refuses screenshots. Only the flag decides: an app that shows a code or password in a plain field (a one-time code, a PIN on a custom keypad) is not covered by this.
 - `record_text = false` (or `--no-record-text`) keeps `text`, `content_desc` and `hint` of every element, and the title of a window that covers a tap, out of the records. Use it when screens may show a code in a plain field. It cannot be used with `--screenshots`, because a picture shows the text.
 - Limit: fingerprints in `skipped.jsonl` and in the records are hashes over an element's texts. A short code (4 to 6 digits) could be recovered from its fingerprint by trying all values, with `record_text` off too. Do not share a run folder of a screen that showed such a code.
 - `uiprobe dump` and the text a dry run prints are not run folders and keep the texts; the same care as for [dumps](#personal-data-in-dumps) applies.
