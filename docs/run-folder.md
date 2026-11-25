@@ -42,6 +42,8 @@ The `screens` folder is made when the first screen file is written.
 
 `element` (in `uiprobe.transition_start/1` and `uiprobe.skip/1`) is written in the form the caller gives: an `Element` is written in its `uiprobe.screen/1` form, and a mapping is written as given. The writer does not check its fields.
 
+To see a run folder as a tree of screens and rows, use `uiprobe tree RUN_DIR` ([Showing a crawl run as a tree](commands.md#showing-a-crawl-run-as-a-tree)); it reads these files and writes none.
+
 ## summary.txt
 
 For each screen that was written, one heading line (package, activity and the screen id, as in the indented tree output of `uiprobe dump`) followed by one line for each clickable element that has a label (its text, or else its content description). After the counts at the top there can be `Note:` lines (quoted and escaped), which `crawl_run()` uses for an error code (`error: adb_error`), for a screen whose screenshot could not be taken, for a launch after which the app was not in front (`... was not in front after launch (PACKAGE)`, also when the start named an activity of another app), for a start whose reply did not come in time (`the reply of am start -W for PACKAGE did not come within 10.0 seconds; whether the app started is unknown, so the run ended`), for a force-stop whose start was not sent (`PACKAGE was force-stopped at the start of the run but not started (REASON)` for the first launch, `PACKAGE was force-stopped but not started again (REASON)` for a relaunch), and for each move of the pinned transport to a new number. Labels come from the app, so they are quoted and escaped the same way as in the indented tree output: control and bidirectional characters appear as `\uXXXX`.

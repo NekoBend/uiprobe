@@ -400,6 +400,7 @@ def _build_parser() -> _Parser:
     _add_launch_parser(commands.add_parser)
     _add_crawl_parser(commands.add_parser)
     _add_diagnose_parser(commands.add_parser)
+    _add_tree_parser(commands.add_parser)
     init = commands.add_parser(
         "init",
         allow_abbrev=False,
@@ -419,6 +420,32 @@ def _build_parser() -> _Parser:
         help=f"where to create the file (default ./{SETTINGS_FILE})",
     )
     return parser
+
+
+def _add_tree_parser(add_parser: Callable[..., argparse.ArgumentParser]) -> None:
+    """The tree command: a run folder shown as a tree."""
+    tree = add_parser(
+        "tree",
+        allow_abbrev=False,
+        help="show a crawl run folder as a tree",
+        description=(
+            "Show what a crawl saw and pressed, as a tree of screens, from the"
+            " files of its run folder. The command reads only that folder: it"
+            " contacts no device and no adb server, and writes no file."
+        ),
+    )
+    tree.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
+    tree.add_argument(
+        "--ids",
+        action="store_true",
+        help="add the screen id and activity to each screen",
+    )
+    tree.add_argument(
+        "--why",
+        action="store_true",
+        help="add the reasons a row was not pressed",
+    )
+    tree.add_argument("run_dir", metavar="RUN_DIR", help="the run folder")
 
 
 def _add_diagnose_parser(add_parser: Callable[..., argparse.ArgumentParser]) -> None:
