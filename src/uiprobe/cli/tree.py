@@ -122,7 +122,7 @@ class _Renderer:
                 below = self.open_screen(target, entry.name)
                 ending = " → 次の画面" if entry.again else ""
         self.lines[-1] += ending + (")" if entry.again else "")
-        return [*extras, *below]
+        return [*below, *extras]
 
     def run(self, sid: str) -> None:
         """List the screen `sid` and everything first reached below it."""

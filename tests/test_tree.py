@@ -1098,7 +1098,10 @@ def test_every_sent_tap_on_a_row_keeps_its_edge(tmp_path, capsys):
     folder.finish()
     _, out, _ = run_tree(capsys, str(folder.path))
     lines = out.splitlines()
-    assert lines[2:4] == ["├─ Network", "│  ├─ (もう一度押した → 次の画面)"]
+    assert lines[2] == "├─ Network"
+    assert lines.index("│  ├─ Info ·") < lines.index(
+        "│  ├─ (もう一度押した → 次の画面)"
+    )
     assert "│  │  └─ [見出し] Version 1" in lines
     assert "│  ├─ (もう一度押した → (同じ画面))" in lines
     assert lines.count("│  ├─ (もう一度押した → 次の画面)") == 1
