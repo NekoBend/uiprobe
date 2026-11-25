@@ -73,11 +73,13 @@ choice. Both are decided by equality, not by where a word came from: a
 settings file lists the built-in words itself, and an added word equal to a
 built-in one is that built-in word.
 
-The default deny words come from four lists: the base list (purchases,
+The default deny words come from five lists: the base list (purchases,
 payments, sending, deleting, signing out and similar), a list of further
 actions such as subscriptions and starting over, the nine words for
 disabling, force-stopping and signing in (``_SETTINGS_DENY_WORDS``), and the
-four words for carts and accounts (``_SHOP_DENY_WORDS``).
+four words for carts and accounts (``_SHOP_DENY_WORDS``), and the sixteen words
+for state-changing verbs of Settings pages such as "Forget" and "Disconnect"
+(``_STATE_DENY_WORDS``, added in defaults version 7).
 
 Known and accepted over-block: because words are substrings, ``Posture``
 matches ``post`` and ``Recorder`` matches ``order``. They are not pressed
@@ -388,6 +390,7 @@ from uiprobe.guards.constants import (  # noqa: F401
     _SHOP_DENY_WORDS,
     _SLIDER_CLASSES,
     _SPACES_RE,
+    _STATE_DENY_WORDS,
     _TEXT_FIELD_PARTS,
     _TOOLBAR_CLASS,
     _TWO_TARGET_DIVIDER,

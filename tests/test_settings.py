@@ -287,6 +287,28 @@ V3_FILE = DATA / "settings_v3.toml"
 # revision 9e322cd, before version 5 existed), unchanged.
 V4_FILE = DATA / "settings_v4.toml"
 V5_FILE = DATA / "settings_v5.toml"
+# The file that `uiprobe init` wrote at defaults version 6 (rendered at
+# revision 425ce46, before version 7 existed), unchanged.
+V6_FILE = DATA / "settings_v6.toml"
+# The version 7 items, pinned like version 1 and 2: the state-changing words.
+V7_DENY = (
+    "切断",
+    "接続を解除",
+    "ペアリングを解除",
+    "オフにする",
+    "取り出",
+    "マウント解除",
+    "リンク解除",
+    "forget",
+    "disconnect",
+    "unpair",
+    "turn off",
+    "revoke",
+    "eject",
+    "unmount",
+    "unlink",
+    "deactivate",
+)
 
 
 def write(tmp_path: Path, text: str | bytes, name: str = SETTINGS_FILE) -> Path:
@@ -316,7 +338,7 @@ def test_the_defaults_round_trip(tmp_path):
     loaded = load_settings(default_file(tmp_path))
     assert loaded.source == tmp_path / SETTINGS_FILE
     assert loaded.format_version == 1
-    assert loaded.defaults_version == CURRENT == 6
+    assert loaded.defaults_version == CURRENT == 7
     assert loaded.press is False
     assert loaded.deny_words == DEFAULT_DENY_WORDS
     assert loaded.deny_exceptions == DEFAULT_DENY_EXCEPTIONS
@@ -346,7 +368,7 @@ def test_the_rendered_file_layout():
     assert text.startswith("# uiprobe settings")
     assert text.endswith("\n")
     assert "\r" not in text
-    assert "format_version = 1\ndefaults_version = 6\n" in text
+    assert "format_version = 1\ndefaults_version = 7\n" in text
     assert "press = false\n" in text
     for table in (
         "[deny]",
@@ -1022,8 +1044,8 @@ def test_numbers_at_the_limits_are_accepted(tmp_path, old, new):
     [
         ("format_version = 1", "format_version = 2", "format_version"),
         ("format_version = 1", "format_version = 0", "format_version"),
-        ("defaults_version = 6", "defaults_version = 0", "defaults_version"),
-        ("defaults_version = 6", "defaults_version = 7", "defaults_version"),
+        ("defaults_version = 7", "defaults_version = 0", "defaults_version"),
+        ("defaults_version = 7", "defaults_version = 8", "defaults_version"),
     ],
 )
 def test_versions_out_of_range_are_refused(tmp_path, old, new, key):
@@ -1821,7 +1843,7 @@ def _digit_limit() -> Iterator[None]:
 def _huge_cases() -> list[tuple[str, str, str]]:
     cases = [
         ("format_version = 1", f"format_version = {HUGE}", "format_version"),
-        ("defaults_version = 6", f"defaults_version = {HUGE}", "defaults_version"),
+        ("defaults_version = 7", f"defaults_version = {HUGE}", "defaults_version"),
     ]
     for old, key in [
         ("min_visible_px = 8", "min_visible_px"),
@@ -2111,16 +2133,19 @@ def test_the_generated_file_holds_the_version_2_values_plus_the_later_keys():
     # (tests/data/settings_v2.toml), plus the empty except list and, with
     # version 3, the two row rules and, with version 4, the up-button and
     # slider rules and, with version 5, the replay rule and, with version 6, the
-    # record_text key.
+    # record_text key and, with version 7, the state-changing deny words.
     current = tomllib.loads(render_default_settings())
     assert current["deny"].pop("except") == []
-    assert current.pop("defaults_version") == 6
+    assert current.pop("defaults_version") == 7
     assert current.pop("record_text") is True
     assert current["rules"].pop("replay_path") is True
     assert current["rules"].pop("skip_two_target_rows") is True
     assert current["rules"].pop("skip_rows_with_buttons") is False
     assert current["rules"].pop("skip_navigate_up") is True
     assert current["rules"].pop("skip_sliders") is True
+    words = current["deny"]["words"]
+    assert tuple(words[-len(V7_DENY) :]) == V7_DENY
+    del words[-len(V7_DENY) :]
     older = tomllib.loads(v2_text())
     assert older.pop("defaults_version") == 2
     assert current == older
@@ -2315,7 +2340,7 @@ def test_a_current_file_gives_the_row_rules_as_written(tmp_path):
         .replace("skip_rows_with_buttons = false", "skip_rows_with_buttons = true")
     )
     loaded = load_settings(write(tmp_path, text))
-    assert loaded.defaults_version == 6
+    assert loaded.defaults_version == 7
     assert (loaded.skip_two_target_rows, loaded.skip_rows_with_buttons) == (False, True)
     policy = settings.policy_from_settings(loaded)
     assert (policy.skip_two_target_rows, policy.skip_rows_with_buttons) == (False, True)
@@ -2332,7 +2357,7 @@ def test_a_current_file_needs_the_row_rules(tmp_path, key):
 
 def test_the_generated_file_writes_both_row_rules():
     text = render_default_settings()
-    assert "defaults_version = 6\n" in text
+    assert "defaults_version = 7\n" in text
     rules = text.split("[rules]\n")[1].split("[limits]")[0]
     assert "skip_two_target_rows = true\n" in rules
     assert "skip_rows_with_buttons = false\n" in rules
@@ -2343,9 +2368,9 @@ def test_a_newer_defaults_version_is_refused_with_its_number(tmp_path):
     # What an older uiprobe says about a file that `uiprobe init` writes now
     # (the message of the defaults_version range check names both numbers).
     text = render_default_settings().replace(
-        "defaults_version = 6", "defaults_version = 7"
+        "defaults_version = 7", "defaults_version = 8"
     )
-    refused(write(tmp_path, text), "defaults_version", "must be from 1 to 6, not 7")
+    refused(write(tmp_path, text), "defaults_version", "must be from 1 to 7, not 8")
 
 
 def test_version_3_added_no_list_defaults():
@@ -2385,7 +2410,7 @@ def test_the_version_3_file_loads_as_the_current_defaults(tmp_path):
     (tmp_path / "now").mkdir()
     current = load_settings(default_file(tmp_path / "now"))
     assert (
-        dataclasses.replace(loaded, source=current.source, defaults_version=6)
+        dataclasses.replace(loaded, source=current.source, defaults_version=7)
         == current
     )
 
@@ -2480,7 +2505,7 @@ def test_the_version_4_file_loads_as_the_current_defaults(tmp_path):
     (tmp_path / "now").mkdir()
     current = load_settings(default_file(tmp_path / "now"))
     assert (
-        dataclasses.replace(loaded, source=current.source, defaults_version=6)
+        dataclasses.replace(loaded, source=current.source, defaults_version=7)
         == current
     )
 
@@ -2602,7 +2627,7 @@ def test_the_version_5_file_loads_as_the_current_defaults(tmp_path):
     (tmp_path / "now").mkdir()
     current = load_settings(default_file(tmp_path / "now"))
     assert (
-        dataclasses.replace(loaded, source=current.source, defaults_version=6)
+        dataclasses.replace(loaded, source=current.source, defaults_version=7)
         == current
     )
 
@@ -2622,10 +2647,10 @@ def test_an_older_file_may_turn_record_text_off(tmp_path, version):
     assert loaded.record_text is False
 
 
-def test_the_generated_file_is_version_6_and_writes_record_text_on_top():
+def test_the_generated_file_is_the_current_version_and_writes_record_text_on_top():
     text = render_default_settings()
-    assert settings.DEFAULTS_VERSION == 6
-    assert "defaults_version = 6\n" in text
+    assert settings.DEFAULTS_VERSION == 7
+    assert "defaults_version = 7\n" in text
     top = text.split("[deny]")[0]
     assert "record_text = true\n" in top
     assert tomllib.loads(text)["record_text"] is True
@@ -2647,7 +2672,7 @@ def test_a_version_6_file_gives_record_text_as_written(tmp_path):
     )
     loaded = load_settings(write(tmp_path, text))
     assert loaded.record_text is False
-    assert loaded.defaults_version == 6
+    assert loaded.defaults_version == 7
 
 
 @pytest.mark.parametrize("value", ["1", '"false"', "0", "[]"])
@@ -2678,8 +2703,83 @@ def test_version_6_added_no_list_defaults():
             item for version, item in getattr(settings, table) if version == 6
         ] == []
     assert settings._LATER_TOP == {"record_text": 6}
-    assert settings._FIRST_EXCEPT == 7
+    assert settings._FIRST_EXCEPT == 8
 
 
 def test_record_text_is_not_a_policy_field():
     assert "record_text" not in {f.name for f in dataclasses.fields(guards.Policy)}
+
+
+# -- the state-changing deny words (defaults version 7) ------------------------------
+
+
+def v6_text() -> str:
+    text = V6_FILE.read_text(encoding="utf-8")
+    assert "defaults_version = 6\n" in text
+    assert "record_text = true\n" in text
+    assert '"forget"' not in text
+    return text
+
+
+def test_the_version_7_defaults_are_pinned():
+    version_7 = tuple(item for version, item in settings._DENY_WORDS if version == 7)
+    assert version_7 == V7_DENY
+    for table in (
+        "_DENY_EXCEPTIONS",
+        "_CONFIRM_WORDS",
+        "_IRREVERSIBLE_PHRASES",
+        "_REFUSE_KEYS",
+        "_REFUSE_PREFIXES",
+    ):
+        assert [
+            item for version, item in getattr(settings, table) if version == 7
+        ] == []
+    assert settings._FIRST_EXCEPT == 8
+
+
+def test_the_generated_file_lists_the_version_7_words(tmp_path):
+    loaded = load_settings(default_file(tmp_path))
+    assert loaded.defaults_version == 7
+    for word in V7_DENY:
+        assert word in loaded.deny_words
+
+
+def test_a_version_6_file_gets_the_version_7_words(tmp_path):
+    loaded = load_settings(write(tmp_path, v6_text()))
+    assert loaded.defaults_version == 6
+    assert loaded.warnings == ()
+    for word in V7_DENY:
+        assert word in loaded.deny_words
+    assert set(loaded.deny_words) == set(DEFAULT_DENY_WORDS)
+    (tmp_path / "now").mkdir()
+    current = load_settings(default_file(tmp_path / "now"))
+    assert (
+        dataclasses.replace(loaded, source=current.source, defaults_version=7)
+        == current
+    )
+    policy = settings.policy_from_settings(loaded)
+    assert "forget" in policy.deny_words
+
+
+@pytest.mark.parametrize("version", [1, 2, 3, 4, 5])
+def test_an_older_file_gets_the_version_7_words(tmp_path, version):
+    loaded = load_settings(write(tmp_path, all_older_texts()[version - 1]()))
+    assert loaded.defaults_version == version
+    for word in V7_DENY:
+        assert word in loaded.deny_words
+
+
+def test_a_version_6_file_keeps_a_removed_version_7_word_out(tmp_path):
+    text = v6_text().replace("remove = []", 'remove = ["Forget"]', 1)  # deny
+    loaded = load_settings(write(tmp_path, text))
+    assert "forget" not in loaded.deny_words
+    for word in V7_DENY:
+        if word != "forget":
+            assert word in loaded.deny_words
+
+
+def test_a_version_7_file_without_a_version_7_word_does_not_get_it_back(tmp_path):
+    text = render_default_settings().replace('    "forget",\n', "", 1)
+    assert '"forget"' not in text
+    loaded = load_settings(write(tmp_path, text))
+    assert "forget" not in loaded.deny_words
