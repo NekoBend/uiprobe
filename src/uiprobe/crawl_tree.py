@@ -568,9 +568,9 @@ class _Moves:
 def _rank(tap: _Tap) -> int:
     """Which tap stands for an element: sent and read first, then one whose
     delivery is unknown, then one that was not sent."""
-    if _not_sent(tap):
-        return 2
-    return 1 if _unknown(tap) else 0
+    if _unknown(tap):
+        return 1
+    return 2 if _not_sent(tap) else 0
 
 
 def _end_is_valid(end: dict[str, object]) -> bool:
@@ -592,18 +592,24 @@ class _Lines:
     # per action: the package of an off_target start line that comes right
     # after its end line, decided on the screen that end line names
     off_after: dict[int, str] = field(default_factory=dict)
-    # actions whose record cannot be trusted: a repeated start line, or a
-    # damaged line between their start and end or right after their end
+    # actions whose record cannot be trusted (see `_transition_lines`)
     ambiguous: set[int] = field(default_factory=set)
 
 
 def _transition_lines(base: Path, warnings: _Warnings) -> _Lines:
-    """Read transitions.jsonl in physical order (a damaged line counts as a
-    line when deciding what is adjacent)."""
+    """Read transitions.jsonl in physical order and decide which actions can be
+    trusted. One rule: an action is trusted only when it has exactly one start
+    line and exactly one end line, the start comes before the end, and no
+    damaged or non-record line sits between them or on the one line right after
+    the end (the line that off_target evidence comes from). Any other action is
+    ambiguous: its result is unknown."""
     found = _Lines()
-    open_actions: set[int] = set()
+    start_at: dict[int, list[int]] = {}
+    end_at: dict[int, list[int]] = {}
+    bad: list[int] = []
+    explained: set[int] = set()
     previous_end: tuple[int, str | None] | None = None
-    for line in _lines(base / "transitions.jsonl", warnings):
+    for index, line in enumerate(_lines(base / "transitions.jsonl", warnings), 1):
         follows, previous_end = previous_end, None
         action_id = _action_id(line.get("action_id")) if line is not None else None
         schema = line.get("schema") if line is not None else None
@@ -611,35 +617,66 @@ def _transition_lines(base: Path, warnings: _Warnings) -> _Lines:
             line is None
             or action_id is None
             or schema not in ("uiprobe.transition_start/1", "uiprobe.transition_end/1")
+            or (
+                schema == "uiprobe.transition_start/1"
+                and not isinstance(line.get("action"), dict)
+            )
         ):
             if line is not None:
                 warnings.append("transitions.jsonl has a line that is not a transition")
-            found.ambiguous.update(open_actions)
-            if follows:
-                found.ambiguous.add(follows[0])
+            bad.append(index)
         elif schema == "uiprobe.transition_start/1":
-            if action_id in found.starts:
-                found.ambiguous.add(action_id)
-            else:
+            if action_id not in found.starts:
                 found.order.append(action_id)
-            found.starts[action_id] = line
-            open_actions.add(action_id)
+                found.starts[action_id] = line
+            start_at.setdefault(action_id, []).append(index)
             _note_off(found, line, follows)
-        elif _end_is_valid(line):
-            found.ends[action_id] = line
-            open_actions.discard(action_id)
-            previous_end = (action_id, _screen_id(line.get("to_screen_id")))
         else:
-            warnings.append(
-                f"action {action_id} has an end line that is not understood,"
-                " so its result is unknown"
-            )
-    for action_id in found.ambiguous:
+            end_at.setdefault(action_id, []).append(index)
+            if _end_is_valid(line):
+                found.ends.setdefault(action_id, line)
+                previous_end = (action_id, _screen_id(line.get("to_screen_id")))
+            else:
+                explained.add(action_id)
+                found.ambiguous.add(action_id)
+                warnings.append(
+                    f"action {action_id} has an end line that is not understood,"
+                    " so its result is unknown"
+                )
+    _judge(found, start_at, end_at, bad)
+    for action_id in sorted(found.ambiguous - explained):
         warnings.append(
-            f"action {action_id} has a repeated start line or a damaged line"
-            " next to it, so its result is unknown"
+            f"action {action_id} has repeated, misplaced or interrupted lines,"
+            " so its result is unknown"
         )
+    for action_id in sorted(set(end_at) - set(found.starts)):
+        warnings.append(f"action {action_id} has an end line but no start line")
     return found
+
+
+def _judge(
+    found: _Lines,
+    start_at: dict[int, list[int]],
+    end_at: dict[int, list[int]],
+    bad: list[int],
+) -> None:
+    """Mark the actions that break the rule of `_transition_lines`."""
+    damaged = set(bad)
+    for action_id in found.order:
+        starts = start_at[action_id]
+        ends = end_at.get(action_id, [])
+        if not ends and len(starts) == 1:
+            continue  # no end line: unknown already, nothing else to say
+        first, last = starts[0], ends[-1] if ends else 0
+        inside = any(first < b < ends[0] for b in bad) if len(ends) == 1 else False
+        if (
+            len(starts) != 1
+            or len(ends) != 1
+            or first > last
+            or inside
+            or (last + 1) in damaged
+        ):
+            found.ambiguous.add(action_id)
 
 
 def _note_off(
@@ -662,7 +699,6 @@ def _read_moves(base: Path, warnings: _Warnings) -> _Moves:
         start_line = lines.starts[action_id]
         action = start_line.get("action")
         if not isinstance(action, dict):
-            warnings.append(f"action {action_id} has no action record")
             continue
         end = lines.ends.get(action_id)
         kind = action.get("kind")
@@ -684,7 +720,7 @@ def _read_moves(base: Path, warnings: _Warnings) -> _Moves:
 
 def _sent_target(tap: _Tap) -> str | None:
     """The screen a sent tap led to, if its end line names one."""
-    if tap.end is None or tap.end.get("dump_failed") is True:
+    if _unknown(tap) or tap.end is None or tap.end.get("dump_failed") is True:
         return None
     return _screen_id(tap.end.get("to_screen_id"))
 
@@ -927,7 +963,9 @@ def _led_to(
     # app's screens). Say so only when the line right after this action's end
     # line is a start line decided on this very screen with `off_target`.
     if action_id in moves.off_after:
-        return {"other_app": moves.off_after[action_id]}
+        named = moves.off_after[action_id]
+        # Another app only when the package differs from the run's own.
+        return {"unknown": True} if named == package else {"other_app": named}
     return {"not_read": True}
 
 

@@ -1348,7 +1348,7 @@ def test_a_damaged_line_after_the_end_makes_the_tap_unknown(tmp_path, capsys):
     assert code == 0
     assert "├─ Network → (結果不明)" in out.splitlines()
     assert "別のアプリ" not in out
-    assert "action 1 has a repeated start line or a damaged line" in err
+    assert "action 1 has repeated, misplaced or interrupted lines" in err
 
 
 def test_a_damaged_line_between_start_and_end_makes_the_tap_unknown(tmp_path, capsys):
@@ -1399,3 +1399,115 @@ def test_the_settings_limit_is_read_when_the_reader_runs(tmp_path, monkeypatch):
     with pytest.raises(settings.SettingsError, match="larger than 5 bytes"):
         settings._read_bytes(path, "f")
     assert settings._read_bytes(path, "f", 10) == b"x" * 10
+
+
+# --- the one rule for a trusted tap ---
+
+
+def _no_action(_sid, _tap):
+    return {}
+
+
+def _tap_end_ok(sid, _tap):
+    return {"dump_failed": False, "to_screen_id": sid}
+
+
+def _tap_end_not_sent(_sid, _tap):
+    return {"not_sent": True, "reason": "covered_by_other"}
+
+
+def _relaunch_same_package(_sid, _tap):
+    return {
+        "action": {"kind": "relaunch"},
+        "from_screen_id": OTHER_SCREEN,
+        "off_target": {"package": PACKAGE},
+    }
+
+
+def _unknown_and_no_edge(tmp_path, capsys, lines):
+    path, home_id = _raw_run(tmp_path, lines)
+    code, out, _ = run_tree(capsys, str(path))
+    assert code == 0
+    assert "├─ Network → (結果不明)" in out.splitlines()
+    _, out, _ = run_tree(capsys, str(path), "--json")
+    data = json.loads(out)
+    network = next(
+        e for e in data["screens"][home_id]["elements"] if e["name"] == "Network"
+    )
+    assert network["to"] == {"unknown": True}
+    assert network["pressed"] is False
+    return data
+
+
+def test_an_end_before_its_start_is_unknown(tmp_path, capsys):
+    _unknown_and_no_edge(
+        tmp_path, capsys, [("E", 1, _tap_end_ok), ("S", 1, _tap_start)]
+    )
+
+
+def test_two_end_lines_are_unknown_even_if_one_is_not_sent(tmp_path, capsys):
+    _unknown_and_no_edge(
+        tmp_path,
+        capsys,
+        [
+            ("S", 1, _tap_start),
+            ("E", 1, _tap_end_not_sent),
+            ("E", 1, _tap_end_ok),
+        ],
+    )
+
+
+def test_a_not_sent_end_is_not_sent_only_when_the_rule_holds(tmp_path, capsys):
+    path, _ = _raw_run(tmp_path, [("S", 1, _tap_start), ("E", 1, _tap_end_not_sent)])
+    _, out, _ = run_tree(capsys, str(path))
+    assert "├─ Network → (送らなかった: covered_by_other)" in out.splitlines()
+    path2 = tmp_path / "second"
+    path2.mkdir()
+    path, _ = _raw_run(
+        path2,
+        [("S", 1, _tap_start), b"{broken", ("E", 1, _tap_end_not_sent)],
+    )
+    _, out, _ = run_tree(capsys, str(path))
+    assert "├─ Network → (結果不明)" in out.splitlines()
+
+
+def test_a_start_line_without_action_next_to_a_tap_makes_it_unknown(tmp_path, capsys):
+    _unknown_and_no_edge(
+        tmp_path,
+        capsys,
+        [("S", 1, _tap_start), ("E", 1, _tap_end_other), ("S", 2, _no_action)],
+    )
+
+
+def test_off_target_naming_the_target_package_is_unknown(tmp_path, capsys):
+    _unknown_and_no_edge(
+        tmp_path,
+        capsys,
+        [
+            ("S", 1, _tap_start),
+            ("E", 1, _tap_end_other),
+            ("S", 2, _relaunch_same_package),
+        ],
+    )
+
+
+def test_an_unknown_tap_gives_its_destination_no_edge(tmp_path, capsys):
+    folder = Folder(tmp_path)
+    home = home_screen()
+    home_id = folder.screen(home)
+    about_id = folder.screen(ABOUT)
+    folder.start("launch")
+    folder.end(home_id)
+    folder.tap(home, 3, about_id)
+    folder.writer.close()
+    _append(
+        folder.path / "transitions.jsonl",
+        {"schema": "uiprobe.transition_end/1", "action_id": 2, "not_sent": True},
+    )
+    _, out, _ = run_tree(capsys, str(folder.path), "--json")
+    data = json.loads(out)
+    network = next(
+        e for e in data["screens"][home_id]["elements"] if e["name"] == "Network"
+    )
+    assert network["to"] == {"unknown": True}
+    assert about_id in data["unreached"]  # no edge led there

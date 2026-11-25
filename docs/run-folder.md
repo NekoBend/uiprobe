@@ -62,6 +62,13 @@ When an interrupt does reach a write, the writer marks itself as failed and refu
 
 A program with the run folder's own rights can swap a file or folder for a link between uiprobe's checks and its read; this is outside what the command guards against (`uiprobe tree` checks the files it reads, see [Showing a crawl run as a tree](commands.md#showing-a-crawl-run-as-a-tree)).
 
+What `uiprobe tree` still does not close:
+
+- Very large output below the file caps (a 64 MiB log of many short taps, or a screen file of 8 MiB, still makes a long tree or JSON).
+- A skip line with a very large number of reasons is parsed slowly (it is within the file cap).
+- A panel that became clickable on a revisit under the same screen id can hide its child heading, because the screen file shows the first reading.
+- `unreached` is decided from the taps that count as sent. The destination of an unknown tap gets no edge from it, so whether that screen is listed in `unreached` depends on the other taps, not on the unknown one.
+
 Files and folders are only ever created new: an existing file is never opened. But if another program running with the same rights replaces the run folder or the `screens` folder with a link (or, on Windows, a junction) during a run, later new files can be created where that link points. uiprobe does not defend against such a program, which could just as well write there itself. That reasoning holds only when the other program has the same rights. If you run uiprobe with higher rights (as an administrator or root), choose a parent folder that only that account can open, on a path where no other user can rename or replace any folder (every folder above it must be protected too), not a shared folder such as a common temporary folder: a program with lower rights could otherwise move where uiprobe creates its new files. The run folder itself is made private (see Rules), but on Python 3.12.0 to 3.12.3 on Windows that does not apply.
 
 The same holds for a program that appends to `transitions.jsonl` or `skipped.jsonl` during a run: the writer keeps its own position in the file, so its next line can overwrite what was appended. The writer assumes it is the only one writing into its run folder.
