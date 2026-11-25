@@ -443,7 +443,7 @@ def test_a_failed_identity_read_on_the_last_poll_still_ends_the_launch(
     # The read at the deadline proves the device again after a failed
     # identity read and finds another app in front: launch_interrupted, not
     # not_in_front (on which a crawl would go on to a relaunch).
-    from tests.test_launch import OK_36
+    from tests.device.launch.helpers import OK_36
 
     device = pinned(fake_adb)
     Waits(device, [])
