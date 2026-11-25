@@ -935,8 +935,12 @@ def _close_quietly(fd: int) -> None:
         return  # nothing is lost by failing to close a read-only descriptor
 
 
-def _read_bytes(path: str | os.PathLike[str], shown: str) -> bytes:
-    """Read the settings file `path` (at most one byte more than the limit).
+def _read_bytes(
+    path: str | os.PathLike[str], shown: str, limit: int = MAX_SETTINGS_BYTES
+) -> bytes:
+    """Read the file `path` (at most one byte more than `limit`, which is the
+    settings limit unless the caller gives another; `uiprobe tree` reads its
+    run folder files through here).
 
     The path is opened once, as given (a str is not normalised, so a trailing
     ``/.`` after a file fails as it does for any program); every check and
@@ -964,24 +968,27 @@ def _read_bytes(path: str | os.PathLike[str], shown: str) -> bytes:
             raise fail("not a regular file") from None
         raise fail(f"cannot be read: {_shown(str(error))}") from None
     try:
-        return _read_descriptor(fd, path, fail)
+        return _read_descriptor(fd, path, fail, limit)
     finally:
         _close_quietly(fd)
 
 
 def _read_descriptor(
-    fd: int, path: str | os.PathLike[str], fail: Callable[[str], SettingsError]
+    fd: int,
+    path: str | os.PathLike[str],
+    fail: Callable[[str], SettingsError],
+    cap: int = MAX_SETTINGS_BYTES,
 ) -> bytes:
     changed = "the file changed while it was read; try again"
     try:
         before = os.fstat(fd)
         if not stat.S_ISREG(before.st_mode):
             raise fail("not a regular file")
-        if before.st_size > MAX_SETTINGS_BYTES:
-            raise fail(f"larger than {MAX_SETTINGS_BYTES} bytes")
+        if before.st_size > cap:
+            raise fail(f"larger than {cap} bytes")
         chunks: list[bytes] = []
         total = 0
-        limit = MAX_SETTINGS_BYTES + 1
+        limit = cap + 1
         while total < limit:
             chunk = os.read(fd, min(_READ_CHUNK, limit - total))
             if not chunk:
@@ -993,8 +1000,8 @@ def _read_descriptor(
         raise  # a refusal above is already worded; do not wrap it again
     except (OSError, ValueError) as error:
         raise fail(f"cannot be read: {_shown(str(error))}") from None
-    if total > MAX_SETTINGS_BYTES:
-        raise fail(f"larger than {MAX_SETTINGS_BYTES} bytes")
+    if total > cap:
+        raise fail(f"larger than {cap} bytes")
     if total != before.st_size or _file_identity(after) != _file_identity(before):
         raise fail(changed)
     try:

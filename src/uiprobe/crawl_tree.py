@@ -26,6 +26,8 @@ from typing import Final
 
 from uiprobe.crawl import fingerprint_of
 from uiprobe.model import Bounds, Element, Screen
+from uiprobe.settings import SettingsError
+from uiprobe.settings import _read_bytes as _read_capped
 
 __all__ = [
     "TREE_SCHEMA",
@@ -45,6 +47,12 @@ _SCREEN_ID: Final = re.compile(r"s-[0-9a-f]{12}")
 MAX_LOG_BYTES: Final = 64 * 1024 * 1024
 MAX_FILE_BYTES: Final = 8 * 1024 * 1024
 MAX_WARNINGS: Final = 20
+# At most this many texts are kept for a row, and this many elements are looked
+# at below it, so nested clickables cannot multiply the work.
+MAX_ROW_TEXTS: Final = 50
+_MAX_MEMBERS: Final = 500
+_MAX_FINGERPRINTED: Final = 5000
+_READ_CHUNK: Final = 65536
 _EPOCH: Final = datetime(1970, 1, 1, tzinfo=UTC)
 _PASSWORD_NAME: Final = "[password field]"  # noqa: S105 (a marker, not a secret)
 
@@ -65,7 +73,9 @@ class Row:
     ``to`` is the ending of a tap that was attempted: ``{"screen_id": ...}``,
     ``{"same_screen": True}``, ``{"other_app": package or None}``,
     ``{"not_read": True}`` or ``{"not_sent": reason}``; None when no tap on
-    this row is recorded. A row whose tap was not sent is not ``pressed``.
+    this row is recorded; ``unknown`` is a tap with no usable end line. A row
+    whose tap was not sent, or is unknown, is not ``pressed``. ``also_to`` holds
+    the other endings of further sent taps on the same element.
     """
 
     element_id: str
@@ -77,6 +87,7 @@ class Row:
     pressed: bool = False
     action_id: int | None = None
     to: Ending | None = None
+    also_to: list[Ending] = field(default_factory=list)
     reasons: tuple[str, ...] = ()
 
 
@@ -126,11 +137,38 @@ class _UnreadableError(Exception):
 def _read_bytes(path: Path, limit: int) -> bytes:
     """Read a regular file inside the run folder, never following a link.
 
+    The file is checked by `lstat` (not a link, a regular file, one name only,
+    not over `limit`), then read through the settings reader, which opens it
+    once with read-only flags (a FIFO does not block), checks the open
+    descriptor and reads at most `limit` + 1 bytes; then `lstat` must show the
+    same file again, so a link put in between is refused.
+
     Raises:
         FileNotFoundError: Nothing is there.
-        _UnreadableError: A link, a file that is not regular (a FIFO, a folder), a
-            file over `limit` bytes, or a read error.
+        _UnreadableError: A link, a file that is not regular (a FIFO, a
+            folder), a hard link, a file over `limit` bytes, or a read error.
     """
+    before = _checked(path, limit)
+    try:
+        data = _read_capped(path, path.name, limit)
+    except SettingsError as exc:
+        text = str(exc).removeprefix(f"{path.name}: ")
+        if text.startswith("larger than"):
+            text = _over(limit)
+        raise _UnreadableError(text) from None
+    after = _checked(path, limit)
+    if (after.st_ino, after.st_dev) != (before.st_ino, before.st_dev):
+        raise _UnreadableError("changed while it was read")
+    return data
+
+
+def _over(limit: int) -> str:
+    return f"is over {limit // (1024 * 1024)} MiB, so it is skipped"
+
+
+def _checked(path: Path, limit: int) -> os.stat_result:
+    """`lstat` of `path`, refused when it is a link, not a regular file, a hard
+    link or over `limit` bytes."""
     try:
         before = os.lstat(path)
     except FileNotFoundError:
@@ -141,23 +179,11 @@ def _read_bytes(path: Path, limit: int) -> bytes:
         raise _UnreadableError("is a link, which is not followed")
     if not stat.S_ISREG(before.st_mode):
         raise _UnreadableError("is not a regular file")
+    if before.st_nlink > 1:
+        raise _UnreadableError("has more than one name (a hard link), so it is skipped")
     if before.st_size > limit:
-        raise _UnreadableError(
-            f"is over {limit // (1024 * 1024)} MiB, so it is skipped"
-        )
-    # Checked by lstat just before the read, not at the open itself: the guard
-    # of the sources allows no read-only open here. A program with the run
-    # folder's own rights could swap the file in between; it could as well read
-    # the target itself.
-    try:
-        data = path.read_bytes()
-    except OSError as exc:
-        raise _UnreadableError(exc.strerror or "cannot be read") from None
-    if len(data) > limit:
-        raise _UnreadableError(
-            f"is over {limit // (1024 * 1024)} MiB, so it is skipped"
-        )
-    return data
+        raise _UnreadableError(_over(limit))
+    return before
 
 
 def _loads(data: bytes) -> object:
@@ -176,9 +202,9 @@ def _read_json(path: Path) -> object:
 
 
 def _is_folder(path: Path) -> bool:
-    """Whether `path` is a real folder, not a link to one."""
+    """Whether `path` is a real folder, not a link or a Windows junction."""
     try:
-        return stat.S_ISDIR(os.lstat(path).st_mode)
+        return stat.S_ISDIR(os.lstat(path).st_mode) and not os.path.isjunction(path)
     except OSError:
         return False
 
@@ -223,34 +249,43 @@ def _action_id(value: object) -> int | None:
 
 
 class _Reader:
-    """Loads screen files on demand, once each."""
+    """Loads screen files on demand, once each, by the names the folder lists."""
 
     def __init__(self, run_dir: Path, warnings: list[str]) -> None:
         self._dir = run_dir / "screens"
         self._warnings = warnings
+        self._cache: dict[str, tuple[Screen, str, str | None] | None] = {}
+        self.names: dict[str, str] = {}
         if os.path.lexists(self._dir) and not _is_folder(self._dir):
             warnings.append("screens is a link or not a folder, so it is not read")
-            self.usable = False
-        else:
-            self.usable = True
-        self._cache: dict[str, tuple[Screen, str, str | None] | None] = {}
+        elif _is_folder(self._dir):
+            try:
+                listed = [f.name for f in self._dir.iterdir()]
+            except OSError:
+                listed = []
+                warnings.append("screens cannot be listed")
+            # screen id -> the exact file name found in the listing
+            self.names = {
+                name[:-5]: name
+                for name in listed
+                if name.endswith(".json") and _SCREEN_ID.fullmatch(name[:-5])
+            }
 
     def load(self, screen_id: str) -> tuple[Screen, str, str | None] | None:
         """The screen, its package and its activity, or None when no usable file."""
         if screen_id in self._cache:
             return self._cache[screen_id]
-        if not self.usable:
-            return None
         found: tuple[Screen, str, str | None] | None = None
-        path = self._dir / f"{screen_id}.json"
-        try:
-            found = _parse_screen(_read_json(path))
-        except FileNotFoundError:
-            pass
-        except _UnreadableError as exc:
-            self._warnings.append(f"screens/{screen_id}.json {exc}")
-        except (ValueError, KeyError, TypeError, AttributeError, OverflowError):
-            self._warnings.append(f"screens/{screen_id}.json cannot be read")
+        name = self.names.get(screen_id)
+        if name is not None:
+            try:
+                found = _parse_screen(_read_json(self._dir / name))
+            except FileNotFoundError:
+                pass
+            except _UnreadableError as exc:
+                self._warnings.append(f"screens/{name} {exc}")
+            except (ValueError, KeyError, TypeError, AttributeError, OverflowError):
+                self._warnings.append(f"screens/{name} cannot be read")
         self._cache[screen_id] = found
         return found
 
@@ -349,10 +384,11 @@ def _rows_of(
         if element.parent in index:
             up = index[element.parent]  # type: ignore[index]
             under_row[i] = is_row[up] or under_row[up]
+    own = [e.text.strip() for e in elements]  # each element's text, once
     rows: list[Row] = []
     for i, element in enumerate(elements):
         if is_row[i]:
-            rows.append(_row(screen, i, children, record_text=record_text))
+            rows.append(_row(screen, i, children, own, record_text=record_text))
         elif not under_row[i]:
             heading = _heading(element, record_text=record_text)
             if heading is not None:
@@ -361,37 +397,50 @@ def _rows_of(
 
 
 def _subtree(i: int, children: dict[str, list[int]], screen: Screen) -> list[int]:
+    """The element and what is below it, in document order, at most
+    `_MAX_MEMBERS` of them (a parent cycle cannot loop either)."""
     found = [i]
     seen = {i}
     stack = [i]
-    while stack:
+    while stack and len(found) < _MAX_MEMBERS:
         for child in children.get(screen.elements[stack.pop()].id, []):
-            if child not in seen:  # a parent cycle must not loop
+            if child not in seen:
                 seen.add(child)
                 found.append(child)
                 stack.append(child)
-    return sorted(found)
+    return sorted(found)[:_MAX_MEMBERS]
 
 
 def _row(
-    screen: Screen, i: int, children: dict[str, list[int]], *, record_text: bool
+    screen: Screen,
+    i: int,
+    children: dict[str, list[int]],
+    own: list[str],
+    *,
+    record_text: bool,
 ) -> Row:
     element = screen.elements[i]
-    members = [screen.elements[j] for j in _subtree(i, children, screen)]
+    members = _subtree(i, children, screen)
     short = _short_class(element.class_name)
-    password = any("password" in m.flags for m in members)
-    if password:
+    if any("password" in screen.elements[j].flags for j in members):
         return _row_of(element, "row", _PASSWORD_NAME, (), hidden=True)
     if not record_text:
         marker = "icon" if len(members) == 1 else "row"
         return _row_of(element, "row", f"[{marker}: {short}]", (), hidden=True)
-    texts = tuple(m.text.strip() for m in members if m.text.strip())
+    texts: list[str] = []
+    for j in members:
+        if own[j]:
+            texts.append(own[j])
+            if len(texts) >= MAX_ROW_TEXTS:
+                break
     if texts:
         name = texts[0]
     else:
-        described = [m.content_desc.strip() for m in members if m.content_desc.strip()]
+        described = [
+            d for j in members if (d := screen.elements[j].content_desc.strip())
+        ]
         name = f'"{described[0]}"' if described else f"[icon: {short}]"
-    return _row_of(element, "row", name, texts, hidden=False)
+    return _row_of(element, "row", name, tuple(texts), hidden=False)
 
 
 def _heading(element: Element, *, record_text: bool) -> Row | None:
@@ -422,8 +471,12 @@ def _read_start(base: Path) -> dict[str, object]:
     except ValueError:
         msg = "run-start.json is not valid UTF-8 JSON"
         raise TreeError(msg) from None
-    if not isinstance(start, dict) or not isinstance(start.get("package"), str):
-        msg = "run-start.json is not a run start record (no package)"
+    if (
+        not isinstance(start, dict)
+        or start.get("schema") != "uiprobe.run_start/1"
+        or not isinstance(start.get("package"), str)
+    ):
+        msg = "run-start.json is not a uiprobe.run_start/1 record with a package"
         raise TreeError(msg)
     return start
 
@@ -469,21 +522,11 @@ def _tap_of(
 
 @dataclass(slots=True)
 class _Moves:
-    taps: dict[tuple[str, str], _Tap]
+    taps: dict[tuple[str, str], list[_Tap]]
     root: str | None
+    first_from: str | None
     count: int
-    off_target: dict[str, str]
-
-
-def _note_off_target(start_line: dict[str, object], found: dict[str, str]) -> None:
-    """Remember the package of a start line decided on a screen of another app,
-    under the id of that screen."""
-    other = start_line.get("off_target")
-    decided_on = _screen_id(start_line.get("from_screen_id"))
-    if isinstance(other, dict) and decided_on is not None:
-        package = _str_or_none(other.get("package"))
-        if package:
-            found.setdefault(decided_on, package)
+    off_after: dict[int, str]
 
 
 def _rank(tap: _Tap) -> int:
@@ -494,14 +537,37 @@ def _rank(tap: _Tap) -> int:
     return 1 if _unknown(tap) else 0
 
 
-def _read_moves(base: Path, warnings: list[str]) -> _Moves:
-    """The taps of transitions.jsonl, and the screen the launch led to."""
+def _end_is_valid(end: dict[str, object]) -> bool:
+    """An end line says exactly one of: a screen, dump_failed, not_sent, failed."""
+    said = (
+        _screen_id(end.get("to_screen_id")) is not None,
+        end.get("dump_failed") is True,
+        end.get("not_sent") is True,
+        end.get("failed") is True,
+    )
+    return sum(said) == 1
+
+
+def _transition_lines(
+    base: Path, warnings: list[str]
+) -> tuple[
+    dict[int, dict[str, object]],
+    dict[int, dict[str, object]],
+    list[int],
+    dict[int, str],
+]:
+    """The start lines, the usable end lines, the action ids in order and, per
+    action, the package of an off_target start line that comes right after its
+    end line, decided on the screen that end line names."""
     starts: dict[int, dict[str, object]] = {}
     ends: dict[int, dict[str, object]] = {}
     order: list[int] = []
+    off_after: dict[int, str] = {}
+    previous_end: tuple[int, str | None] | None = None
     for line in _lines(base / "transitions.jsonl", warnings):
         action_id = _action_id(line.get("action_id"))
         schema = line.get("schema")
+        follows, previous_end = previous_end, None
         if action_id is None or schema not in (
             "uiprobe.transition_start/1",
             "uiprobe.transition_end/1",
@@ -511,12 +577,28 @@ def _read_moves(base: Path, warnings: list[str]) -> _Moves:
             if action_id not in starts:
                 order.append(action_id)
             starts[action_id] = line
-        else:
+            other = line.get("off_target")
+            package = (
+                _str_or_none(other.get("package")) if isinstance(other, dict) else None
+            )
+            decided_on = _screen_id(line.get("from_screen_id"))
+            if follows and package and decided_on and follows[1] == decided_on:
+                off_after[follows[0]] = package
+        elif _end_is_valid(line):
             ends[action_id] = line
-    # The tap that stands for each (screen, element): see `_rank`; the first
-    # one of the best rank.
-    taps: dict[tuple[str, str], _Tap] = {}
-    off_target: dict[str, str] = {}
+            previous_end = (action_id, _screen_id(line.get("to_screen_id")))
+        else:
+            warnings.append(
+                f"action {action_id} has an end line that is not understood,"
+                " so its result is unknown"
+            )
+    return starts, ends, order, off_after
+
+
+def _read_moves(base: Path, warnings: list[str]) -> _Moves:
+    """The taps of transitions.jsonl, and the screen the launch led to."""
+    starts, ends, order, off_after = _transition_lines(base, warnings)
+    taps: dict[tuple[str, str], list[_Tap]] = {}
     root: str | None = None
     first_from: str | None = None
     for action_id in order:
@@ -527,7 +609,6 @@ def _read_moves(base: Path, warnings: list[str]) -> _Moves:
             continue
         end = ends.get(action_id)
         kind = action.get("kind")
-        _note_off_target(start_line, off_target)
         if kind == "launch" and root is None and end is not None:
             root = _screen_id(end.get("to_screen_id"))
         if kind != "tap":
@@ -537,10 +618,15 @@ def _read_moves(base: Path, warnings: list[str]) -> _Moves:
             warnings.append(f"action {action_id} is a tap with no screen or element")
             continue
         first_from = first_from or tap.from_screen_id
-        old = taps.get((tap.from_screen_id, tap.element_id))
-        if old is None or _rank(tap) < _rank(old):
-            taps[tap.from_screen_id, tap.element_id] = tap
-    return _Moves(taps, root or first_from, len(order), off_target)
+        taps.setdefault((tap.from_screen_id, tap.element_id), []).append(tap)
+    return _Moves(taps, root, first_from, len(order), off_after)
+
+
+def _sent_target(tap: _Tap) -> str | None:
+    """The screen a sent tap led to, if its end line names one."""
+    if tap.end is None or tap.end.get("dump_failed") is True:
+        return None
+    return _screen_id(tap.end.get("to_screen_id"))
 
 
 @dataclass(slots=True)
@@ -558,11 +644,14 @@ def _read_skips(base: Path, warnings: list[str]) -> _Skips:
         if sid is None or not isinstance(fingerprint, str):
             warnings.append("skipped.jsonl has a line with no screen id or fingerprint")
             continue
-        listed = (
-            [r for r in reasons if isinstance(r, str)]
-            if isinstance(reasons, list)
-            else []
-        )
+        if not isinstance(reasons, list) or not all(
+            isinstance(r, str) for r in reasons
+        ):
+            warnings.append(
+                "skipped.jsonl has a line whose reasons are not a list of strings"
+            )
+            continue
+        listed = list(reasons)
         if fingerprint == sid:
             bucket = skips.whole_screen.setdefault(sid, [])
         else:
@@ -571,30 +660,15 @@ def _read_skips(base: Path, warnings: list[str]) -> _Skips:
     return skips
 
 
-def _screen_ids(base: Path, moves: _Moves) -> list[str]:
+def _screen_ids(reader: _Reader, moves: _Moves) -> list[str]:
     """The ids of the screens to read: the ones the taps name, then the rest."""
     wanted: list[str] = []
-    named = [moves.root, *(key[0] for key in moves.taps)]
-    named.extend(
-        _screen_id(tap.end.get("to_screen_id")) if tap.end else None
-        for tap in moves.taps.values()
-    )
+    named = [moves.root, moves.first_from, *(key[0] for key in moves.taps)]
+    named.extend(_sent_target(tap) for taps in moves.taps.values() for tap in taps)
     for sid in named:
         if sid is not None and sid not in wanted:
             wanted.append(sid)
-    names: list[str] = []
-    if _is_folder(base / "screens"):
-        try:
-            names = sorted(f.name for f in (base / "screens").iterdir())
-        except OSError:
-            names = []
-    wanted.extend(
-        name[:-5]
-        for name in names
-        if name.endswith(".json")
-        and _SCREEN_ID.fullmatch(name[:-5])
-        and name[:-5] not in wanted
-    )
+    wanted.extend(sid for sid in sorted(reader.names) if sid not in wanted)
     return wanted
 
 
@@ -614,25 +688,20 @@ def _node(
     by_fp = skips.by_screen.get(sid, {})
     unmatched: list[tuple[str, tuple[str, ...]]] = []
     if by_fp:
-        by_id = {e.id: e for e in screen.elements}
         seen: set[str] = set()
-        for row in rows:
-            if row.kind != "row":
-                continue
-            fp = fingerprint_of(screen, by_id[row.element_id])
-            if fp in by_fp:
-                row.reasons = tuple(by_fp[fp])
-                seen.add(fp)
+        if len(screen.elements) <= _MAX_FINGERPRINTED:
+            by_id = {e.id: e for e in screen.elements}
+            for row in rows:
+                if row.kind != "row":
+                    continue
+                fp = fingerprint_of(screen, by_id[row.element_id])
+                if fp in by_fp:
+                    row.reasons = tuple(by_fp[fp])
+                    seen.add(fp)
         unmatched = [(fp, tuple(r)) for fp, r in by_fp.items() if fp not in seen]
     for row in rows:
-        tap = moves.taps.get((sid, row.element_id))
-        if tap is None:
-            continue
-        row.action_id = tap.action_id
-        row.to = _ending(tap, sid, package, reader, moves)
-        row.pressed = "not_sent" not in row.to and "unknown" not in row.to
-        if record_text:
-            _rename(row, tap.element)
+        if (sid, row.element_id) in moves.taps:
+            _attach(row, moves.taps[sid, row.element_id], sid, package, reader, moves)
     return ScreenNode(
         sid,
         screen_package,
@@ -662,12 +731,15 @@ def read_tree(run_dir: str | Path) -> RunTree:
     skips = _read_skips(base, warnings)
     reader = _Reader(base, warnings)
     screens: dict[str, ScreenNode] = {}
-    for sid in _screen_ids(base, moves):
+    for sid in _screen_ids(reader, moves):
         loaded = reader.load(sid)
         if loaded is not None:
             screens[sid] = _node(
                 sid, loaded, moves, skips, reader, package, record_text=record_text
             )
+    root = moves.root if moves.root in screens else moves.first_from
+    if root not in screens:
+        root = None
     for sid, element_id in moves.taps:
         node = screens.get(sid)
         if node is None:
@@ -676,12 +748,12 @@ def read_tree(run_dir: str | Path) -> RunTree:
             warnings.append(
                 f"a tap names {element_id}, which is not in the file of {sid}"
             )
-    reached = _reachable(moves.root, screens)
+    reached = _reachable(root, screens)
     led_to = {
-        row.to["screen_id"]
-        for node in screens.values()
-        for row in node.rows
-        if row.to and isinstance(row.to.get("screen_id"), str)
+        target
+        for taps in moves.taps.values()
+        for tap in taps
+        if (target := _sent_target(tap)) is not None
     }
     summary = ended or {}
     actions = summary.get("actions")
@@ -694,18 +766,44 @@ def read_tree(run_dir: str | Path) -> RunTree:
         actions=actions if isinstance(actions, int) else moves.count,
         finished=ended is not None,
         record_text=record_text,
-        root=moves.root if moves.root in screens else None,
+        root=root,
         screens=screens,
         unreached=[
             sid
             for sid, node in screens.items()
             if sid not in reached
             and node.package == package
-            and sid != moves.root
+            and sid != root
             and sid not in led_to
         ],
         warnings=_capped(warnings),
     )
+
+
+def _attach(
+    row: Row,
+    taps: list[_Tap],
+    sid: str,
+    package: str,
+    reader: _Reader,
+    moves: _Moves,
+) -> None:
+    """Put the taps on an element on its row: the best one stands for the row,
+    and each further sent tap that led elsewhere is an `also_to`."""
+    best = min(taps, key=_rank)  # the first of the best rank
+    row.action_id = best.action_id
+    row.to = _ending(best, sid, package, reader, moves)
+    row.pressed = "not_sent" not in row.to and "unknown" not in row.to
+    if row.pressed:
+        _rename(row, best.element)
+    shown = [row.to]
+    for tap in taps:
+        if tap is best or _rank(tap) != 0:
+            continue
+        ending = _ending(tap, sid, package, reader, moves)
+        if ending not in shown:
+            shown.append(ending)
+            row.also_to.append(ending)
 
 
 def _rename(row: Row, element: dict[str, object]) -> None:
@@ -756,18 +854,20 @@ def _ending(
         return {"not_read": True}
     if target == from_id:
         return {"same_screen": True}
-    return _led_to(target, package, reader, moves)
+    return _led_to(target, package, reader, moves, tap.action_id)
 
 
-def _led_to(target: str, package: str, reader: _Reader, moves: _Moves) -> Ending:
+def _led_to(
+    target: str, package: str, reader: _Reader, moves: _Moves, action_id: int
+) -> Ending:
     found = reader.load(target)
     if found is not None:
         return {"screen_id": target} if found[1] == package else {"other_app": found[1]}
     # No file: a screen of another app (the crawl writes only the target
-    # app's screens). Say so only when a start line decided on this very
-    # screen (`from_screen_id` is the end line's screen) with `off_target`.
-    if target in moves.off_target:
-        return {"other_app": moves.off_target[target]}
+    # app's screens). Say so only when the line right after this action's end
+    # line is a start line decided on this very screen with `off_target`.
+    if action_id in moves.off_after:
+        return {"other_app": moves.off_after[action_id]}
     return {"not_read": True}
 
 
@@ -780,9 +880,10 @@ def _reachable(root: str | None, screens: dict[str, ScreenNode]) -> set[str]:
             continue
         reached.add(sid)
         for row in screens[sid].rows:
-            target = row.to.get("screen_id") if row.to else None
-            if isinstance(target, str) and target in screens:
-                stack.append(target)
+            for ending in ([row.to] if row.to else []) + row.also_to:
+                target = ending.get("screen_id")
+                if isinstance(target, str) and target in screens:
+                    stack.append(target)
     return reached
 
 
@@ -801,6 +902,8 @@ def _element_dict(row: Row) -> dict[str, object]:
         data["action_id"] = row.action_id
         if row.to is not None:
             data["to"] = dict(row.to)
+        if row.also_to:
+            data["also_to"] = [dict(e) for e in row.also_to]
         data["reasons"] = list(row.reasons)
     return data
 

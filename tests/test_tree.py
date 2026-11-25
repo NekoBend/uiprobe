@@ -526,7 +526,7 @@ def test_a_run_start_without_a_package_is_an_error(tmp_path, capsys):
     (tmp_path / "run" / "run-start.json").write_text("[]", encoding="utf-8")
     code, _, err = run_tree(capsys, str(tmp_path / "run"))
     assert code == 2
-    assert "no package" in err
+    assert "uiprobe.run_start/1" in err
 
 
 def test_the_command_writes_nothing(tmp_path, capsys):
@@ -889,3 +889,295 @@ def test_unreached_lists_only_screens_no_tap_led_to(tmp_path, capsys):
     _, out, _ = run_tree(capsys, str(folder.path))
     assert "(押した行からは辿れなかった画面" in out
     assert "Back home" in out  # the Network screen is still shown, below
+
+
+# --- the second round of rules ---
+
+
+def _append(path: Path, *lines: dict) -> None:
+    path.write_bytes(
+        path.read_bytes() + b"".join(json.dumps(x).encode() + b"\n" for x in lines)
+    )
+
+
+def test_run_dir_itself_and_its_parents_may_be_links(tmp_path, capsys):
+    folder = full_run(tmp_path)
+    shortcut = tmp_path / "shortcut"
+    _link(shortcut, folder.path, target_is_directory=True)
+    code, out, err = run_tree(capsys, str(shortcut))
+    assert code == 0
+    assert out.splitlines() == FULL_TEXT
+    assert err == ""
+    above = tmp_path / "above"
+    _link(above, tmp_path, target_is_directory=True)
+    code, out, _ = run_tree(capsys, str(above / "run"))
+    assert code == 0
+    assert out.splitlines() == FULL_TEXT
+
+
+def test_a_junction_for_screens_is_refused(tmp_path, capsys, monkeypatch):
+    folder = full_run(tmp_path)
+    real = os.path.isjunction
+    monkeypatch.setattr(
+        os.path, "isjunction", lambda p: str(p).endswith("screens") or real(p)
+    )
+    code, out, err = run_tree(capsys, str(folder.path))
+    assert code == 0
+    assert "screens is a link or not a folder" in err
+    assert "Welcome" not in out
+
+
+def test_a_hard_linked_file_is_refused(tmp_path, capsys):
+    folder = full_run(tmp_path)
+    home_id = home_screen().screen_id
+    os.link(folder.path / "screens" / f"{home_id}.json", tmp_path / "second-name")
+    _, out, err = run_tree(capsys, str(folder.path))
+    assert f"screens/{home_id}.json has more than one name" in err
+    assert "Welcome" not in out
+    os.link(folder.path / "transitions.jsonl", tmp_path / "log-name")
+    _, _, err = run_tree(capsys, str(folder.path))
+    assert "transitions.jsonl has more than one name" in err
+
+
+def test_a_screen_is_opened_only_by_the_exact_listed_name(tmp_path, capsys):
+    folder = full_run(tmp_path)
+    home_id = home_screen().screen_id
+    screens = folder.path / "screens"
+    (screens / f"{home_id}.json").rename(screens / f"S-{home_id[2:]}.json")
+    _, out, err = run_tree(capsys, str(folder.path))
+    assert "Welcome" not in out
+    assert f"a tap names the screen {home_id}, which has no readable file" in err
+
+
+def test_the_read_stops_at_the_cap_even_if_the_listing_size_lies(
+    tmp_path, capsys, monkeypatch
+):
+    from uiprobe import crawl_tree
+
+    folder = full_run(tmp_path)
+    path = folder.path / "transitions.jsonl"
+    size = path.stat().st_size
+    monkeypatch.setattr(crawl_tree, "MAX_LOG_BYTES", size - 1)
+    real = os.lstat
+    lying = real(path)
+
+    class Lie:
+        def __getattr__(self, name):
+            return 0 if name == "st_size" else getattr(lying, name)
+
+    monkeypatch.setattr(
+        crawl_tree, "_checked", lambda p, _limit: Lie() if p == path else real(p)
+    )
+    _, _, err = run_tree(capsys, str(folder.path))
+    assert "transitions.jsonl is over" in err
+
+
+def test_a_file_of_exactly_the_cap_is_read(tmp_path):
+    from uiprobe import crawl_tree
+
+    path = tmp_path / "f"
+    path.write_bytes(b"x" * 20)
+    assert crawl_tree._read_bytes(path, 20) == b"x" * 20
+    with pytest.raises(crawl_tree._UnreadableError):
+        crawl_tree._read_bytes(path, 19)
+
+
+def test_texts_are_capped_and_nesting_is_bounded(tmp_path, capsys):
+    folder = Folder(tmp_path)
+    elements = [el(1, cls="FrameLayout"), el(2, 1, cls="LinearLayout", flags=CLICK)]
+    elements += [el(number, 2, text=f"t{number}") for number in range(3, 203)]
+    chain = [el(300, 1, cls="LinearLayout", flags=CLICK, text="c0")]
+    chain += [
+        el(300 + n, 299 + n, cls="LinearLayout", flags=CLICK, text=f"c{n}")
+        for n in range(1, 400)
+    ]
+    sid = folder.screen(make_screen(".Big", [*elements, *chain]))
+    folder.start("launch")
+    folder.end(sid)
+    folder.finish()
+    _, out, _ = run_tree(capsys, str(folder.path), "--json")
+    rows = json.loads(out)["screens"][sid]["elements"]
+    assert len(rows) == 2 + 399
+    assert all(len(r["texts"]) <= 50 for r in rows)
+    assert len(rows[0]["texts"]) == 50
+    assert rows[0]["name"] == "t3"
+
+
+def test_an_end_line_must_say_exactly_one_thing(tmp_path, capsys):
+    folder = Folder(tmp_path)
+    home = home_screen()
+    home_id = folder.screen(home)
+    folder.start("launch")
+    folder.end(home_id)
+    folder.start("tap", home_id, home.elements[2])
+    folder.writer.close()
+    _append(
+        folder.path / "transitions.jsonl",
+        {
+            "schema": "uiprobe.transition_end/1",
+            "action_id": 2,
+            "to_screen_id": home_id,
+            "dump_failed": True,
+        },
+    )
+    code, out, err = run_tree(capsys, str(folder.path))
+    assert code == 0
+    assert "├─ Network → (結果不明)" in out.splitlines()
+    assert "action 2 has an end line that is not understood" in err
+
+
+def test_skip_reasons_must_be_a_list_of_strings(tmp_path, capsys):
+    folder = full_run(tmp_path)
+    _append(
+        folder.path / "skipped.jsonl",
+        {
+            "schema": "uiprobe.skip/1",
+            "screen_id": home_screen().screen_id,
+            "fingerprint": "f-x",
+            "reasons": "toggle",
+        },
+        {
+            "schema": "uiprobe.skip/1",
+            "screen_id": home_screen().screen_id,
+            "fingerprint": "f-y",
+            "reasons": [1],
+        },
+    )
+    code, out, err = run_tree(capsys, str(folder.path), "--json")
+    assert code == 0
+    assert err == ""
+    warnings = json.loads(out)["warnings"]
+    assert (
+        warnings.count(
+            "skipped.jsonl has a line whose reasons are not a list of strings"
+        )
+        == 2
+    )
+    assert json.loads(out)["screens"][home_screen().screen_id]["unmatched"] == []
+
+
+def test_run_start_needs_its_schema(tmp_path, capsys):
+    folder = full_run(tmp_path)
+    _edit_start(folder, schema="something/1")
+    code, _, err = run_tree(capsys, str(folder.path))
+    assert code == 2
+    assert "uiprobe.run_start/1" in err
+    (folder.path / "run-start.json").write_text('{"package": "a.b"}')
+    code, _, err = run_tree(capsys, str(folder.path))
+    assert code == 2
+
+
+def test_a_later_visit_to_the_screen_is_not_evidence_of_another_app(tmp_path, capsys):
+    folder = Folder(tmp_path)
+    home = home_screen()
+    home_id = folder.screen(home)
+    folder.start("launch")
+    folder.end(home_id)
+    folder.tap(home, 3, OTHER_SCREEN)  # the next line is not the relaunch
+    folder.tap(home, 6, home_id)
+    folder.start("relaunch", OTHER_SCREEN, off_target_package="com.other.app")
+    folder.end(home_id)
+    folder.finish()
+    _, out, _ = run_tree(capsys, str(folder.path))
+    assert "├─ Network → (読めなかった)" in out.splitlines()
+    assert "別のアプリ" not in out
+
+
+def test_every_sent_tap_on_a_row_keeps_its_edge(tmp_path, capsys):
+    folder = Folder(tmp_path)
+    home = home_screen()
+    home_id = folder.screen(home)
+    network_id = folder.screen(NETWORK)
+    about_id = folder.screen(ABOUT)
+    folder.start("launch")
+    folder.end(home_id)
+    folder.tap(home, 3, network_id)
+    folder.tap(home, 3, about_id)
+    folder.tap(home, 3, about_id)  # the same ending again is not repeated
+    folder.tap(home, 3, home_id)
+    folder.finish()
+    _, out, _ = run_tree(capsys, str(folder.path))
+    lines = out.splitlines()
+    assert lines[2:4] == ["├─ Network", "│  ├─ (もう一度押した → 次の画面)"]
+    assert "│  │  └─ [見出し] Version 1" in lines
+    assert "│  ├─ (もう一度押した → (同じ画面))" in lines
+    assert lines.count("│  ├─ (もう一度押した → 次の画面)") == 1
+    _, out, _ = run_tree(capsys, str(folder.path), "--json")
+    data = json.loads(out)
+    network = next(
+        e for e in data["screens"][home_id]["elements"] if e["name"] == "Network"
+    )
+    assert network["to"] == {"screen_id": network_id}
+    assert network["also_to"] == [{"screen_id": about_id}, {"same_screen": True}]
+    assert network["action_id"] == 2
+    assert data["unreached"] == []
+
+
+def test_a_screen_a_tap_led_to_is_never_unreached(tmp_path, capsys):
+    folder = Folder(tmp_path)
+    home_id = folder.screen(home_screen())
+    about_id = folder.screen(ABOUT)
+    folder.start("launch")
+    folder.end(home_id)
+    missing = make_screen(".Gone", [el(1, cls="FrameLayout"), el(2, 1, flags=CLICK)])
+    folder.tap(missing, 2, about_id)  # its own screen file is not in the folder
+    folder.finish()
+    _, out, err = run_tree(capsys, str(folder.path), "--json")
+    data = json.loads(out)
+    assert about_id in data["screens"]
+    assert data["unreached"] == []
+    assert "a tap names the screen" in err or any(
+        "a tap names the screen" in w for w in data["warnings"]
+    )
+
+
+def test_a_refused_tap_does_not_rename_the_row(tmp_path, capsys):
+    folder = Folder(tmp_path)
+    old = make_screen(
+        ".Home",
+        [el(1, cls="FrameLayout"), el(2, 1, cls="Button", text="Old", flags=CLICK)],
+    )
+    sid = folder.screen(old)
+    folder.start("launch")
+    folder.end(sid)
+    folder.start(
+        "tap",
+        sid,
+        {
+            "id": "e2",
+            "class": "android.widget.Button",
+            "text": "New",
+            "bounds": [0, 0, 1, 1],
+        },
+    )
+    folder.end(not_sent="covered_by_other")
+    folder.finish()
+    _, out, _ = run_tree(capsys, str(folder.path))
+    assert "└─ Old → (送らなかった: covered_by_other)" in out.splitlines()
+    assert "New" not in out
+
+
+def test_a_missing_launch_snapshot_falls_back_to_the_first_tap(tmp_path, capsys):
+    folder = Folder(tmp_path)
+    home = home_screen()
+    home_id = folder.screen(home)
+    folder.start("launch")
+    folder.end("s-cccccccccccc")  # the launch's screen has no file
+    folder.tap(home, 3, home_id)
+    folder.finish()
+    _, out, _ = run_tree(capsys, str(folder.path), "--json")
+    data = json.loads(out)
+    assert data["root"] == home_id
+
+
+def test_a_failed_end_counts_as_unknown(tmp_path, capsys):
+    folder = Folder(tmp_path)
+    home = home_screen()
+    home_id = folder.screen(home)
+    folder.start("launch")
+    folder.end(home_id)
+    folder.start("tap", home_id, home.elements[2])
+    folder.end(failed="start_failed")
+    folder.finish()
+    _, out, _ = run_tree(capsys, str(folder.path))
+    assert "├─ Network → (結果不明)" in out.splitlines()
