@@ -73,6 +73,9 @@ class Row:
     ``kind`` is ``row`` or ``text``. ``texts`` are all the texts of the row
     in document order, ``name`` first (the name itself is not always a text:
     it can be a content description or a marker such as ``[icon: ImageButton]``).
+    ``name_from`` says where the name came from: ``text``, ``content_desc``,
+    ``password`` (the marker of a password field) or ``none`` (the name is a
+    placeholder such as ``[icon: ImageButton]``, there is no real name).
     ``to`` is the ending of a tap that was attempted: ``{"screen_id": ...}``,
     ``{"same_screen": True}``, ``{"other_app": package or None}``,
     ``{"not_read": True}`` or ``{"not_sent": reason}``; None when no tap on
@@ -87,6 +90,7 @@ class Row:
     name: str
     texts: tuple[str, ...]
     hidden: bool
+    name_from: str = "none"
     pressed: bool = False
     action_id: int | None = None
     to: Ending | None = None
@@ -419,6 +423,7 @@ def _row_of(
     texts: tuple[str, ...],
     *,
     hidden: bool,
+    name_from: str = "none",
 ) -> Row:
     return Row(
         element_id=element.id,
@@ -427,6 +432,7 @@ def _row_of(
         name=name,
         texts=texts,
         hidden=hidden,
+        name_from=name_from,
     )
 
 
@@ -493,7 +499,9 @@ def _row(
     members = _subtree(i, children, screen)
     short = _short_class(element.class_name)
     if any("password" in screen.elements[j].flags for j in members):
-        return _row_of(element, "row", _PASSWORD_NAME, (), hidden=True)
+        return _row_of(
+            element, "row", _PASSWORD_NAME, (), hidden=True, name_from="password"
+        )
     if not record_text:
         marker = "icon" if len(members) == 1 else "row"
         return _row_of(element, "row", f"[{marker}: {short}]", (), hidden=True)
@@ -504,13 +512,15 @@ def _row(
             if len(texts) >= MAX_ROW_TEXTS:
                 break
     if texts:
-        name = texts[0]
-    else:
-        described = [
-            d for j in members if (d := screen.elements[j].content_desc.strip())
-        ]
-        name = f'"{described[0]}"' if described else f"[icon: {short}]"
-    return _row_of(element, "row", name, tuple(texts), hidden=False)
+        return _row_of(
+            element, "row", texts[0], tuple(texts), hidden=False, name_from="text"
+        )
+    described = [d for j in members if (d := screen.elements[j].content_desc.strip())]
+    if described:
+        return _row_of(
+            element, "row", described[0], (), hidden=False, name_from="content_desc"
+        )
+    return _row_of(element, "row", f"[icon: {short}]", (), hidden=False)
 
 
 def _text_row(element: Element, *, record_text: bool) -> Row | None:
@@ -519,11 +529,13 @@ def _text_row(element: Element, *, record_text: bool) -> Row | None:
     if "password" in element.flags:
         if not element.text.strip():
             return None
-        return _row_of(element, "text", _PASSWORD_NAME, (), hidden=True)
+        return _row_of(
+            element, "text", _PASSWORD_NAME, (), hidden=True, name_from="password"
+        )
     text = element.text.strip()
     if not text:
         return None
-    return _row_of(element, "text", text, (text,), hidden=False)
+    return _row_of(element, "text", text, (text,), hidden=False, name_from="text")
 
 
 def _read_start(base: Path) -> dict[str, object]:
@@ -1233,8 +1245,10 @@ def _rename(row: Row, element: dict[str, object]) -> None:
         name = text.strip()
         row.texts = (name, *(t for t in row.texts if t != name))
         row.name = name
+        row.name_from = "text"
     elif isinstance(desc, str) and desc.strip():
-        row.name = f'"{desc.strip()}"'
+        row.name = desc.strip()
+        row.name_from = "content_desc"
 
 
 def _unknown(tap: _Tap) -> bool:
@@ -1302,6 +1316,7 @@ def _element_dict(row: Row) -> dict[str, object]:
         "kind": row.kind,
         "class": row.class_name,
         "name": row.name,
+        "name_from": row.name_from,
         "texts": list(row.texts),
     }
     if row.hidden:

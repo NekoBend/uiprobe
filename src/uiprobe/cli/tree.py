@@ -5,13 +5,14 @@ from __future__ import annotations
 import argparse  # noqa: TC003 (a runtime import in the former cli.py)
 import re
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Final
 
 from uiprobe._json import dumps
 from uiprobe.cli.output import _emit, _printable
 from uiprobe.cli.parser import _UsageError
 from uiprobe.crawl_tree import (
+    Row,
     RunTree,
     TreeError,
     read_tree,
@@ -20,6 +21,13 @@ from uiprobe.crawl_tree import (
 from uiprobe.settings import _shown
 
 LEGEND: Final = "· = not pressed, so nothing below it was looked at"
+LEGEND_DESC: Final = (
+    '"..." = the element has no visible text; this is its accessibility description'
+)
+LEGEND_ARROW: Final = "→ PACKAGE = pressing it opened that app"
+LEGEND_AGAIN: Final = (
+    "(pressed again) = the row above was pressed again and led to the screen below"
+)
 _NO_TEXT: Final = "screen texts were not recorded in this run (record_text = false)"
 _FIRST_SCREEN: Final = "first screen"
 MAX_LABEL: Final = 200
@@ -41,13 +49,40 @@ def _json_text(tree: RunTree) -> str:
     return _SURROGATE.sub(lambda m: f"\\u{ord(m[0]):04x}", dumps(tree_to_dict(tree)))
 
 
+# Which notes after a pressed row's name stay in the text tree; the others are
+# in `--json` only (those the last line counts are counted there).
+# Kinds: "other_app", "same_screen", "not_sent", "unknown", "not_read" and
+# "screen_above" (the screen was already drawn above).
+NOTES_IN_TEXT: Final = frozenset({"other_app"})
+
+# Rows named only by a content description (no visible text): "show" lists them
+# by the description, "quoted" puts it in double quotes, "json_only" leaves
+# them out of the text tree. A pressed one that led to a screen stays in the
+# tree under any value, so that screen keeps its place.
+DESC_ONLY_ROWS: Final = "quoted"
+
+_COUNTED: Final = ("other_app", "not_sent", "unknown", "not_read")
+
+
+@dataclass(slots=True)
+class _Tally:
+    """What the text tree leaves out, counted for its last line."""
+
+    ends: dict[str, int] = field(default_factory=dict)
+    texts: int = 0
+    desc_only: int = 0
+    unnamed: int = 0
+    unmatched: int = 0
+    marks: set[str] = field(default_factory=set)  # dot, desc, arrow, again
+
+
 @dataclass(slots=True)
 class _Entry:
     text: str
     to: dict[str, object] | None = None
-    name: str = ""
     again: bool = False  # a further sent tap on the same row
     more: tuple[dict[str, object], ...] = ()
+    name: str = ""
 
 
 def _heading_text(tree: RunTree, sid: str) -> str:
@@ -56,47 +91,114 @@ def _heading_text(tree: RunTree, sid: str) -> str:
     return f"(screen {_printable(sid)}  {activity})"
 
 
-def _entries(tree: RunTree, sid: str, *, ids: bool, why: bool) -> list[_Entry]:
+def _kind_of(to: dict[str, object]) -> str:
+    """The kind of a destination: "screen", or the kind of a note."""
+    for key in ("screen_id", "same_screen", "other_app", "not_sent", "unknown"):
+        if key in to:
+            return "screen" if key == "screen_id" else key
+    return "not_read"
+
+
+def _note(to: dict[str, object], kind: str) -> str | None:
+    """The note after a row's name for a destination with no screen below it,
+    or None when there is nothing to say (another app with no package)."""
+    if kind == "same_screen":
+        return " → (same screen)"
+    if kind == "other_app":
+        package = to["other_app"]
+        return f" → {_printable(package)}" if isinstance(package, str) else None
+    if kind == "not_sent":
+        reason = to["not_sent"]
+        return f" → (not sent: {_printable(reason) if isinstance(reason, str) else ''})"
+    if kind == "unknown":
+        return " → (result unknown)"
+    return " → (could not be read)"
+
+
+def _keeps_line(row: Row) -> bool:
+    """Whether a row has a line in the text tree."""
+    if row.name_from == "none" or (
+        row.name_from == "content_desc" and DESC_ONLY_ROWS == "json_only"
+    ):
+        return row.to is not None and "screen_id" in row.to
+    return True
+
+
+def _row_line(
+    row: Row, note: str | None, *, why: bool, tally: _Tally
+) -> tuple[str, str]:
+    """The line of a row and its name as shown. The marks it uses are noted in
+    `tally`, for the legend."""
+    name = _label(row.name)
+    if row.name_from == "content_desc" and DESC_ONLY_ROWS == "quoted":
+        name = f'"{name}"'
+        tally.marks.add("desc")
+    line = name + (note or "")
+    if note is not None and row.to is not None and "other_app" in row.to:
+        tally.marks.add("arrow")
+    if not row.pressed:
+        tally.marks.add("dot")
+        line += " ·"
+        if why and row.reasons and row.to is None:
+            line += " [" + ", ".join(_printable(r) for r in row.reasons) + "]"
+    return line, name
+
+
+def _entries(
+    tree: RunTree, sid: str, *, ids: bool, why: bool, tally: _Tally
+) -> list[_Entry]:
     node = tree.screens[sid]
     entries: list[_Entry] = []
     if ids:
         entries.append(_Entry(_heading_text(tree, sid)))
+    tally.unmatched += len(node.unmatched)
     for row in node.rows:
-        name = _label(row.name)
         if row.kind == "text":
-            entries.append(_Entry(f"[text] {name}"))
-        elif row.to is None:
-            line = f"{name} ·"
-            if why and row.reasons:
-                line += " [" + ", ".join(_printable(r) for r in row.reasons) + "]"
-            entries.append(_Entry(line))
-        else:
-            entries.append(_Entry(name, row.to, name, more=tuple(row.also_to)))
-    if node.unmatched and node.unmatched_why:
-        count = len(node.unmatched)
-        entries.append(_Entry(f"({count} not matched to rows: too many elements)"))
-    elif node.unmatched:
-        entries.append(_Entry(f"({len(node.unmatched)} with no matching row)"))
+            tally.texts += 1
+            continue
+        kept = _keeps_line(row)
+        note = None
+        if row.to is not None:
+            kind = _kind_of(row.to)
+            if kind != "screen":
+                note = _note(row.to, kind) if kind in NOTES_IN_TEXT and kept else None
+                if note is None and kind in _COUNTED:
+                    tally.ends[kind] = tally.ends.get(kind, 0) + 1
+        if not kept:
+            if row.name_from == "none":
+                tally.unnamed += 1
+            else:
+                tally.desc_only += 1
+            continue
+        line, name = _row_line(row, note, why=why, tally=tally)
+        entries.append(_Entry(line, row.to, more=tuple(row.also_to), name=name))
     return entries
 
 
-def _ending(to: dict[str, object], *, ids: bool) -> str | None:
-    """The text after a pressed row's name, or None when a screen goes below."""
-    if "same_screen" in to:
-        return " → (same screen)"
-    if "other_app" in to:
-        package = to["other_app"]
-        suffix = f" ({_printable(package)})" if ids and isinstance(package, str) else ""
-        return " → another app" + suffix
-    if "not_sent" in to:
-        reason = to["not_sent"]
-        shown = _printable(reason) if isinstance(reason, str) else ""
-        return f" → (not sent: {shown})"
-    if "unknown" in to:
-        return " → (result unknown)"
-    if "screen_id" in to:
+_SUMMARY: Final = (
+    ("other_app", "rows that led to another app"),
+    ("not_sent", "rows not sent"),
+    ("unknown", "rows with an unknown result"),
+    ("not_read", "rows whose next screen could not be read"),
+)
+
+
+def _summary(tally: _Tally) -> str | None:
+    """The last line: what the text tree leaves out, with counts."""
+    parts = [
+        f"{label}: {tally.ends[kind]}" for kind, label in _SUMMARY if kind in tally.ends
+    ]
+    for count, label in (
+        (tally.desc_only, "rows named only by a description"),
+        (tally.texts, "texts outside rows"),
+        (tally.unnamed, "unnamed elements"),
+        (tally.unmatched, "skip records not matched to a row"),
+    ):
+        if count:
+            parts.append(f"{label}: {count}")
+    if not parts:
         return None
-    return " → (could not be read)"
+    return "left out of the tree (see --json): " + ", ".join(parts)
 
 
 def _orphan_heading(tree: RunTree, sid: str) -> str:
@@ -105,6 +207,25 @@ def _orphan_heading(tree: RunTree, sid: str) -> str:
     node = tree.screens[sid]
     activity = _printable(node.activity) if node.activity else "-"
     return f"(screen not reached from a pressed row {_printable(sid)}  {activity})"
+
+
+def _draw(items: list[tuple[int, str]]) -> list[str]:
+    """Add the branch drawing to the lines of a tree, given as (depth, text)
+    in the order they are printed."""
+    last = [False] * len(items)
+    later: set[int] = set()  # depths that still have a line after this one
+    for i in range(len(items) - 1, -1, -1):
+        depth = items[i][0]
+        last[i] = depth not in later
+        later = {d for d in later if d < depth} | {depth}
+    lines: list[str] = []
+    stack: list[bool] = []
+    for i, (depth, text) in enumerate(items):
+        del stack[depth:]
+        prefix = "".join("   " if flag else "│  " for flag in stack)
+        lines.append(prefix + ("└─ " if last[i] else "├─ ") + text)
+        stack.append(last[i])
+    return lines
 
 
 class _Renderer:
@@ -116,49 +237,60 @@ class _Renderer:
         self.why = why
         self.lines: list[str] = []
         self.expanded: dict[str, str] = {}
-        self.frames: list[tuple[list[_Entry], int, str]] = []
+        self.tally = _Tally()
 
     def open_screen(self, sid: str, name: str) -> list[_Entry]:
         self.expanded[sid] = name
-        return _entries(self.tree, sid, ids=self.ids, why=self.why)
+        return _entries(self.tree, sid, ids=self.ids, why=self.why, tally=self.tally)
 
-    def children_of(self, entry: _Entry) -> list[_Entry]:
-        """Finish the entry's line; return the lines that go below it."""
+    def below_of(self, entry: _Entry, items: list[tuple[int, str]]) -> list[_Entry]:
+        """The entries that go below a drawn row line."""
         to = entry.to
         if to is None:
             return []
-        extras = [
-            _Entry("(pressed again", e, entry.name, again=True) for e in entry.more
-        ]
-        ending = _ending(to, ids=self.ids)
         below: list[_Entry] = []
-        if ending is None:
-            target = to["screen_id"]
-            assert isinstance(target, str)  # noqa: S101
-            if target in self.expanded:
-                ending = f" → (screen shown above: {self.expanded[target]})"
-                if self.ids:
-                    ending += f" {_printable(target)}"
-            else:
+        target = to.get("screen_id")
+        if isinstance(target, str):
+            if target not in self.expanded:
                 below = self.open_screen(target, entry.name)
-                ending = " → next screen" if entry.again else ""
-        self.lines[-1] += ending + (")" if entry.again else "")
-        return [*below, *extras]
+            elif "screen_above" in NOTES_IN_TEXT:
+                depth, text = items[-1]
+                shown = f" → (screen shown above: {self.expanded[target]})"
+                if self.ids:
+                    shown += f" {_printable(target)}"
+                items[-1] = (depth, text + shown)
+        again = [
+            _Entry("(pressed again)", e, again=True, name=entry.name)
+            for e in entry.more
+            if isinstance(e.get("screen_id"), str)
+        ]
+        return [*below, *again]
 
-    def run(self, sid: str) -> None:
+    def run(self, sid: str, name: str) -> None:
         """List the screen `sid` and everything first reached below it."""
-        self.frames.append((self.open_screen(sid, _FIRST_SCREEN), 0, ""))
-        while self.frames:
-            entries, index, prefix = self.frames.pop()
+        items: list[tuple[int, str]] = []
+        frames = [(self.open_screen(sid, name), 0, 0)]
+        while frames:
+            entries, index, depth = frames.pop()
             if index >= len(entries):
                 continue
-            self.frames.append((entries, index + 1, prefix))
+            frames.append((entries, index + 1, depth))
             entry = entries[index]
-            last = index == len(entries) - 1
-            self.lines.append(prefix + ("└─ " if last else "├─ ") + entry.text)
-            below = self.children_of(entry)
+            if entry.again:
+                assert entry.to is not None  # noqa: S101
+                target = entry.to["screen_id"]
+                assert isinstance(target, str)  # noqa: S101
+                if target in self.expanded:
+                    continue
+                items.append((depth, entry.text))
+                self.tally.marks.add("again")
+                below = self.open_screen(target, entry.name)
+            else:
+                items.append((depth, entry.text))
+                below = self.below_of(entry, items)
             if below:
-                self.frames.append((below, 0, prefix + ("   " if last else "│  ")))
+                frames.append((below, 0, depth + 1))
+        self.lines.extend(_draw(items))
 
 
 def render_text(tree: RunTree, *, ids: bool = False, why: bool = False) -> list[str]:
@@ -170,7 +302,7 @@ def render_text(tree: RunTree, *, ids: bool = False, why: bool = False) -> list[
     drawn = _Renderer(tree, ids=ids, why=why)
     drawn.lines.append(first)
     if tree.root is not None:
-        drawn.run(tree.root)
+        drawn.run(tree.root, _FIRST_SCREEN)
     # Screens no tap led to come first; then any that only taps among
     # themselves led to (a loop that the root does not reach).
     rest = [
@@ -181,8 +313,18 @@ def render_text(tree: RunTree, *, ids: bool = False, why: bool = False) -> list[
     for sid in (*tree.unreached, *rest):
         if sid not in drawn.expanded:
             drawn.lines.append(_orphan_heading(tree, sid))
-            drawn.run(sid)
-    drawn.lines.append(LEGEND)
+            drawn.run(sid, _FIRST_SCREEN)
+    for mark, text in (
+        ("dot", LEGEND),
+        ("desc", LEGEND_DESC),
+        ("arrow", LEGEND_ARROW),
+        ("again", LEGEND_AGAIN),
+    ):
+        if mark in drawn.tally.marks:
+            drawn.lines.append(text)
+    summary = _summary(drawn.tally)
+    if summary is not None:
+        drawn.lines.append(summary)
     return drawn.lines
 
 
