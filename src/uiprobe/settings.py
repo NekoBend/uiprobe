@@ -112,6 +112,7 @@ from typing import TYPE_CHECKING, Final
 
 from uiprobe.device import DEVICE_WIDE_KEY_PREFIXES, DEVICE_WIDE_KEYS, FIXED_DEVICE_KEYS
 from uiprobe.guards import (
+    _STATE_DENY_WORDS,
     API36_BOTTOM_PX,
     API36_SIDE_PX,
     API36_TOP_PX,
@@ -149,7 +150,7 @@ __all__ = [
 
 SETTINGS_FILE: Final = "uiprobe.toml"
 FORMAT_VERSION: Final = 1
-DEFAULTS_VERSION: Final = 6
+DEFAULTS_VERSION: Final = 7
 MAX_SETTINGS_BYTES: Final = 1024 * 1024
 
 # Every default list item with the defaults version that introduced it. Each
@@ -170,16 +171,18 @@ MAX_SETTINGS_BYTES: Final = 1024 * 1024
 # Version 4 added the rules skip_navigate_up and skip_sliders (no list items).
 # Version 5 added the rule replay_path (no list items). Version 6 added the
 # top-level key record_text (no list items; a missing one reads True).
+# Version 7 added the state-changing deny words (forget, disconnect, ...).
 _LATER_DENY: Final[dict[str, int]] = {
     "やり直": 2,
     "元に戻": 2,
     "restart": 2,
     "undo": 2,
+    **dict.fromkeys(_STATE_DENY_WORDS, 7),
 }
 # The [deny] except list has no built-in words. One added later starts at the
 # next defaults version (raise DEFAULTS_VERSION with it); before that, the
 # test that no default is tagged beyond the current version fails.
-_FIRST_EXCEPT: Final = 7
+_FIRST_EXCEPT: Final = 8
 _LATER_EXCEPT: Final[dict[str, int]] = {}
 _LATER_CONFIRM: Final[dict[str, int]] = {}
 # The [irreversible] table came with version 2, so its items start there.
@@ -930,7 +933,11 @@ def _exceptions(
                 "[deny] except",
                 f"{_value_text(exception)} equals the deny word {_value_text(word)};"
                 " an exception cannot let its own deny word through: to let it"
-                " through, remove the deny word instead",
+                " through, remove the deny word instead. If this file was written"
+                " by an older uiprobe, the deny word may be a default that a later"
+                f" defaults version added (current: {DEFAULTS_VERSION}, which added"
+                " forget, disconnect and others): drop the word from [deny] except"
+                " (it is now a default deny word), or add it to [deny] remove",
             )
         else:
             warnings.append(

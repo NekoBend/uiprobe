@@ -13,6 +13,7 @@ from tests.guards.helpers import (
     EXTRA_DENY,
     SETTINGS_DENY,
     SHOP_DENY,
+    STATE_DENY,
     el,
     reasons,
     run,
@@ -38,15 +39,19 @@ def test_default_word_lists_match_the_expected_lists() -> None:
     assert len(BASE_DENY) == 23 + 23
     assert len(SETTINGS_DENY) == 9
     assert len(SHOP_DENY) == 4
-    assert DEFAULT_DENY_WORDS[-13:-4] == tuple(SETTINGS_DENY)
-    assert DEFAULT_DENY_WORDS[-4:] == tuple(SHOP_DENY)
+    assert len(STATE_DENY) == 16
+    assert DEFAULT_DENY_WORDS[-29:-20] == tuple(SETTINGS_DENY)
+    assert DEFAULT_DENY_WORDS[-20:-16] == tuple(SHOP_DENY)
+    assert DEFAULT_DENY_WORDS[-16:] == tuple(STATE_DENY)
     assert Counter(DEFAULT_DENY_WORDS) == Counter(
-        BASE_DENY + EXTRA_DENY + SETTINGS_DENY + SHOP_DENY
+        BASE_DENY + EXTRA_DENY + SETTINGS_DENY + SHOP_DENY + STATE_DENY
     )
     assert Counter(CONFIRM_WORDS) == Counter(EXPECTED_CONFIRM)
 
 
-@pytest.mark.parametrize("word", BASE_DENY + EXTRA_DENY + SETTINGS_DENY + SHOP_DENY)
+@pytest.mark.parametrize(
+    "word", BASE_DENY + EXTRA_DENY + SETTINGS_DENY + SHOP_DENY + STATE_DENY
+)
 def test_every_deny_word_refuses_a_button(word) -> None:
     found = run([el("e2", text=word)])
     assert "deny_word" in reasons(found, "e2")

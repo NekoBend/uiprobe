@@ -348,6 +348,26 @@ SETTINGS_DENY = [
 SHOP_DENY = ["カート", "アカウント", "cart", "account"]
 
 
+STATE_DENY = [
+    "切断",
+    "接続を解除",
+    "ペアリングを解除",
+    "オフにする",
+    "取り出",
+    "マウント解除",
+    "リンク解除",
+    "forget",
+    "disconnect",
+    "unpair",
+    "turn off",
+    "revoke",
+    "eject",
+    "unmount",
+    "unlink",
+    "deactivate",
+]
+
+
 EXPECTED_CONFIRM = [
     *[
         "OK",
