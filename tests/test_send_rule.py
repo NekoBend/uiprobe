@@ -54,8 +54,8 @@ from typing import TYPE_CHECKING, NamedTuple
 
 import pytest
 
+from tests.crawl_driver.helpers import SCREENS, SERIAL, SHOP, TRANSPORT, Clock
 from tests.fake_device import FakeAndroid
-from tests.test_crawl_driver import SCREENS, SERIAL, SHOP, TRANSPORT, Clock
 from uiprobe import crawl_driver
 from uiprobe.crawl import Limits, Relaunch, Tap
 from uiprobe.crawl_driver import crawl

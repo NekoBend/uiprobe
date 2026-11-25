@@ -645,7 +645,7 @@ SECOND_DISPLAY = (
 
 @pytest.mark.parametrize("check", [True, False], ids=["checked", "unchecked"])
 def test_a_crawl_on_two_displays_needs_the_tap_window_check(tmp_path, fake_adb, check):
-    from tests.test_crawl_driver import SCREENS, TRANSPORT, Clock, lines, run
+    from tests.crawl_driver.helpers import SCREENS, TRANSPORT, Clock, lines, run
     from uiprobe.crawl import Limits
     from uiprobe.guards import Policy
 
@@ -788,7 +788,7 @@ def test_launch_names_another_display_only_from_an_exact_top_line(
 def gate_run(tmp_path, fake_adb, extra: str):
     """A crawl run with the tap window check off, after its launch and first
     observation; `extra` is added to the fake's `dumpsys window`."""
-    from tests.test_crawl_driver import SCREENS, TRANSPORT, Clock, _gate_run
+    from tests.crawl_driver.helpers import SCREENS, TRANSPORT, Clock, _gate_run
     from uiprobe.guards import Policy
 
     android = FakeAndroid(
@@ -803,13 +803,13 @@ def gate_run(tmp_path, fake_adb, extra: str):
 
 
 def last_end(tmp_path) -> dict:
-    from tests.test_crawl_driver import lines
+    from tests.crawl_driver.helpers import lines
 
     return lines(tmp_path / "run" / "transitions.jsonl")[-1]
 
 
 def last_start(tmp_path) -> dict:
-    from tests.test_crawl_driver import lines
+    from tests.crawl_driver.helpers import lines
 
     starts = [r for r in lines(tmp_path / "run" / "transitions.jsonl") if "action" in r]
     return starts[-1]
@@ -887,7 +887,7 @@ def test_a_caller_clock_that_first_shows_two_displays_sends_nothing(tmp_path, fa
     # The gate's reads show one display; the caller's clock, called after
     # them, reads the foreground on a dump that now shows two. uiprobe's own
     # check after the final comparison refuses the BACK.
-    from tests.test_crawl_driver import SCREENS, TRANSPORT, Clock, _gate_run
+    from tests.crawl_driver.helpers import SCREENS, TRANSPORT, Clock, _gate_run
     from uiprobe.crawl import Back
     from uiprobe.guards import Policy
 
@@ -953,7 +953,7 @@ def test_the_last_check_is_not_caller_code(tmp_path, fake_adb, monkeypatch):
 
 
 def test_a_new_run_starts_without_the_displays_seen(tmp_path, fake_adb):
-    from tests.test_crawl_driver import SCREENS, TRANSPORT, Clock, run
+    from tests.crawl_driver.helpers import SCREENS, TRANSPORT, Clock, run
     from uiprobe.crawl import Limits
     from uiprobe.guards import Policy
 

@@ -9,10 +9,18 @@ from typing import TYPE_CHECKING
 
 import pytest
 
+from tests.crawl_driver.helpers import (
+    SCREENS,
+    SERIAL,
+    SHOP,
+    TRANSPORT,
+    Clock,
+    lines,
+    run,
+)
 from tests.fake_device import FakeAndroid
-from tests.test_crawl_driver import SCREENS, SERIAL, SHOP, TRANSPORT, Clock, lines, run
+from tests.repin.helpers import Waits, listing, renumber
 from tests.test_inputwindows import DISPLAY1
-from tests.test_repin import Waits, listing, renumber
 from uiprobe.crawl import Limits
 from uiprobe.device import EXIT_MARKER, Device
 from uiprobe.guards import Policy
