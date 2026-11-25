@@ -22,8 +22,10 @@ import pytest
 from tests.fake_adb_server import FakeAdbServer, Reset, Stall
 from tests.fake_device import El, FakeAndroid, Screen
 from uiprobe import cli
-from uiprobe import device as device_module
 from uiprobe.device import Device
+from uiprobe.device import apps as device_apps
+from uiprobe.device import pin as device_pin
+from uiprobe.device import state as device_state
 from uiprobe.errors import AdbError, LaunchFailedError
 
 SERIAL = "emulator-5554"
@@ -103,11 +105,9 @@ def android(fake_adb: FakeAdbServer) -> FakeAndroid:
 @pytest.fixture
 def clock(monkeypatch: pytest.MonkeyPatch) -> Clock:
     fake = Clock()
-    monkeypatch.setattr(
-        device_module,
-        "time",
-        SimpleNamespace(monotonic=fake.monotonic, sleep=fake.sleep),
-    )
+    fake_time = SimpleNamespace(monotonic=fake.monotonic, sleep=fake.sleep)
+    monkeypatch.setattr(device_pin, "time", fake_time)
+    monkeypatch.setattr(device_state, "time", fake_time)
     return fake
 
 
@@ -901,7 +901,7 @@ def test_the_start_waits_as_long_as_the_launch_timeout(device, monkeypatch):
 def test_a_start_that_stays_silent_fails_with_start_timeout(
     device, android, fake_adb, monkeypatch
 ):
-    monkeypatch.setattr(device_module, "START_MIN_WAIT", 0.05)
+    monkeypatch.setattr(device_apps, "START_MIN_WAIT", 0.05)
     android.override(re.compile(r"^am start"), Stall(b"Starting: Intent\n"))
     with pytest.raises(LaunchFailedError) as info:
         device.launch(SHOP, timeout=0)

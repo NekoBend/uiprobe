@@ -10,13 +10,13 @@ import pytest
 
 from uiprobe import adb as adb_module
 from uiprobe import crawl_driver
-from uiprobe import device as device_module
 from uiprobe.crawl import (
     Limits,
     Tap,
 )
 from uiprobe.crawl_driver import crawl
 from uiprobe.device import Device
+from uiprobe.device import pin as device_pin
 from uiprobe.guards import Policy
 
 if TYPE_CHECKING:
@@ -439,7 +439,7 @@ def test_nothing_is_hashed_between_the_last_time_check_and_a_tap(
 
     events: list[str] = []
     original_id = model.Screen.screen_id
-    original_check = device_module._monotonic
+    original_check = device_pin._monotonic
     original_send = adb_module._send_request
 
     def recording_id(self: model.Screen) -> str:
@@ -456,7 +456,7 @@ def test_nothing_is_hashed_between_the_last_time_check_and_a_tap(
         return original_send(sock, request)
 
     monkeypatch.setattr(model.Screen, "screen_id", property(recording_id))
-    monkeypatch.setattr(device_module, "_monotonic", recording_check)
+    monkeypatch.setattr(device_pin, "_monotonic", recording_check)
     monkeypatch.setattr(adb_module, "_send_request", recording_send)
     out = tmp_path / "run"
     crawl(
