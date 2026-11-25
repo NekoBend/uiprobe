@@ -22,12 +22,15 @@ import stat
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Final
+from typing import TYPE_CHECKING, Final
 
-from uiprobe.crawl import fingerprint_of
+from uiprobe.crawl import _Prints
 from uiprobe.model import Bounds, Element, Screen
 from uiprobe.settings import SettingsError
 from uiprobe.settings import _read_bytes as _read_capped
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
 
 __all__ = [
     "TREE_SCHEMA",
@@ -51,7 +54,7 @@ MAX_WARNINGS: Final = 20
 # at below it, so nested clickables cannot multiply the work.
 MAX_ROW_TEXTS: Final = 50
 _MAX_MEMBERS: Final = 500
-_MAX_FINGERPRINTED: Final = 5000
+_MAX_FINGERPRINTED: Final = 2000
 _READ_CHUNK: Final = 65536
 _EPOCH: Final = datetime(1970, 1, 1, tzinfo=UTC)
 _PASSWORD_NAME: Final = "[password field]"  # noqa: S105 (a marker, not a secret)
@@ -101,6 +104,7 @@ class ScreenNode:
     rows: list[Row]
     unmatched: list[tuple[str, tuple[str, ...]]] = field(default_factory=list)
     screen_reasons: tuple[str, ...] = ()
+    unmatched_why: str | None = None  # why they were not matched, when not tried
 
 
 @dataclass(slots=True)
@@ -128,6 +132,26 @@ class _Tap:
     element_id: str
     end: dict[str, object] | None
     element: dict[str, object]
+    ambiguous: bool = False
+
+
+class _Warnings:
+    """What could not be read: counted as it happens, only the first
+    `MAX_WARNINGS` texts are kept."""
+
+    def __init__(self) -> None:
+        self.kept: list[str] = []
+        self.count = 0
+
+    def append(self, text: str) -> None:
+        self.count += 1
+        if len(self.kept) < MAX_WARNINGS:
+            self.kept.append(text)
+
+    def result(self) -> list[str]:
+        if self.count <= MAX_WARNINGS:
+            return list(self.kept)
+        return [*self.kept, f"and {self.count - MAX_WARNINGS} more warnings"]
 
 
 class _UnreadableError(Exception):
@@ -213,29 +237,39 @@ def _str_or_none(value: object) -> str | None:
     return value if isinstance(value, str) else None
 
 
-def _lines(path: Path, warnings: list[str]) -> list[dict[str, object]]:
-    """The JSON objects of a ``.jsonl`` file; a bad line is a warning."""
+def _lines(path: Path, warnings: _Warnings) -> Iterator[dict[str, object] | None]:
+    """The non-blank lines of a ``.jsonl`` file, one at a time: the JSON object,
+    or None for a line that is not one (that is a warning, and still a line:
+    the callers use the physical order)."""
     try:
         data = _read_bytes(path, MAX_LOG_BYTES)
     except FileNotFoundError:
-        return []  # written at the first line, so absent when there was none
+        return  # written at the first line, so absent when there was none
     except _UnreadableError as exc:
         warnings.append(f"{path.name} {exc}")
-        return []
-    found: list[dict[str, object]] = []
-    for number, raw in enumerate(data.split(b"\n"), 1):
+        return
+    start = 0
+    number = 0
+    while start <= len(data):
+        end = data.find(b"\n", start)
+        if end < 0:
+            end = len(data)
+        raw = data[start:end]
+        start = end + 1
+        number += 1
         if not raw.strip():
             continue
         try:
             value = _loads(raw)
         except ValueError:
             warnings.append(f"{path.name} line {number} is not valid UTF-8 JSON")
+            yield None
             continue
         if isinstance(value, dict):
-            found.append(value)
+            yield value
         else:
             warnings.append(f"{path.name} line {number} is not a JSON object")
-    return found
+            yield None
 
 
 def _screen_id(value: object) -> str | None:
@@ -251,7 +285,7 @@ def _action_id(value: object) -> int | None:
 class _Reader:
     """Loads screen files on demand, once each, by the names the folder lists."""
 
-    def __init__(self, run_dir: Path, warnings: list[str]) -> None:
+    def __init__(self, run_dir: Path, warnings: _Warnings) -> None:
         self._dir = run_dir / "screens"
         self._warnings = warnings
         self._cache: dict[str, tuple[Screen, str, str | None] | None] = {}
@@ -481,7 +515,7 @@ def _read_start(base: Path) -> dict[str, object]:
     return start
 
 
-def _read_end(base: Path, warnings: list[str]) -> dict[str, object] | None:
+def _read_end(base: Path, warnings: _Warnings) -> dict[str, object] | None:
     """The content of run.json, or None when it is missing or not usable."""
     try:
         loaded = _read_json(base / "run.json")
@@ -506,6 +540,8 @@ def _tap_of(
     start_line: dict[str, object],
     action: dict[str, object],
     end: dict[str, object] | None,
+    *,
+    ambiguous: bool,
 ) -> _Tap | None:
     """The tap a start line records, or None when it names no screen or element."""
     from_id = _screen_id(start_line.get("from_screen_id"))
@@ -517,7 +553,7 @@ def _tap_of(
         or not isinstance(element_id, str)
     ):
         return None
-    return _Tap(action_id, from_id, element_id, end, element)
+    return _Tap(action_id, from_id, element_id, end, element, ambiguous)
 
 
 @dataclass(slots=True)
@@ -548,78 +584,102 @@ def _end_is_valid(end: dict[str, object]) -> bool:
     return sum(said) == 1
 
 
-def _transition_lines(
-    base: Path, warnings: list[str]
-) -> tuple[
-    dict[int, dict[str, object]],
-    dict[int, dict[str, object]],
-    list[int],
-    dict[int, str],
-]:
-    """The start lines, the usable end lines, the action ids in order and, per
-    action, the package of an off_target start line that comes right after its
-    end line, decided on the screen that end line names."""
-    starts: dict[int, dict[str, object]] = {}
-    ends: dict[int, dict[str, object]] = {}
-    order: list[int] = []
-    off_after: dict[int, str] = {}
+@dataclass(slots=True)
+class _Lines:
+    starts: dict[int, dict[str, object]] = field(default_factory=dict)
+    ends: dict[int, dict[str, object]] = field(default_factory=dict)
+    order: list[int] = field(default_factory=list)
+    # per action: the package of an off_target start line that comes right
+    # after its end line, decided on the screen that end line names
+    off_after: dict[int, str] = field(default_factory=dict)
+    # actions whose record cannot be trusted: a repeated start line, or a
+    # damaged line between their start and end or right after their end
+    ambiguous: set[int] = field(default_factory=set)
+
+
+def _transition_lines(base: Path, warnings: _Warnings) -> _Lines:
+    """Read transitions.jsonl in physical order (a damaged line counts as a
+    line when deciding what is adjacent)."""
+    found = _Lines()
+    open_actions: set[int] = set()
     previous_end: tuple[int, str | None] | None = None
     for line in _lines(base / "transitions.jsonl", warnings):
-        action_id = _action_id(line.get("action_id"))
-        schema = line.get("schema")
         follows, previous_end = previous_end, None
-        if action_id is None or schema not in (
-            "uiprobe.transition_start/1",
-            "uiprobe.transition_end/1",
+        action_id = _action_id(line.get("action_id")) if line is not None else None
+        schema = line.get("schema") if line is not None else None
+        if (
+            line is None
+            or action_id is None
+            or schema not in ("uiprobe.transition_start/1", "uiprobe.transition_end/1")
         ):
-            warnings.append("transitions.jsonl has a line that is not a transition")
+            if line is not None:
+                warnings.append("transitions.jsonl has a line that is not a transition")
+            found.ambiguous.update(open_actions)
+            if follows:
+                found.ambiguous.add(follows[0])
         elif schema == "uiprobe.transition_start/1":
-            if action_id not in starts:
-                order.append(action_id)
-            starts[action_id] = line
-            other = line.get("off_target")
-            package = (
-                _str_or_none(other.get("package")) if isinstance(other, dict) else None
-            )
-            decided_on = _screen_id(line.get("from_screen_id"))
-            if follows and package and decided_on and follows[1] == decided_on:
-                off_after[follows[0]] = package
+            if action_id in found.starts:
+                found.ambiguous.add(action_id)
+            else:
+                found.order.append(action_id)
+            found.starts[action_id] = line
+            open_actions.add(action_id)
+            _note_off(found, line, follows)
         elif _end_is_valid(line):
-            ends[action_id] = line
+            found.ends[action_id] = line
+            open_actions.discard(action_id)
             previous_end = (action_id, _screen_id(line.get("to_screen_id")))
         else:
             warnings.append(
                 f"action {action_id} has an end line that is not understood,"
                 " so its result is unknown"
             )
-    return starts, ends, order, off_after
+    for action_id in found.ambiguous:
+        warnings.append(
+            f"action {action_id} has a repeated start line or a damaged line"
+            " next to it, so its result is unknown"
+        )
+    return found
 
 
-def _read_moves(base: Path, warnings: list[str]) -> _Moves:
+def _note_off(
+    found: _Lines, line: dict[str, object], follows: tuple[int, str | None] | None
+) -> None:
+    other = line.get("off_target")
+    package = _str_or_none(other.get("package")) if isinstance(other, dict) else None
+    decided_on = _screen_id(line.get("from_screen_id"))
+    if follows and package and decided_on and follows[1] == decided_on:
+        found.off_after[follows[0]] = package
+
+
+def _read_moves(base: Path, warnings: _Warnings) -> _Moves:
     """The taps of transitions.jsonl, and the screen the launch led to."""
-    starts, ends, order, off_after = _transition_lines(base, warnings)
+    lines = _transition_lines(base, warnings)
     taps: dict[tuple[str, str], list[_Tap]] = {}
     root: str | None = None
     first_from: str | None = None
-    for action_id in order:
-        start_line = starts[action_id]
+    for action_id in lines.order:
+        start_line = lines.starts[action_id]
         action = start_line.get("action")
         if not isinstance(action, dict):
             warnings.append(f"action {action_id} has no action record")
             continue
-        end = ends.get(action_id)
+        end = lines.ends.get(action_id)
         kind = action.get("kind")
         if kind == "launch" and root is None and end is not None:
             root = _screen_id(end.get("to_screen_id"))
         if kind != "tap":
             continue
-        tap = _tap_of(action_id, start_line, action, end)
+        tap = _tap_of(
+            action_id, start_line, action, end, ambiguous=action_id in lines.ambiguous
+        )
         if tap is None:
             warnings.append(f"action {action_id} is a tap with no screen or element")
             continue
         first_from = first_from or tap.from_screen_id
         taps.setdefault((tap.from_screen_id, tap.element_id), []).append(tap)
-    return _Moves(taps, root, first_from, len(order), off_after)
+    off_after = {a: p for a, p in lines.off_after.items() if a not in lines.ambiguous}
+    return _Moves(taps, root, first_from, len(lines.order), off_after)
 
 
 def _sent_target(tap: _Tap) -> str | None:
@@ -635,9 +695,11 @@ class _Skips:
     whole_screen: dict[str, list[str]]
 
 
-def _read_skips(base: Path, warnings: list[str]) -> _Skips:
+def _read_skips(base: Path, warnings: _Warnings) -> _Skips:
     skips = _Skips({}, {})
     for line in _lines(base / "skipped.jsonl", warnings):
+        if line is None:
+            continue
         sid = _screen_id(line.get("screen_id"))
         fingerprint = line.get("fingerprint")
         reasons = line.get("reasons")
@@ -687,17 +749,21 @@ def _node(
     rows = _rows_of(screen, tapped, record_text=record_text)
     by_fp = skips.by_screen.get(sid, {})
     unmatched: list[tuple[str, tuple[str, ...]]] = []
-    if by_fp:
+    unchecked = False
+    if by_fp and len(screen.elements) > _MAX_FINGERPRINTED:
+        unchecked = True
+        unmatched = [(fp, tuple(r)) for fp, r in by_fp.items()]
+    elif by_fp:
+        prints = _Prints(screen)  # one index of the screen, built once
+        by_id = {e.id: e for e in screen.elements}
         seen: set[str] = set()
-        if len(screen.elements) <= _MAX_FINGERPRINTED:
-            by_id = {e.id: e for e in screen.elements}
-            for row in rows:
-                if row.kind != "row":
-                    continue
-                fp = fingerprint_of(screen, by_id[row.element_id])
-                if fp in by_fp:
-                    row.reasons = tuple(by_fp[fp])
-                    seen.add(fp)
+        for row in rows:
+            if row.kind != "row":
+                continue
+            fp = prints.of(by_id[row.element_id])
+            if fp in by_fp:
+                row.reasons = tuple(by_fp[fp])
+                seen.add(fp)
         unmatched = [(fp, tuple(r)) for fp, r in by_fp.items() if fp not in seen]
     for row in rows:
         if (sid, row.element_id) in moves.taps:
@@ -709,6 +775,7 @@ def _node(
         rows,
         unmatched,
         tuple(skips.whole_screen.get(sid, ())),
+        "too_many_elements" if unchecked else None,
     )
 
 
@@ -721,7 +788,7 @@ def read_tree(run_dir: str | Path) -> RunTree:
             that cannot be read becomes a warning, and the rest is built.
     """
     base = Path(run_dir)
-    warnings: list[str] = []
+    warnings = _Warnings()
     start = _read_start(base)
     package = str(start["package"])
     record_text = start.get("record_text") is not False
@@ -776,7 +843,7 @@ def read_tree(run_dir: str | Path) -> RunTree:
             and sid != root
             and sid not in led_to
         ],
-        warnings=_capped(warnings),
+        warnings=warnings.result(),
     )
 
 
@@ -825,14 +892,7 @@ def _rename(row: Row, element: dict[str, object]) -> None:
 def _unknown(tap: _Tap) -> bool:
     """A tap whose start line has no end line, or whose sending failed: it may
     or may not have reached the device."""
-    return tap.end is None or bool(tap.end.get("failed"))
-
-
-def _capped(warnings: list[str]) -> list[str]:
-    if len(warnings) <= MAX_WARNINGS:
-        return warnings
-    more = len(warnings) - MAX_WARNINGS
-    return [*warnings[:MAX_WARNINGS], f"and {more} more warnings"]
+    return tap.ambiguous or tap.end is None or bool(tap.end.get("failed"))
 
 
 def _not_sent(tap: _Tap) -> bool:
@@ -928,6 +988,7 @@ def tree_to_dict(tree: RunTree) -> dict[str, object]:
             "elements": [_element_dict(row) for row in node.rows],
             "unmatched": [
                 {"fingerprint": fp, "reasons": list(reasons)}
+                | ({"why": node.unmatched_why} if node.unmatched_why else {})
                 for fp, reasons in node.unmatched
             ],
         }

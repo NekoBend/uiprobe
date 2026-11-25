@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse  # noqa: TC003 (a runtime import in the former cli.py)
+import re
 import sys
 from dataclasses import dataclass
 from typing import Final
@@ -21,6 +22,23 @@ from uiprobe.settings import _shown
 LEGEND: Final = "· = 押していないので、その下は見ていない行"
 _NO_TEXT: Final = "このランでは画面の文字を記録していません (record_text = false)"
 _FIRST_SCREEN: Final = "最初の画面"
+MAX_LABEL: Final = 200
+_SURROGATE: Final = re.compile("[\ud800-\udfff]")
+
+
+def _label(text: str) -> str:
+    """A device text for the text tree: at most `MAX_LABEL` characters, with a
+    visible marker for what was cut, and escaped for the terminal. (`--json`
+    keeps the full text.)"""
+    if len(text) <= MAX_LABEL:
+        return _printable(text)
+    return f"{_printable(text[:MAX_LABEL])}…(+{len(text) - MAX_LABEL} 字)"
+
+
+def _json_text(tree: RunTree) -> str:
+    """The JSON of the tree with lone surrogates written as escapes, so the
+    output never holds a character that cannot be encoded."""
+    return _SURROGATE.sub(lambda m: f"\\u{ord(m[0]):04x}", dumps(tree_to_dict(tree)))
 
 
 @dataclass(slots=True)
@@ -44,7 +62,7 @@ def _entries(tree: RunTree, sid: str, *, ids: bool, why: bool) -> list[_Entry]:
     if ids:
         entries.append(_Entry(_heading_text(tree, sid)))
     for row in node.rows:
-        name = _printable(row.name)
+        name = _label(row.name)
         if row.kind == "heading":
             entries.append(_Entry(f"[見出し] {name}"))
         elif row.to is None:
@@ -54,7 +72,10 @@ def _entries(tree: RunTree, sid: str, *, ids: bool, why: bool) -> list[_Entry]:
             entries.append(_Entry(line))
         else:
             entries.append(_Entry(name, row.to, name, more=tuple(row.also_to)))
-    if node.unmatched:
+    if node.unmatched and node.unmatched_why:
+        count = len(node.unmatched)
+        entries.append(_Entry(f"({count} 件は対応を調べていない: 部品が多すぎる)"))
+    elif node.unmatched:
         entries.append(_Entry(f"({len(node.unmatched)} 件は対応する行が見つからない)"))
     return entries
 
@@ -183,7 +204,7 @@ def _cmd_tree(args: argparse.Namespace) -> int:
         msg = f"{_shown(path)}: {exc}"
         raise _UsageError(msg) from None
     if args.json:
-        _emit(dumps(tree_to_dict(tree)))
+        _emit(_json_text(tree))
         return 0
     for warning in tree.warnings:
         _emit(f"uiprobe: warning: {_printable(warning)}", stream=sys.stderr)

@@ -371,7 +371,7 @@ def test_a_run_without_run_json_still_shows(tmp_path, capsys):
 def test_a_damaged_line_is_a_warning_and_the_rest_is_shown(tmp_path, capsys):
     folder = full_run(tmp_path)
     path = folder.path / "transitions.jsonl"
-    path.write_bytes(path.read_bytes() + b"{not json\n")
+    path.write_bytes(b"{not json\n" + path.read_bytes())
     code, out, err = run_tree(capsys, str(folder.path))
     assert code == 0
     assert out.splitlines() == FULL_TEXT
@@ -1184,3 +1184,218 @@ def test_a_failed_end_counts_as_unknown(tmp_path, capsys):
     folder.finish()
     _, out, _ = run_tree(capsys, str(folder.path))
     assert "├─ Network → (結果不明)" in out.splitlines()
+
+
+# --- the last round ---
+
+
+def test_a_long_text_is_cut_in_the_text_tree_only(tmp_path, capsys):
+    folder = Folder(tmp_path)
+    long_text = "L" * 260
+    screen = make_screen(
+        ".Home",
+        [
+            el(1, cls="FrameLayout"),
+            el(2, 1, text=long_text),
+            el(3, 1, cls="LinearLayout", flags=CLICK),
+            el(4, 3, text="M" * 201),
+            el(5, 1, cls="LinearLayout", flags=CLICK),
+            el(6, 5, text="E" * 200),
+        ],
+    )
+    sid = folder.screen(screen)
+    folder.start("launch")
+    folder.end(sid)
+    folder.tap(screen, 3, sid)  # back to the root: "seen above" uses the name
+    folder.finish()
+    _, out, _ = run_tree(capsys, str(folder.path))
+    lines = out.splitlines()
+    assert f"├─ [見出し] {'L' * 200}…(+60 字)" in lines
+    assert f"├─ {'M' * 200}…(+1 字) → (同じ画面)" in lines
+    assert f"└─ {'E' * 200} ·" in lines
+    _, out, _ = run_tree(capsys, str(folder.path), "--json")
+    names = [e["name"] for e in json.loads(out)["screens"][sid]["elements"]]
+    assert names == [long_text, "M" * 201, "E" * 200]
+
+
+def test_a_cut_name_is_used_in_a_seen_above_reference(tmp_path, capsys):
+    folder = Folder(tmp_path)
+    home = make_screen(
+        ".Home",
+        [
+            el(1, cls="FrameLayout"),
+            el(2, 1, cls="LinearLayout", flags=CLICK),
+            el(3, 2, text="N" * 250),
+            el(4, 1, cls="LinearLayout", flags=CLICK),
+            el(5, 4, text="Again"),
+        ],
+    )
+    other = make_screen(".Other", [el(1, cls="FrameLayout"), el(2, 1, text="Hi")])
+    home_id = folder.screen(home)
+    other_id = folder.screen(other)
+    folder.start("launch")
+    folder.end(home_id)
+    folder.tap(home, 2, other_id)
+    folder.tap(home, 4, other_id)
+    folder.finish()
+    _, out, _ = run_tree(capsys, str(folder.path))
+    cut = "N" * 200 + "…(+50 字)"
+    assert f"├─ {cut}" in out.splitlines()
+    assert f"└─ Again → (上に出た画面: {cut})" in out.splitlines()
+
+
+def test_warnings_are_counted_and_only_twenty_are_kept(tmp_path, capsys):
+    folder = full_run(tmp_path)
+    log = folder.path / "skipped.jsonl"
+    log.write_bytes(log.read_bytes() + b"[]\n" * 30)
+    code, out, err = run_tree(capsys, str(folder.path), "--json")
+    warnings = json.loads(out)["warnings"]
+    assert code == 0
+    assert len(warnings) == 21
+    assert warnings[-1] == "and 10 more warnings"
+    code, _, err = run_tree(capsys, str(folder.path))
+    assert err.count("uiprobe: warning:") == 21
+
+
+def test_a_screen_with_too_many_elements_is_not_matched(tmp_path, capsys):
+    folder = Folder(tmp_path)
+    elements = [el(1, cls="FrameLayout")]
+    elements += [
+        el(n, 1, cls="LinearLayout", flags=CLICK, text=f"r{n}") for n in range(2, 2003)
+    ]
+    screen = make_screen(".Huge", elements)
+    sid = folder.screen(screen)
+    folder.start("launch")
+    folder.end(sid)
+    folder.skip(screen, 5, "toggle")
+    folder.skip(screen, 6, "deny_word")
+    folder.finish()
+    _, out, _ = run_tree(capsys, str(folder.path))
+    assert "└─ (2 件は対応を調べていない: 部品が多すぎる)" in out.splitlines()
+    assert "[toggle]" not in out
+    _, out, _ = run_tree(capsys, str(folder.path), "--json")
+    node = json.loads(out)["screens"][sid]
+    assert len(node["unmatched"]) == 2
+    assert all(u["why"] == "too_many_elements" for u in node["unmatched"])
+    assert all(e["reasons"] == [] for e in node["elements"])
+
+
+def _raw_run(tmp_path: Path, lines: list) -> tuple[Path, str]:
+    """A run folder whose transitions.jsonl is written by hand."""
+    folder = Folder(tmp_path)
+    home = home_screen()
+    home_id = folder.screen(home)
+    folder.finish()
+    start = {"schema": "uiprobe.transition_start/1"}
+    end = {"schema": "uiprobe.transition_end/1"}
+    tap = {
+        "kind": "tap",
+        "element": {"id": "e3", "class": "android.widget.LinearLayout"},
+    }
+    table = {"S": start, "E": end}
+    out = []
+    for item in lines:
+        if isinstance(item, bytes):
+            out.append(item)
+            continue
+        kind, number, extra = item
+        body = extra(home_id, tap)
+        out.append(json.dumps({**table[kind], "action_id": number, **body}).encode())
+    (folder.path / "transitions.jsonl").write_bytes(b"\n".join(out) + b"\n")
+    return folder.path, home_id
+
+
+def _tap_start(sid, tap):
+    return {"action": tap, "from_screen_id": sid}
+
+
+def _tap_end_other(_sid, _tap):
+    return {"dump_failed": False, "to_screen_id": OTHER_SCREEN}
+
+
+def _relaunch_off(_sid, _tap):
+    return {
+        "action": {"kind": "relaunch"},
+        "from_screen_id": OTHER_SCREEN,
+        "off_target": {"package": "com.other.app"},
+    }
+
+
+def test_the_clean_sequence_is_another_app(tmp_path, capsys):
+    path, _ = _raw_run(
+        tmp_path,
+        [
+            ("S", 1, _tap_start),
+            ("E", 1, _tap_end_other),
+            ("S", 2, _relaunch_off),
+        ],
+    )
+    _, out, _ = run_tree(capsys, str(path))
+    assert "├─ Network → 別のアプリ" in out.splitlines()
+
+
+def test_a_damaged_line_after_the_end_makes_the_tap_unknown(tmp_path, capsys):
+    path, _ = _raw_run(
+        tmp_path,
+        [
+            ("S", 1, _tap_start),
+            ("E", 1, _tap_end_other),
+            b"{broken",
+            ("S", 2, _relaunch_off),
+        ],
+    )
+    code, out, err = run_tree(capsys, str(path))
+    assert code == 0
+    assert "├─ Network → (結果不明)" in out.splitlines()
+    assert "別のアプリ" not in out
+    assert "action 1 has a repeated start line or a damaged line" in err
+
+
+def test_a_damaged_line_between_start_and_end_makes_the_tap_unknown(tmp_path, capsys):
+    path, _ = _raw_run(
+        tmp_path,
+        [("S", 1, _tap_start), b"[1]", ("E", 1, _tap_end_other)],
+    )
+    _, out, _ = run_tree(capsys, str(path))
+    assert "├─ Network → (結果不明)" in out.splitlines()
+
+
+def test_a_repeated_start_line_makes_the_tap_unknown(tmp_path, capsys):
+    path, _ = _raw_run(
+        tmp_path,
+        [
+            ("S", 1, _tap_start),
+            ("S", 1, _tap_start),
+            ("E", 1, _tap_end_other),
+            ("S", 2, _relaunch_off),
+        ],
+    )
+    _, out, _ = run_tree(capsys, str(path))
+    assert "├─ Network → (結果不明)" in out.splitlines()
+    assert "別のアプリ" not in out
+
+
+def test_a_lone_surrogate_is_escaped_in_the_json_output(tmp_path, capsys):
+    folder = full_run(tmp_path)
+    home_id = home_screen().screen_id
+    path = folder.path / "screens" / f"{home_id}.json"
+    text = path.read_text(encoding="utf-8").replace("Welcome", "Wel\\ud800come")
+    path.write_text(text, encoding="utf-8")
+    code, out, _ = run_tree(capsys, str(folder.path), "--json")
+    assert code == 0
+    out.encode("utf-8")  # a lone surrogate would raise here
+    assert "Wel\\ud800come" in out
+    assert json.loads(out)["screens"][home_id]["elements"][0]["name"] == "Wel\ud800come"
+    _, text_out, _ = run_tree(capsys, str(folder.path))
+    text_out.encode("utf-8")
+
+
+def test_the_settings_limit_is_read_when_the_reader_runs(tmp_path, monkeypatch):
+    from uiprobe import settings
+
+    path = tmp_path / "f"
+    path.write_bytes(b"x" * 10)
+    monkeypatch.setattr(settings, "MAX_SETTINGS_BYTES", 5)
+    with pytest.raises(settings.SettingsError, match="larger than 5 bytes"):
+        settings._read_bytes(path, "f")
+    assert settings._read_bytes(path, "f", 10) == b"x" * 10

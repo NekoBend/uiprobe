@@ -936,11 +936,11 @@ def _close_quietly(fd: int) -> None:
 
 
 def _read_bytes(
-    path: str | os.PathLike[str], shown: str, limit: int = MAX_SETTINGS_BYTES
+    path: str | os.PathLike[str], shown: str, limit: int | None = None
 ) -> bytes:
     """Read the file `path` (at most one byte more than `limit`, which is the
-    settings limit unless the caller gives another; `uiprobe tree` reads its
-    run folder files through here).
+    current `MAX_SETTINGS_BYTES` unless the caller gives another; `uiprobe tree`
+    reads its run folder files through here).
 
     The path is opened once, as given (a str is not normalised, so a trailing
     ``/.`` after a file fails as it does for any program); every check and
@@ -977,8 +977,10 @@ def _read_descriptor(
     fd: int,
     path: str | os.PathLike[str],
     fail: Callable[[str], SettingsError],
-    cap: int = MAX_SETTINGS_BYTES,
+    cap: int | None = None,
 ) -> bytes:
+    if cap is None:
+        cap = MAX_SETTINGS_BYTES  # read now, so a reassignment still counts
     changed = "the file changed while it was read; try again"
     try:
         before = os.fstat(fd)
