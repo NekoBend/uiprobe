@@ -803,7 +803,7 @@ class CrawlEngine:
             self._depths[sid] = 1
             self._root = sid
             self._path = [sid]
-            self._start_replay()
+            self._start_replay(sid)
         elif tapped:
             depth = len(self._path)
             known = self._depths.get(sid)
@@ -1072,13 +1072,15 @@ class CrawlEngine:
         ways.reverse()
         return tuple(ways)
 
-    def _start_replay(self) -> None:
+    def _start_replay(self, root: str) -> None:
         """At a new root: choose a goal and the route down to it.
 
         A goal kept from an earlier replay that has not been reached or
         dropped comes first; else it is the deepest screen of the path just
         before the relaunch that still had a row to try. The root itself is
-        never a goal: nothing needs replaying for it.
+        never a goal: nothing needs replaying for it. A relaunch that lands
+        directly on the goal (the new root has the goal's id) has reached it:
+        the goal ends there and no route row is pressed.
         """
         if not self._policy.replay_path:
             return
@@ -1088,6 +1090,9 @@ class CrawlEngine:
         for sid in candidates:
             if sid in self._replay_dropped or self._untried.get(sid, 0) < 1:
                 continue
+            if sid == root:
+                self._goal = None  # reached: go on with the untried rows
+                return
             route = self._route_to(sid)
             if route is not None:
                 self._goal = sid

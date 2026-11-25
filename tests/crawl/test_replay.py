@@ -844,3 +844,24 @@ def test_the_records_of_a_transition_keep_their_old_fields() -> None:
     for transition in eng.records.transitions:
         assert list(asdict(transition)) == names
     assert eng.replay_actions  # the replay is told apart outside the record
+
+
+def test_replay_b_a_relaunch_landing_on_the_goal_presses_no_route_row() -> None:
+    eng, _root, sub = to_relaunch()
+    goal = sub.screen.screen_id
+    assert eng._untried[goal] == 2
+    # The app comes back on the sub-page itself: that is the new root.
+    nxt = eng.next(sub)
+    assert isinstance(nxt, Tap)
+    assert not eng.is_replay(nxt)
+    assert eng.replay_actions == frozenset()
+    assert eng._goal is None
+    assert eng._replay is None
+    assert eng._replay_fails == {}
+    # an untried row of the goal (a2), not a1, which was tried
+    row = next(
+        e
+        for e in sub.screen.elements
+        if fingerprint_of(sub.screen, e) == nxt.fingerprint
+    )
+    assert row.text == "a2"
