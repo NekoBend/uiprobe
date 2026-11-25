@@ -19,9 +19,9 @@ from uiprobe.crawl_tree import (
 )
 from uiprobe.settings import _shown
 
-LEGEND: Final = "· = 押していないので、その下は見ていない行"
-_NO_TEXT: Final = "このランでは画面の文字を記録していません (record_text = false)"
-_FIRST_SCREEN: Final = "最初の画面"
+LEGEND: Final = "· = not pressed, so nothing below it was looked at"
+_NO_TEXT: Final = "screen texts were not recorded in this run (record_text = false)"
+_FIRST_SCREEN: Final = "first screen"
 MAX_LABEL: Final = 200
 _SURROGATE: Final = re.compile("[\ud800-\udfff]")
 
@@ -32,7 +32,7 @@ def _label(text: str) -> str:
     keeps the full text.)"""
     if len(text) <= MAX_LABEL:
         return _printable(text)
-    return f"{_printable(text[:MAX_LABEL])}…(+{len(text) - MAX_LABEL} 字)"
+    return f"{_printable(text[:MAX_LABEL])}…(+{len(text) - MAX_LABEL} chars)"
 
 
 def _json_text(tree: RunTree) -> str:
@@ -53,7 +53,7 @@ class _Entry:
 def _heading_text(tree: RunTree, sid: str) -> str:
     node = tree.screens[sid]
     activity = _printable(node.activity) if node.activity else "-"
-    return f"(画面 {_printable(sid)}  {activity})"
+    return f"(screen {_printable(sid)}  {activity})"
 
 
 def _entries(tree: RunTree, sid: str, *, ids: bool, why: bool) -> list[_Entry]:
@@ -64,7 +64,7 @@ def _entries(tree: RunTree, sid: str, *, ids: bool, why: bool) -> list[_Entry]:
     for row in node.rows:
         name = _label(row.name)
         if row.kind == "text":
-            entries.append(_Entry(f"[文字] {name}"))
+            entries.append(_Entry(f"[text] {name}"))
         elif row.to is None:
             line = f"{name} ·"
             if why and row.reasons:
@@ -74,29 +74,29 @@ def _entries(tree: RunTree, sid: str, *, ids: bool, why: bool) -> list[_Entry]:
             entries.append(_Entry(name, row.to, name, more=tuple(row.also_to)))
     if node.unmatched and node.unmatched_why:
         count = len(node.unmatched)
-        entries.append(_Entry(f"({count} 件は対応を調べていない: 部品が多すぎる)"))
+        entries.append(_Entry(f"({count} not matched to rows: too many elements)"))
     elif node.unmatched:
-        entries.append(_Entry(f"({len(node.unmatched)} 件は対応する行が見つからない)"))
+        entries.append(_Entry(f"({len(node.unmatched)} with no matching row)"))
     return entries
 
 
 def _ending(to: dict[str, object], *, ids: bool) -> str | None:
     """The text after a pressed row's name, or None when a screen goes below."""
     if "same_screen" in to:
-        return " → (同じ画面)"
+        return " → (same screen)"
     if "other_app" in to:
         package = to["other_app"]
         suffix = f" ({_printable(package)})" if ids and isinstance(package, str) else ""
-        return " → 別のアプリ" + suffix
+        return " → another app" + suffix
     if "not_sent" in to:
         reason = to["not_sent"]
         shown = _printable(reason) if isinstance(reason, str) else ""
-        return f" → (送らなかった: {shown})"
+        return f" → (not sent: {shown})"
     if "unknown" in to:
-        return " → (結果不明)"
+        return " → (result unknown)"
     if "screen_id" in to:
         return None
-    return " → (読めなかった)"
+    return " → (could not be read)"
 
 
 def _orphan_heading(tree: RunTree, sid: str) -> str:
@@ -104,7 +104,7 @@ def _orphan_heading(tree: RunTree, sid: str) -> str:
     BACK or a relaunch, or is another reading of a screen that changes)."""
     node = tree.screens[sid]
     activity = _printable(node.activity) if node.activity else "-"
-    return f"(押した行からは辿れなかった画面 {_printable(sid)}  {activity})"
+    return f"(screen not reached from a pressed row {_printable(sid)}  {activity})"
 
 
 class _Renderer:
@@ -128,7 +128,7 @@ class _Renderer:
         if to is None:
             return []
         extras = [
-            _Entry("(もう一度押した", e, entry.name, again=True) for e in entry.more
+            _Entry("(pressed again", e, entry.name, again=True) for e in entry.more
         ]
         ending = _ending(to, ids=self.ids)
         below: list[_Entry] = []
@@ -136,12 +136,12 @@ class _Renderer:
             target = to["screen_id"]
             assert isinstance(target, str)  # noqa: S101
             if target in self.expanded:
-                ending = f" → (上に出た画面: {self.expanded[target]})"
+                ending = f" → (screen shown above: {self.expanded[target]})"
                 if self.ids:
                     ending += f" {_printable(target)}"
             else:
                 below = self.open_screen(target, entry.name)
-                ending = " → 次の画面" if entry.again else ""
+                ending = " → next screen" if entry.again else ""
         self.lines[-1] += ending + (")" if entry.again else "")
         return [*below, *extras]
 
