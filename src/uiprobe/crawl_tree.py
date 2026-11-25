@@ -70,7 +70,7 @@ class TreeError(Exception):
 class Row:
     """One line of a screen: a clickable row, or a text outside any row.
 
-    ``kind`` is ``row`` or ``heading``. ``texts`` are all the texts of the row
+    ``kind`` is ``row`` or ``text``. ``texts`` are all the texts of the row
     in document order, ``name`` first (the name itself is not always a text:
     it can be a content description or a marker such as ``[icon: ImageButton]``).
     ``to`` is the ending of a tap that was attempted: ``{"screen_id": ...}``,
@@ -217,6 +217,36 @@ def _loads(data: bytes) -> object:
     except RecursionError:
         msg = "nested too deeply"
         raise ValueError(msg) from None
+
+
+def _no_duplicates(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    found: dict[str, object] = {}
+    for key, value in pairs:
+        if key in found:
+            msg = "duplicate key"
+            raise ValueError(msg)
+        found[key] = value
+    return found
+
+
+def _loads_strict(data: bytes) -> object:
+    """Like `_loads`, but a key that appears twice in an object is an error."""
+    try:
+        return json.loads(data.decode("utf-8"), object_pairs_hook=_no_duplicates)
+    except RecursionError:
+        msg = "nested too deeply"
+        raise ValueError(msg) from None
+
+
+def _json_valid(data: bytes) -> bool:
+    """Whether `data` is JSON at all (any shape; a repeated key is allowed)."""
+    try:
+        json.loads(data.decode("utf-8"))
+    except RecursionError:
+        return True  # valid, only too deep to read
+    except ValueError:
+        return False
+    return True
 
 
 def _read_json(path: Path) -> object:
@@ -403,7 +433,7 @@ def _rows_of(
     *,
     record_text: bool,
 ) -> list[Row]:
-    """The rows and headings of a screen, in document order."""
+    """The rows and the texts outside rows of a screen, in document order."""
     elements = screen.elements
     index = {e.id: i for i, e in enumerate(elements)}
     children: dict[str, list[int]] = {}
@@ -423,9 +453,9 @@ def _rows_of(
         if is_row[i]:
             rows.append(_row(screen, i, children, own, record_text=record_text))
         elif not under_row[i]:
-            heading = _heading(element, record_text=record_text)
-            if heading is not None:
-                rows.append(heading)
+            text_row = _text_row(element, record_text=record_text)
+            if text_row is not None:
+                rows.append(text_row)
     return rows
 
 
@@ -476,17 +506,17 @@ def _row(
     return _row_of(element, "row", name, tuple(texts), hidden=False)
 
 
-def _heading(element: Element, *, record_text: bool) -> Row | None:
+def _text_row(element: Element, *, record_text: bool) -> Row | None:
     if not record_text:
         return None
     if "password" in element.flags:
         if not element.text.strip():
             return None
-        return _row_of(element, "heading", _PASSWORD_NAME, (), hidden=True)
+        return _row_of(element, "text", _PASSWORD_NAME, (), hidden=True)
     text = element.text.strip()
     if not text:
         return None
-    return _row_of(element, "heading", text, (text,), hidden=False)
+    return _row_of(element, "text", text, (text,), hidden=False)
 
 
 def _read_start(base: Path) -> dict[str, object]:
@@ -641,7 +671,7 @@ def _action_ok(line: dict[str, object]) -> str | None:
     point = action.get("point")
     has_from = "from_screen_id" in line
     checks = (
-        (kind not in _KINDS, "action.kind"),
+        (not _is_text(kind) or kind not in _KINDS, "action.kind"),
         (
             "point" in action
             and not (
@@ -790,13 +820,13 @@ def _parse_line(raw: bytes) -> dict[str, object] | None:
     if raw != raw.strip():
         return None
     try:
-        value = _loads(raw)
+        value = _loads_strict(raw)
     except ValueError:
         return None
     return value if isinstance(value, dict) else None
 
 
-def _check_transitions(data: bytes) -> _Lines:
+def _check_transitions(data: bytes, *, distrust: bool = False) -> _Lines:
     """Trust the file only if every line is exactly as uiprobe writes it.
 
     The shapes come from `RunWriter.write_transition_start` and
@@ -813,11 +843,10 @@ def _check_transitions(data: bytes) -> _Lines:
     raws = list(complete)
     cut = False
     if last is not None:
-        parsed = _parse_line(last)
-        if parsed is not None and _line_problem(parsed) is None:
-            raws.append(last)  # complete, only its newline is missing
+        if _json_valid(last):
+            raws.append(last)  # complete JSON, only its newline is missing
         else:
-            cut = True
+            cut = True  # not JSON: a write that was cut short
     entries: list[dict[str, object]] = []
     parsed: list[dict[str, object]] = []
     problem: tuple[int, str] | None = None
@@ -834,7 +863,7 @@ def _check_transitions(data: bytes) -> _Lines:
     if problem is None:
         problem = _sequence_problem(entries)
     found.problem = problem
-    found.trusted = problem is None
+    found.trusted = problem is None and not distrust
     if found.trusted:
         _collect(found, entries)
     else:
@@ -898,21 +927,26 @@ def _note_off(
     if previous is None or previous["schema"] != _END or not isinstance(other, dict):
         return
     to = _screen_id(previous.get("to_screen_id"))
-    if to is not None and line.get("from_screen_id") == to:
-        found.off_after[int(str(previous["action_id"]))] = str(other["package"])
+    named = other["package"]
+    if to is not None and line.get("from_screen_id") == to and named:
+        found.off_after[int(str(previous["action_id"]))] = str(named)
 
 
-def _read_transitions(base: Path, warnings: _Warnings) -> _Lines:
-    """Read transitions.jsonl; see `_check_transitions` for what is trusted."""
+def _read_transitions(
+    base: Path, warnings: _Warnings, *, distrust: bool = False
+) -> _Lines:
+    """Read transitions.jsonl; see `_check_transitions` for what is trusted.
+    `distrust` fails the gate whatever the file says (a screen file of another
+    package, which uiprobe never writes, is in the folder)."""
     path = base / "transitions.jsonl"
     try:
         data = _read_bytes(path, MAX_LOG_BYTES)
     except FileNotFoundError:
-        return _Lines()  # written at the first line, so absent when there was none
+        data = b""  # written at the first line, so absent when there was none
     except _UnreadableError as exc:
         warnings.append(f"{path.name} {exc}")
-        return _Lines()
-    found = _check_transitions(data)
+        data = b""
+    found = _check_transitions(data, distrust=distrust)
     if not found.trusted:
         warnings.append(GATE_WARNING)
     elif found.cut:
@@ -920,9 +954,9 @@ def _read_transitions(base: Path, warnings: _Warnings) -> _Lines:
     return found
 
 
-def _read_moves(base: Path, warnings: _Warnings) -> _Moves:
+def _read_moves(base: Path, warnings: _Warnings, *, distrust: bool) -> _Moves:
     """The taps of transitions.jsonl, and the screen the launch led to."""
-    lines = _read_transitions(base, warnings)
+    lines = _read_transitions(base, warnings, distrust=distrust)
     taps: dict[tuple[str, str], list[_Tap]] = {}
     root: str | None = lines.root_hint
     first_from: str | None = None
@@ -1056,9 +1090,15 @@ def read_tree(run_dir: str | Path) -> RunTree:
     record_text = start.get("record_text") is not False
     label = _str_or_none(start.get("app_label"))
     ended = _read_end(base, warnings)
-    moves = _read_moves(base, warnings)
     skips = _read_skips(base, warnings)
     reader = _Reader(base, warnings)
+    # uiprobe writes only screens of the target app: another package's file
+    # means the folder is not as uiprobe wrote it.
+    foreign = any(
+        found is not None and found[1] != package
+        for found in (reader.load(sid) for sid in sorted(reader.names))
+    )
+    moves = _read_moves(base, warnings, distrust=foreign)
     screens: dict[str, ScreenNode] = {}
     for sid in _screen_ids(reader, moves):
         loaded = reader.load(sid)
@@ -1182,17 +1222,16 @@ def _ending(
 def _led_to(
     target: str, package: str, reader: _Reader, moves: _Moves, action_id: int
 ) -> Ending:
-    found = reader.load(target)
-    if found is not None:
-        return {"screen_id": target} if found[1] == package else {"other_app": found[1]}
-    # No file: a screen of another app (the crawl writes only the target
-    # app's screens). Say so only when the line right after this action's end
-    # line is a start line decided on this very screen with `off_target`.
-    if action_id in moves.off_after:
-        named = moves.off_after[action_id]
-        # Another app only when the package differs from the run's own.
-        return {"unknown": True} if named == package else {"other_app": named}
-    return {"not_read": True}
+    if reader.load(target) is not None:
+        return {"screen_id": target}  # a file of the run's package (see the gate)
+    # No file: another app's screen (uiprobe writes only the app's own screens),
+    # but only when the start line right after this action's end line was
+    # decided on this very screen and names a non-empty package that is not the
+    # run's own.
+    named = moves.off_after.get(action_id)
+    if named is None:
+        return {"not_read": True}
+    return {"unknown": True} if named == package else {"other_app": named}
 
 
 def _reachable(root: str | None, screens: dict[str, ScreenNode]) -> set[str]:

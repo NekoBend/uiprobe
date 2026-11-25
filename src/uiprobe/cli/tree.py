@@ -63,8 +63,8 @@ def _entries(tree: RunTree, sid: str, *, ids: bool, why: bool) -> list[_Entry]:
         entries.append(_Entry(_heading_text(tree, sid)))
     for row in node.rows:
         name = _label(row.name)
-        if row.kind == "heading":
-            entries.append(_Entry(f"[見出し] {name}"))
+        if row.kind == "text":
+            entries.append(_Entry(f"[文字] {name}"))
         elif row.to is None:
             line = f"{name} ·"
             if why and row.reasons:
