@@ -5,7 +5,7 @@ from __future__ import annotations
 import argparse  # noqa: TC003 (a runtime import in the former cli.py)
 import re
 import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Final
 
 from uiprobe._json import dumps
@@ -157,6 +157,29 @@ def _row_line(
     return line, name
 
 
+def _merged(row: Row, folded: list[Row]) -> Row:
+    """The row with the taps of the clickable elements folded into it, as if
+    they had been on the row itself: the endings of the pressed ones first, and
+    pressed when any of them was."""
+    if not folded:
+        return row
+    group = [row, *folded]
+    ordered = sorted(group, key=lambda r: not r.pressed)  # stable
+    endings: list[dict[str, object]] = []
+    for r in ordered:
+        for ending in _endings(r):
+            if ending not in endings:
+                endings.append(ending)
+    reasons = tuple(dict.fromkeys(x for r in group for x in r.reasons))
+    return replace(
+        row,
+        pressed=any(r.pressed for r in group),
+        to=endings[0] if endings else None,
+        also_to=endings[1:],
+        reasons=reasons,
+    )
+
+
 def _entries(
     tree: RunTree, sid: str, *, ids: bool, why: bool, tally: _Tally
 ) -> list[_Entry]:
@@ -165,7 +188,14 @@ def _entries(
     if ids:
         entries.append(_Entry(_heading_text(tree, sid)))
     tally.unmatched += len(node.unmatched)
+    folds: dict[str, list[Row]] = {}
     for row in node.rows:
+        if row.folded_into is not None:
+            folds.setdefault(row.folded_into, []).append(row)
+    for line_row in node.rows:
+        if line_row.folded_into is not None:
+            continue  # it is on the line of the row it folds into
+        row = _merged(line_row, folds.get(line_row.element_id, []))
         if row.kind == "text":
             tally.texts += 1
             continue

@@ -82,6 +82,8 @@ class Row:
     this row is recorded; ``unknown`` is a tap with no usable end line. A row
     whose tap was not sent, or is unknown, is not ``pressed``. ``also_to`` holds
     the other endings of further sent taps on the same element.
+    ``folded_into`` is the id of the outermost clickable ancestor, for a row
+    that has one (the text tree shows it on that ancestor's line).
     """
 
     element_id: str
@@ -91,6 +93,7 @@ class Row:
     texts: tuple[str, ...]
     hidden: bool
     name_from: str = "none"
+    folded_into: str | None = None
     pressed: bool = False
     action_id: int | None = None
     to: Ending | None = None
@@ -461,10 +464,21 @@ def _rows_of(
             up = index[element.parent]  # type: ignore[index]
             under_row[i] = is_row[up] or under_row[up]
     own = [e.text.strip() for e in elements]  # each element's text, once
+    outer: list[int | None] = [None] * len(elements)  # outermost row above
+    for i, element in enumerate(elements):
+        up = index.get(element.parent) if element.parent is not None else None
+        if up is not None and up < i:  # a parent comes first; no self or cycle
+            outer[i] = (
+                outer[up] if outer[up] is not None else (up if is_row[up] else None)
+            )
     rows: list[Row] = []
     for i, element in enumerate(elements):
         if is_row[i]:
-            rows.append(_row(screen, i, children, own, record_text=record_text))
+            row = _row(screen, i, children, own, record_text=record_text)
+            above = outer[i]
+            if above is not None:
+                row.folded_into = elements[above].id
+            rows.append(row)
         elif not under_row[i]:
             text_row = _text_row(element, record_text=record_text)
             if text_row is not None:
@@ -1322,6 +1336,8 @@ def _element_dict(row: Row) -> dict[str, object]:
     }
     if row.hidden:
         data["hidden"] = True
+    if row.folded_into is not None:
+        data["folded_into"] = row.folded_into
     if row.kind == "row":
         data["pressed"] = row.pressed
         data["action_id"] = row.action_id

@@ -562,6 +562,112 @@ def test_an_ambiguous_name_in_the_note_becomes_the_path_from_the_root(tmp_path, 
     assert any(line.endswith("Open → see: A > Open") for line in out.splitlines())
 
 
+def _samsung_wifi():
+    """An outer clickable row with a text and an inner clickable switch that
+    is named only by its description."""
+    return make_screen(
+        ".Home",
+        [
+            el(1, cls="FrameLayout"),
+            el(2, 1, cls="LinearLayout", flags=CLICK),
+            el(3, 2, text="Wi-Fi"),
+            el(4, 2, cls="Switch", desc="Wi-Fi", flags=CLICK),
+        ],
+    )
+
+
+def _folded_run(tmp_path, *taps):
+    """A run on the Samsung shape; each tap is (element number, destination
+    key or None for a same-screen result)."""
+    folder = Folder(tmp_path)
+    home = _samsung_wifi()
+    home_id = folder.screen(home)
+    destinations = {"home": home_id}
+    if any(key == "network" for _, key in taps):
+        destinations["network"] = folder.screen(NETWORK)
+    folder.start("launch")
+    folder.end(home_id)
+    for number, key in taps:
+        folder.tap(home, number, destinations[key])
+    folder.finish()
+    return folder
+
+
+def test_a_clickable_inside_a_clickable_row_is_one_line(tmp_path, capsys):
+    folder = _folded_run(tmp_path)
+    _, out, _ = run_tree(capsys, str(folder.path))
+    lines = out.splitlines()
+    assert lines[1] == "└─ Wi-Fi ·"
+    assert '"Wi-Fi"' not in out
+    assert lines[2] == LEGEND
+    assert not any(line.startswith("left out") for line in lines)
+
+
+def test_json_names_the_row_a_folded_element_folds_into(tmp_path, capsys):
+    folder = _folded_run(tmp_path, (4, "home"))
+    _, out, _ = run_tree(capsys, str(folder.path), "--json")
+    outer, inner = json.loads(out)["screens"][_samsung_wifi().screen_id]["elements"]
+    assert "folded_into" not in outer
+    assert inner["folded_into"] == "e2"
+    assert (inner["name"], inner["pressed"]) == ('"Wi-Fi"', True)
+    assert inner["to"] == {"same_screen": True}
+    assert outer["pressed"] is False
+
+
+def test_a_pressed_inner_element_shows_its_destination_under_the_line(tmp_path, capsys):
+    folder = _folded_run(tmp_path, (4, "network"))
+    _, out, _ = run_tree(capsys, str(folder.path))
+    assert out.splitlines()[1:4] == [
+        "└─ Wi-Fi",
+        "   ├─ Back home ·",
+        "   └─ Info ·",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("taps", "dot"),
+    [((), True), (((2, "home"),), False), (((4, "home"),), False)],
+)
+def test_the_dot_is_on_the_line_only_when_nothing_in_it_was_pressed(
+    tmp_path, capsys, taps, dot
+):
+    folder = _folded_run(tmp_path, *taps)
+    _, out, _ = run_tree(capsys, str(folder.path))
+    assert (out.splitlines()[1] == "└─ Wi-Fi ·") is dot
+
+
+def test_two_pressed_elements_of_one_line_use_the_pressed_again_form(tmp_path, capsys):
+    folder = _folded_run(tmp_path, (2, "home"), (4, "network"))
+    _, out, _ = run_tree(capsys, str(folder.path))
+    assert out.splitlines()[1:5] == [
+        "└─ Wi-Fi",
+        "   └─ (pressed again)",
+        "      ├─ Back home ·",
+        "      └─ Info ·",
+    ]
+
+
+def test_clickables_without_a_clickable_ancestor_stay_separate(tmp_path, capsys):
+    folder = Folder(tmp_path)
+    bar = make_screen(
+        ".Home",
+        [
+            el(1, cls="FrameLayout"),
+            el(2, 1, cls="LinearLayout"),
+            el(3, 2, cls="ImageButton", desc="Back", flags=CLICK),
+            el(4, 2, cls="ImageButton", desc="Search", flags=CLICK),
+        ],
+    )
+    sid = folder.screen(bar)
+    folder.start("launch")
+    folder.end(sid)
+    folder.finish()
+    _, out, _ = run_tree(capsys, str(folder.path))
+    assert out.splitlines()[1:3] == ['├─ "Back" ·', '└─ "Search" ·']
+    _, out, _ = run_tree(capsys, str(folder.path), "--json")
+    assert "folded_into" not in out
+
+
 def test_a_screen_without_named_rows_is_marked_under_its_row(tmp_path, capsys):
     folder = full_run(tmp_path)
     _, out, _ = run_tree(capsys, str(folder.path))
