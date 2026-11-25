@@ -1632,6 +1632,8 @@ def test_the_short_uid_note_is_the_given_sentence():
 
 def test_the_crawl_and_diagnose_share_one_app_window_test(monkeypatch):
     # cli calls the very function the crawl's _Run.app_window calls.
+    gate_module = sys.modules[_Run.app_window.__module__]
+    assert cli._app_window is vars(gate_module)["_app_window"]
     assert cli._app_window is crawl_driver._app_window
     calls: list[str] = []
 
@@ -1639,7 +1641,8 @@ def test_the_crawl_and_diagnose_share_one_app_window_test(monkeypatch):
         calls.append(package)
         return True
 
-    monkeypatch.setattr(crawl_driver, "_app_window", spy)
+    # `_Run.app_window` reads `_app_window` in the module that holds it.
+    monkeypatch.setattr(gate_module, "_app_window", spy)
     run = _Run.__new__(_Run)
     run.package = LAUNCHER
     window = parse_input_windows(SAMSUNG36)
