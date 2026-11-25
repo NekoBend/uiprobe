@@ -823,7 +823,7 @@ def test_a_slow_dump_outlasts_the_client_timeout(phone, monkeypatch):
     # The client's per-read timeout (10 s, shortened here) must not cut a dump
     # that is merely slow: uiautomator is silent until it has finished.
     monkeypatch.setitem(adb.AdbClient.__init__.__kwdefaults__, "timeout", 0.2)
-    monkeypatch.setattr("uiprobe.device.DUMP_TIMEOUT", 5.0)
+    monkeypatch.setattr("uiprobe.device.reads.DUMP_TIMEOUT", 5.0)
     script_dump(phone)
     served = slow_dump(phone, 0.6)
     started = time.perf_counter()
@@ -840,7 +840,7 @@ def test_a_slow_dump_outlasts_the_client_timeout(phone, monkeypatch):
 def test_a_dump_that_never_finishes_is_a_dump_error_not_an_adb_error(
     phone, monkeypatch
 ):
-    monkeypatch.setattr("uiprobe.device.DUMP_TIMEOUT", 0.2)
+    monkeypatch.setattr("uiprobe.device.reads.DUMP_TIMEOUT", 0.2)
     script_dump(phone)
     phone.on_shell(SERIAL, re.compile(r"^uiautomator dump "), Stall())
     phone._shell[SERIAL].insert(0, phone._shell[SERIAL].pop())

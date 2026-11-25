@@ -392,7 +392,9 @@ ALLOWED_CALLS: dict[str, frozenset[str]] = {
     # Discard output after a broken pipe: only the null device, write-only.
     "cli/__init__.py": frozenset({"os.open(os.devnull, os.O_WRONLY)"}),
     # Not files: `datetime.replace` and `bytes.replace`.
-    "device.py": frozenset({"datetime.now(UTC).astimezone().replace(microsecond=0)"}),
+    "device/reads.py": frozenset(
+        {"datetime.now(UTC).astimezone().replace(microsecond=0)"}
+    ),
     # Not files: `bytes.replace`, and `getattr(element, field)` in `find`, which
     # reads the text, resource_id or content_desc attribute of a UI element
     # (`field` is one of those three literals, never a file name).
@@ -1023,7 +1025,7 @@ def test_a_changed_devnull_call_is_flagged_in_every_file(source, filename):
 )
 def test_the_allowed_call_is_accepted_only_in_its_file(source):
     assert not file_changes(source, "cli/__init__.py")
-    assert file_changes(source, "device.py")
+    assert file_changes(source, "device/reads.py")
     assert file_changes(source, "cli/commands.py")  # the key is the whole path
     assert file_changes(source, "sub/cli/__init__.py")
     assert file_changes(source)
@@ -1491,7 +1493,7 @@ def test_the_read_only_open_is_accepted_only_in_settings():
     source = f"import os\n{READ_ONLY_OPEN}"
     assert not file_changes(source, "settings.py")
     assert file_changes(source, "cli.py")
-    assert file_changes(source, "device.py")
+    assert file_changes(source, "device/reads.py")
     assert file_changes(source, "sub/settings.py")
     assert file_changes(source)
 

@@ -16,7 +16,6 @@ from tests.fake_device import (
     Screen,
 )
 from uiprobe import crawl_driver
-from uiprobe import device as device_module
 from uiprobe.crawl import (
     CrawlEngine,
     Limits,
@@ -24,6 +23,8 @@ from uiprobe.crawl import (
 )
 from uiprobe.crawl_driver import CrawlResult, crawl
 from uiprobe.device import Device, FocusedWindow
+from uiprobe.device import pin as device_pin
+from uiprobe.device import state as device_state
 from uiprobe.guards import Policy
 from uiprobe.runlog import RunWriter
 
@@ -179,11 +180,9 @@ def commands(fake_adb: FakeAdbServer) -> list[str]:
 def share_clock(monkeypatch, clock) -> None:
     """Make uiprobe's own clock (the one the device checks right before a
     request goes out) the test's clock, so that a test can move both."""
-    monkeypatch.setattr(
-        device_module,
-        "time",
-        SimpleNamespace(monotonic=clock.monotonic, sleep=clock.sleep),
-    )
+    fake_time = SimpleNamespace(monotonic=clock.monotonic, sleep=clock.sleep)
+    monkeypatch.setattr(device_pin, "time", fake_time)
+    monkeypatch.setattr(device_state, "time", fake_time)
 
 
 def cover_after_browse(monkeypatch, device, android) -> None:
