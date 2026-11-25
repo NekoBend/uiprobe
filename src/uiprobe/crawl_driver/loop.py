@@ -5,7 +5,7 @@ from __future__ import annotations
 import contextlib
 from typing import TYPE_CHECKING
 
-from uiprobe.crawl import Back, Observation, Relaunch, Reread, Stop
+from uiprobe.crawl import RELAUNCH_LIMIT, Back, Observation, Relaunch, Reread, Stop
 from uiprobe.crawl_driver.constants import (
     _HALF_RELAUNCH,
     INTERRUPTED,
@@ -67,11 +67,15 @@ class _LoopMixin(_RunState):
             else:
                 self.write_skips(observation.screen, held[1], tap=held[0])
             if isinstance(action, Stop):
+                if action.reason == RELAUNCH_LIMIT:
+                    self.note_landing(observation)
                 return action.reason
             if isinstance(action, Reread):
                 observation = self.observe()
                 continue
             refused, fresh = self.send(action, observation)
+            if refused != NOT_SENT_RECONNECTED and isinstance(action, Back | Relaunch):
+                self.note_landing(observation)  # a taken-back action is read again
             ending = self.ending(action, refused)
             if ending is not None:
                 return ending
@@ -79,6 +83,22 @@ class _LoopMixin(_RunState):
             # engine, which releases the unreported tap.
             observation = fresh if fresh is not None else self.next_observation()
         return INTERRUPTED
+
+    def note_landing(self, observation: Observation) -> None:
+        """Count the app in front when the engine acted on another app's screen.
+
+        The engine's own rule decides (the dump and the foreground both name
+        the target app); a foreground that is unknown or is the target itself
+        names no other app.
+        """
+        screen, front = observation.screen, observation.foreground
+        if (
+            screen is not None
+            and front is not None
+            and front != self.package
+            and not self.on_target(screen, front)
+        ):
+            self.other_apps[front] = self.other_apps.get(front, 0) + 1
 
     def first_launch(self) -> str | None:
         """Send the first launch; the stop reason when the run ends there."""

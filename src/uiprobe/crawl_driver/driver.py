@@ -47,7 +47,11 @@ class CrawlResult:
     not refuse it, see `uiprobe.inputwindows.RULES`); ``last_screen_id`` the
     last screen that was read and ``last_foreground`` the app in front at the
     last read (None when unknown); ``last_focus`` the package that owned the
-    window with input focus at the last observation (None when unknown).
+    window with input focus at the last observation (None when unknown);
+    ``other_apps`` the packages in front when the engine acted on a screen of
+    another app (a BACK, a relaunch, or the stop at the relaunch limit), with
+    how many times each, most frequent first and, for equal counts, first seen
+    first.
     """
 
     out: Path
@@ -62,6 +66,7 @@ class CrawlResult:
     last_foreground: str | None = None
     cover_rule: str | None = None
     last_focus: str | None = None
+    other_apps: tuple[tuple[str, int], ...] = ()
 
 
 def _check_flag(name: str, value: object) -> None:
@@ -471,6 +476,11 @@ def _end(
     return True
 
 
+def _ranked(counts: dict[str, int]) -> tuple[tuple[str, int], ...]:
+    """The counts, most frequent first; equal counts keep their first-seen order."""
+    return tuple(sorted(counts.items(), key=lambda item: -item[1]))
+
+
 def _result(run: _Run, writer: RunWriter, reason: str) -> CrawlResult:
     screens, actions = run.count()
     return CrawlResult(
@@ -486,4 +496,5 @@ def _result(run: _Run, writer: RunWriter, reason: str) -> CrawlResult:
         last_screen_id=run.last_screen_id,
         last_foreground=run.last_foreground,
         last_focus=None if run.focus is None else run.focus.owner,
+        other_apps=_ranked(run.other_apps),
     )

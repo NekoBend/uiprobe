@@ -63,6 +63,8 @@ class _RunState:
         self.cover_rule: str | None = None  # and the reader's rule, when it had one
         self.last_screen_id: str | None = None  # the last screen read
         self.last_foreground: str | None = None  # the app in front at the last read
+        # Packages in front where the engine acted on another app's screen.
+        self.other_apps: dict[str, int] = {}
         self.gate_screen_id: str | None = None  # the id of the gate's own dump
         self.screenshots = screenshots
         self.settle = settle
