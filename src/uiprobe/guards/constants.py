@@ -160,6 +160,31 @@ _SETTINGS_DENY_WORDS: Final[tuple[str, ...]] = (
     "login",
 )
 
+# Words for state-changing verbs of Android Settings pages, such as the
+# "Forget", "Disconnect" and "Unpair" buttons of a saved network or a paired
+# device and "Eject" of a storage device (Japanese first, then English). "restore"
+# (and 復元) and 取り消 were considered and left out: "Backup & restore" rows only
+# open a sub-page and 取り消し often means "Cancel". "無効化" is not listed: 無効
+# above already holds it.
+_STATE_DENY_WORDS: Final[tuple[str, ...]] = (
+    "切断",
+    "接続を解除",
+    "ペアリングを解除",
+    "オフにする",
+    "取り出",
+    "マウント解除",
+    "リンク解除",
+    "forget",
+    "disconnect",
+    "unpair",
+    "turn off",
+    "revoke",
+    "eject",
+    "unmount",
+    "unlink",
+    "deactivate",
+)
+
 # Words for carts and accounts, such as "Add to cart" and "My account"
 # (Japanese first, then English).
 _SHOP_DENY_WORDS: Final[tuple[str, ...]] = (
@@ -170,7 +195,11 @@ _SHOP_DENY_WORDS: Final[tuple[str, ...]] = (
 )
 
 DEFAULT_DENY_WORDS: Final[tuple[str, ...]] = (
-    _BASE_DENY_WORDS + _EXTRA_DENY_WORDS + _SETTINGS_DENY_WORDS + _SHOP_DENY_WORDS
+    _BASE_DENY_WORDS
+    + _EXTRA_DENY_WORDS
+    + _SETTINGS_DENY_WORDS
+    + _SHOP_DENY_WORDS
+    + _STATE_DENY_WORDS
 )
 
 # Built-in exception words (see `word_matches`): none, so the defaults decide
