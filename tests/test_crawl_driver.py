@@ -43,6 +43,9 @@ from uiprobe.crawl import (
     Tap,
 )
 from uiprobe.crawl_driver import CrawlResult, crawl
+from uiprobe.crawl_driver import driver as driver_module
+from uiprobe.crawl_driver import gate as gate_module
+from uiprobe.crawl_driver import observe as observe_module
 from uiprobe.device import IDENTITY_COMMAND, Device, FocusedWindow
 from uiprobe.errors import (
     AdbError,
@@ -1923,7 +1926,8 @@ def engine_log(monkeypatch: pytest.MonkeyPatch, device: Device) -> EngineLog:
             log.events.append(Event("tap_sent", tap=tap))
             super().tap_sent(tap)
 
-    monkeypatch.setattr(crawl_driver, "CrawlEngine", RecordingEngine)
+    # `_crawl_on` reads `CrawlEngine` in the module that holds it.
+    monkeypatch.setattr(driver_module, "CrawlEngine", RecordingEngine)
 
     def on_tap(_number: int, *args: object, **_kwargs: object) -> None:
         log.events.append(Event("send", point=cast("tuple[int, int]", args[0])))
@@ -2049,7 +2053,9 @@ def test_the_clock_values_given_to_the_engine_stay_in_range(
         nows.append(now)
         return real(screen, foreground, keyboard_shown, now)
 
-    monkeypatch.setattr(crawl_driver, "Observation", observation)
+    # The gate and `observe` read `Observation` in their own modules.
+    monkeypatch.setattr(gate_module, "Observation", observation)
+    monkeypatch.setattr(observe_module, "Observation", observation)
     result = crawl(
         device,
         SHOP,

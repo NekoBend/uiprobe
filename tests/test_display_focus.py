@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import inspect
 import re
+import sys
 from typing import TYPE_CHECKING
 
 import pytest
@@ -926,14 +927,17 @@ def test_the_last_check_is_not_caller_code(tmp_path, fake_adb, monkeypatch):
     from uiprobe import crawl_driver
     from uiprobe.crawl import Back
 
+    # The module that holds the gate, and the reader it calls.
+    gate_module = sys.modules[crawl_driver._Run.gate.__module__]
     calls: list[str] = []
-    real = crawl_driver.displays_seen
+    real = gate_module.displays_seen
 
     def spy(device: Device) -> bool:
         calls.append(type(device).__name__)
         return real(device)
 
-    monkeypatch.setattr(crawl_driver, "displays_seen", spy)
+    # `displays_seen` is read in the module that holds the gate.
+    monkeypatch.setattr(gate_module, "displays_seen", spy)
     android, _, driver, _, observation = gate_run(tmp_path, fake_adb, "")
     driver.send(Back(), observation)
     assert calls == ["Device", "Device"]  # the early check and the last one

@@ -22,6 +22,7 @@ from tests.test_crawl_driver import (
 )
 from uiprobe import crawl_driver
 from uiprobe.crawl import Limits
+from uiprobe.crawl_driver import driver as driver_module
 from uiprobe.device import (
     IDENTITY_COMMAND,
     MAX_RECONNECTS,
@@ -1397,7 +1398,8 @@ def test_after_a_withdrawal_the_engine_and_the_run_folder_keep_their_landing(
             super().__init__(*args, **kwargs)  # ty: ignore[invalid-argument-type]
             engines.append(self)
 
-    monkeypatch.setattr(crawl_driver, "CrawlEngine", Kept)
+    # `_crawl_on` reads `CrawlEngine` in the module that holds it.
+    monkeypatch.setattr(driver_module, "CrawlEngine", Kept)
     device = pinned(fake_adb)
     in_gate = [False]
     original_gate = crawl_driver._Run.gate
