@@ -1103,7 +1103,7 @@ def test_every_sent_tap_on_a_row_keeps_its_edge(tmp_path, capsys):
         "│  ├─ (もう一度押した → 次の画面)"
     )
     assert "│  │  └─ [見出し] Version 1" in lines
-    assert "│  ├─ (もう一度押した → (同じ画面))" in lines
+    assert "│  └─ (もう一度押した → (同じ画面))" in lines
     assert lines.count("│  ├─ (もう一度押した → 次の画面)") == 1
     _, out, _ = run_tree(capsys, str(folder.path), "--json")
     data = json.loads(out)
