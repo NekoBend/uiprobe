@@ -70,6 +70,8 @@ def _ending(row: Row, *, ids: bool) -> str | None:
         reason = to["not_sent"]
         shown = _printable(reason) if isinstance(reason, str) else ""
         return f" → (送らなかった: {shown})"
+    if "unknown" in to:
+        return " → (結果不明)"
     if "screen_id" in to:
         return None
     return " → (読めなかった)"
@@ -126,7 +128,14 @@ def render_text(tree: RunTree, *, ids: bool = False, why: bool = False) -> list[
     if tree.root is not None:
         start(tree.root, "", _FIRST_SCREEN)
         run_frames()
-    for sid in tree.unreached:
+    # Screens no tap led to come first; then any that only taps among
+    # themselves led to (a loop that the root does not reach).
+    rest = [
+        sid
+        for sid, node in tree.screens.items()
+        if node.package == tree.package and sid not in tree.unreached
+    ]
+    for sid in (*tree.unreached, *rest):
         if sid not in expanded:
             lines.append(_orphan_heading(tree, sid))
             start(sid, "", _FIRST_SCREEN)
@@ -136,6 +145,16 @@ def render_text(tree: RunTree, *, ids: bool = False, why: bool = False) -> list[
 
 
 def _cmd_tree(args: argparse.Namespace) -> int:
+    if (
+        args.serial is not None
+        or args.adb is not None
+        or args.adb_server is not None
+        or not args.start_server
+    ):
+        msg = (
+            "tree takes no device options (-s, --adb, --adb-server, --no-start-server)"
+        )
+        raise _UsageError(msg)
     path = str.__str__(args.run_dir)
     try:
         tree = read_tree(path)
