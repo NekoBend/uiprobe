@@ -129,6 +129,7 @@ def run(
     stop: Callable[[], bool] | None = None,
     policy: Policy | None = None,
     restart: bool = True,
+    record_text: bool = True,
 ) -> CrawlResult:
     return crawl(
         device,
@@ -143,6 +144,7 @@ def run(
         clock=clock.monotonic,
         sleep=clock.sleep,
         restart=restart,
+        record_text=record_text,
     )
 
 

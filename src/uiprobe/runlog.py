@@ -237,12 +237,35 @@ def _check_skip_details(
     return checked
 
 
-def _element_dict(element: Element | Mapping[str, object] | None) -> dict[str, object]:
+_TEXT_FIELDS: Final = ("text", "content_desc", "hint")
+
+
+def _hide_texts(data: dict[str, object], *, record_text: bool) -> dict[str, object]:
+    """Blank the texts of an element's JSON form that must not be recorded.
+
+    A field with the ``password`` flag always loses its ``text``; with
+    `record_text` False ``text``, ``content_desc`` and ``hint`` go. A hidden
+    field that held something is written as ``""`` and named in ``hidden``
+    (in field order); a field that was empty stays as it was and is not named.
+    """
+    flags = data.get("flags")
+    password = isinstance(flags, list) and "password" in flags
+    names = _TEXT_FIELDS if not record_text else ("text",) if password else ()
+    hidden = [name for name in names if data.get(name)]
+    for name in hidden:
+        data[name] = ""
+    if hidden:
+        data["hidden"] = hidden
+    return data
+
+
+def _element_dict(
+    element: Element | Mapping[str, object] | None, *, record_text: bool = True
+) -> dict[str, object]:
     if element is None:
         return {}
-    if isinstance(element, Element):
-        return element.to_dict()
-    return dict(element)
+    data = element.to_dict() if isinstance(element, Element) else dict(element)
+    return _hide_texts(data, record_text=record_text)
 
 
 def _check_point(point: Sequence[int] | None) -> list[int] | None:
@@ -370,8 +393,11 @@ def _put(handle: IO[Any], data: str | bytes) -> None:
     os.fsync(handle.fileno())
 
 
-def _label(element: Element) -> str:
-    return element.text.strip() or element.content_desc.strip()
+def _label(element: Element, *, record_text: bool = True) -> str:
+    if "password" in element.flags:
+        return "[password field]"
+    label = element.text.strip() or element.content_desc.strip()
+    return label if label and record_text else "[text not recorded]" if label else ""
 
 
 class RunWriter:
@@ -399,6 +425,7 @@ class RunWriter:
         self._skipped: set[tuple[str, str, tuple[str, ...]]] = set()
         self._made_screens_folder = False
         self._starts_written = 0
+        self._record_text = True
 
     @classmethod
     def create(
@@ -415,6 +442,7 @@ class RunWriter:
         check_tap_window: bool | None = None,
         deny_exceptions: Iterable[str] = (),
         restart: bool | None = None,
+        record_text: bool | None = None,
     ) -> RunWriter:
         """Make the run folder `out` and write ``run-start.json`` into it.
 
@@ -430,7 +458,14 @@ class RunWriter:
         given, is written as ``check_tap_window`` (the crawl's
         ``Policy.check_tap_window``). `restart`, when given, is written as
         ``restart``: whether the crawl force-stops the app before its first
-        start.
+        start. `record_text`, when given, is written as ``record_text`` and
+        decides whether the texts of screens are kept (see `RunWriter` and
+        the run folder page): False writes every element's ``text``,
+        ``content_desc`` and ``hint`` as ``""`` (named in ``hidden``), the
+        label lines of ``summary.txt`` as ``[text not recorded]``, the
+        ``window`` of a ``covered_by_other`` end line as ``""``, and refuses
+        `write_screenshot`. None is True. A password field's text is
+        hidden either way.
 
         Before anything is made, `out` gets the checks of
         `uiprobe.pngfile.check_new_path`: it must not be empty, hold a null
@@ -471,6 +506,9 @@ class RunWriter:
         if restart is not None and not isinstance(restart, bool):
             msg = "restart must be a bool or None"
             raise TypeError(msg)
+        if record_text is not None and not isinstance(record_text, bool):
+            msg = "record_text must be a bool or None"
+            raise TypeError(msg)
         words = _check_texts("deny_words", deny_words)
         exceptions = _check_texts("deny_exceptions", deny_exceptions)
         limit_values = _limits_dict(limits)
@@ -492,6 +530,8 @@ class RunWriter:
             record["check_tap_window"] = check_tap_window
         if restart is not None:
             record["restart"] = restart
+        if record_text is not None:
+            record["record_text"] = record_text
         text = _json_text(record, indent=2) + "\n"
         try:
             _make_dir(folder)  # the very str that was checked
@@ -500,6 +540,7 @@ class RunWriter:
             raise RunFolderError(msg, details={"path": folder}) from error
         root = Path(folder)
         writer = cls(root, _token=_CREATED)
+        writer._record_text = record_text is not False
         writer._write_new(root / "run-start.json", text)
         return writer
 
@@ -602,7 +643,7 @@ class RunWriter:
         if checked_point is not None:
             action["point"] = checked_point
         if element is not None:
-            action["element"] = _element_dict(element)
+            action["element"] = _element_dict(element, record_text=self._record_text)
         line["action"] = action
         if from_screen_id is not None:
             line["from_screen_id"] = _check_screen_id(from_screen_id)
@@ -693,7 +734,11 @@ class RunWriter:
                 "reason": not_sent,
             }
             if details:
-                skipped["details"] = _check_details(details)
+                shown = _check_details(details)
+                if not self._record_text and shown.get("window"):
+                    shown["window"] = ""
+                    shown["hidden"] = ["window"]
+                skipped["details"] = shown
             self._append("transitions.jsonl", _json_text(skipped) + "\n")
             return
         line: dict[str, object] = {
@@ -731,12 +776,17 @@ class RunWriter:
         _check_text("fingerprint", fingerprint)
         listed = tuple(_check_texts("reasons", reasons))
         explained = _check_skip_details(details, listed)
+        if not self._record_text:
+            for entry in explained:
+                if entry.get("note"):
+                    entry["note"] = ""
+                    entry["hidden"] = ["note"]  # ty: ignore[invalid-assignment]
         key = (checked, fingerprint, listed)
         with self.critical():
             self._check_usable()
             if key in self._skipped:
                 return False
-            body = _element_dict(element)
+            body = _element_dict(element, record_text=self._record_text)
             record: dict[str, object] = {
                 "schema": SKIP_SCHEMA,
                 "recorded_at": _stamp(_now()),
@@ -768,7 +818,12 @@ class RunWriter:
             self._check_usable()
             if screen_id in self._screens:
                 return False
-            text = _json_text(screen.to_dict(), indent=2) + "\n"
+            data = screen.to_dict()
+            data["elements"] = [
+                _hide_texts(dict(item), record_text=self._record_text)
+                for item in data["elements"]  # ty: ignore[not-iterable]
+            ]
+            text = _json_text(data, indent=2) + "\n"
             self._write_new(self._screen_path(screen_id, "json"), text, in_screens=True)
             self._screens[screen_id] = screen
         return True
@@ -781,6 +836,9 @@ class RunWriter:
                 is made.
         """
         checked = _check_screen_id(screen_id)
+        if not self._record_text:
+            msg = "screenshots show the screen's text; this run does not record it"
+            raise ValueError(msg)
         if not isinstance(png, bytes):
             msg = f"png must be bytes, not {type(png).__name__}"
             raise TypeError(msg)
@@ -988,9 +1046,10 @@ class RunWriter:
                 head += "/" + _name(screen.activity)
             lines.extend(["", f"{head}  ({screen_id})"])
             labels = [
-                _label(element)
+                label
                 for element in screen.elements
-                if "clickable" in element.flags and _label(element)
+                if "clickable" in element.flags
+                and (label := _label(element, record_text=self._record_text))
             ]
             lines.extend(f"  {_quote(label)}" for label in labels)
             if not labels:
