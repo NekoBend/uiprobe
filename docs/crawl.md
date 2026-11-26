@@ -176,13 +176,13 @@ transport moves: 0
 run folder: runs/first
 ```
 
-While it presses, the command writes progress lines to stderr, so that a long run does not look stuck: one line after a sent action, at most one every 5 seconds, and always one after the first action (the launch). None is written once the run has stopped, and the result below is not changed by them. The line has the time since the start (of the time limit), the actions sent so far (of the action limit), the distinct screens of the app seen so far, and the depth of the path the crawl was on at its last decision (of the depth limit; at least 1):
+While it presses, the command writes progress lines to stderr, so that a long run does not look stuck: one line after a sent action, at most one every 5 seconds, counted from the end of the last write, and normally one after the first action (the launch; it is missing when the run stops before the first screen is read, and so is any line when the run ends first). None is written once the run has stopped, and the result below is not changed by them. The line has the time since the start (of the time limit), the actions sent so far (of the action limit), the distinct screens of the app seen so far, and the depth of the path the crawl was on at its last decision (of the depth limit; at least 1):
 
 ```console
 progress: 2m 14s of 30m, 37 of 300 actions, 12 screens, depth 3 of 5
 ```
 
-Progress lines are written to stderr also with `--json` (as the plan is), so stdout holds exactly the JSON result. They name no text of the device. `--quiet` turns them off; it is used only when the crawl presses and is a usage error for a preview, as the other options below. The lines are built from what the run already keeps and cost no request to the device. From Python, see `on_progress` in [Crawling from Python](python.md#crawling-from-python-alpha).
+Progress lines are written to stderr also with `--json` (as the plan is), so stdout holds exactly the JSON result. They name no text of the device. When stderr cannot be written to (closed, a broken pipe), the lines are switched off for the rest of the run and the crawl goes on; the result is not affected. `--quiet` turns them off; it is used only when the crawl presses and is a usage error for a preview, as the other options below. The lines are built from what the run already keeps and cost no request to the device. From Python, see `on_progress` in [Crawling from Python](python.md#crawling-from-python-alpha).
 
 Lines starting with `note:` follow when one of these happened:
 

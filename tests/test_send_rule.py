@@ -588,16 +588,16 @@ def test_the_rule_test_fails_on_a_clock_call_before_the_tap_after_a_relaunch(
 def test_the_rule_test_fails_on_a_progress_call_inside_the_window(
     tmp_path, fake_adb, monkeypatch, path
 ):
-    # report_progress put after the decision and before the input is caught.
+    # the callback called after the decision and before the input is caught.
     send_input = crawl_driver._Run.send_input
     relaunch_stop = crawl_driver._Run.relaunch_stop
 
     def progress_then_send(self, action, action_id):
-        self.report_progress()
+        self.on_progress(None)
         return send_input(self, action, action_id)
 
     def progress_then_stop(self, action_id, action):
-        self.report_progress()
+        self.on_progress(None)
         return relaunch_stop(self, action_id, action)
 
     monkeypatch.setattr(crawl_driver._Run, "send_input", progress_then_send)

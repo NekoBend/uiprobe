@@ -191,10 +191,12 @@ def crawl(
     never once the run has stopped. It runs in the crawl's own thread,
     between two actions and never between a gate's last comparison and the
     input (see the send rule in docs/safety.md), and it reads nothing from the
-    device. The library prints nothing itself. An exception it raises ends
-    the run like any other error of the loop (``error`` with the code
-    ``internal_error``, then raised again), a `KeyboardInterrupt` like Ctrl+C;
-    it is not swallowed.
+    device. The library prints nothing itself. It is not called while a
+    transition is open or when the run is stopping, and it reads no clock.
+    An exception it raises ends the run like any other error of the loop
+    (``run.json`` has ``stop_reason`` ``error``, ``summary.txt`` the note
+    ``error: internal_error``, then it is raised again), a `KeyboardInterrupt`
+    like Ctrl+C; it is not swallowed.
     `screenshots` also saves a screenshot of each new screen; a screen that
     cannot be captured is noted in the summary and the crawl goes on. The
     image is taken after the dump, so it can differ if the app changed

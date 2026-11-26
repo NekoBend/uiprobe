@@ -121,14 +121,39 @@ def test_a_closed_stream_prints_nothing_and_does_not_fail():
     _ProgressPrinter(None)(progress())
 
 
-def test_a_broken_pipe_is_not_swallowed():
+def test_a_failing_write_turns_progress_off_without_failing():
     class Broken(io.StringIO):
+        writes = 0
+
         def write(self, text: str) -> int:
             del text
+            type(self).writes += 1
             raise BrokenPipeError
 
-    with pytest.raises(BrokenPipeError):
-        _ProgressPrinter(Broken())(progress())
+    ticks = _Ticks()
+    printer = _ProgressPrinter(Broken(), clock=ticks)
+    printer(progress(actions=1))
+    ticks.now += 60
+    printer(progress(actions=2))
+    assert Broken.writes == 1  # no second attempt: progress is off
+
+
+def test_a_failing_flush_turns_progress_off_without_failing():
+    class Broken(io.StringIO):
+        def flush(self) -> None:
+            raise OSError(5, "input/output error")
+
+    _ProgressPrinter(Broken())(progress())
+
+
+def test_the_interval_counts_from_the_end_of_the_write():
+    stream = io.StringIO()
+    reads = iter([100.0, 103.0, 106.0, 108.5, 111.0])
+    printer = _ProgressPrinter(stream, clock=lambda: next(reads))
+    printer(progress(actions=1))  # attempt at 100, the write ended at 103
+    printer(progress(actions=2))  # 106: only 3 s after the end of the write
+    printer(progress(actions=3))  # 108.5: 5.5 s after it, so it prints
+    assert len(stream.getvalue().splitlines()) == 2
 
 
 def test_each_line_is_flushed():
@@ -248,3 +273,24 @@ def test_a_preview_refuses_quiet(fake_adb, capsys):
     err = capsys.readouterr().err
     assert code == 2
     assert "--quiet is used only when the crawl presses: add --press" in err
+
+
+def test_a_closed_stderr_does_not_stop_the_crawl_and_stdout_stays_json(
+    fake_adb, capsys, tmp_path, monkeypatch
+):
+    class BrokenProgress(io.StringIO):
+        def write(self, text: str) -> int:
+            if text.startswith("progress:"):
+                raise BrokenPipeError
+            return super().write(text)
+
+    err = BrokenProgress()
+    monkeypatch.setattr("sys.stderr", err)
+    argv = ["--adb-server", fake_adb.address, "--json", "crawl", SHOP, "--press"]
+    code = cli.run([*argv, "--out", str(tmp_path / "run"), "--settle", "0"])
+    out = capsys.readouterr().out
+    assert code == 0
+    result = json.loads(out)
+    assert result["stop_reason"] == "exhausted"
+    assert "progress:" not in err.getvalue()
+    assert err.getvalue().startswith(f"pressing on {SERIAL}")

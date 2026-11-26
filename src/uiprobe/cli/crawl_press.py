@@ -159,9 +159,11 @@ class _ProgressPrinter:
     first time at once, then at most one every `PROGRESS_INTERVAL` seconds.
 
     It writes through `_emit` and flushes right away, as the other lines on
-    stderr (warnings, notes) do, so a line is never cut by another. A closed
-    stream raises ``BrokenPipeError`` out of the callback and ends the run,
-    as `_emit` does everywhere.
+    stderr (warnings, notes) do, so a line is never cut by another. A line is
+    only a convenience: when a write or flush fails (stderr closed, a broken
+    pipe, any other OSError), the printer turns itself off for the rest of the
+    run and the crawl goes on, so the result is unaffected. The interval
+    counts from the end of the last write.
     """
 
     def __init__(
@@ -175,17 +177,22 @@ class _ProgressPrinter:
         self._clock = time.monotonic if clock is None else clock
         self._interval = interval
         self._last: float | None = None
+        self._off = False
 
     def __call__(self, progress: Progress) -> None:
         stream = self._stream
-        if stream is None:  # a closed stderr: nothing to write to
+        if stream is None or self._off:  # a closed stderr: nothing to write to
             return
         now = self._clock()
         if self._last is not None and now - self._last < self._interval:
             return
-        self._last = now
-        _emit(_progress_text(progress), stream=stream)
-        _flush(stream)
+        try:
+            _emit(_progress_text(progress), stream=stream)
+            _flush(stream)
+        except (OSError, ValueError):  # ValueError: a file closed under us
+            self._off = True
+            return
+        self._last = self._clock()  # counted from the end of the write
 
 
 def _cmd_crawl_press(args: argparse.Namespace, setup: _CrawlSetup) -> int:  # noqa: PLR0912, PLR0915 - one error path per kind of failure
