@@ -47,11 +47,16 @@ def _close_writers():
 
 
 def el(number, parent=None, cls="TextView", text="", desc="", flags=(), **more):
+    # A top element fills the display (as an app screen does), so that the
+    # crawl's dialog rule is false for the fixtures unless a test wants it.
+    full = parent is None and "bounds" not in more
+    if full:
+        more["bounds"] = Bounds(0, 0, 1080, 2400)
+    more.setdefault("bounds", Bounds(0, number * 10, 100, number * 10 + 10))
     return Element(
         id=f"e{number}",
         parent=None if parent is None else f"e{parent}",
         class_name=f"android.widget.{cls}",
-        bounds=Bounds(0, number * 10, 100, number * 10 + 10),
         text=text,
         content_desc=desc,
         flags=tuple(flags),
@@ -2402,3 +2407,144 @@ def test_off_target_does_not_make_a_screen_with_a_target_file_another_app(
     assert err == ""
     assert "├─ Network" in out.splitlines()
     assert "→ com.other" not in out
+
+
+LEGEND_POPUP = "[popup] = pressing it opened a popup; its contents are in --json"
+
+
+def _button_screen(activity, names, *, popup=False):
+    top = Bounds(100, 500, 980, 1500) if popup else None
+    elements = [
+        el(1, cls="FrameLayout", **({"bounds": top} if top else {})),
+    ]
+    for number, name in enumerate(names, start=2):
+        elements.append(el(number, 1, cls="Button", text=name, flags=CLICK))
+    return make_screen(activity, elements)
+
+
+def _popup_run(tmp_path, *, first_is_popup=False):
+    folder = Folder(tmp_path)
+    home = _button_screen(".Home", ["Plain", "Ask", "Ask again"], popup=first_is_popup)
+    plain = _button_screen(".Plain", ["Leaf"])
+    dialog = _button_screen(".Dialog", ["OK", "Cancel"], popup=True)
+    behind = _button_screen(".Behind", ["Deep"])
+    ids = {
+        name: folder.screen(s)
+        for name, s in (
+            ("home", home),
+            ("plain", plain),
+            ("dialog", dialog),
+            ("behind", behind),
+        )
+    }
+    folder.start("launch")
+    folder.end(ids["home"])
+    folder.tap(home, 2, ids["plain"])
+    folder.tap(home, 3, ids["dialog"])
+    folder.tap(home, 4, ids["dialog"])  # the same popup again
+    folder.tap(dialog, 2, ids["behind"])  # OK, reached only through the popup
+    folder.finish()
+    return folder, ids
+
+
+POPUP_TEXT = [
+    "com.example.app (com.example.app)",
+    "├─ Plain",
+    "│  └─ Leaf ·",
+    "├─ Ask [popup]",
+    "└─ Ask again [popup]",
+    "(screen not reached from a pressed row s-ID  .Behind)",
+    "└─ Deep ·",
+    LEGEND,
+    LEGEND_POPUP,
+    "left out of the tree (see --json): rows inside popups: 2",
+]
+
+
+def test_a_row_that_opened_a_popup_ends_in_the_mark_and_has_no_children(
+    tmp_path, capsys
+):
+    folder, ids = _popup_run(tmp_path)
+    code, out, _ = run_tree(capsys, str(folder.path))
+    assert code == 0
+    assert out.splitlines() == [
+        line.replace("s-ID", ids["behind"]) for line in POPUP_TEXT
+    ]
+
+
+def test_the_legend_line_appears_only_with_the_mark(tmp_path, capsys):
+    folder, _ = _popup_run(tmp_path)
+    _, out, _ = run_tree(capsys, str(folder.path))
+    assert LEGEND_POPUP in out.splitlines()
+    (tmp_path / "other").mkdir()
+    plain = full_run(tmp_path / "other")
+    _, out, _ = run_tree(capsys, str(plain.path))
+    assert "[popup]" not in out
+
+
+def test_the_summary_counts_the_rows_of_a_popup_once(tmp_path, capsys):
+    folder, _ = _popup_run(tmp_path)
+    _, out, _ = run_tree(capsys, str(folder.path))
+    # Two rows (OK, Cancel); two presses led to the popup, which count once.
+    assert out.splitlines()[-1].endswith(": rows inside popups: 2")
+    assert out.count("rows inside popups") == 1
+
+
+def test_a_popup_with_no_rows_adds_no_summary_item(tmp_path, capsys):
+    folder = Folder(tmp_path)
+    home = _button_screen(".Home", ["Ask"])
+    dialog = _button_screen(".Dialog", [], popup=True)
+    home_id, dialog_id = folder.screen(home), folder.screen(dialog)
+    folder.start("launch")
+    folder.end(home_id)
+    folder.tap(home, 2, dialog_id)
+    folder.finish()
+    _, out, _ = run_tree(capsys, str(folder.path))
+    assert out.splitlines()[1] == "└─ Ask [popup]"
+    assert "rows inside popups" not in out
+
+
+def test_json_marks_only_the_popup_screens(tmp_path, capsys):
+    folder, ids = _popup_run(tmp_path)
+    _, out, _ = run_tree(capsys, "--json", str(folder.path))
+    screens = json.loads(out)["screens"]
+    assert screens[ids["dialog"]]["popup"] is True
+    assert all("popup" not in screens[ids[n]] for n in ("home", "plain", "behind"))
+    # The popup's rows stay in the JSON.
+    assert len(screens[ids["dialog"]]["elements"]) == 2
+
+
+def test_a_first_screen_that_is_a_popup_is_still_drawn(tmp_path, capsys):
+    folder, ids = _popup_run(tmp_path, first_is_popup=True)
+    _, out, _ = run_tree(capsys, str(folder.path))
+    lines = out.splitlines()
+    assert lines[:3] == [
+        "com.example.app (com.example.app)",
+        "├─ Plain",
+        "│  └─ Leaf ·",
+    ]
+    assert "├─ Ask [popup]" in lines
+    assert json.loads(run_tree(capsys, "--json", str(folder.path))[1])["screens"][
+        ids["home"]
+    ]["popup"]
+
+
+def test_a_popup_first_screen_is_not_counted_when_a_row_leads_back_to_it(
+    tmp_path, capsys
+):
+    folder = Folder(tmp_path)
+    home = _button_screen(".Home", ["Next"], popup=True)
+    next_screen = _button_screen(".Next", ["Back to start"])
+    home_id, next_id = folder.screen(home), folder.screen(next_screen)
+    folder.start("launch")
+    folder.end(home_id)
+    folder.tap(home, 2, next_id)
+    folder.tap(next_screen, 2, home_id)
+    folder.finish()
+    _, out, _ = run_tree(capsys, str(folder.path))
+    assert out.splitlines()[:3] == [
+        "com.example.app (com.example.app)",
+        "└─ Next",
+        "   └─ Back to start [popup]",
+    ]
+    assert "rows inside popups" not in out
