@@ -141,6 +141,28 @@ def _plain_policy(policy: Policy) -> Policy:
 
 
 @dataclass(frozen=True, slots=True)
+class Progress:
+    """Where a pressing crawl is, as `crawl` reports it to ``on_progress``.
+
+    ``elapsed`` is the seconds since the run's start by the run's clock,
+    ``actions`` the actions counted against ``action_limit``, ``screens`` the
+    distinct screens of the target app seen so far, ``depth`` the length of
+    the path the crawl was on at its last decision (at least 1; the screen
+    just read joins the path at the next decision) and ``depth_limit`` and
+    ``minutes`` the other limits. Every value is one the run already keeps;
+    making it reads nothing from the device.
+    """
+
+    elapsed: float
+    actions: int
+    action_limit: int
+    screens: int
+    depth: int
+    depth_limit: int
+    minutes: int
+
+
+@dataclass(frozen=True, slots=True)
 class _Seen:
     """What the device showed: the observation plus the focused window."""
 

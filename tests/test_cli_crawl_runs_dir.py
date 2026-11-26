@@ -809,7 +809,7 @@ def test_an_interrupt_while_the_writer_closes_names_the_folder(
 
     monkeypatch.setattr(runlog.RunWriter, "close", interrupted)
     code, _text, err = crawl(
-        capsys, fake_adb, *FAST, "--out", str(out), "--actions", "2"
+        capsys, fake_adb, *FAST, "--out", str(out), "--actions", "2", "--quiet"
     )
     assert code == 130
     assert (

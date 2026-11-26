@@ -329,6 +329,11 @@ class CrawlEngine:
         return self._sent
 
     @property
+    def depth(self) -> int:
+        """How many screens deep the crawl is now (the length of its path)."""
+        return len(self._path)
+
+    @property
     def start_screen_id(self) -> str | None:
         """The id of the start screen, None until a target screen was seen."""
         return self._start_id
