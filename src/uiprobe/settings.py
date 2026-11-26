@@ -52,15 +52,15 @@ Version 8 added the rule ``also_target``, a list of package names (empty by
 default) that a pressing crawl may also press in (see `uiprobe.also_target`).
 It is optional in every file, like ``[deny] except``, and ``uiprobe init``
 writes it as a comment, so no file needs it; an older file reads as ``[]``.
-Version 9 added the rule ``back_on_other_screens`` (a missing one reads False);
-a file written at version 9 must have it, and an older uiprobe refuses a
-version 9 file. With true, a pressing crawl presses BACK on a screen of another
+Version 10 added the rule ``back_on_other_screens`` (a missing one reads False);
+a file written at version 10 must have it, and an older uiprobe refuses a
+version 10 file. With true, a pressing crawl presses BACK on a screen of another
 app instead of restarting the app (``Policy.back_on_other_screens``).
-Version 10 added the rule ``scroll_lists`` (a missing one reads False) and the
+Version 11 added the rule ``scroll_lists`` (a missing one reads False) and the
 keys ``scrolls_per_screen``, ``scroll_amount`` and ``scroll_incidents`` of
 ``[limits]`` (a missing one reads its default, `DEFAULT_SCROLLS_PER_SCREEN`,
 `DEFAULT_SCROLL_AMOUNT`, `DEFAULT_SCROLL_INCIDENTS`); a file written at
-version 10 must have all four, and an older uiprobe refuses a version 10 file.
+version 11 must have all four, and an older uiprobe refuses a version 11 file.
 With true, a pressing crawl may turn a mouse wheel over a list (opt-in, off by
 default; see `uiprobe.guards.scroll_target`).
 
@@ -171,7 +171,7 @@ __all__ = [
 
 SETTINGS_FILE: Final = "uiprobe.toml"
 FORMAT_VERSION: Final = 1
-DEFAULTS_VERSION: Final = 10
+DEFAULTS_VERSION: Final = 11
 MAX_SETTINGS_BYTES: Final = 1024 * 1024
 
 # Every default list item with the defaults version that introduced it. Each
@@ -195,10 +195,11 @@ MAX_SETTINGS_BYTES: Final = 1024 * 1024
 # Version 7 added the state-changing deny words (forget, disconnect, ...).
 # Version 8 added the rule also_target (a list of packages; optional in every
 # file, a missing one reads as the empty list; `uiprobe init` writes it
-# commented). Version 9 added the rule back_on_other_screens (no list items; a
-# missing one reads False). Version 10 added the rule scroll_lists and the
-# [limits] keys scrolls_per_screen, scroll_amount and scroll_incidents (no list
-# items).
+# commented). Version 9 added the confirm words turn on, enable, オンにする
+# and 有効にする (a dialog's "Turn on" button changes a device setting).
+# Version 10 added the rule back_on_other_screens (no list items; a missing one
+# reads False). Version 11 added the rule scroll_lists and the [limits] keys
+# scrolls_per_screen, scroll_amount and scroll_incidents (no list items).
 _LATER_DENY: Final[dict[str, int]] = {
     "やり直": 2,
     "元に戻": 2,
@@ -209,9 +210,14 @@ _LATER_DENY: Final[dict[str, int]] = {
 # The [deny] except list has no built-in words. One added later starts at the
 # next defaults version (raise DEFAULTS_VERSION with it); before that, the
 # test that no default is tagged beyond the current version fails.
-_FIRST_EXCEPT: Final = 11
+_FIRST_EXCEPT: Final = 12
 _LATER_EXCEPT: Final[dict[str, int]] = {}
-_LATER_CONFIRM: Final[dict[str, int]] = {}
+_LATER_CONFIRM: Final[dict[str, int]] = {
+    "turn on": 9,
+    "enable": 9,
+    "オンにする": 9,
+    "有効にする": 9,
+}
 # The [irreversible] table came with version 2, so its items start there.
 _FIRST_IRREVERSIBLE: Final = 2
 _LATER_IRREVERSIBLE: Final[dict[str, int]] = {}
@@ -299,15 +305,15 @@ _LATER_RULES: Final[dict[str, int]] = {
     "skip_navigate_up": 4,
     "skip_sliders": 4,
     "replay_path": 5,
-    "back_on_other_screens": 9,
-    "scroll_lists": 10,
+    "back_on_other_screens": 10,
+    "scroll_lists": 11,
 }
 # Keys of [limits] that a later version added, with that version (a missing one
 # takes its default).
 _LATER_LIMITS: Final[dict[str, int]] = {
-    "scrolls_per_screen": 10,
-    "scroll_amount": 10,
-    "scroll_incidents": 10,
+    "scrolls_per_screen": 11,
+    "scroll_amount": 11,
+    "scroll_incidents": 11,
 }
 _LATER_LIMIT_VALUES: Final[dict[str, int]] = {
     "scrolls_per_screen": _DEFAULT_SCROLLS_PER_SCREEN,
@@ -371,11 +377,11 @@ class Settings:
     optional key that needed no new defaults version), follow it for the same
     reason. ``also_target`` (default ``()``), added with defaults version 8,
     comes after it for the same reason, then ``back_on_other_screens`` (default
-    False), added with defaults version 9, and last ``scroll_lists`` (default
+    False), added with defaults version 10, and last ``scroll_lists`` (default
     `DEFAULT_SCROLL_LISTS`, False) and ``scrolls_per_screen``,
     ``scroll_amount`` and ``scroll_incidents`` (defaults
     `DEFAULT_SCROLLS_PER_SCREEN`, `DEFAULT_SCROLL_AMOUNT` and
-    `DEFAULT_SCROLL_INCIDENTS`), added with defaults version 10.
+    `DEFAULT_SCROLL_INCIDENTS`), added with defaults version 11.
     """
 
     source: Path
@@ -419,10 +425,10 @@ class Settings:
     # Added with defaults version 8: the packages (besides the target app)
     # that a pressing crawl may also press in. Empty by default.
     also_target: tuple[str, ...] = ()
-    # Added with defaults version 9: press BACK on a screen of another app
+    # Added with defaults version 10: press BACK on a screen of another app
     # instead of restarting the app (``Policy.back_on_other_screens``).
     back_on_other_screens: bool = False
-    # Added with defaults version 10: ``[rules] scroll_lists`` (off by default)
+    # Added with defaults version 11: ``[rules] scroll_lists`` (off by default)
     # and the ``[limits]`` keys ``scrolls_per_screen``, ``scroll_amount`` and
     # ``scroll_incidents``.
     scroll_lists: bool = DEFAULT_SCROLL_LISTS

@@ -392,6 +392,10 @@ EXPECTED_CONFIRM = [
         "allow",
         "apply",
         "done",
+        "turn on",
+        "enable",
+        "オンにする",
+        "有効にする",
     ],
 ]
 

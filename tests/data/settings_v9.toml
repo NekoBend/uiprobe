@@ -187,6 +187,10 @@ words = [
     "allow",
     "apply",
     "done",
+    "turn on",
+    "enable",
+    "オンにする",
+    "有効にする",
 ]
 remove = []
 
@@ -243,13 +247,7 @@ skip_sliders = true
 # "do not press the same row twice when only a badge changed" behaviour
 # to the earlier behaviour.
 replay_path = true
-# With true, a pressing crawl presses BACK on another app's screen (up to
-# twice before it restarts the app) instead of restarting at once; that
-# BACK reaches whichever window has the input focus, not necessarily the
-# app being crawled. --back-on-other-screens and --no-back-on-other-screens
-# override it for one run.
-back_on_other_screens = false
-# also_target = ["com.example.helper"]   # apps the crawl may also press in; system UI and the home app are refused, the controls of permission screens are never tapped (they get BACK when back_on_other_screens is true)
+# also_target = ["com.example.helper"]   # apps the crawl may also press in; system UI and the home app are refused, permission screens are never pressed
 min_visible_px = 8
 edge_top_px = 24
 edge_bottom_px = 32
