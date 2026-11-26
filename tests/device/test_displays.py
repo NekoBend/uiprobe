@@ -261,3 +261,38 @@ def test_a_huge_display_number_gives_none_not_an_error():
         ("Display 0:", f"Display {huge}:"),
     ):
         assert parse_active_display_physical_id(good.replace(old, new, 1)) is None
+
+
+def test_records_after_the_closing_bracket_are_ignored():
+    good = make(ID_ALL, ID_ALL, folded=True)
+    stale = viewport(0, ID_C, active=True)
+    text = good.replace("]\n", f"], {stale}\n", 1)
+    assert parse_active_display_physical_id(text) == ID_B
+    only_one = make([(0, ID_A)], [(0, ID_A), (1, ID_B)]).replace(
+        "]\n", f"], {viewport(1, ID_B, active=False)}\n", 1
+    )
+    assert parse_active_display_physical_id(only_one) is None
+
+
+def test_a_list_that_is_not_closed_or_empty_gives_none():
+    good = make(ID_ALL, ID_ALL)
+    assert parse_active_display_physical_id(good.replace("}]\n", "}\n", 1)) is None
+    assert (
+        parse_active_display_physical_id(good.replace("}, Disp", "} Disp", 1)) is None
+    )
+    empty = "  mViewports=[]\n" + logical((0, ID_A))
+    assert parse_active_display_physical_id(empty) is None
+
+
+def test_mviewports_inside_a_nested_section_is_not_taken():
+    good = make(ID_ALL, ID_ALL)
+    nested = good.replace("  mViewports=", "  Other:\n    mViewports=", 1)
+    assert parse_active_display_physical_id(nested) is None
+    deeper = good.replace("  mViewports=", "   mViewports=", 1)
+    assert parse_active_display_physical_id(deeper) is None
+
+
+def test_a_second_mviewports_line_gives_none():
+    good = make(ID_ALL, ID_ALL)
+    line = good.split("\n")[1]
+    assert parse_active_display_physical_id(good + line + "\n") is None

@@ -17,6 +17,9 @@ A display is on when its viewport has ``isActive=true`` and its block has
 when exactly one display is on, both places are well-formed for every display,
 and both name the same device (digits only) for that display. It is a pure
 function of the text; the text is never returned or put in an error.
+
+Limits, on purpose: a display that is off and has no viewport record makes the
+result unresolved (None), and anything unclear gives None rather than a guess.
 """
 
 from __future__ import annotations
@@ -27,6 +30,7 @@ from typing import Final
 __all__ = ["parse_active_display_physical_id"]
 
 _VIEWPORTS_LINE: Final = re.compile(r"\s*mViewports=\[")
+_VIEWPORTS_INDENT: Final = 2
 _VIEWPORT: Final = re.compile(r"DisplayViewport\{([^{}]*)\}")
 _VIEWPORT_DISPLAY: Final = re.compile(r"(?:^|, )displayId=([0-9]{1,20})(?=,|$)")
 _VIEWPORT_UNIQUE: Final = re.compile(r"(?:^|, )uniqueId='local:([^']*)'(?=,|$)")
@@ -47,13 +51,38 @@ def _lines(text: str) -> list[str]:
     return [line.removesuffix("\r") for line in text.split("\n")]
 
 
+def _records(line: str) -> list[str] | None:
+    """The bodies of the records inside the brackets of an ``mViewports=[...]``
+    line, up to the closing bracket; text after it is ignored. None when the
+    list is empty or is not made of records separated by ``, ``."""
+    position = line.index("[") + 1
+    bodies: list[str] = []
+    while record := _VIEWPORT.match(line, position):
+        bodies.append(record.group(1))
+        position = record.end()
+        if line.startswith("]", position):
+            return bodies
+        if not line.startswith(", ", position):
+            return None
+        position += 2
+    return None
+
+
 def _viewports(lines: list[str]) -> _Facts | None:
-    """Every display of the one ``mViewports=`` line, or None if any is unclear."""
+    """Every display of the one ``mViewports=`` line, or None if any is unclear.
+
+    The line must be the top-level one (at the indent the real output has), so
+    a copy inside a nested section is not taken; any second line with the
+    field, at any indent, makes it unclear.
+    """
     holders = [line for line in lines if _VIEWPORTS_LINE.match(line)]
-    if len(holders) != 1:
+    if len(holders) != 1 or _indent(holders[0]) != _VIEWPORTS_INDENT:
+        return None
+    bodies = _records(holders[0])
+    if bodies is None:
         return None
     found: _Facts = {}
-    for body in _VIEWPORT.findall(holders[0]):
+    for body in bodies:
         number = _VIEWPORT_DISPLAY.findall(body)
         unique = _VIEWPORT_UNIQUE.findall(body)
         active = _VIEWPORT_ACTIVE.findall(body)

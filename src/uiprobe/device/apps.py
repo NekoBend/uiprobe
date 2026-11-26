@@ -31,9 +31,14 @@ from uiprobe.pngfile import check_png
 DEFAULT_LAUNCH_TIMEOUT: Final = 10.0
 
 
-# What `screencap` prints, as text before the image, on a device with more than
-# one display (only the stable start is matched).
-MULTIPLE_DISPLAYS_WARNING: Final = b"[Warning] Multiple displays were found"
+# The first line `screencap` prints, as text before the image, on a device with
+# more than one display, with its newline (matched whole, not by its start).
+MULTIPLE_DISPLAYS_WARNING: Final = (
+    b"[Warning] Multiple displays were found, but no display id was specified!"
+    b" Defaulting to the first display found, however this default is not"
+    b" guaranteed to be consistent across captures. A display id should be"
+    b" specified.\n"
+)
 
 
 LAUNCH_POLL_INTERVAL: Final = 0.5

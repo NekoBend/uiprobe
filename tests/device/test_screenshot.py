@@ -393,6 +393,15 @@ def test_the_png_error_stays_chained(device, android):
     assert isinstance(raised.value.__cause__, ValueError)
 
 
+def test_a_changed_warning_line_does_not_read_the_displays(device, android, fake_adb):
+    first_line = WARNING.split(b"\n")[0]
+    for data in (first_line + b"X\n", first_line, first_line + b"\r\n"):
+        script(android, data)
+        with pytest.raises(ScreenshotFailedError):
+            device.screenshot()
+    assert commands(fake_adb) == ["exec:screencap -p"] * 3
+
+
 def test_other_bad_bytes_do_not_read_the_displays(device, android, fake_adb):
     script(android, b"[Warning] something else\n")
     with pytest.raises(ScreenshotFailedError) as raised:
