@@ -63,7 +63,9 @@ def _settle_given(
 def test_the_default_pause_after_a_press_is_one_second(
     fake_adb, capsys, monkeypatch, tmp_path
 ):
-    assert _settle_given(fake_adb, capsys, monkeypatch, tmp_path / "run") == 1.0
+    given = _settle_given(fake_adb, capsys, monkeypatch, tmp_path / "run")
+    assert type(given) is float
+    assert given == 1.0
 
 
 @pytest.mark.usefixtures("here", "android")
@@ -71,4 +73,5 @@ def test_the_settle_option_is_passed_as_given(fake_adb, capsys, monkeypatch, tmp
     given = _settle_given(
         fake_adb, capsys, monkeypatch, tmp_path / "run", "--settle", "0.25"
     )
+    assert type(given) is float
     assert given == 0.25
