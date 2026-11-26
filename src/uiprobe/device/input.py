@@ -36,35 +36,69 @@ from uiprobe.model import Bounds, Element
 _SCROLL_LINE = re.compile(
     r"(?:(?P<source>[A-Za-z_]+)\s+)?scroll\s+<x>\s+<y>(?P<rest>.*)"
 )
-_AXIS_LIST = re.compile(r"\[\s*--axis\s+(?P<axes>[^\]]*)\]")
+_BRACKET = re.compile(r"\[(?P<inside>[^\[\]]*)\]")
+_AXIS_IN_BRACKET = re.compile(r"--axis\s+(?P<axes>.*)", re.DOTALL)
 _DEFAULT_SOURCES = re.compile(r"\(\s*Default:\s*(?P<sources>[^)]*)\)")
+# The real usage says "(for pointer-based sources)": the mouse is one.
+_POINTER_SOURCES = re.compile(r"\(\s*for\s+pointer-based\s+sources\s*\)", re.IGNORECASE)
+_AXIS_OPTIONS_LINE = re.compile(r"Axis options:\s*(?P<names>.*)", re.IGNORECASE)
+_AXIS_NAMES = re.compile(r"[A-Z_]+(?:\s*,\s*[A-Z_]+)*")
+_NEGATIVE = re.compile(
+    r"\b(?:unsupported|not\s+supported|unavailable|not\s+available|disabled)\b",
+    re.IGNORECASE,
+)
 _PLACEHOLDER = re.compile(r"<[^<>\s]+>")
 
 
 def _line_sources(found: re.Match[str]) -> set[str]:
     """The sources a ``scroll <x> <y>`` line is for: the word before the
-    command, else the ``(Default: ...)`` of the line; none when it names none."""
+    command, else the ``(Default: ...)`` of the line, else ``mouse`` when the
+    line says it is for pointer-based sources; none when it names none."""
     if found["source"]:
         return {found["source"].lower()}
     default = _DEFAULT_SOURCES.search(found["rest"])
-    if default is None:
-        return set()
-    return {word.lower() for word in re.split(r"[\s,]+", default["sources"]) if word}
+    if default is not None:
+        return {
+            word.lower() for word in re.split(r"[\s,]+", default["sources"]) if word
+        }
+    if _POINTER_SOURCES.search(found["rest"]):
+        return {"mouse"}
+    return set()
+
+
+def _bracket_axes(rest: str) -> set[str]:
+    """Every axis named by ``--axis NAME`` in the bracket groups of a line: the
+    word must stand alone, followed by its value placeholder or the end of the
+    group."""
+    names: set[str] = set()
+    for group in _BRACKET.finditer(rest):
+        option = _AXIS_IN_BRACKET.search(group["inside"])
+        if option is None:
+            continue
+        words = [w for w in re.split(r"[,\s]+", option["axes"]) if w]
+        for index, word in enumerate(words):
+            after = words[index + 1] if index + 1 < len(words) else None
+            if re.fullmatch(r"[A-Z_]+", word) and (
+                after is None or _PLACEHOLDER.fullmatch(after)
+            ):
+                names.add(word)
+    return names
 
 
 def _lists_wheel(usage: str) -> bool:
     """Whether the usage text of ``input`` lists the ``mouse`` source and a
     ``scroll <x> <y>`` command of that source with ``VSCROLL`` as an axis.
 
-    Read per source: the scroll line must name the ``mouse`` source (as the
-    word before the command, or in its ``(Default: ...)``); a line for another
-    source (``rotary``, say) that lists ``VSCROLL`` is no support, and neither is
-    a line that names no source. The axis is read from the bracketed
-    ``[--axis ...]`` option list of that line only, split into comma and space
-    separated words: ``VSCROLL`` must be a word of its own, followed by its value
-    placeholder (``<v>``) or by the end of the list. The word anywhere else
-    (outside the brackets, in a note such as ``VSCROLL unsupported``, inside a
-    longer word) does not count.
+    Read per source: the scroll line must be the mouse source's (the word before
+    the command, its ``(Default: ...)``, or ``(for pointer-based sources)``, which
+    includes the mouse); a line for another source (``rotary``, say) that lists
+    ``VSCROLL`` is no support, and neither is a line that names no source. A
+    line that says it is unsupported or not supported (also in a note such as
+    ``(unsupported: [--axis VSCROLL,<v>])``) is no support. The axes are every
+    ``--axis NAME`` of the line's bracket groups (``VSCROLL`` must be a word of its
+    own with its value placeholder) and the names of an ``Axis options:`` line
+    (``SCROLL, HSCROLL, VSCROLL``, as the real usage prints them), which must be
+    nothing but such names. ``VSCROLL`` anywhere else does not count.
     """
     listed = [line.strip() for line in _lines(usage)]
     mouse = any(
@@ -72,19 +106,31 @@ def _lists_wheel(usage: str) -> bool:
         or (line.startswith("The sources are") and "mouse" in re.split(r"[\s,]+", line))
         for line in listed
     )
+    if not mouse:
+        return False
+    scroll_lines = []
     for line in listed:
         found = _SCROLL_LINE.fullmatch(line)
-        if found is None or "mouse" not in _line_sources(found):
-            continue
-        axes = _AXIS_LIST.search(found["rest"])
-        if axes is None:
-            continue
-        words = [w for w in re.split(r"[,\s]+", axes["axes"]) if w]
-        for index, word in enumerate(words):
-            after = words[index + 1] if index + 1 < len(words) else None
-            if word == "VSCROLL" and (after is None or _PLACEHOLDER.fullmatch(after)):
-                return mouse
-    return False
+        if (
+            found is not None
+            and "mouse" in _line_sources(found)
+            and not _NEGATIVE.search(line)
+        ):
+            scroll_lines.append(found)
+    if not scroll_lines:
+        return False
+    axes: set[str] = set()
+    for found in scroll_lines:
+        axes |= _bracket_axes(found["rest"])
+    for line in listed:
+        options = _AXIS_OPTIONS_LINE.fullmatch(line)
+        if (
+            options is not None
+            and not _NEGATIVE.search(line)
+            and _AXIS_NAMES.fullmatch(options["names"].strip())
+        ):
+            axes |= {w for w in re.split(r"[,\s]+", options["names"]) if w}
+    return "VSCROLL" in axes
 
 
 class _InputMixin(_DeviceState):

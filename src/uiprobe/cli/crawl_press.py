@@ -575,8 +575,9 @@ def _press_scroll_text(plan: dict[str, object]) -> list[str]:
         )
         answer = (
             f"yes ({origin}), at most {plan['scrolls_per_screen']} per screen,"
-            f" wheel amount {plan['scroll_amount']}; an app's own view can react"
-            " to the wheel (see docs/safety.md)"
+            f" wheel amount {plan['scroll_amount']}; an app's own view, or a window"
+            " that appears just before the wheel, can react to it (see"
+            " docs/safety.md)"
         )
     elif plan.get("scroll_input") is False:
         answer = "no (this device's input does not list the wheel scroll)"

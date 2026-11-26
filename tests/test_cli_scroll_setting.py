@@ -72,7 +72,10 @@ def wheels(android: FakeAndroid) -> list[tuple[str, ...]]:
 
 
 LINE = "scroll lists with the mouse wheel: "
-TAIL = "; an app's own view can react to the wheel (see docs/safety.md)"
+TAIL = (
+    "; an app's own view, or a window that appears just before the wheel, can react"
+    " to it (see docs/safety.md)"
+)
 LIMITS = "at most 10 per screen, wheel amount 3"
 
 

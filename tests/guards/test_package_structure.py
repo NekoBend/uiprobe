@@ -76,12 +76,13 @@ def test_every_annotation_in_the_guards_package_resolves() -> None:
     from collections.abc import Iterable, Sequence
 
     from uiprobe.guards.policy import Judgement
-    from uiprobe.model import Element, Screen
+    from uiprobe.model import Bounds, Element, Screen
 
     extra = {
         "Judgement": Judgement,
         "Iterable": Iterable,
         "Sequence": Sequence,
+        "Bounds": Bounds,
         "Element": Element,
         "Screen": Screen,
     }

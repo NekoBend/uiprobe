@@ -802,6 +802,30 @@ class _Judge:
             reasons.append("irreversible_screen")
             details.append(irreversible)
 
+    def unsafe_ids(self) -> frozenset[str]:
+        """The ids of every element of the screen, clickable or not, that the tap
+        rules would refuse to press for what it is or says: it is of a package
+        other than this screen's target, or its own text, description or hint
+        holds a deny word (the same matcher, exceptions included) or, with the
+        irreversibility rule on, one of its phrases. The decisions of `judge`
+        exist only for clickable elements, so the wheel scroll asks this for every
+        element at its point."""
+        phrases = (
+            _PhraseMatcher(self.policy.irreversible_phrases)
+            if self.policy.skip_irreversible and self.policy.irreversible_phrases
+            else None
+        )
+        found = set()
+        for i, element in enumerate(self.elements):
+            hit = self.own_hit[i]
+            if (
+                element.package != self.target
+                or (hit is not None and hit[1] != "resource_id")
+                or (phrases is not None and phrases.find([element]) is not None)
+            ):
+                found.add(element.id)
+        return frozenset(found)
+
     def irreversible_detail(self) -> Detail | None:
         """Return the irreversibility phrase found on the screen, if any.
 
@@ -1080,4 +1104,5 @@ def judge(
         dialog=state.dialog,
         irreversible=state.irreversible_detail() is not None,
         edges=state._avoid,  # noqa: SLF001 - the areas of `screen_edge`
+        unsafe=state.unsafe_ids(),
     )

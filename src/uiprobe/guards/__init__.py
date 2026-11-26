@@ -461,6 +461,7 @@ from uiprobe.guards.scroll import (
     lists_key,
     scroll_container,
     scroll_target,
+    scrolled_container_on,
 )
 from uiprobe.guards.tree import (  # noqa: F401
     _CELLS_X,
@@ -558,5 +559,6 @@ __all__ = [
     "parse_deny_file",
     "scroll_container",
     "scroll_target",
+    "scrolled_container_on",
     "word_matches",
 ]

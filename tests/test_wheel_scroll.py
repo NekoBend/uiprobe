@@ -239,3 +239,106 @@ def test_vscroll_on_the_mouse_line_is_support_whatever_other_lines_say(
 ):
     android.input_usage = usage
     assert device._wheel_supported() is True
+
+
+# -- the exact reading of the axis options -----------------------------------------
+
+REAL = (
+    "Usage: input [<source>] [-d DISPLAY_ID] <command> [<arg>...]\n"
+    "\n"
+    "The sources are:\n"
+    "      dpad\n"
+    "      keyboard\n"
+    "      mouse\n"
+    "      touchpad\n"
+    "      touchscreen\n"
+    "The commands and default sources are:\n"
+    "      text <string> (Default: touchscreen)\n"
+    "      tap <x> <y> (Default: touchscreen)\n"
+    "      scroll <x> <y> [axis_value] (for pointer-based sources)\n"
+    "      swipe <x1> <y1> <x2> <y2> [duration(ms)] (Default: touchscreen)\n"
+    "Axis options: SCROLL, HSCROLL, VSCROLL\n"
+)
+
+
+def test_the_real_shape_with_an_axis_options_line_is_support(device, android):
+    android.input_usage = REAL
+    assert device._wheel_supported() is True
+    android.input_usage = REAL.replace("Axis options:", "      Axis options:")
+    assert device._wheel_supported() is True
+
+
+@pytest.mark.parametrize(
+    "usage",
+    [
+        # the options line has no VSCROLL
+        REAL.replace("SCROLL, HSCROLL, VSCROLL", "SCROLL, HSCROLL"),
+        # no options line and no --axis anywhere
+        REAL.replace("Axis options: SCROLL, HSCROLL, VSCROLL\n", ""),
+        # VSCROLL as part of a longer name, or among other words
+        REAL.replace("VSCROLL", "NOVSCROLL"),
+        REAL.replace(
+            "SCROLL, HSCROLL, VSCROLL", "SCROLL, HSCROLL, VSCROLL unsupported"
+        ),
+        REAL.replace("Axis options:", "Axis options (VSCROLL not supported):"),
+        # the scroll line itself says it is unsupported
+        REAL.replace("(for pointer-based sources)", "(unsupported)"),
+        REAL.replace(
+            "(for pointer-based sources)", "(for pointer-based sources, not supported)"
+        ),
+        # the scroll line is for another source
+        REAL.replace("(for pointer-based sources)", "(Default: rotary)"),
+        # the mouse source is not listed
+        REAL.replace("      mouse\n", ""),
+        # the options line is a sentence
+        REAL.replace("SCROLL, HSCROLL, VSCROLL", "VSCROLL is a fine axis"),
+    ],
+)
+def test_the_real_shape_with_a_defect_is_no_support(device, android, usage):
+    android.input_usage = usage
+    assert device._wheel_supported() is False
+
+
+@pytest.mark.parametrize(
+    "usage",
+    [
+        # Astra's shape: a disclaimer around the bracketed option
+        "The sources are:\n  mouse\n"
+        "mouse scroll <x> <y> (unsupported: [--axis VSCROLL,<v>])\n",
+        "The sources are:\n  mouse\n"
+        "scroll <x> <y> [--axis VSCROLL,<v>] (Default: mouse) not supported\n",
+        "The sources are:\n  mouse\n"
+        "mouse scroll <x> <y> [--axis VSCROLL,<v>] (this form is not supported)\n",
+    ],
+)
+def test_a_line_that_says_it_is_unsupported_is_no_support(device, android, usage):
+    android.input_usage = usage
+    assert device._wheel_supported() is False
+
+
+@pytest.mark.parametrize(
+    "usage",
+    [
+        # Astra's shape: VSCROLL in a second bracket after HSCROLL
+        "The sources are:\n  mouse\n"
+        "mouse scroll <x> <y> [--axis HSCROLL,<h>] [--axis VSCROLL,<v>]\n",
+        "The sources are:\n  mouse\n"
+        "scroll <x> <y> [--axis HSCROLL,<h>] [--axis VSCROLL,<v>] (Default: mouse)\n",
+        # a mouse line with the options on their own line
+        "The sources are:\n  mouse\n"
+        "mouse scroll <x> <y> [axis_value]\nAxis options: HSCROLL, VSCROLL\n",
+    ],
+)
+def test_every_axis_of_the_line_counts(device, android, usage):
+    android.input_usage = usage
+    assert device._wheel_supported() is True
+
+
+def test_an_axis_options_line_alone_is_no_support_without_a_mouse_scroll_line(
+    device, android
+):
+    android.input_usage = (
+        "The sources are:\n  mouse\n  rotary\n"
+        "rotary scroll <x> <y> [axis_value]\nAxis options: SCROLL, VSCROLL\n"
+    )
+    assert device._wheel_supported() is False

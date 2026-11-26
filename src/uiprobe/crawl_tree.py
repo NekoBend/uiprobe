@@ -1482,12 +1482,14 @@ def _match_skips(
     owner: list[tuple[Row, Screen]],
     by_fp: dict[str, list[str]],
     skips: _Skips,
-    sid: str,
+    ids: list[str],
     *,
     record_text: bool,
 ) -> set[str]:
     """Put the skip reasons on the rows whose fingerprint they name; return the
-    fingerprints that found a row."""
+    fingerprints that found a row. `ids` are the screen ids that make one screen
+    (the first is the screen's own): the skip lines decided on any of them count,
+    since a row read after a scroll may belong to the screen under another id."""
     seen: set[str] = set()
     indexes: dict[int, tuple[_Prints, dict[str, Element]]] = {}
     for row, view in owner:
@@ -1505,14 +1507,23 @@ def _match_skips(
         if fp not in by_fp and (not record_text or "password" in element.flags):
             # The texts were blanked when the line was written, so the
             # fingerprint cannot match; the element id of the line does.
-            fp = skips.by_element.get(sid, {}).get(row.element_id, fp)
+            fp = next(
+                (
+                    found
+                    for one in ids
+                    if (found := skips.by_element.get(one, {}).get(row.element_id))
+                    is not None
+                    and found in by_fp
+                ),
+                fp,
+            )
         if fp in by_fp:
             row.reasons = tuple(by_fp[fp])
             seen.add(fp)
     return seen
 
 
-def _node(
+def _node(  # noqa: PLR0912 - one step per kind of read
     sid: str,
     loaded: tuple[Screen, str, str | None],
     moves: _Moves,
@@ -1543,15 +1554,20 @@ def _node(
     rows, owner, stand_in = _scrolled_rows(
         views, first, taps_by, record_text=record_text
     )
-    by_fp = skips.by_screen.get(sid, {})
+    own_fp = skips.by_screen.get(sid, {})
+    ids = [sid, *sorted(members - {sid})]
+    by_fp: dict[str, list[str]] = {}
+    for one in ids:
+        for fingerprint, reasons in skips.by_screen.get(one, {}).items():
+            by_fp.setdefault(fingerprint, reasons)
     unmatched: list[tuple[str, tuple[str, ...]]] = []
     unchecked = False
     if by_fp and any(len(v.elements) > _MAX_FINGERPRINTED for _, v in views):
         unchecked = True
-        unmatched = [(fp, tuple(r)) for fp, r in by_fp.items()]
+        unmatched = [(fp, tuple(r)) for fp, r in own_fp.items()]
     elif by_fp:
-        seen = _match_skips(owner, by_fp, skips, sid, record_text=record_text)
-        unmatched = [(fp, tuple(r)) for fp, r in by_fp.items() if fp not in seen]
+        seen = _match_skips(owner, by_fp, skips, ids, record_text=record_text)
+        unmatched = [(fp, tuple(r)) for fp, r in own_fp.items() if fp not in seen]
     # Every tap of a row, also those decided on a later read of a row that is
     # shown once (its repeat), so that no destination is lost.
     attached: dict[int, tuple[Row, list[_Tap]]] = {}
@@ -1737,7 +1753,14 @@ def _ending(
     target = _screen_id(end.get("to_screen_id"))
     if end.get("dump_failed") or target is None:
         return {"not_read": True}
-    if target == from_id:
+    family = moves.family
+    if target == from_id or any(
+        family.get(target, target) == family.get(one, one)
+        for one in (from_id, tap.from_screen_id)
+    ):
+        # The tap stayed on the screen it was pressed on, also when that screen
+        # has another id than the one it is listed under (a list whose id
+        # changed as it scrolled is one screen).
         return {"same_screen": True}
     return _led_to(target, own, reader, moves, tap.action_id)
 

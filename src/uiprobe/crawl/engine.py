@@ -57,6 +57,7 @@ from uiprobe.guards import (
     lists_key,
     scroll_container,
     scroll_target,
+    scrolled_container_on,
 )
 from uiprobe.model import Screen  # noqa: TC001
 
@@ -84,6 +85,7 @@ class _Pending:
     # The screen read right before a scroll was sent, to see what it changed.
     scroll_pre: Screen | None = None
     scroll_key: str | None = None
+    scroll_container: str | None = None
     # What the scroll did beyond scrolling, once seen (see `scroll_effect`).
     effect: str | None = None
     effect_seen: bool = False
@@ -125,6 +127,8 @@ class _ScrollPlan:
     # name of the screen by its lists (see `uiprobe.guards.lists_key`).
     family: str = ""
     lists: str = ""
+    # The package and activity (see `_activity_key`).
+    activity_key: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -213,6 +217,7 @@ class _State:
     scrolls: dict[str, int]
     family_scrolls: dict[str, int]
     lists_scrolls: dict[str, int]
+    activity_scrolls: dict[str, int]
     scrolled_end: set[str]
     family: dict[str, str]
     seen_prints: dict[str, set[str]]
@@ -368,6 +373,7 @@ class CrawlEngine:
         self._scrolls: dict[str, int] = {}
         self._family_scrolls: dict[str, int] = {}
         self._lists_scrolls: dict[str, int] = {}
+        self._activity_scrolls: dict[str, int] = {}
         self._scrolled_end: set[str] = set()
         self._family: dict[str, str] = {}
         self._seen_prints: dict[str, set[str]] = {}
@@ -518,6 +524,7 @@ class CrawlEngine:
             scrolls=dict(self._scrolls),
             family_scrolls=dict(self._family_scrolls),
             lists_scrolls=dict(self._lists_scrolls),
+            activity_scrolls=dict(self._activity_scrolls),
             scrolled_end=set(self._scrolled_end),
             family=dict(self._family),
             seen_prints={k: set(v) for k, v in self._seen_prints.items()},
@@ -569,6 +576,7 @@ class CrawlEngine:
         self._scrolls = dict(state.scrolls)
         self._family_scrolls = dict(state.family_scrolls)
         self._lists_scrolls = dict(state.lists_scrolls)
+        self._activity_scrolls = dict(state.activity_scrolls)
         self._scrolled_end = set(state.scrolled_end)
         self._family = dict(state.family)
         self._seen_prints = {k: set(v) for k, v in state.seen_prints.items()}
@@ -599,7 +607,11 @@ class CrawlEngine:
                 sid,
                 on_target=on_target,
                 keyboard=observation.keyboard_shown is True,
-                effect=self._resolve_effect(screen, on_target=on_target),
+                effect=self._resolve_effect(
+                    screen,
+                    on_target=on_target,
+                    foreground_unknown=observation.foreground is None,
+                ),
             )
         limit = self._limit_reached(observation.now)
         if limit is not None:
@@ -742,6 +754,9 @@ class CrawlEngine:
         self._lists_scrolls[approved.lists] = (
             self._lists_scrolls.get(approved.lists, 0) + 1
         )
+        self._activity_scrolls[approved.activity_key] = (
+            self._activity_scrolls.get(approved.activity_key, 0) + 1
+        )
         self._pending = _Pending(
             self._sent,
             "scroll",
@@ -750,6 +765,7 @@ class CrawlEngine:
             amount=scroll.amount,
             scroll_pre=approved.pre,
             scroll_key=approved.key,
+            scroll_container=approved.container,
         )
         self._relaunches = 0
         self._refused = 0
@@ -873,9 +889,13 @@ class CrawlEngine:
             and foreground == screen.package
             and (screen.package == self._package or screen.package in self._also)
         )
-        return self._resolve_effect(screen, on_target=on_target)
+        return self._resolve_effect(
+            screen, on_target=on_target, foreground_unknown=foreground is None
+        )
 
-    def _resolve_effect(self, screen: Screen | None, *, on_target: bool) -> str | None:
+    def _resolve_effect(
+        self, screen: Screen | None, *, on_target: bool, foreground_unknown: bool
+    ) -> str | None:
         pending = self._pending
         pre = None if pending is None else pending.scroll_pre
         if pending is None or pending.kind != "scroll" or pre is None:
@@ -884,20 +904,31 @@ class CrawlEngine:
             return pending.effect
         if screen is None:
             return None
-        if not on_target:
+        if not on_target and self._unread_foreground_only(
+            pre, screen, foreground_unknown=foreground_unknown
+        ):
+            # The foreground could not be read, and the screen is the one that
+            # was scrolled: nothing says it was left. An incident (no more scrolls
+            # on this screen) but no new page: the depth stays.
+            effect = "changed"
+        elif not on_target:
             effect = "navigation"
         elif (
             screen.package != pre.package
             or screen.activity != pre.activity
             or is_dialog(screen)
-            or self._left_the_list(pre, screen, pending.scroll_key)
+            or self._left_the_list(
+                pre, screen, pending.scroll_key, pending.scroll_container
+            )
         ):
             # Another package of the listed ones, another activity, or a dialog
             # (told by its top-level element being smaller than the display,
             # also when the screen id did not change), or a page of the same
             # activity that has taken the list's place.
             effect = "navigation"
-        elif changed_by_wheel(pre, screen, pending.scroll_key):
+        elif changed_by_wheel(
+            pre, screen, pending.scroll_key, pending.scroll_container
+        ):
             effect = "changed"
         else:
             effect = None
@@ -908,19 +939,34 @@ class CrawlEngine:
         return effect
 
     @staticmethod
-    def _left_the_list(pre: Screen, screen: Screen, key: str | None) -> bool:
-        """Whether the screen read after a scroll is another page of the same
-        activity: no scrollable element of it has the container key of the list
-        that was scrolled (whatever its id: a page with the same classes and
-        resource ids but no scrollable list has the same id). A page of the same
-        activity that shows the same list is not told apart from the list."""
-        del pre
-        if key is None:
-            return False
-        return not any(
-            "scrollable" in e.flags and container_key(screen, e) == key
-            for e in screen.elements
+    def _unread_foreground_only(
+        pre: Screen, screen: Screen, *, foreground_unknown: bool
+    ) -> bool:
+        """Whether the only thing off is an unreadable foreground: the dump is
+        of the same package, activity and screen id as the one scrolled."""
+        return (
+            foreground_unknown
+            and screen.package == pre.package
+            and screen.activity == pre.activity
+            and screen.screen_id == pre.screen_id
         )
+
+    @staticmethod
+    def _left_the_list(
+        pre: Screen, screen: Screen, key: str | None, container: str | None
+    ) -> bool:
+        """Whether the screen read after a scroll is another page of the same
+        activity: the scrolled container is gone, which is told by no scrollable
+        element of it having the container key with bounds that overlap the
+        container's (a page that reuses the list's key elsewhere is another page;
+        a scroll does not move the container). Whatever the screen id: a page
+        with the same classes and resource ids but no scrollable list has the same
+        id. A page of the same activity that shows the same list in the same place
+        is not told apart from the list."""
+        planned = next((e for e in pre.elements if e.id == container), None)
+        if key is None or planned is None:
+            return False
+        return scrolled_container_on(screen, key, planned) is None
 
     def _scroll_incident(self, key: str | None) -> None:
         """A scroll changed something or navigated: never scroll that container
@@ -963,7 +1009,9 @@ class CrawlEngine:
             # Like a tap that lands off target, or on another activity or a
             # dialog (a new screen on top, depth + 1); a scroll that stays on
             # the screen pushes nothing.
-            if not on_target or navigated:
+            # An unreadable foreground on the screen that was scrolled is an
+            # incident but no new screen on the path.
+            if (not on_target and effect != "changed") or navigated:
                 self._path.append(sid if on_target else _OFF)
         elif kind in ("launch", "relaunch"):
             if self._path:
@@ -1334,9 +1382,10 @@ class CrawlEngine:
         scrolls that changed something or navigated), the container is not
         blocked by such a scroll, the screen's family has not been scrolled to
         its end, fewer than ``Limits.scrolls_per_screen`` scrolls were sent on the
-        container and on the screen's family of ids, each (a proposal that is
-        refused does not count; the second count keeps the cap when the largest
-        list of the screen changes, and with it the container's key), and
+        container, on the screen's family of ids, on its set of lists and in its
+        activity, each (a proposal that is refused does not count; the other
+        counts keep the cap when the largest list of the screen changes, and with
+        it the container's key, or a list is added), and
         `scroll_target` finds a point (it says no on a dialog, an irreversible
         screen, without a container of an allowed class, or when no point has
         only plain elements at it). The container is counted and blocked under
@@ -1358,11 +1407,14 @@ class CrawlEngine:
         box = next(e for e in screen.elements if e.id == container)
         key = container_key(screen, box)
         lists = lists_key(screen)
+        activity_key = f"{screen.package}/{screen.activity or ''}"
         if (
             key in self._scroll_blocked
             or self._scrolls.get(key, 0) >= self._limits.scrolls_per_screen
             or self._family_scrolls.get(family, 0) >= self._limits.scrolls_per_screen
             or self._lists_scrolls.get(lists, 0) >= self._limits.scrolls_per_screen
+            or self._activity_scrolls.get(activity_key, 0)
+            >= self._limits.scrolls_per_screen
         ):
             return None
         scroll = Scroll(sid, point, self._limits.scroll_amount)
@@ -1374,6 +1426,7 @@ class CrawlEngine:
             screen.activity,
             family=family,
             lists=lists,
+            activity_key=activity_key,
         )
         return scroll
 

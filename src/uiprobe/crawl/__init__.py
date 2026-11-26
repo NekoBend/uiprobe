@@ -113,9 +113,10 @@ where screen ids change are listed under the stated limits below.
   element, an element judge refuses, or an element that is neither the
   container, inside it nor one of its ancestors (a sibling over or under the
   list, labelled or not), at it), fewer than
-  ``scrolls_per_screen`` were *sent* both for the container and for the
-  screen's family of ids (a proposal that is refused does not count; the
-  second count keeps the cap when another list becomes the largest), the screen
+  ``scrolls_per_screen`` were *sent* for the container, for the
+  screen's family of ids, for its set of lists and in its activity (a proposal
+  that is refused does not count; the other counts keep the cap when another
+  list becomes the largest or is added), the screen
   has not been scrolled to its end or marked by a
   scroll that changed something, fewer than ``scroll_incidents`` such scrolls
   happened in the run, and refusals are not piling up. It goes through

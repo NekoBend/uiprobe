@@ -29,7 +29,7 @@ from uiprobe.guards.tree import _is_dialog, _is_text_field, _Tree
 
 if TYPE_CHECKING:
     from uiprobe.guards.policy import Judgement
-    from uiprobe.model import Element, Screen
+    from uiprobe.model import Bounds, Element, Screen
 
 _SCROLLABLE = "scrollable"
 _LONG_CLICKABLE = "long_clickable"
@@ -137,7 +137,9 @@ def scroll_target(screen: Screen, judgement: Judgement) -> tuple[str, Point] | N
     area = screen.visible_bounds(container)
     if area is None:
         return None
-    refused = frozenset(d.element.id for d in judgement.decisions if d.reasons)
+    refused = judgement.unsafe | frozenset(
+        d.element.id for d in judgement.decisions if d.reasons
+    )
     for col, row in _GRID:
         point = (
             area.left + area.width * col // 4,
@@ -221,35 +223,112 @@ def _ancestry(
     return tuple(chain)
 
 
-def changed_by_wheel(before: Screen, after: Screen, key: str | None = None) -> bool:
+def changed_by_wheel(
+    before: Screen,
+    after: Screen,
+    key: str | None = None,
+    container: str | None = None,
+) -> bool:
     """Whether the screen shows that a wheel turn changed something other than
     the scroll position, comparing the screen read before it with the one after.
 
-    ``key`` is the `container_key` of the list that was scrolled. Two signs.
-    (1) A checkable element outside the list with the same text-inclusive
-    identity (class, resource id, text, description, hint and the ancestors'
-    classes and resource ids) on both screens whose checked states differ (the
-    sorted states of all such elements are compared per identity, when there
-    are as many of them on both screens: identical rows that scrolled in or out
-    are no change). (2) Outside the list: elements
-    with the same text-free identity (class, resource id and the ancestors'
-    classes and resource ids), taken in document order, where the n-th text or
-    description or checked state differs on the two screens (groups of another
-    size on the two screens cannot be paired and are not compared). What is
-    inside the scrolled list is not compared by text, because its rows move and
-    change as it scrolls: a sole row replaced by another is no change. Without
-    ``key`` the list is not known, and only elements whose identity is unique on
-    both screens are compared, as rows are told apart by their identity not being
-    unique. A clock or a counter that changes between the reads is taken as a
-    change too, which only costs a scroll.
+    ``container`` is the id, on `before`, of the element that was scrolled, and
+    ``key`` its `container_key`. Only what is below that one element is left out
+    of the comparison (on `after`: below the element with that key whose bounds
+    overlap the container's most), not everything below any element with the same
+    key: a sibling list that was not scrolled is compared. Two signs. (1) A
+    checkable element outside the list with the same text-inclusive identity
+    (class, resource id, text, description, hint and the ancestors' classes and
+    resource ids) on both screens whose checked states differ (the sorted states
+    of all such elements are compared per identity, when there are as many of
+    them on both screens: identical rows that scrolled in or out are no change).
+    (2) Outside the list: elements with the same text-free identity (class,
+    resource id and the ancestors' classes and resource ids), taken in document
+    order, where the n-th text or description or checked state differs on the two
+    screens (groups of another size on the two screens cannot be paired and are
+    not compared). What is inside the scrolled list is not compared by text,
+    because its rows move and change as it scrolls: a sole row replaced by
+    another is no change. Without ``key`` and ``container`` the list is not
+    known, and only elements whose identity is unique on both screens are
+    compared, as rows are told apart by their identity not being unique. A clock
+    or a counter that changes between the reads is taken as a change too, which
+    only costs a scroll.
     """
-    return _checked_changed(before, after, key) or _text_changed(before, after, key)
+    skips: tuple[frozenset[str], frozenset[str]] = (frozenset(), frozenset())
+    if key is not None and container is not None:
+        skips = scrolled_below(before, after, key, container)
+    known = key is not None and container is not None
+    return _checked_changed(before, after, skips) or _text_changed(
+        before, after, skips, known=known
+    )
 
 
-def _checked_changed(before: Screen, after: Screen, key: str | None = None) -> bool:
-    def states(screen: Screen) -> dict[tuple[object, ...], list[bool]]:
+def _children(screen: Screen) -> dict[str, list[str]]:
+    children: dict[str, list[str]] = {}
+    for element in screen.elements:
+        if element.parent is not None:
+            children.setdefault(element.parent, []).append(element.id)
+    return children
+
+
+def _below(screen: Screen, root: str | None) -> frozenset[str]:
+    """The ids of the elements below the element `root` (not itself)."""
+    if root is None:
+        return frozenset()
+    children = _children(screen)
+    found: set[str] = set()
+    stack = [root]
+    while stack:
+        for child in children.get(stack.pop(), ()):
+            if child not in found and child != root:
+                found.add(child)
+                stack.append(child)
+    return frozenset(found)
+
+
+def _overlap(a: Bounds, b: Bounds) -> int:
+    width = min(a.right, b.right) - max(a.left, b.left)
+    height = min(a.bottom, b.bottom) - max(a.top, b.top)
+    return width * height if width > 0 and height > 0 else 0
+
+
+def scrolled_container_on(
+    screen: Screen, key: str, container: Element
+) -> Element | None:
+    """The element of `screen` that is the scrolled container of another read:
+    a scrollable element with the same `container_key` whose bounds overlap
+    the container's most (a scroll does not move the container); None when no
+    such element overlaps it at all."""
+    best: tuple[int, Element] | None = None
+    for element in screen.elements:
+        if _SCROLLABLE not in element.flags or container_key(screen, element) != key:
+            continue
+        area = _overlap(element.bounds, container.bounds)
+        if area > 0 and (best is None or area > best[0]):
+            best = (area, element)
+    return None if best is None else best[1]
+
+
+def scrolled_below(
+    before: Screen, after: Screen, key: str, container: str
+) -> tuple[frozenset[str], frozenset[str]]:
+    """The ids below the scrolled container on `before` and on `after`."""
+    planned = next((e for e in before.elements if e.id == container), None)
+    if planned is None:
+        return frozenset(), frozenset()
+    found = scrolled_container_on(after, key, planned)
+    return _below(before, planned.id), _below(
+        after, None if found is None else found.id
+    )
+
+
+def _checked_changed(
+    before: Screen, after: Screen, skips: tuple[frozenset[str], frozenset[str]]
+) -> bool:
+    def states(
+        screen: Screen, skip: frozenset[str]
+    ) -> dict[tuple[object, ...], list[bool]]:
         by_id = {e.id: e for e in screen.elements}
-        skip = _inside_list(screen, key)
         found: dict[tuple[object, ...], list[bool]] = {}
         for element in screen.elements:
             if _CHECKABLE not in element.flags or element.id in skip:
@@ -265,7 +344,7 @@ def _checked_changed(before: Screen, after: Screen, key: str | None = None) -> b
             found.setdefault(identity, []).append("checked" in element.flags)
         return found
 
-    old, new = states(before), states(after)
+    old, new = states(before, skips[0]), states(after, skips[1])
     # Groups of another size cannot be paired: rows of identical identity that
     # scrolled in or out (two identical switch rows scrolling down to one) are
     # no change.
@@ -277,33 +356,17 @@ def _checked_changed(before: Screen, after: Screen, key: str | None = None) -> b
     )
 
 
-def _inside_list(screen: Screen, key: str | None) -> frozenset[str]:
-    """The ids of the elements below a scrollable element with this container
-    key (the list and its rows); empty without a key."""
-    if key is None:
-        return frozenset()
-    children: dict[str, list[str]] = {}
-    for element in screen.elements:
-        if element.parent is not None:
-            children.setdefault(element.parent, []).append(element.id)
-    found: set[str] = set()
-    stack = [
-        e.id
-        for e in screen.elements
-        if _SCROLLABLE in e.flags and container_key(screen, e) == key
-    ]
-    while stack:
-        for child in children.get(stack.pop(), ()):
-            if child not in found:
-                found.add(child)
-                stack.append(child)
-    return frozenset(found)
-
-
-def _text_changed(before: Screen, after: Screen, key: str | None) -> bool:
-    def identities(screen: Screen) -> dict[tuple[object, ...], list[Element]]:
+def _text_changed(
+    before: Screen,
+    after: Screen,
+    skips: tuple[frozenset[str], frozenset[str]],
+    *,
+    known: bool,
+) -> bool:
+    def identities(
+        screen: Screen, skip: frozenset[str]
+    ) -> dict[tuple[object, ...], list[Element]]:
         by_id = {e.id: e for e in screen.elements}
-        skip = _inside_list(screen, key)
         found: dict[tuple[object, ...], list[Element]] = {}
         for element in screen.elements:
             if element.id in skip:
@@ -316,10 +379,10 @@ def _text_changed(before: Screen, after: Screen, key: str | None) -> bool:
             found.setdefault(identity, []).append(element)
         return found
 
-    old, new = identities(before), identities(after)
+    old, new = identities(before, skips[0]), identities(after, skips[1])
     for identity, elements in old.items():
         now = new.get(identity, [])
-        if len(elements) != len(now) or (key is None and len(elements) != 1):
+        if len(elements) != len(now) or (not known and len(elements) != 1):
             continue
         for was, here in zip(elements, now, strict=True):
             if (

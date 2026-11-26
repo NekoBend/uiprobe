@@ -463,7 +463,10 @@ def test_the_plan_says_whether_lists_are_scrolled():
         "scroll_amount": 2,
     }
     line = "scroll lists with the mouse wheel: "
-    tail = "; an app's own view can react to the wheel (see docs/safety.md)"
+    tail = (
+        "; an app's own view, or a window that appears just before the wheel, can"
+        " react to it (see docs/safety.md)"
+    )
 
     def text(**more):
         return cli._press_plan_text({**plan, **more}, settings=SETTINGS_FILE)

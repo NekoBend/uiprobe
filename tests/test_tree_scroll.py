@@ -830,3 +830,74 @@ def test_a_read_of_another_activity_after_a_failed_dump_is_not_listed_under_the_
     rows = read_tree(folder.path).screens[first.screen_id].rows
     assert [r.name for r in rows if r.kind == "row"] == ["A", "B"]
     assert all(r.after_scroll is None for r in rows)
+
+
+# -- a list that became layout B as it scrolled -----------------------------------
+
+
+def layout_a_to_b(tmp_path):
+    folder = Folder(tmp_path)
+    first = listing(["A", "B", "C"])
+    second = listing(["C", "D"])  # one row fewer: another screen id (layout B)
+    assert first.screen_id != second.screen_id
+    for screen in (first, second, LEAF):
+        folder.screen(screen)
+    folder.start("launch")
+    folder.end(first.screen_id)
+    number = scroll(folder, first, second)
+    return folder, first, second, number
+
+
+def test_a_tap_that_stayed_on_layout_b_is_not_navigation(tmp_path):
+    folder, first, second, number = layout_a_to_b(tmp_path)
+    tap_after(folder, second, 5, second.screen_id, number)  # D, B to B
+    folder.finish()
+    tree = read_tree(folder.path)
+    d = next(r for r in tree.screens[first.screen_id].rows if r.name == "D")
+    assert d.pressed
+    assert d.to == {"same_screen": True}
+
+
+def test_a_tap_from_layout_b_back_to_layout_a_stays_on_the_screen_too(tmp_path):
+    folder, first, second, number = layout_a_to_b(tmp_path)
+    tap_after(folder, second, 5, first.screen_id, number)
+    folder.finish()
+    d = next(
+        r for r in read_tree(folder.path).screens[first.screen_id].rows if r.name == "D"
+    )
+    assert d.to == {"same_screen": True}
+
+
+def test_a_tap_from_layout_b_to_another_screen_is_still_navigation(tmp_path):
+    folder, first, second, number = layout_a_to_b(tmp_path)
+    tap_after(folder, second, 5, LEAF.screen_id, number)
+    folder.finish()
+    d = next(
+        r for r in read_tree(folder.path).screens[first.screen_id].rows if r.name == "D"
+    )
+    assert d.to == {"screen_id": LEAF.screen_id}
+
+
+def test_a_reason_decided_on_layout_b_is_shown_on_its_row(tmp_path):
+    folder, first, second, _number = layout_a_to_b(tmp_path)
+    folder.skip(second, 5, "deny_word")  # D, decided on the second id
+    folder.finish()
+    tree = read_tree(folder.path)
+    rows = {r.name: r for r in tree.screens[first.screen_id].rows if r.kind == "row"}
+    assert rows["D"].reasons == ("deny_word",)
+    assert rows["A"].reasons == ()
+    # the reason is not reported as unmatched under the first id
+    assert tree.screens[first.screen_id].unmatched == []
+
+
+def test_a_reason_decided_on_the_first_id_still_shows(tmp_path):
+    folder, first, second, _number = layout_a_to_b(tmp_path)
+    folder.skip(first, 5, "toggle")  # B, decided on the first id
+    folder.finish()
+    rows = {
+        r.name: r
+        for r in read_tree(folder.path).screens[first.screen_id].rows
+        if r.kind == "row"
+    }
+    assert rows["B"].reasons == ("toggle",)
+    del second

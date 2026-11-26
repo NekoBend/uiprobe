@@ -36,7 +36,14 @@ from uiprobe.crawl import (
     Tap,
     fingerprint_of,
 )
-from uiprobe.guards import IRREVERSIBLE_PHRASES, Policy, judge, scroll_target
+from uiprobe.guards import (
+    IRREVERSIBLE_PHRASES,
+    Policy,
+    container_key,
+    judge,
+    lists_key,
+    scroll_target,
+)
 from uiprobe.guards.scroll import elements_at, scroll_container
 from uiprobe.model import Bounds, Element, Screen
 
@@ -157,7 +164,7 @@ def point_of(screen):
 
 
 def key_of(screen):
-    from uiprobe.guards import container_key, scroll_container
+    from uiprobe.guards import scroll_container
 
     container = scroll_container(screen)
     assert container is not None
@@ -1439,6 +1446,62 @@ def test_two_texts_of_one_identity_that_did_not_change_are_no_change() -> None:
     assert eng.scroll_effect(after.screen, PKG) is None
 
 
+def sibling_lists(*, checked, rows=("a",)):
+    """The list (scrolled) and a smaller sibling list with the same class,
+    resource id and parent, hence the same container key; a switch and a text
+    in the sibling."""
+    sibling = Element(
+        "e8",
+        "e1",
+        RECYCLER,
+        Bounds(0, 0, 320, 50),
+        resource_id=f"{PKG}:id/list",
+        package=PKG,
+        flags=("scrollable",),
+    )
+    flags = ("checkable", "checked") if checked else ("checkable",)
+    toggle = Element(
+        "e81",
+        "e8",
+        "android.widget.Switch",
+        Bounds(10, 10, 60, 40),
+        package=PKG,
+        flags=flags,
+    )
+    return seen(list_screen(list(rows), row_flags=(), extras=(sibling, toggle)))
+
+
+def test_a_switch_in_an_untouched_sibling_list_with_the_same_key_is_a_change() -> None:
+    eng = started()
+    before = sibling_lists(checked=False)
+    sibling = next(e for e in before.screen.elements if e.id == "e8")
+    assert container_key(before.screen, sibling) == key_of(before.screen)
+    sent_scroll(eng, before)
+    after = sibling_lists(checked=True, rows=("b",))
+    assert eng.scroll_effect(after.screen, PKG) == "changed"
+
+
+def test_the_scrolled_list_itself_is_still_left_out() -> None:
+    eng = started()
+    sent_scroll(eng, sibling_lists(checked=False))
+    after = sibling_lists(checked=False, rows=("b",))
+    assert eng.scroll_effect(after.screen, PKG) is None
+
+
+def test_the_container_is_found_again_by_key_and_overlap() -> None:
+    from uiprobe.guards.scroll import scrolled_container_on
+
+    before = sibling_lists(checked=False).screen
+    container = scroll_container(before)
+    assert container is not None
+    key = container_key(before, container)
+    found = scrolled_container_on(before, key, container)
+    assert found is not None
+    assert found.id == container.id  # not the sibling with the same key
+    away = Element("z", "e1", RECYCLER, Bounds(0, 640, 10, 650), package=PKG)
+    assert scrolled_container_on(before, key, away) is None
+
+
 def test_the_texts_inside_the_list_are_not_compared_by_text() -> None:
     from uiprobe.guards import changed_by_wheel, container_key, scroll_container
 
@@ -1447,7 +1510,7 @@ def test_the_texts_inside_the_list_are_not_compared_by_text() -> None:
     container = scroll_container(before)
     assert container is not None
     key = container_key(before, container)
-    assert not changed_by_wheel(before, after, key)
+    assert not changed_by_wheel(before, after, key, container.id)
     # without the key the list is not known: rows of one identity are never
     # compared, as before
     assert not changed_by_wheel(before, after)
@@ -1568,6 +1631,50 @@ def test_a_switch_outside_the_list_that_toggled_is_still_a_change() -> None:
     sent_scroll(eng, before)
     after = seen(list_screen([], extras=(switch(checked=True),)))
     assert eng.scroll_effect(after.screen, PKG) == "changed"
+
+
+def test_a_new_page_reusing_the_list_key_elsewhere_is_navigation() -> None:
+    # The same activity, class and resource id of the list, but the list is not
+    # where the scrolled one was: another page with a list of the same kind.
+    eng = started()
+    before = seen(list_screen(["a"], row_flags=()))
+    sent_scroll(eng, before)
+    page = seen(list_screen(["x", "y"], row_flags=(), window=(0, 610, 320, 630)))
+    assert page.screen.screen_id != before.screen.screen_id
+    assert key_of(page.screen) == key_of(before.screen)  # the key is reused
+    assert eng.scroll_effect(page.screen, PKG) == "navigation"
+    eng.next(page)
+    assert len(eng._path) == 2  # depth + 1
+    assert eng._scroll_incidents == 1
+    assert key_of(before.screen) in eng._scroll_blocked
+
+
+def test_the_same_list_in_the_same_place_is_not_navigation() -> None:
+    eng = started()
+    sent_scroll(eng, seen(list_screen(["a"], row_flags=())))
+    after = seen(list_screen(["b", "c"], row_flags=(), window=(0, 80, 320, 580)))
+    # moved a little, still overlapping: the same list
+    assert eng.scroll_effect(after.screen, PKG) is None
+
+
+def test_an_unreadable_foreground_on_the_scrolled_screen_is_an_incident_only() -> None:
+    eng = started()
+    before = seen(list_screen(["a", "b"], row_flags=()))
+    sent_scroll(eng, before)
+    unread = seen(list_screen(["a", "b"], row_flags=()), fg=None)
+    assert eng.scroll_effect(unread.screen, None) == "changed"
+    eng.next(unread)
+    assert len(eng._path) == 1  # no depth change
+    assert eng._scroll_incidents == 1  # the screen is not scrolled again
+    assert key_of(before.screen) in eng._scroll_blocked
+    assert eng.records.transitions[-1].scroll_effect == "changed"
+
+
+def test_an_unreadable_foreground_on_another_screen_is_still_navigation() -> None:
+    eng = started()
+    sent_scroll(eng, seen(list_screen(["a"], row_flags=())))
+    other = seen(list_screen(["x", "y"], row_flags=(), name="other"), fg=None)
+    assert eng.scroll_effect(other.screen, None) == "navigation"
 
 
 def test_a_list_that_gained_a_row_is_not_another_page() -> None:
@@ -1744,6 +1851,95 @@ def test_a_plain_class_at_the_point_leaves_the_point_qualified(cls) -> None:
     inside = extra("e9", cls, (150, 320, 170, 340), parent="e2")
     screen = list_screen([], extras=(inside,))
     assert point_of(screen) == POINT
+
+
+# -- what a non-clickable element at the point is or says ---------------------------
+
+
+def label_at_point(**more):
+    """A plain, non-clickable label inside the list, over the wheel's center."""
+    base = extra(
+        "e9",
+        "android.widget.TextView",
+        (150, 320, 170, 340),
+        parent="e2",
+    )
+    return clone(base, **more)
+
+
+def test_a_neutral_label_at_the_point_leaves_it_qualified() -> None:
+    screen = list_screen([], extras=(label_at_point(text="Volume"),))
+    assert point_of(screen) == POINT
+
+
+def test_a_label_of_another_package_at_the_point_refuses_the_point() -> None:
+    other = label_at_point(text="Volume", package="com.example.other")
+    assert point_of(list_screen([], extras=(other,))) == NEXT
+    whole = clone(other, bounds=Bounds(*WINDOW))
+    assert target_of(list_screen([], extras=(whole,))) is None
+
+
+@pytest.mark.parametrize(
+    "field", ["text", "content_desc", "hint"], ids=["text", "description", "hint"]
+)
+def test_a_deny_word_in_a_non_clickable_label_refuses_the_point(field) -> None:
+    # judge decides only clickables; the wheel looks at every element there
+    word = label_at_point(**{field: "Delete"})
+    screen = list_screen([], extras=(word,))
+    assert point_of(screen) == NEXT
+    assert (
+        target_of(list_screen([], extras=(clone(word, bounds=Bounds(*WINDOW)),)))
+        is None
+    )
+
+
+def test_the_deny_words_are_the_judges_with_its_exceptions() -> None:
+    # "automatically" excuses the deny word "call" in the judge, and here
+    excused = label_at_point(text="Call me automatically")
+    policy = Policy(scroll_lists=True, deny_exceptions=("automatically",))
+    assert target_of_policy(list_screen([], extras=(excused,)), policy) is not None
+    bare = label_at_point(text="Call me")
+    assert point_of(list_screen([], extras=(bare,))) == NEXT
+    # a custom deny word of the policy counts too
+    custom = Policy(scroll_lists=True, deny_words=("zap",))
+    zap = label_at_point(text="Zap it")
+    assert target_of_policy(list_screen([], extras=(zap,)), custom) is not None
+    assert (
+        target_of_policy(
+            list_screen([], extras=(clone(zap, bounds=Bounds(*WINDOW)),)), custom
+        )
+        is None
+    )
+
+
+def test_a_deny_word_only_in_a_resource_id_does_not_count() -> None:
+    named = label_at_point(text="Volume", resource_id=f"{PKG}:id/delete_row")
+    assert point_of(list_screen([], extras=(named,))) == POINT
+
+
+def test_an_irreversibility_phrase_in_a_label_at_the_point_refuses_it() -> None:
+    from uiprobe.guards import IRREVERSIBLE_PHRASES
+
+    phrase = IRREVERSIBLE_PHRASES[0]
+    screen = list_screen([], extras=(label_at_point(text=phrase),))
+    assert target_of(screen) is None  # the whole screen is irreversible
+
+
+def test_a_listed_apps_element_at_the_point_is_its_own_only_when_on_target() -> None:
+    helper = "com.example.helper"
+    policy = Policy(scroll_lists=True, also_target=(helper,))
+    own = label_at_point(text="Volume", package=helper)
+    screen = list_screen([], package=helper, extras=(own,))
+    assert (
+        scroll_target(screen, judge(screen, PKG, policy, foreground=helper)) is not None
+    )
+    # the app's own element on a listed app's screen is another package there
+    app = clone(own, package=PKG)
+    mixed = list_screen([], package=helper, extras=(app,))
+    assert (
+        scroll_target(mixed, judge(mixed, PKG, policy, foreground=helper))[1]  # ty: ignore[not-subscriptable]
+        == NEXT
+    )
 
 
 # -- an editable element at the point refuses it -----------------------------------
@@ -2077,7 +2273,7 @@ def test_the_cap_holds_when_the_header_changes_the_screen_id() -> None:
     assert eng._scrolls == {key_of(one.screen): 1}
 
 
-def two_lists(labels, *, first_is_large, row_flags=(), header=False):
+def two_lists(labels, *, first_is_large, row_flags=(), header=False, third=False):
     """A screen with two lists, either of which can be the largest; the rows
     are inside the second list and cannot be pressed."""
     small, large = (0, 60, 100, 200), (100, 300, 300, 620)
@@ -2095,25 +2291,30 @@ def two_lists(labels, *, first_is_large, row_flags=(), header=False):
         window=large if first_is_large else small,
         row_flags=row_flags,
         row_parent="e8",
-        extras=(other, *((header_element(),) if header else ())),
+        extras=(
+            other,
+            *((header_element(),) if header else ()),
+            *((third_list(),) if third else ()),
+        ),
     )
     return seen(screen)
 
 
+def third_list():
+    """A third list, larger than both, as a screen can gain one on return."""
+    return Element(
+        "e61",
+        "e1",
+        RECYCLER,
+        Bounds(0, 250, 320, 620),
+        resource_id=f"{PKG}:id/third",
+        package=PKG,
+        flags=("scrollable",),
+    )
+
+
 def header_element():
     return extra("e60", "android.widget.TextView", (10, 10, 100, 40), text="Title")
-
-
-def test_the_cap_holds_when_another_list_becomes_the_largest() -> None:
-    # Swapping which list is the largest changes the container's key, but the
-    # screen is the same family of ids: the cap counts it too.
-    eng = started(limits=Limits(scrolls_per_screen=1))
-    one = two_lists(["a", "b"], first_is_large=True)
-    sent_scroll(eng, one)
-    two = two_lists(["c", "d"], first_is_large=False)
-    assert key_of(two.screen) != key_of(one.screen)
-    assert eng.next(two) == Stop("exhausted")  # new rows, but the cap is spent
-    assert eng._family_scrolls == {eng._canon(one.screen.screen_id): 1}
 
 
 def test_the_cap_holds_across_a_visit_when_a_header_and_the_largest_list_change() -> (
@@ -2137,24 +2338,53 @@ def test_the_cap_holds_across_a_visit_when_a_header_and_the_largest_list_change(
     assert not isinstance(eng.next(back), Scroll)  # the cap of the screen holds
 
 
-def test_the_lists_key_names_the_screen_by_all_its_lists() -> None:
-    from uiprobe.guards import lists_key
+def test_the_cap_holds_in_one_activity_when_a_third_list_changes_every_key() -> None:
+    # A third, larger list joins the screen on return: the container key, the
+    # family of ids and the set of lists all differ from what was counted. The
+    # activity is the same, and its count holds.
+    eng = started(limits=Limits(scrolls_per_screen=1))
+    sent_scroll(eng, two_lists(["a"], first_is_large=True))
+    shown = two_lists(["a", "b"], first_is_large=True, row_flags=("clickable",))
+    tap = eng.next(shown)
+    assert isinstance(tap, Tap)
+    assert eng.recheck(tap, shown)
+    eng.tap_sent(tap)
+    assert isinstance(eng.next(seen(make_screen([], name="leaf"))), Back)
+    back = two_lists(["c", "d"], first_is_large=False, header=True, third=True)
+    first = two_lists(["a"], first_is_large=True).screen
+    assert key_of(back.screen) not in eng._scrolls
+    assert eng._canon(back.screen.screen_id) not in eng._family_scrolls
+    assert lists_key(back.screen) not in eng._lists_scrolls
+    assert back.screen.activity == first.activity
+    assert not isinstance(eng.next(back), Scroll)  # one scroll in the activity
+    assert eng._activity_scrolls == {f"{PKG}/{first.activity}": 1}
 
+
+def test_the_cap_of_one_activity_does_not_reach_another_activity() -> None:
+    eng = started(limits=Limits(scrolls_per_screen=1))
+    sent_scroll(eng, two_lists(["a"], first_is_large=True))
+    other = seen(list_screen(["x", "y"], row_flags=(), name="other"))
+    # a screen of another activity has its own count (it is reached by tap, back
+    # or relaunch in a run; here the engine is only asked about it)
+    assert isinstance(eng.next(other), Scroll)
+
+
+def test_the_lists_key_names_the_screen_by_all_its_lists() -> None:
     one = two_lists(["a"], first_is_large=True).screen
     other = two_lists(["a"], first_is_large=False, header=True).screen
     assert lists_key(one) == lists_key(other)
     assert lists_key(list_screen(["a"])) != lists_key(one)  # one list, not two
 
 
-def test_a_second_list_is_scrolled_while_the_cap_of_the_screen_is_not_spent() -> None:
+def test_a_second_scroll_goes_while_the_cap_of_the_screen_is_not_spent() -> None:
     eng = started(limits=Limits(scrolls_per_screen=2))
-    sent_scroll(eng, two_lists(["a", "b"], first_is_large=True))
+    sent_scroll(eng, two_lists(["a", "b"], first_is_large=False))
     again = eng.next(two_lists(["c", "d"], first_is_large=False))
     assert isinstance(again, Scroll)  # the second of two on this screen
     assert eng.recheck(again, two_lists(["c", "d"], first_is_large=False))
     eng.scroll_sent(again)
-    last = eng.next(two_lists(["e", "f"], first_is_large=True))
-    assert last == Stop("exhausted")  # two sent on the screen, whatever the list
+    last = eng.next(two_lists(["e", "f"], first_is_large=False))
+    assert last == Stop("exhausted")  # two sent on the screen
 
 
 def test_new_rows_that_cannot_be_pressed_are_not_the_end_of_the_list() -> None:

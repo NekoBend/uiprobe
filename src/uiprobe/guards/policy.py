@@ -510,13 +510,17 @@ class Judgement:
     False for a screen too large to judge, and are not compared. ``edges`` are
     the screen-edge rectangles that gave ``screen_edge`` to a press point on
     this screen (empty for a screen too large to judge; not compared): the
-    crawl's wheel point must not lie in one either.
+    crawl's wheel point must not lie in one either. ``unsafe`` holds the ids of
+    every element, clickable or not, that is of another package than the
+    screen's target or has a deny word or irreversibility phrase in its own text,
+    description or hint (empty for a screen too large to judge; not compared).
     """
 
     decisions: tuple[Decision, ...]
     dialog: bool = field(default=False, compare=False)
     irreversible: bool = field(default=False, compare=False)
     edges: tuple[Bounds, ...] = field(default=(), compare=False)
+    unsafe: frozenset[str] = field(default=frozenset(), compare=False)
 
     @property
     def pressable(self) -> tuple[Decision, ...]:
