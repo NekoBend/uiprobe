@@ -2626,3 +2626,28 @@ def test_a_pressed_again_line_of_a_folded_element_to_a_popup_is_marked(
     assert any(x.endswith("(pressed again) [popup]") for x in lines)
     assert not any("OK" in x for x in lines)
     assert "rows inside popups: 1" in lines[-1]
+
+
+def test_a_popup_screens_texts_and_unnamed_elements_are_still_counted(tmp_path, capsys):
+    folder = Folder(tmp_path)
+    home = _button_screen(".Home", ["Ask"])
+    dialog = make_screen(
+        ".Dialog",
+        [
+            el(1, cls="FrameLayout", bounds=Bounds(100, 500, 980, 1500)),
+            el(2, 1, text="Title"),
+            el(3, 1, text="Body"),
+            el(4, 1, cls="Button", text="OK", flags=CLICK),
+            el(5, 1, cls="ImageButton", flags=CLICK),
+        ],
+    )
+    home_id, dialog_id = folder.screen(home), folder.screen(dialog)
+    folder.start("launch")
+    folder.end(home_id)
+    folder.tap(home, 2, dialog_id)
+    folder.finish()
+    _, out, _ = run_tree(capsys, str(folder.path))
+    assert out.splitlines()[-1] == (
+        "left out of the tree (see --json): rows inside popups: 1, "
+        "texts outside rows: 2, unnamed elements: 1"
+    )

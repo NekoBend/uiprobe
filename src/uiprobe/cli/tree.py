@@ -321,6 +321,9 @@ class _Renderer:
             scratch = _Tally()
             lines = _entries(self.tree, sid, ids=False, why=False, tally=scratch)
             self.tally.popup_rows += len(lines)
+            # What the popup's screen leaves out is still left out of the tree.
+            self.tally.texts += scratch.texts
+            self.tally.unnamed += scratch.unnamed
         return True
 
     def open_screen(self, sid: str, name: str, path: tuple[str, ...]) -> list[_Entry]:
