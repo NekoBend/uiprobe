@@ -1432,9 +1432,10 @@ class CrawlEngine:
 
     @staticmethod
     def _screen_state(screen: Screen) -> tuple[tuple[object, ...], ...]:
-        """The whole screen, as the re-check compares it: every element's id,
-        parent, class, package, text, description, hint, flags and bounds."""
-        return tuple(
+        """The whole screen, as the re-check compares it: the display size, then
+        every element's id, parent, class, package, text, description, hint,
+        flags, ``editable`` and bounds."""
+        elements = tuple(
             (
                 e.id,
                 e.parent,
@@ -1444,10 +1445,12 @@ class CrawlEngine:
                 e.content_desc,
                 e.hint,
                 e.flags,
+                e.editable,
                 tuple(e.bounds.to_list()),
             )
             for e in screen.elements
         )
+        return (("display", *screen.display), *elements)
 
     def _recheck_scroll(self, scroll: Scroll, observation: Observation) -> bool:
         """The re-check of a scroll, as `recheck` does it for a tap."""

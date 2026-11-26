@@ -256,8 +256,8 @@ REAL = (
     "      text <string> (Default: touchscreen)\n"
     "      tap <x> <y> (Default: touchscreen)\n"
     "      scroll <x> <y> [axis_value] (for pointer-based sources)\n"
-    "      swipe <x1> <y1> <x2> <y2> [duration(ms)] (Default: touchscreen)\n"
     "Axis options: SCROLL, HSCROLL, VSCROLL\n"
+    "      swipe <x1> <y1> <x2> <y2> [duration(ms)] (Default: touchscreen)\n"
 )
 
 
@@ -342,3 +342,39 @@ def test_an_axis_options_line_alone_is_no_support_without_a_mouse_scroll_line(
         "rotary scroll <x> <y> [axis_value]\nAxis options: SCROLL, VSCROLL\n"
     )
     assert device._wheel_supported() is False
+
+
+def test_the_options_line_belongs_to_the_scroll_line_it_follows(device, android):
+    # VSCROLL under the rotary line, HSCROLL on the mouse line: not pooled
+    android.input_usage = (
+        "The sources are:\n  mouse\n  rotary\n"
+        "mouse scroll <x> <y> [axis_value]\nAxis options: SCROLL, HSCROLL\n"
+        "rotary scroll <x> <y> [axis_value]\nAxis options: SCROLL, VSCROLL\n"
+    )
+    assert device._wheel_supported() is False
+    # and the other way round it is support: the mouse line's own options
+    android.input_usage = (
+        "The sources are:\n  mouse\n  rotary\n"
+        "mouse scroll <x> <y> [axis_value]\nAxis options: SCROLL, VSCROLL\n"
+        "rotary scroll <x> <y> [axis_value]\nAxis options: SCROLL, HSCROLL\n"
+    )
+    assert device._wheel_supported() is True
+
+
+def test_an_options_line_after_another_command_is_not_the_scroll_lines(device, android):
+    android.input_usage = (
+        REAL.replace(
+            "Axis options: SCROLL, HSCROLL, VSCROLL\n      swipe <x1>",
+            "      swipe <x1>",
+        )
+        + "Axis options: SCROLL, HSCROLL, VSCROLL\n"
+    )
+    assert device._wheel_supported() is False
+
+
+def test_a_description_line_between_does_not_end_the_search(device, android):
+    android.input_usage = REAL.replace(
+        "(for pointer-based sources)\n",
+        "(for pointer-based sources)\n      Scrolls at a point.\n",
+    )
+    assert device._wheel_supported() is True

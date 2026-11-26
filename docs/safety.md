@@ -45,6 +45,9 @@ Limits that stay, which the dump cannot close (this is why it is opt-in):
 - Changes after the gate's last read pass any action, a tap included: the gate reads the screen and the window, and the request goes out right after, but what happens on the device between the last read and the event is not seen.
 - With `--no-tap-window-check` (`Policy(check_tap_window=False)`) the window at the point is not read, so an overlay of another app over the point gets the wheel as it gets a tap.
 - A clock, a counter or another text that changes outside the list between the two reads is taken as a change and costs a scroll, and a change inside the scrolled list (a value of a row) is not looked at by text.
+- A non-clickable label whose deny word is only in its resource id is not matched: resource ids are not matched at the wheel point (the judge does match them for a tap, on the element it presses).
+- Calling the private `Device._wheel_scroll` directly sends the wheel event without a usage read; only the crawl's driver reads the usage first, and the method is not part of the API.
+- Two display cases of `uiprobe tree` after scrolling, when parent ids are reused by the dump: a child's destination can be shown under two rows, and with text recording off (`record_text = false`) a skip reason can be attached to two rows. They change what the tree shows, not what the crawl sent.
 - An element that appears between the gate's dump and its final window read (a new window or view at the point) can receive the wheel, and a value can change; this is rare, and a short form of it is in the plan line.
 - A replacement `Device` subclass can claim wheel support: the driver trusts the `Device` object it is given, including one whose `_wheel_supported` is overridden (subclasses are trusted, as for the other checks the crawl asks of the device).
 

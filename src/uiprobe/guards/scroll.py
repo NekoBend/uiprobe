@@ -22,6 +22,7 @@ from typing import TYPE_CHECKING
 
 from uiprobe.guards.constants import (
     _CHECKABLE,
+    PERMISSION_PACKAGES,
     SCROLL_CONTAINER_CLASSES,
     SCROLL_POINT_CLASSES,
 )
@@ -34,7 +35,6 @@ if TYPE_CHECKING:
 _SCROLLABLE = "scrollable"
 _LONG_CLICKABLE = "long_clickable"
 _PASSWORD = "password"  # noqa: S105 (a flag name)
-_EDITABLE = "editable"
 # The grid of candidate points, in quarters of the container's visible width and
 # height: the center first, then the others.
 _GRID = ((2, 2), (1, 2), (3, 2), (2, 1), (2, 3), (1, 1), (3, 1), (1, 3), (3, 3))
@@ -96,7 +96,7 @@ def _allowed(element: Element, container: Element, refused_ids: frozenset[str]) 
         or _LONG_CLICKABLE in element.flags
         or _CHECKABLE in element.flags
         or _PASSWORD in element.flags
-        or _EDITABLE in element.flags
+        or element.editable
         or _is_text_field(element)
     )
 
@@ -115,7 +115,8 @@ def scroll_target(screen: Screen, judgement: Judgement) -> tuple[str, Point] | N
     """Return ``(container id, point)`` for a wheel turned on ``screen``, or
     None when it must not be turned.
 
-    None when the screen is a dialog or is judged irreversible, when there is no
+    None when the screen is a dialog, is judged irreversible or belongs to a
+    permission package (`PERMISSION_PACKAGES`), when there is no
     container (`scroll_container`), or when no candidate point qualifies. The
     candidates are the container's visible center and then the other points of a
     3 by 3 grid (quarters of its visible part), in that order. A point qualifies
@@ -131,6 +132,8 @@ def scroll_target(screen: Screen, judgement: Judgement) -> tuple[str, Point] | N
     """
     if judgement.dialog or judgement.irreversible:
         return None
+    if screen.package in PERMISSION_PACKAGES:
+        return None  # a tap there gets `permission_screen`; the wheel gets nothing
     container = scroll_container(screen)
     if container is None:
         return None

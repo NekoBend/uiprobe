@@ -27,6 +27,7 @@ from tests.crawl.helpers import started as started_with
 from uiprobe import crawl
 from uiprobe.crawl import (
     Back,
+    CrawlEngine,
     Launch,
     Limits,
     Observation,
@@ -1945,7 +1946,7 @@ def test_a_listed_apps_element_at_the_point_is_its_own_only_when_on_target() -> 
 # -- an editable element at the point refuses it -----------------------------------
 
 
-def test_an_editable_flag_is_parsed_from_the_dump() -> None:
+def test_the_editable_attribute_is_parsed_apart_from_the_flags() -> None:
     from uiprobe.model import parse_uiautomator_xml
 
     xml = (
@@ -1957,21 +1958,39 @@ def test_an_editable_flag_is_parsed_from_the_dump() -> None:
         ' selected="false" editable="true" bounds="[0,0][10,10]"/></hierarchy>'
     )
     [element] = parse_uiautomator_xml(xml)
-    assert "editable" in element.flags
-    assert (
-        "editable"
-        not in parse_uiautomator_xml(
-            xml.replace('editable="true"', 'editable="false"')
-        )[0].flags
+    assert element.editable is True
+    assert "editable" not in element.flags  # flags and fingerprints are as before
+    assert element.to_dict()["flags"] == ["focusable"]
+    plain = parse_uiautomator_xml(xml.replace('editable="true"', 'editable="false"'))
+    assert plain[0].editable is False
+    assert plain[0] == element  # not part of equality
+
+
+def test_only_editable_changing_does_not_stop_a_tap() -> None:
+    # Behaviour with scrolling off is that of main: the tap is sent.
+    eng = started(policy=Policy())
+    screen = list_screen(["a"], row_flags=("clickable",))
+    tap = eng.next(seen(screen))
+    assert isinstance(tap, Tap)
+    row = next(e for e in screen.elements if e.text == "a")
+    changed = replace(
+        screen,
+        elements=tuple(
+            clone(e, editable=True) if e.id == row.id else e for e in screen.elements
+        ),
     )
+    assert changed == screen  # equal but for editable
+    assert eng.recheck(tap, seen(changed))
+    assert fingerprint_of(changed, row) == fingerprint_of(screen, row)
+    assert changed.screen_id == screen.screen_id
 
 
 @pytest.mark.parametrize("cls", PLAIN)
 def test_an_editable_plain_element_at_the_point_refuses_the_point(cls) -> None:
-    editable = extra("e9", cls, (150, 320, 170, 340), flags=("editable",), parent="e2")
+    editable = clone(extra("e9", cls, (150, 320, 170, 340), parent="e2"), editable=True)
     screen = list_screen([], extras=(editable,))
     assert point_of(screen) == NEXT
-    whole = extra("e9", cls, WINDOW, flags=("editable",), parent="e2")
+    whole = clone(extra("e9", cls, WINDOW, parent="e2"), editable=True)
     assert target_of(list_screen([], extras=(whole,))) is None
     # a real text field class stays refused, editable or not
     field = extra("e9", "android.widget.EditText", WINDOW, parent="e2")
@@ -2199,6 +2218,22 @@ def test_the_same_screen_passes_the_whole_screen_check() -> None:
     assert eng.recheck(scroll, seen(list_screen([], extras=(header(),))))
 
 
+def test_a_changed_display_size_refuses_the_scroll() -> None:
+    # same elements, ids and bounds (the root still covers the display, so the
+    # screen is no dialog); only the display size differs
+    eng, scroll = planned_with_header()
+    fresh = list_screen([], extras=(header(),))
+    resized = replace(fresh, display=(fresh.display[0], fresh.display[1] - 1))
+    assert resized.screen_id == fresh.screen_id
+    assert not eng.recheck(scroll, seen(resized))
+
+
+def test_an_element_turned_editable_refuses_the_scroll() -> None:
+    eng, scroll = planned_with_header()
+    fresh = list_screen([], extras=(clone(header(), editable=True),))
+    assert not eng.recheck(scroll, seen(fresh))
+
+
 def test_a_reparented_element_refuses_the_scroll() -> None:
     # same id, text, bounds and class: only the element it hangs under differs
     # (the screen id does not hold parents, so nothing else says so)
@@ -2399,3 +2434,36 @@ def test_rows_that_cannot_be_pressed_and_are_all_seen_are_the_end() -> None:
     sent_scroll(eng, seen(list_screen(["a", "b", "c"], row_flags=())))
     after = seen(list_screen(["b", "c", "a"], row_flags=()))
     assert eng.next(after) == Stop("exhausted")
+
+
+# -- a permission screen is never scrolled ----------------------------------------
+
+
+@pytest.mark.parametrize(
+    "package",
+    [
+        "com.android.packageinstaller",
+        "com.google.android.packageinstaller",
+        "com.android.permissioncontroller",
+        "com.google.android.permissioncontroller",
+    ],
+)
+def test_a_screen_of_a_permission_package_is_never_scrolled(package) -> None:
+    screen = list_screen(["Allow"], row_flags=(), package=package)
+    policy = policy_on()
+    assert (
+        scroll_target(screen, judge(screen, package, policy, foreground=package))
+        is None
+    )
+    # the same screen of an ordinary package has a point
+    ordinary = list_screen(["Allow"], row_flags=())
+    assert scroll_target(ordinary, judged(ordinary)) is not None
+
+
+def test_the_engine_sends_no_wheel_on_a_permission_target_screen() -> None:
+    package = "com.google.android.permissioncontroller"
+    eng = CrawlEngine(package, policy_on(), Limits(), started_at=0.0)
+    assert eng.start() == Launch()
+    screen = list_screen(["Allow"], row_flags=(), package=package)
+    action = eng.next(seen(screen, fg=package))
+    assert not isinstance(action, Scroll)

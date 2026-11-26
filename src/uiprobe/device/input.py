@@ -48,6 +48,23 @@ _NEGATIVE = re.compile(
     re.IGNORECASE,
 )
 _PLACEHOLDER = re.compile(r"<[^<>\s]+>")
+_SOURCE_WORDS = frozenset(
+    {
+        "dpad",
+        "keyboard",
+        "mouse",
+        "touchpad",
+        "touchscreen",
+        "touchnavigation",
+        "joystick",
+        "gamepad",
+        "trackball",
+        "stylus",
+        "rotary_encoder",
+        "rotary",
+        "sensor",
+    }
+)
 
 
 def _line_sources(found: re.Match[str]) -> set[str]:
@@ -108,29 +125,42 @@ def _lists_wheel(usage: str) -> bool:
     )
     if not mouse:
         return False
-    scroll_lines = []
-    for line in listed:
+    axes: set[str] = set()
+    for index, line in enumerate(listed):
         found = _SCROLL_LINE.fullmatch(line)
         if (
-            found is not None
-            and "mouse" in _line_sources(found)
-            and not _NEGATIVE.search(line)
+            found is None
+            or "mouse" not in _line_sources(found)
+            or _NEGATIVE.search(line)
         ):
-            scroll_lines.append(found)
-    if not scroll_lines:
-        return False
-    axes: set[str] = set()
-    for found in scroll_lines:
+            continue
         axes |= _bracket_axes(found["rest"])
-    for line in listed:
-        options = _AXIS_OPTIONS_LINE.fullmatch(line)
-        if (
-            options is not None
-            and not _NEGATIVE.search(line)
-            and _AXIS_NAMES.fullmatch(options["names"].strip())
-        ):
-            axes |= {w for w in re.split(r"[,\s]+", options["names"]) if w}
+        axes |= _options_after(listed, index)
     return "VSCROLL" in axes
+
+
+def _options_after(listed: list[str], index: int) -> set[str]:
+    """The axis names of the ``Axis options:`` line that belongs to the scroll
+    line at `index`: the next such line after it, before another command or
+    source line. A line that says it is unsupported, or holds anything but
+    names, gives none."""
+    for line in listed[index + 1 :]:
+        options = _AXIS_OPTIONS_LINE.fullmatch(line)
+        if options is not None:
+            if _NEGATIVE.search(line) or not _AXIS_NAMES.fullmatch(
+                options["names"].strip()
+            ):
+                return set()
+            return {w for w in re.split(r"[,\s]+", options["names"]) if w}
+        if (
+            _SCROLL_LINE.fullmatch(line)
+            or line.startswith("The ")
+            or "(Default:" in line
+            or "<" in line
+            or line in _SOURCE_WORDS
+        ):
+            return set()  # another command or a source line comes first
+    return set()
 
 
 class _InputMixin(_DeviceState):
