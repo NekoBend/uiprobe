@@ -54,6 +54,7 @@ def _press_only(args: argparse.Namespace) -> list[tuple[str, bool]]:
         ("--no-tap-window-check", args.no_tap_window_check),
         ("--no-restart", args.no_restart),
         ("--no-record-text", args.no_record_text),
+        ("--quiet", args.quiet),
     ]
 
 
@@ -640,6 +641,15 @@ def _add_press_options(crawl: argparse.ArgumentParser) -> None:
             " (text, content description and hint are written as empty strings;"
             " password fields are always hidden); cannot be combined with"
             " --screenshots"
+        ),
+    )
+    crawl.add_argument(
+        "--quiet",
+        action="store_true",
+        help=(
+            "when pressing: print no progress lines on stderr (by default one"
+            " line goes out after an action, at most every 5 seconds); the"
+            " result is printed as usual"
         ),
     )
 

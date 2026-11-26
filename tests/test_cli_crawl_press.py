@@ -52,7 +52,7 @@ def press(
 @pytest.mark.usefixtures("here")
 def test_press_runs_a_short_crawl_on_an_emulator(fake_adb, android, capsys, tmp_path):
     out = tmp_path / "run"
-    code, text, err = press(capsys, fake_adb, "--press", "--out", str(out))
+    code, text, err = press(capsys, fake_adb, "--press", "--out", str(out), "--quiet")
     assert (code, err) == (0, "")
     lines = text.splitlines()
     assert lines[0] == f"pressing on {SERIAL} (emulator): {SHOP}"
@@ -146,7 +146,7 @@ def test_a_real_device_runs_with_the_option(fake_adb, android, capsys, tmp_path)
     android.props["ro.kernel.qemu"] = "0"
     out = tmp_path / "run"
     code, text, err = press(
-        capsys, fake_adb, "--press", "--out", str(out), "--allow-real-device"
+        capsys, fake_adb, "--press", "--out", str(out), "--allow-real-device", "--quiet"
     )
     assert (code, err) == (0, "")
     assert text.splitlines()[0] == f"pressing on {SERIAL} (real device): {SHOP}"
@@ -228,7 +228,7 @@ def test_ctrl_c_writes_the_run_and_exits_130(fake_adb, capsys, tmp_path, monkeyp
 
     monkeypatch.setattr(Device, "tap", tap_then_interrupt)
     out = tmp_path / "run"
-    code, _text, err = press(capsys, fake_adb, "--press", "--out", str(out))
+    code, _text, err = press(capsys, fake_adb, "--press", "--out", str(out), "--quiet")
     assert code == 130
     assert (
         err == f"uiprobe: error: interrupted; the run so far is in {_shown(str(out))}\n"
@@ -243,7 +243,7 @@ def test_an_unreadable_tap_window_explains_the_option(
 ):
     monkeypatch.setattr(Device, "window_at", lambda _self, _point, **_kw: "line_format")
     out = tmp_path / "run"
-    code, text, err = press(capsys, fake_adb, "--press", "--out", str(out))
+    code, text, err = press(capsys, fake_adb, "--press", "--out", str(out), "--quiet")
     assert (code, err) == (0, "")
     assert [i for i in android.inputs if i.kind == "tap"] == []
     notes = [line for line in text.splitlines() if line.startswith("note: ")]
@@ -626,7 +626,9 @@ def test_a_relaunch_limit_on_another_app_points_to_back(
     fake_adb, android, capsys, tmp_path, monkeypatch
 ):
     _launch_into_other_app(monkeypatch, android)
-    code, text, err = press(capsys, fake_adb, "--press", "--out", str(tmp_path / "r"))
+    code, text, err = press(
+        capsys, fake_adb, "--press", "--out", str(tmp_path / "r"), "--quiet"
+    )
     assert (code, err) == (0, "")  # the stop reason and exit code are unchanged
     assert "stopped: relaunch_limit" in text
     [note] = [line for line in text.splitlines() if "--back-on-other-screens" in line]
@@ -889,7 +891,7 @@ def test_the_option_keeps_texts_out_of_the_records_and_says_so_in_the_plan(
 ):
     out = tmp_path / "run"
     code, text, err = press(
-        capsys, fake_adb, "--press", "--out", str(out), "--no-record-text"
+        capsys, fake_adb, "--press", "--out", str(out), "--no-record-text", "--quiet"
     )
     assert (code, err) == (0, "")
     plan = text.splitlines()
@@ -915,7 +917,7 @@ def test_the_plan_is_silent_about_texts_when_they_are_recorded(
     fake_adb, capsys, tmp_path
 ):
     out = tmp_path / "run"
-    code, text, err = press(capsys, fake_adb, "--press", "--out", str(out))
+    code, text, err = press(capsys, fake_adb, "--press", "--out", str(out), "--quiet")
     assert (code, err) == (0, "")
     assert "recorded" not in text.split("stopped: ")[0]
     assert json.loads((out / "run-start.json").read_bytes())["record_text"] is True
@@ -927,7 +929,7 @@ def test_the_file_key_turns_texts_off(fake_adb, capsys, tmp_path, here):
         render_default_settings().replace(*OFF_IN_FILE), encoding="utf-8"
     )
     out = tmp_path / "run"
-    code, text, err = press(capsys, fake_adb, "--press", "--out", str(out))
+    code, text, err = press(capsys, fake_adb, "--press", "--out", str(out), "--quiet")
     assert (code, err) == (0, "")
     assert "texts of the screens will not be recorded" in text
     assert json.loads((out / "run-start.json").read_bytes())["record_text"] is False

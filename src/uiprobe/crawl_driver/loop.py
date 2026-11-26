@@ -18,7 +18,7 @@ from uiprobe.crawl_driver.constants import (
     PAUSE_STEP,
     STOP_NOT_SENT,
 )
-from uiprobe.crawl_driver.helpers import _Ended, _kind, _seconds
+from uiprobe.crawl_driver.helpers import Progress, _Ended, _kind, _seconds
 from uiprobe.crawl_driver.state import _RunState
 from uiprobe.device import _monotonic
 from uiprobe.errors import LaunchFailedError, UiprobeError
@@ -55,6 +55,8 @@ class _LoopMixin(_RunState):
             return reason
         engine = self.engine
         observation = self.next_observation()
+        if observation is not None:
+            self.report_progress(observation)  # the first launch is closed
         while observation is not None:
             if self.stopped():
                 return INTERRUPTED
@@ -82,7 +84,44 @@ class _LoopMixin(_RunState):
             # A tap the gate did not send: the screen it re-read goes to the
             # engine, which releases the unreported tap.
             observation = fresh if fresh is not None else self.next_observation()
+            if observation is not None and refused is None:
+                self.report_progress(observation)
         return INTERRUPTED
+
+    def report_progress(self, observation: Observation) -> None:
+        """Tell `on_progress` where the run is, after a sent action's end line.
+
+        Called from the loop only, with the observation just read, and only
+        when the run goes on: the action's end line is written (no transition
+        is open), `stop` has not said yes, no wait was ended and uiprobe's own
+        clock has not passed the end. The next send is a whole gate away, so
+        the caller's code never runs between a gate's last comparison and its
+        input. It reads no clock and no `stop` (the elapsed time is the
+        observation's own clock sample), so a callback cannot change what the
+        run sends. An error of the callback ends the run like any other error
+        of the loop; it is not caught here.
+        """
+        callback, limits = self.on_progress, self.limits
+        if callback is None or limits is None:
+            return
+        if (
+            self._open is not None
+            or self._stop_seen
+            or self.wait_stop is not None
+            or self.past()
+        ):
+            return
+        callback(
+            Progress(
+                elapsed=max(0.0, observation.now - self.started_at),
+                actions=self.engine.actions_sent,
+                action_limit=limits.actions,
+                screens=len(self.screens_seen),
+                depth=max(1, self.engine.depth),
+                depth_limit=limits.depth,
+                minutes=limits.minutes,
+            )
+        )
 
     def note_landing(self, observation: Observation) -> None:
         """Count the app in front when the engine acted on another app's screen.
