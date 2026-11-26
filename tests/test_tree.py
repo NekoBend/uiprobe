@@ -27,6 +27,7 @@ LEGEND_TOGGLE = "[toggle] = it holds a switch or checkbox, so it was not pressed
 LEGEND_BACK = "[back] = the screen's navigate-up button, which is not pressed"
 LEGEND_SLIDER = "[slider] = it is or overlaps a slider, so it was not pressed"
 LEGEND_DISABLED = "[disabled] = it was disabled, so it was not pressed"
+LEGEND_NO_CHANGE = "[no change] = pressing it left the same screen"
 LEGEND_DESC = (
     '"..." = the element has no visible text; this is its accessibility description'
 )
@@ -201,8 +202,7 @@ def run_tree(capsys, *argv: str) -> tuple[int, str, str]:
 
 
 SUMMARY = (
-    "left out of the tree (see --json): rows that stayed on the same screen: 1, "
-    "rows not sent: 1, "
+    "left out of the tree (see --json): rows not sent: 1, "
     "rows whose next screen could not be read: 1, texts outside rows: 2, "
     "unnamed elements: 1"
 )
@@ -215,12 +215,13 @@ FULL_TEXT = [
     "├─ About → see: Info",
     '├─ "Menu" ·',
     "├─ Wi-Fi [toggle]",
-    "├─ Same",
+    "├─ Same [no change]",
     "├─ Other app → com.other.app",
     "├─ Broken",
     "└─ Blocked ·",
     LEGEND,
     LEGEND_TOGGLE,
+    LEGEND_NO_CHANGE,
     LEGEND_DESC,
     LEGEND_ARROW,
     LEGEND_SEE,
@@ -365,8 +366,8 @@ def test_the_legend_has_a_line_for_each_mark_that_appears(tmp_path, capsys):
     _, out, _ = run_tree(capsys, str(folder.path))
     assert out.splitlines() == [
         "com.example.app (com.example.app)",
-        "└─ Same",
-        "left out of the tree (see --json): rows that stayed on the same screen: 1",
+        "└─ Same [no change]",
+        LEGEND_NO_CHANGE,
     ]
 
 
@@ -475,7 +476,7 @@ def test_a_visible_text_wins_over_the_description_of_the_pressed_row(tmp_path, c
     folder.tap(home, 2, sid)
     folder.finish()
     _, out, _ = run_tree(capsys, str(folder.path))
-    assert "└─ Open" in out.splitlines()
+    assert "└─ Open [no change]" in out.splitlines()
     assert "Cart" not in out
     _, out, _ = run_tree(capsys, str(folder.path), "--json")
     element = json.loads(out)["screens"][sid]["elements"][0]
@@ -724,7 +725,7 @@ def test_a_container_that_is_not_clickable_in_the_screen_file_is_no_fold_target(
     folder.tap(home, 2, sid)  # logged on the container, which is not clickable
     folder.finish()
     _, out, _ = run_tree(capsys, str(folder.path))
-    assert out.splitlines()[1:3] == ["├─ Child", "└─ Child ·"]
+    assert out.splitlines()[1:3] == ["├─ Child [no change]", "└─ Child ·"]
     _, out, _ = run_tree(capsys, str(folder.path), "--json")
     assert "folded_into" not in out
 
@@ -825,7 +826,7 @@ def test_why_adds_the_reasons_of_unpressed_rows(tmp_path, capsys):
     assert '├─ "Menu" · [deny_word, screen_edge]' in lines
     assert "├─ Wi-Fi · [toggle]" in lines
     assert not any("[icon:" in line for line in lines)
-    assert "├─ Same" in lines
+    assert "├─ Same [no change]" in lines
 
 
 def test_a_fingerprint_that_matches_nothing_is_reported(tmp_path, capsys):
@@ -1506,7 +1507,7 @@ def test_a_pressed_row_is_named_by_its_own_recorded_element(tmp_path, capsys):
     folder.end(sid)
     folder.finish()
     _, out, _ = run_tree(capsys, str(folder.path))
-    assert "├─ New title" in out.splitlines()
+    assert "├─ New title [no change]" in out.splitlines()
     assert "Old title" not in out
     assert "└─ Other ·" in out.splitlines()  # unpressed: from the snapshot
     _, out, _ = run_tree(capsys, str(folder.path), "--json")
@@ -1874,7 +1875,7 @@ def test_a_long_text_is_cut_in_the_text_tree_only(tmp_path, capsys):
     _, out, _ = run_tree(capsys, str(folder.path))
     lines = out.splitlines()
     assert not any("L" * 10 in line for line in lines)
-    assert f"├─ {'M' * 200}…(+1 chars)" in lines
+    assert f"├─ {'M' * 200}…(+1 chars) [no change]" in lines
     assert f"└─ {'E' * 200} ·" in lines
     _, out, _ = run_tree(capsys, str(folder.path), "--json")
     names = [e["name"] for e in json.loads(out)["screens"][sid]["elements"]]
@@ -2286,7 +2287,7 @@ def test_a_final_start_line_with_no_end_is_only_that_tap_unknown(tmp_path, capsy
     lines = out.splitlines()
     assert (code, err) == (0, "")
     assert "├─ Network" in lines
-    assert "├─ About" in lines
+    assert "├─ About [no change]" in lines
     assert "├─ Same ·" in lines
 
 
@@ -2341,7 +2342,7 @@ def test_a_last_end_line_cut_short_leaves_only_that_tap_unknown(tmp_path, capsys
     lines = out.splitlines()
     assert code == 0
     assert err == f"uiprobe: warning: {CUT_WARNING}\n"
-    assert "├─ Network" in lines
+    assert "├─ Network [no change]" in lines
     assert "└─ 日本語の名前 ·" in lines
 
 
@@ -2356,7 +2357,7 @@ def test_a_last_start_line_cut_short_is_ignored(tmp_path, capsys):
     lines = out.splitlines()
     assert code == 0
     assert err == f"uiprobe: warning: {CUT_WARNING}\n"
-    assert "├─ Network" in lines
+    assert "├─ Network [no change]" in lines
     assert "└─ 日本語の名前 ·" in lines
     assert last_start
 
@@ -2374,7 +2375,7 @@ def test_a_line_cut_in_the_middle_of_a_character_is_cut_short(tmp_path, capsys):
     code, out, err = run_tree(capsys, str(folder.path))
     assert code == 0
     assert err == f"uiprobe: warning: {CUT_WARNING}\n"
-    assert "├─ Network" in out.splitlines()
+    assert "├─ Network [no change]" in out.splitlines()
 
 
 def test_a_complete_last_line_without_its_newline_passes(tmp_path, capsys):
@@ -2383,7 +2384,7 @@ def test_a_complete_last_line_without_its_newline_passes(tmp_path, capsys):
     _log(folder).write_bytes(data.rstrip(b"\n"))
     code, out, err = run_tree(capsys, str(folder.path))
     assert (code, err) == (0, "")
-    assert "└─ 日本語の名前" in out.splitlines()
+    assert "└─ 日本語の名前 [no change]" in out.splitlines()
 
 
 def test_a_cut_line_that_is_not_last_fails_the_gate(tmp_path, capsys):
@@ -2410,7 +2411,7 @@ def test_off_target_does_not_make_a_screen_with_a_target_file_another_app(
     folder.writer.close()
     _, out, err = run_tree(capsys, str(folder.path))
     assert err == ""
-    assert "├─ Network" in out.splitlines()
+    assert "├─ Network [no change]" in out.splitlines()
     assert "→ com.other" not in out
 
 
@@ -2764,3 +2765,149 @@ def test_a_folded_line_shows_the_kinds_of_all_its_elements(tmp_path, capsys):
     folder.finish()
     _, out, _ = run_tree(capsys, str(folder.path))
     assert out.splitlines()[1] == "└─ Wi-Fi [toggle, disabled]"
+
+
+def _same_row_screen():
+    return make_screen(
+        ".Home",
+        [
+            el(1, cls="FrameLayout"),
+            el(2, 1, cls="LinearLayout", flags=CLICK),
+            el(3, 2, text="Same"),
+            el(4, 1, cls="LinearLayout", flags=CLICK),
+            el(5, 4, text="Other"),
+        ],
+    )
+
+
+def _same_row_run(tmp_path, *results):
+    """A run that presses the row "Same" once for each result: "same", "about"
+    (a new screen) or "not_sent"."""
+    folder = Folder(tmp_path)
+    home = _same_row_screen()
+    home_id = folder.screen(home)
+    about_id = folder.screen(ABOUT) if "about" in results else None
+    folder.start("launch")
+    folder.end(home_id)
+    for result in results:
+        if result == "not_sent":
+            folder.tap(home, 2, not_sent="covered_by_other")
+        else:
+            folder.tap(home, 2, home_id if result == "same" else about_id)
+    folder.finish()
+    return folder
+
+
+def test_one_same_screen_tap_gives_the_no_change_label(tmp_path, capsys):
+    folder = _same_row_run(tmp_path, "same")
+    _, out, _ = run_tree(capsys, str(folder.path))
+    assert out.splitlines() == [
+        "com.example.app (com.example.app)",
+        "├─ Same [no change]",
+        "└─ Other ·",
+        LEGEND,
+        LEGEND_NO_CHANGE,
+    ]
+
+
+def test_two_same_screen_taps_give_the_label(tmp_path, capsys):
+    folder = _same_row_run(tmp_path, "same", "same")
+    _, out, _ = run_tree(capsys, str(folder.path))
+    lines = out.splitlines()
+    assert lines[1] == "├─ Same [no change]"
+    assert "rows that stayed" not in out
+    _, out, _ = run_tree(capsys, str(folder.path), "--json")
+    row = json.loads(out)["screens"][_same_row_screen().screen_id]["elements"][0]
+    assert row["to"] == {"same_screen": True}
+
+
+def test_mixed_results_keep_today_s_display_with_no_label(tmp_path, capsys):
+    for results in (("same", "about"), ("about", "same")):
+        (tmp_path / "-".join(results)).mkdir()
+        folder = _same_row_run(tmp_path / "-".join(results), *results)
+        _, out, _ = run_tree(capsys, str(folder.path))
+        lines = out.splitlines()
+        assert "[no change]" not in out
+        assert LEGEND_NO_CHANGE not in lines
+        assert "├─ Same" in lines
+        assert lines[-1].startswith("left out of the tree (see --json): ")
+        assert "rows that stayed on the same screen: 1" in lines[-1]
+
+
+def test_the_summary_counts_only_the_mixed_rows(tmp_path, capsys):
+    folder = Folder(tmp_path)
+    home = _same_row_screen()
+    home_id = folder.screen(home)
+    about_id = folder.screen(ABOUT)
+    folder.start("launch")
+    folder.end(home_id)
+    folder.tap(home, 2, home_id)  # only the same screen: the label
+    folder.tap(home, 4, home_id)
+    folder.tap(home, 4, about_id)  # mixed: counted
+    folder.finish()
+    _, out, _ = run_tree(capsys, str(folder.path))
+    lines = out.splitlines()
+    assert "├─ Same [no change]" in lines
+    assert lines[-1] == (
+        "left out of the tree (see --json): rows that stayed on the same screen: 1, "
+        "texts outside rows: 1"
+    )
+    assert LEGEND_NO_CHANGE in lines
+
+
+def test_the_no_change_legend_line_follows_the_kind_lines(tmp_path, capsys):
+    folder = Folder(tmp_path)
+    home = home_screen()
+    home_id = folder.screen(home)
+    folder.start("launch")
+    folder.end(home_id)
+    folder.tap(home, 12, home_id)
+    folder.skip(home, 10, "toggle")
+    folder.finish()
+    _, out, _ = run_tree(capsys, str(folder.path))
+    lines = out.splitlines()
+    assert lines.index(LEGEND_TOGGLE) + 1 == lines.index(LEGEND_NO_CHANGE)
+    assert lines.index(LEGEND_NO_CHANGE) < lines.index(LEGEND_DESC)
+    (tmp_path / "none").mkdir()
+    folder = _same_row_run(tmp_path / "none", "about")
+    _, out, _ = run_tree(capsys, str(folder.path))
+    assert "[no change]" not in out
+
+
+def test_a_folded_line_with_only_same_screen_results_has_the_label(tmp_path, capsys):
+    for taps in ([(4, "home")], [(2, "home"), (4, "home")]):
+        (tmp_path / str(len(taps))).mkdir()
+        folder = _folded_run(tmp_path / str(len(taps)), *taps)
+        _, out, _ = run_tree(capsys, str(folder.path))
+        lines = out.splitlines()
+        assert lines[1] == "└─ Wi-Fi [no change]"
+        assert LEGEND_NO_CHANGE in lines
+        assert LEGEND not in lines
+        assert not any(line.startswith("left out") for line in lines)
+    (tmp_path / "mixed").mkdir()
+    folder = _folded_run(tmp_path / "mixed", (2, "network"), (4, "home"))
+    _, out, _ = run_tree(capsys, str(folder.path))
+    assert "[no change]" not in out
+    assert out.splitlines()[-1].endswith("rows that stayed on the same screen: 1")
+
+
+def test_why_shows_the_label_on_a_pressed_row(tmp_path, capsys):
+    folder = _same_row_run(tmp_path, "same")
+    _, out, _ = run_tree(capsys, str(folder.path), "--why")
+    lines = out.splitlines()
+    assert lines[1] == "├─ Same [no change]"
+    assert LEGEND_NO_CHANGE in lines
+
+
+def test_json_is_unchanged_by_the_label(tmp_path, capsys):
+    folder = _same_row_run(tmp_path, "same")
+    _, out, _ = run_tree(capsys, str(folder.path), "--json")
+    assert "no change" not in out
+    data = json.loads(out)
+    row = data["screens"][_same_row_screen().screen_id]["elements"][0]
+    assert (row["name"], row["pressed"], row["to"]) == (
+        "Same",
+        True,
+        {"same_screen": True},
+    )
+    assert "also_to" not in row
