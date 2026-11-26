@@ -33,6 +33,8 @@ LEGEND_EMPTY: Final = (
 LEGEND_AGAIN: Final = (
     "(pressed again) = the row above was pressed again and led to the screen below"
 )
+LEGEND_POPUP: Final = "[popup] = pressing it opened a popup; its contents are in --json"
+POPUP_MARK: Final = " [popup]"
 _NO_TEXT: Final = "screen texts were not recorded in this run (record_text = false)"
 _FIRST_SCREEN: Final = "first screen"
 MAX_LABEL: Final = 200
@@ -78,6 +80,7 @@ class _Tally:
     desc_only: int = 0
     unnamed: int = 0
     unmatched: int = 0
+    popup_rows: int = 0  # lines of popup screens that the tree does not draw
     marks: set[str] = field(default_factory=set)  # dot, desc, arrow, see, again
     names: dict[str, int] = field(default_factory=dict)  # row names as listed
 
@@ -250,6 +253,7 @@ def _summary(tally: _Tally) -> str | None:
         f"{label}: {tally.ends[kind]}" for kind, label in _SUMMARY if kind in tally.ends
     ]
     for count, label in (
+        (tally.popup_rows, "rows inside popups"),
         (tally.desc_only, "rows named only by a description"),
         (tally.texts, "texts outside rows"),
         (tally.unnamed, "unnamed elements"),
@@ -303,6 +307,25 @@ class _Renderer:
         self.expanded: dict[str, str] = {}  # screen id -> name of the opening row
         self.paths: dict[str, tuple[str, ...]] = {}  # ... and the rows above it
         self.tally = _Tally()
+        self.hidden: set[str] = set()  # popup screens named by a mark, not drawn
+
+    def popup(self, sid: str) -> bool:
+        """Whether a row that led to `sid` ends in ` [popup]`: the screen is a
+        popup, by the crawl's own rule. Its rows are not drawn (they are
+        counted once), unless the screen is drawn anyway as the first screen."""
+        if not self.tree.screens[sid].popup:
+            return False
+        self.tally.marks.add("popup")
+        if sid not in self.expanded and sid not in self.hidden:
+            self.hidden.add(sid)
+            scratch = _Tally()
+            lines = _entries(self.tree, sid, ids=False, why=False, tally=scratch)
+            self.tally.popup_rows += len(lines)
+            # What the popup's screen leaves out is still left out of the tree.
+            self.tally.texts += scratch.texts
+            self.tally.unnamed += scratch.unnamed
+            self.tally.unmatched += scratch.unmatched
+        return True
 
     def open_screen(self, sid: str, name: str, path: tuple[str, ...]) -> list[_Entry]:
         self.expanded[sid] = name
@@ -340,7 +363,10 @@ class _Renderer:
         below: list[_Entry] = []
         target = to.get("screen_id")
         if isinstance(target, str):
-            if target not in self.expanded:
+            if self.popup(target):
+                depth, text = items[-1]
+                items[-1] = (depth, text + POPUP_MARK)
+            elif target not in self.expanded:
                 below = self.screen_below(target, entry.name, (*path, entry.name))
             elif "screen_above" in NOTES_IN_TEXT:
                 depth, text = items[-1]
@@ -381,6 +407,9 @@ class _Renderer:
                 assert isinstance(target, str)  # noqa: S101
                 self.tally.marks.add("again")
                 items.append((depth, entry.text))
+                if self.popup(target):
+                    items[-1] = (depth, entry.text + POPUP_MARK)
+                    continue
                 if target in self.expanded:
                     if "screen_above" in NOTES_IN_TEXT:
                         items[-1] = (depth, entry.text + self.see(target))
@@ -414,8 +443,12 @@ def render_text(tree: RunTree, *, ids: bool = False, why: bool = False) -> list[
         if node.package == tree.package and sid not in tree.unreached
     ]
     for sid in (*tree.unreached, *rest):
-        if sid not in drawn.expanded:
-            drawn.lines.append(_orphan_heading(tree, sid))
+        if sid not in drawn.expanded and sid not in drawn.hidden:
+            heading = _orphan_heading(tree, sid)
+            if drawn.popup(sid):  # the rows of a popup are never drawn
+                drawn.lines.append(heading + POPUP_MARK)
+                continue
+            drawn.lines.append(heading)
             name = f"screen {_printable(sid)}"
             drawn.run(sid, name, (name,))
     for mark, text in (
@@ -423,6 +456,7 @@ def render_text(tree: RunTree, *, ids: bool = False, why: bool = False) -> list[
         ("desc", LEGEND_DESC),
         ("arrow", LEGEND_ARROW),
         ("see", LEGEND_SEE),
+        ("popup", LEGEND_POPUP),
         ("again", LEGEND_AGAIN),
         ("empty", LEGEND_EMPTY),
     ):

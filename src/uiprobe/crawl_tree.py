@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Final
 
 from uiprobe.crawl import _Prints
+from uiprobe.guards.tree import _is_dialog, _Tree
 from uiprobe.model import Bounds, Element, Screen
 from uiprobe.settings import SettingsError
 from uiprobe.settings import _read_bytes as _read_capped
@@ -112,6 +113,7 @@ class ScreenNode:
     unmatched: list[tuple[str, tuple[str, ...]]] = field(default_factory=list)
     screen_reasons: tuple[str, ...] = ()
     unmatched_why: str | None = None  # why they were not matched, when not tried
+    popup: bool = False  # the crawl's own dialog rule holds for the screen
 
 
 @dataclass(slots=True)
@@ -1174,6 +1176,7 @@ def _node(
         unmatched,
         tuple(skips.whole_screen.get(sid, ())),
         "too_many_elements" if unchecked else None,
+        _is_dialog(_Tree(screen)),
     )
 
 
@@ -1405,6 +1408,8 @@ def tree_to_dict(tree: RunTree) -> dict[str, object]:
         }
         if node.screen_reasons:
             entry["screen_reasons"] = list(node.screen_reasons)
+        if node.popup:
+            entry["popup"] = True
         screens[sid] = entry
     return {
         "schema": TREE_SCHEMA,
