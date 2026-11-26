@@ -378,3 +378,37 @@ def test_a_description_line_between_does_not_end_the_search(device, android):
         "(for pointer-based sources)\n      Scrolls at a point.\n",
     )
     assert device._wheel_supported() is True
+
+
+def test_a_command_or_source_line_ends_the_search_for_the_options(device, android):
+    # Astra's exact string: the rotary line has no <x> <y>, but it is another
+    # command of another source, so its options line is not the mouse line's.
+    android.input_usage = (
+        "mouse\n"
+        "mouse scroll <x> <y> [--axis HSCROLL,<v>]\n"
+        "rotary scroll [axis_value]\n"
+        "Axis options: VSCROLL"
+    )
+    assert device._wheel_supported() is False
+
+
+@pytest.mark.parametrize(
+    "between",
+    [
+        "rotary scroll [axis_value]",
+        "scroll [axis_value]",
+        "tap <x> <y>",
+        "keyevent <key>",
+        "swipe [duration]",
+        "touchscreen",
+        "rotary",
+    ],
+)
+def test_any_such_line_between_ends_the_search(device, android, between):
+    android.input_usage = (
+        "The sources are:\n  mouse\n  rotary\n"
+        "mouse scroll <x> <y> [axis_value]\n"
+        f"{between}\n"
+        "Axis options: SCROLL, VSCROLL\n"
+    )
+    assert device._wheel_supported() is False

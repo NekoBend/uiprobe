@@ -48,6 +48,21 @@ _NEGATIVE = re.compile(
     re.IGNORECASE,
 )
 _PLACEHOLDER = re.compile(r"<[^<>\s]+>")
+_COMMAND_WORDS = frozenset(
+    {
+        "text",
+        "keyevent",
+        "keycombination",
+        "tap",
+        "swipe",
+        "draganddrop",
+        "press",
+        "roll",
+        "motionevent",
+        "scroll",
+        "fling",
+    }
+)
 _SOURCE_WORDS = frozenset(
     {
         "dpad",
@@ -152,12 +167,14 @@ def _options_after(listed: list[str], index: int) -> set[str]:
             ):
                 return set()
             return {w for w in re.split(r"[,\s]+", options["names"]) if w}
+        first = line.split(None, 1)[0].lower() if line.split() else ""
         if (
             _SCROLL_LINE.fullmatch(line)
             or line.startswith("The ")
             or "(Default:" in line
             or "<" in line
-            or line in _SOURCE_WORDS
+            or first in _SOURCE_WORDS
+            or first in _COMMAND_WORDS
         ):
             return set()  # another command or a source line comes first
     return set()
