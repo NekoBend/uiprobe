@@ -462,20 +462,39 @@ def test_the_plan_says_whether_lists_are_scrolled():
         "scrolls_per_screen": 4,
         "scroll_amount": 2,
     }
-    line = "scroll lists with the mouse wheel on screens with nothing left to press: "
+    line = "scroll lists with the mouse wheel: "
+    tail = "; an app's own view can react to the wheel (see docs/safety.md)"
 
     def text(**more):
         return cli._press_plan_text({**plan, **more}, settings=SETTINGS_FILE)
 
     assert (
-        f"{line}yes, at most 4 per screen, wheel amount 2"
-        in text(scroll_lists=True, scroll_input=True).splitlines()
+        f"{line}yes (--scroll), at most 4 per screen, wheel amount 2{tail}"
+        in text(
+            scroll_lists=True, scroll_lists_source="option", scroll_input=True
+        ).splitlines()
     )
-    assert f"{line}no" in text(scroll_lists=False, scroll_input=None).splitlines()
+    assert (
+        f"{line}yes (settings file), at most 4 per screen, wheel amount 2{tail}"
+        in text(
+            scroll_lists=True, scroll_lists_source="file", scroll_input=True
+        ).splitlines()
+    )
+    for source in ("default", "file", "option"):
+        assert (
+            f"{line}no"
+            in text(
+                scroll_lists=False, scroll_lists_source=source, scroll_input=None
+            ).splitlines()
+        )
     assert (
         f"{line}no (this device's input does not list the wheel scroll)"
-        in text(scroll_lists=False, scroll_input=False).splitlines()
+        in text(
+            scroll_lists=False, scroll_lists_source="option", scroll_input=False
+        ).splitlines()
     )
+    # a plan without the key has no such line
+    assert not [x for x in text().splitlines() if x.startswith("scroll lists with")]
 
 
 def test_the_help_states_the_defaults(capsys):

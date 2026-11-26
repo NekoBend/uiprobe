@@ -555,22 +555,27 @@ def _also_target_plan(plan: dict[str, object]) -> list[str]:
 
 
 def _press_scroll_text(plan: dict[str, object]) -> list[str]:
-    """The plan line about scrolling lists (none for a plan without the key)."""
+    """The plan line about scrolling lists (none for a plan without the key).
+
+    It names where the choice came from and the limits, and says that an app's
+    own view can react to the wheel; scrolling is off unless asked for.
+    """
     if "scroll_lists" not in plan:
         return []
     if plan["scroll_lists"]:
+        origin = (
+            "settings file" if plan.get("scroll_lists_source") == "file" else "--scroll"
+        )
         answer = (
-            f"yes, at most {plan['scrolls_per_screen']} per screen,"
-            f" wheel amount {plan['scroll_amount']}"
+            f"yes ({origin}), at most {plan['scrolls_per_screen']} per screen,"
+            f" wheel amount {plan['scroll_amount']}; an app's own view can react"
+            " to the wheel (see docs/safety.md)"
         )
     elif plan.get("scroll_input") is False:
         answer = "no (this device's input does not list the wheel scroll)"
     else:
         answer = "no"
-    return [
-        "scroll lists with the mouse wheel on screens with nothing left to press:"
-        f" {answer}"
-    ]
+    return [f"scroll lists with the mouse wheel: {answer}"]
 
 
 def _press_because_text(plan: dict[str, object], settings: str) -> str:

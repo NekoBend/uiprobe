@@ -71,9 +71,7 @@ def test_press_runs_a_short_crawl_on_an_emulator(fake_adb, android, capsys, tmp_
         " activity is started; what it had not saved is lost (--no-restart"
         " starts from the screen it shows now)"
     )
-    assert lines[7] == (
-        "scroll lists with the mouse wheel on screens with nothing left to press: no"
-    )
+    assert lines[7] == "scroll lists with the mouse wheel: no"
     assert lines[8].startswith("stopped: ")
     assert any(line.startswith("actions: ") for line in lines)
     assert f"run folder: {out}" in lines[9:]
@@ -1085,7 +1083,7 @@ def test_the_plan_says_when_the_device_does_not_list_the_wheel_scroll(
     code, text, err = press(capsys, fake_adb, "--press", "--out", str(out), "--quiet")
     assert (code, err) == (0, "")
     assert (
-        "scroll lists with the mouse wheel on screens with nothing left to press:"
+        "scroll lists with the mouse wheel:"
         " no (this device's input does not list the wheel scroll)"
     ) in text.splitlines()
     begin = json.loads((out / "run-start.json").read_bytes())
@@ -1101,9 +1099,7 @@ def test_the_usage_is_not_read_when_the_setting_is_off(fake_adb, capsys, tmp_pat
     (tmp_path / SETTINGS_FILE).write_text(render_default_settings(), encoding="utf-8")
     code, text, _err = press(capsys, fake_adb, "--press", "--out", str(tmp_path / "r"))
     assert code == 0
-    assert (
-        "scroll lists with the mouse wheel on screens with nothing left to press: no"
-    ) in text.splitlines()
+    assert "scroll lists with the mouse wheel: no" in text.splitlines()
     assert not [c for _, _, c in fake_adb.commands if c == "input"]
     begin = json.loads((tmp_path / "r" / "run-start.json").read_bytes())
     assert "scroll_lists" not in begin

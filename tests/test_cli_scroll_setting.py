@@ -71,6 +71,16 @@ def wheels(android: FakeAndroid) -> list[tuple[str, ...]]:
     return [i.args for i in android.inputs if i.kind == "wheel"]
 
 
+LINE = "scroll lists with the mouse wheel: "
+TAIL = "; an app's own view can react to the wheel (see docs/safety.md)"
+LIMITS = "at most 10 per screen, wheel amount 3"
+
+
+def plan_line(text: str) -> str:
+    [line] = [x for x in text.splitlines() if x.startswith(LINE)]
+    return line.removeprefix(LINE)
+
+
 def run_start(here: Path) -> dict[str, object]:
     return json.loads((here / "run" / "run-start.json").read_bytes())
 
@@ -82,11 +92,12 @@ def test_the_default_run_reads_no_usage_and_sends_no_wheel(
     fake_adb, android, capsys, here
 ):
     write_file(here, scroll=False)
-    code, _text, _err = run(capsys, fake_adb, here)
+    code, text, _err = run(capsys, fake_adb, here)
     assert code == 0
     assert usage_reads(fake_adb) == []
     assert wheels(android) == []
     assert [i for i in android.inputs if i.kind == "tap"]
+    assert plan_line(text) == "no"
     begin = run_start(here)
     assert not {"scroll_lists", "scroll_input", "scrolls_per_screen"} & set(begin)
 
@@ -95,10 +106,11 @@ def test_the_file_key_alone_turns_the_wheel_after_one_usage_read(
     fake_adb, android, capsys, here
 ):
     write_file(here, scroll=True)
-    code, _text, _err = run(capsys, fake_adb, here)
+    code, text, _err = run(capsys, fake_adb, here)
     assert code == 0
     assert len(usage_reads(fake_adb)) == 1
     assert wheels(android)
+    assert plan_line(text) == f"yes (settings file), {LIMITS}{TAIL}"
     begin = run_start(here)
     assert begin["scroll_lists"] is True
     assert begin["scroll_input"] is True
@@ -106,28 +118,29 @@ def test_the_file_key_alone_turns_the_wheel_after_one_usage_read(
 
 def test_the_option_turns_it_on_over_a_false_file(fake_adb, android, capsys, here):
     write_file(here, scroll=False)
-    code, _text, _err = run(capsys, fake_adb, here, "--scroll")
+    code, text, _err = run(capsys, fake_adb, here, "--scroll")
     assert code == 0
     assert len(usage_reads(fake_adb)) == 1
     assert wheels(android)
+    assert plan_line(text) == f"yes (--scroll), {LIMITS}{TAIL}"
 
 
-def test_the_option_over_a_true_file_changes_nothing_but_the_source(
-    fake_adb, android, capsys, here
-):
+def test_the_option_over_a_true_file_names_the_option(fake_adb, android, capsys, here):
     write_file(here, scroll=True)
-    code, _text, _err = run(capsys, fake_adb, here, "--scroll")
+    code, text, _err = run(capsys, fake_adb, here, "--scroll")
     assert code == 0
     assert len(usage_reads(fake_adb)) == 1
     assert wheels(android)
+    assert plan_line(text) == f"yes (--scroll), {LIMITS}{TAIL}"
 
 
 def test_the_no_option_turns_it_off_over_a_true_file(fake_adb, android, capsys, here):
     write_file(here, scroll=True)
-    code, _text, _err = run(capsys, fake_adb, here, "--no-scroll")
+    code, text, _err = run(capsys, fake_adb, here, "--no-scroll")
     assert code == 0
     assert usage_reads(fake_adb) == []
     assert wheels(android) == []
+    assert plan_line(text) == "no"
     assert "scroll_lists" not in run_start(here)
 
 
@@ -135,9 +148,21 @@ def test_the_no_option_with_a_false_file_sends_nothing_either(
     fake_adb, android, capsys, here
 ):
     write_file(here, scroll=False)
-    code, _text, _err = run(capsys, fake_adb, here, "--no-scroll")
+    code, text, _err = run(capsys, fake_adb, here, "--no-scroll")
     assert code == 0
     assert usage_reads(fake_adb) == []
+    assert wheels(android) == []
+    assert plan_line(text) == "no"
+
+
+def test_the_plan_line_says_when_the_device_does_not_list_the_wheel(
+    fake_adb, android, capsys, here
+):
+    android.input_usage = FakeAndroid.USAGE_OLD
+    write_file(here, scroll=True)
+    code, text, _err = run(capsys, fake_adb, here)
+    assert code == 0
+    assert plan_line(text) == "no (this device's input does not list the wheel scroll)"
     assert wheels(android) == []
 
 
