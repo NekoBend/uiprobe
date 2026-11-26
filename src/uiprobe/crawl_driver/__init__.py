@@ -19,7 +19,9 @@ keys are never sent. By default the engine never
 returns BACK for a screen of another app (it relaunches instead);
 ``Policy.back_on_other_screens`` allows it. A BACK or
 relaunch decided on such a screen names its package (and the foreground) as
-``off_target`` in the start line. Every
+``off_target`` in the start line. A package of ``Policy.also_target`` is not
+another app in this sense: its screens are the target's own (the window at a tap
+must belong to that package's uid), and it is never started or stopped. Every
 action is sent once and never retried. A tap is reported to the engine with
 `CrawlEngine.tap_sent` only after it was sent without an error; a refused tap,
 or one whose send raised, is never reported, and the engine releases it on the

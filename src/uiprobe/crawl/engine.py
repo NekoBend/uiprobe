@@ -43,7 +43,14 @@ from uiprobe.crawl.actions import (
 from uiprobe.crawl.prints import _ids_unique, _Prints
 
 # Detail at runtime too, so that typing.get_type_hints(SkippedElement) works.
-from uiprobe.guards import _WORD_REASONS, MAX_ELEMENTS, Detail, judge
+from uiprobe.guards import (
+    _WORD_REASONS,
+    MAX_ELEMENTS,
+    PERMISSION_PACKAGES,
+    Detail,
+    check_also_target,
+    judge,
+)
 from uiprobe.model import Screen  # noqa: TC001
 
 if TYPE_CHECKING:
@@ -215,6 +222,14 @@ class _BadgeFree:
         return (self.screen_id, self._prints.of(element))
 
 
+def _checked(package: str, policy: Policy) -> Policy:
+    """The target itself cannot be listed (the other static rules of
+    ``Policy.also_target`` were checked when the policy was built)."""
+    if policy.also_target:
+        check_also_target(package, policy.also_target)
+    return policy
+
+
 class CrawlEngine:
     """Decides the next action of a pressing crawl from observations.
 
@@ -227,7 +242,8 @@ class CrawlEngine:
     Raises (on construction):
         TypeError: `package` is not a string, or `started_at` is not a number.
         ValueError: `package` is empty, or `started_at` is below 0, not
-            finite, or not below 2**40.
+            finite, or not below 2**40, or ``policy.also_target`` lists
+            `package` itself (`AlsoTargetError`).
     """
 
     def __init__(
@@ -246,7 +262,11 @@ class CrawlEngine:
             raise ValueError(msg)
         _check_clock("started_at", started_at)
         self._package = package
-        self._policy = policy
+        self._policy = _checked(package, policy)
+        # Packages that count as the target besides `package` (never launched).
+        # A permission package never does: its screens stay off target (a
+        # relaunch, as without the list), so nothing is sent to them either.
+        self._also = frozenset(policy.also_target) - PERMISSION_PACKAGES
         self._limits = limits
         self._started_at = started_at
         self._started = False
@@ -628,8 +648,10 @@ class CrawlEngine:
             self._add_skip(unsent.screen_id, unsent.fingerprint, (TAP_NOT_SENT,))
 
     def _is_target(self, screen: Screen, observation: Observation) -> bool:
-        return (
-            screen.package == self._package and observation.foreground == self._package
+        # The dump and the foreground both name the app: the target, or one of
+        # the packages of `Policy.also_target`.
+        return observation.foreground == screen.package and (
+            screen.package == self._package or screen.package in self._also
         )
 
     def _past_deadline(self, now: float) -> bool:

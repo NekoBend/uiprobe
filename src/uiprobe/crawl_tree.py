@@ -24,7 +24,9 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Final
 
+from uiprobe.also_target import AlsoTargetError, check_also_target
 from uiprobe.crawl import _Prints
+from uiprobe.guards import PERMISSION_PACKAGES
 from uiprobe.guards.tree import _is_dialog, _Tree
 from uiprobe.model import Bounds, Element, Screen
 from uiprobe.settings import SettingsError
@@ -136,6 +138,9 @@ class RunTree:
     screens: dict[str, ScreenNode]
     unreached: list[str]
     warnings: list[str]
+    # The packages besides `package` whose screens the run counted as the
+    # app's own (``also_target`` of run-start.json); empty for most runs.
+    also_target: tuple[str, ...] = ()
 
 
 @dataclass(slots=True)
@@ -588,12 +593,18 @@ def _text_row(element: Element, *, record_text: bool) -> Row | None:
     return _row_of(element, "text", text, (text,), hidden=False, name_from="text")
 
 
-def _read_start(base: Path) -> dict[str, object]:
+def _read_start(base: Path) -> tuple[dict[str, object], bool]:
     if not base.is_dir():
         msg = "the run folder does not exist or is not a folder"
         raise TreeError(msg)
     try:
-        start = _read_json(base / "run-start.json")
+        data = _read_bytes(base / "run-start.json", MAX_FILE_BYTES)
+        start = _loads(data)
+        try:
+            _loads_strict(data)
+            repeated = False
+        except ValueError:
+            repeated = True  # a key twice in an object: not as uiprobe writes it
     except FileNotFoundError:
         msg = "run-start.json is missing, so this is not a run folder"
         raise TreeError(msg) from None
@@ -610,7 +621,24 @@ def _read_start(base: Path) -> dict[str, object]:
     ):
         msg = "run-start.json is not a uiprobe.run_start/1 record with a package"
         raise TreeError(msg)
-    return start
+    return start, repeated
+
+
+def _also_target(start: dict[str, object], package: str) -> tuple[str, ...] | None:
+    """The ``also_target`` of run-start.json, checked with the rules of the
+    settings (`check_also_target`: package format and length, distinct, not
+    `package`, not the system UI, not a fixed home app), and not empty (the
+    writer leaves an empty list out). A missing key is the empty tuple;
+    anything else that is not such a list is None."""
+    if "also_target" not in start:
+        return ()
+    listed = start["also_target"]
+    if not isinstance(listed, list) or not listed:
+        return None
+    try:
+        return check_also_target(package, listed)
+    except AlsoTargetError:
+        return None
 
 
 def _read_end(base: Path, warnings: _Warnings) -> dict[str, object] | None:
@@ -1139,7 +1167,7 @@ def _node(
     moves: _Moves,
     skips: _Skips,
     reader: _Reader,
-    package: str,
+    own: frozenset[str],
     *,
     record_text: bool,
 ) -> ScreenNode:
@@ -1171,7 +1199,7 @@ def _node(
         unmatched = [(fp, tuple(r)) for fp, r in by_fp.items() if fp not in seen]
     for row in rows:
         if (sid, row.element_id) in moves.taps:
-            _attach(row, moves.taps[sid, row.element_id], sid, package, reader, moves)
+            _attach(row, moves.taps[sid, row.element_id], sid, own, reader, moves)
     return ScreenNode(
         sid,
         screen_package,
@@ -1194,17 +1222,30 @@ def read_tree(run_dir: str | Path) -> RunTree:
     """
     base = Path(run_dir)
     warnings = _Warnings()
-    start = _read_start(base)
+    start, repeated = _read_start(base)
     package = str(start["package"])
     record_text = start.get("record_text") is not False
     label = _str_or_none(start.get("app_label"))
+    listed = None if repeated else _also_target(start, package)
+    if repeated:
+        warnings.append("run-start.json repeats a key, so its also_target is not used")
+    elif listed is None:
+        warnings.append(
+            "run-start.json has an also_target that is not a list of other"
+            " packages; it is not used"
+        )
+    also = listed or ()
+    # A permission package never owns screen files, listed or not: the crawl
+    # never writes them, so one in the folder fails the check below.
+    own = frozenset((package, *(n for n in also if n not in PERMISSION_PACKAGES)))
     ended = _read_end(base, warnings)
     skips = _read_skips(base, warnings)
     reader = _Reader(base, warnings)
-    # uiprobe writes only screens of the target app: another package's file
-    # means the folder is not as uiprobe wrote it.
-    foreign = any(
-        found is not None and found[1] != package
+    # uiprobe writes only screens of the target app and of the packages the
+    # run listed in also_target: another package's file means the folder is
+    # not as uiprobe wrote it.
+    foreign = listed is None or any(
+        found is not None and found[1] not in own
         for found in (reader.load(sid) for sid in sorted(reader.names))
     )
     moves = _read_moves(base, warnings, distrust=foreign)
@@ -1213,7 +1254,7 @@ def read_tree(run_dir: str | Path) -> RunTree:
         loaded = reader.load(sid)
         if loaded is not None:
             screens[sid] = _node(
-                sid, loaded, moves, skips, reader, package, record_text=record_text
+                sid, loaded, moves, skips, reader, own, record_text=record_text
             )
     root = moves.root if moves.root in screens else moves.first_from
     if root not in screens:
@@ -1250,11 +1291,12 @@ def read_tree(run_dir: str | Path) -> RunTree:
             sid
             for sid, node in screens.items()
             if sid not in reached
-            and node.package == package
+            and node.package in own
             and sid != root
             and sid not in led_to
         ],
         warnings=warnings.result(),
+        also_target=also,
     )
 
 
@@ -1262,7 +1304,7 @@ def _attach(
     row: Row,
     taps: list[_Tap],
     sid: str,
-    package: str,
+    own: frozenset[str],
     reader: _Reader,
     moves: _Moves,
 ) -> None:
@@ -1270,20 +1312,19 @@ def _attach(
     and each further sent tap that led elsewhere is an `also_to`."""
     best = min(taps, key=_rank)  # the first of the best rank
     row.action_id = best.action_id
-    row.to = _ending(best, sid, package, reader, moves)
+    row.to = _ending(best, sid, own, reader, moves)
     row.pressed = "not_sent" not in row.to and "unknown" not in row.to
     if row.pressed:
         _rename(row, best.element)
     shown = [row.to]
     row.other_attempt = any(
-        _rank(tap) != 0
-        or "same_screen" not in _ending(tap, sid, package, reader, moves)
+        _rank(tap) != 0 or "same_screen" not in _ending(tap, sid, own, reader, moves)
         for tap in taps
     )
     for tap in taps:
         if tap is best or _rank(tap) != 0:
             continue
-        ending = _ending(tap, sid, package, reader, moves)
+        ending = _ending(tap, sid, own, reader, moves)
         if ending not in shown:
             shown.append(ending)
             row.also_to.append(ending)
@@ -1319,7 +1360,7 @@ def _not_sent(tap: _Tap) -> bool:
 
 
 def _ending(
-    tap: _Tap, from_id: str, package: str, reader: _Reader, moves: _Moves
+    tap: _Tap, from_id: str, own: frozenset[str], reader: _Reader, moves: _Moves
 ) -> Ending:
     end = tap.end
     if _unknown(tap):
@@ -1333,22 +1374,27 @@ def _ending(
         return {"not_read": True}
     if target == from_id:
         return {"same_screen": True}
-    return _led_to(target, package, reader, moves, tap.action_id)
+    return _led_to(target, own, reader, moves, tap.action_id)
 
 
 def _led_to(
-    target: str, package: str, reader: _Reader, moves: _Moves, action_id: int
+    target: str,
+    own: frozenset[str],
+    reader: _Reader,
+    moves: _Moves,
+    action_id: int,
 ) -> Ending:
     if reader.load(target) is not None:
-        return {"screen_id": target}  # a file of the run's package (see the gate)
-    # No file: another app's screen (uiprobe writes only the app's own screens),
-    # but only when the start line right after this action's end line was
-    # decided on this very screen and names a non-empty package that is not the
-    # run's own.
+        # a file of the run's package or of a listed one (see the gate)
+        return {"screen_id": target}
+    # No file: another app's screen (uiprobe writes only the app's own screens,
+    # and those of the packages the run listed), but only when the start line
+    # right after this action's end line was decided on this very screen and
+    # names a non-empty package that is not one of the run's own.
     named = moves.off_after.get(action_id)
     if named is None:
         return {"not_read": True}
-    return {"unknown": True} if named == package else {"other_app": named}
+    return {"unknown": True} if named in own else {"other_app": named}
 
 
 def _reachable(root: str | None, screens: dict[str, ScreenNode]) -> set[str]:
@@ -1403,6 +1449,8 @@ def tree_to_dict(tree: RunTree) -> dict[str, object]:
         "finished": tree.finished,
         "record_text": tree.record_text,
     }
+    if tree.also_target:
+        run["also_target"] = list(tree.also_target)
     screens: dict[str, object] = {}
     for sid, node in tree.screens.items():
         entry: dict[str, object] = {

@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import TYPE_CHECKING, Literal
 
+from uiprobe.also_target import AlsoTargetError, check_also_target
 from uiprobe.cli.output import _emit, _printable
 from uiprobe.cli.parser import _GuidedUsageError, _press_only, _UsageError
 from uiprobe.crawl_preview import check_package
@@ -426,6 +427,7 @@ def _crawl_policy(args: argparse.Namespace) -> _CrawlSetup:
         # this was checked before the file was read.
         _check_plan_stream(args)
     _settings_warnings(settings)
+    _check_also_target(args.package, settings)
     if press_source is None and not args.dry_run:
         _refuse_press_only(
             args,
@@ -450,6 +452,18 @@ def _crawl_policy(args: argparse.Namespace) -> _CrawlSetup:
         tap_unlabeled=True if args.tap_unlabeled else None,
     )
     return _CrawlSetup(policy, settings, press_source, out, out_source)
+
+
+def _check_also_target(package: str, settings: Settings) -> None:
+    """Refuse a listed package that no device is needed to refuse: a duplicate
+    (the file reader did), the target itself, the system UI, a fixed home app.
+    No device is contacted; the device's own home app is checked by the run
+    (`_check_also_home` for the preview)."""
+    try:
+        check_also_target(package, settings.also_target)
+    except AlsoTargetError as exc:
+        where = _printable(_shown(str(settings.source)))
+        raise _UsageError(f"{where}: [rules] {_printable(str(exc))}") from None
 
 
 def _detail_text(decision: Decision, detail: Detail) -> str:

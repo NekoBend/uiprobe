@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import re
 import unicodedata
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Final
 
 from uiprobe.guards.constants import (
     _EDGE_SIDES,
@@ -35,6 +36,85 @@ if TYPE_CHECKING:
     from uiprobe.model import Element
 
 # -- policy ----------------------------------------------------------------------
+
+
+# The package of the lock screen and the notification shade.
+SYSTEM_UI: Final = "com.android.systemui"
+# Home apps (launchers) that are refused without asking the device: AOSP's,
+# Google's Pixel launcher and Samsung's One UI Home.
+FIXED_HOME_APPS: Final = (
+    "com.android.launcher3",
+    "com.google.android.apps.nexuslauncher",
+    "com.sec.android.app.launcher",
+)
+
+
+_PACKAGE: Final = re.compile(
+    r"[A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z][A-Za-z0-9_]*)+", re.ASCII
+)
+_MAX_PACKAGE: Final = 255
+
+
+def _package_name(item: object) -> str:
+    """`item` when it follows the Android package rule (the rule of
+    `uiprobe.crawl_preview.check_package`, which this module cannot import)."""
+    if not isinstance(item, str):
+        msg = f"also_target: package must be a str, not {type(item).__name__}"
+        raise AlsoTargetError(msg)
+    if len(item) > _MAX_PACKAGE or not _PACKAGE.fullmatch(item):
+        shown = item if len(item) <= 80 else item[:80] + "..."
+        msg = (
+            f"also_target: not a valid package name: {shown!r} (two or more"
+            " segments separated by dots, each an ASCII letter followed by"
+            f" letters, digits or underscores; at most {_MAX_PACKAGE} characters)"
+        )
+        raise AlsoTargetError(msg)
+    return item
+
+
+class AlsoTargetError(ValueError):
+    """A package listed in ``also_target`` is refused (nothing was sent)."""
+
+
+def check_also_target(target: str | None, listed: Iterable[str]) -> tuple[str, ...]:
+    """Check the list before any device is contacted; return it as a tuple.
+
+    `target` None skips the check against the target app (`Policy` does not
+    know it; `CrawlEngine`, `preview` and `crawl` do).
+
+    Raises:
+        AlsoTargetError: An entry is not a valid package name, is listed twice,
+            is `target` itself, is the system UI or is in `FIXED_HOME_APPS`.
+    """
+    if isinstance(listed, str):
+        msg = "also_target must be a list of package names, not one string"
+        raise AlsoTargetError(msg)
+    found: list[str] = []
+    for item in listed:
+        package = _package_name(item)
+        if package in found:
+            msg = f"also_target lists {package} more than once"
+            raise AlsoTargetError(msg)
+        if package == target:
+            msg = (
+                f"also_target lists {package}, which is the target app itself;"
+                " remove it from the list"
+            )
+            raise AlsoTargetError(msg)
+        if package == SYSTEM_UI:
+            msg = (
+                f"also_target cannot list {package}: it is the system UI (lock"
+                " screen, notification shade); nothing was pressed"
+            )
+            raise AlsoTargetError(msg)
+        if package in FIXED_HOME_APPS:
+            msg = (
+                f"also_target cannot list {package}: it is a home app"
+                " (launcher); nothing was pressed"
+            )
+            raise AlsoTargetError(msg)
+        found.append(package)
+    return tuple(found)
 
 
 def edge_areas(
@@ -147,6 +227,14 @@ class Policy:
     whose resource id contains ``badge``) as one row. False gives the crawl
     that does neither.
 
+    ``also_target`` (default ``()``) lists packages besides the target app whose
+    screens `judge` and the crawl engine treat as the target's own: a screen
+    whose package and foreground app are both listed is judged exactly like
+    the target's screens, with every rule. Permission screens stay refused
+    (``permission_screen``) and an element of another package than the screen's
+    stays refused (``outside_target_app``). With the empty default nothing
+    differs from a policy without the field.
+
     ``edges`` holds the sizes in pixels ``(top, bottom, left, right)`` that
     `judge` turns into `edge_areas` of each screen's display when ``avoid`` is
     None; None keeps the API 36 sizes. An explicit ``avoid`` wins over
@@ -156,7 +244,9 @@ class Policy:
     ``Screen.visible_bounds`` keep the fixed `MIN_VISIBLE_PX`.
 
     Raises:
-        ValueError: A deny word, confirm word or irreversible phrase is empty
+        ValueError: An ``also_target`` entry is refused (`AlsoTargetError`: not
+            a package name, listed twice, the system UI or a fixed home app), or
+            a deny word, confirm word or irreversible phrase is empty
             after normalization, or a confirm word is empty after the label
             cleaning (invisible characters, normalization, surrounding
             punctuation), or an exception word is not one word of letters and
@@ -165,7 +255,8 @@ class Policy:
             is not an integer of at least 1.
         TypeError: ``edges`` is not a sequence, ``deny_exceptions`` is one
             string, or ``back_on_other_screens``, ``check_tap_window`` or
-            ``replay_path`` is not a bool.
+            ``replay_path`` is not a bool, or ``also_target`` is not a tuple of
+            strings.
     """
 
     deny_words: tuple[str, ...] = DEFAULT_DENY_WORDS
@@ -187,6 +278,7 @@ class Policy:
     skip_navigate_up: bool = True
     skip_sliders: bool = True
     replay_path: bool = True
+    also_target: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if type(self.back_on_other_screens) is not bool:
@@ -198,6 +290,16 @@ class Policy:
         if type(self.replay_path) is not bool:
             msg = "replay_path must be a bool"
             raise TypeError(msg)
+        if not isinstance(self.also_target, tuple | list) or not all(
+            type(name) is str for name in self.also_target
+        ):
+            msg = "also_target must be a tuple of package names"
+            raise TypeError(msg)
+        if self.also_target:
+            # The static rules (package format and length, duplicates, the
+            # system UI, the fixed home apps); a refused entry cannot be built.
+            # The target itself is checked where the target is known.
+            check_also_target(None, self.also_target)
         for word in (*self.deny_words, *self.confirm_words, *self.irreversible_phrases):
             _check_word(word)
         _exception_keys(self.deny_exceptions)
@@ -257,6 +359,7 @@ class Policy:
             skip_navigate_up=self.skip_navigate_up,
             skip_sliders=self.skip_sliders,
             replay_path=self.replay_path,
+            also_target=self.also_target,
         )
 
 

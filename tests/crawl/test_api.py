@@ -282,7 +282,7 @@ def test_the_snapshot_holds_every_field_a_decision_can_change() -> None:
     # engine and not to _State would survive a withdraw.
     eng = engine()
     drive(eng, Phone(small_graph()))
-    fixed = {"_package", "_policy", "_limits", "_started_at", "_returned"}
+    fixed = {"_package", "_also", "_policy", "_limits", "_started_at", "_returned"}
     held = {f"_{f.name}" for f in fields(crawl._State)}
     assert set(vars(eng)) - fixed == held
     # and the values a snapshot keeps are copies, not the engine's own

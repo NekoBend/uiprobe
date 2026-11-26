@@ -93,7 +93,12 @@ def preview(device: Device, package: str, policy: Policy | None = None) -> Previ
             `Policy`.
         ValueError: `package` does not follow the Android package rule (see
             `PACKAGE_PATTERN`; two or more dot-separated segments, at most 255
-            characters), or two elements of the screen have the same id.
+            characters), or two elements of the screen have the same id, or
+            ``policy.also_target`` lists the system UI, a fixed home app,
+            `package` itself, a duplicate or a bad name (`AlsoTargetError`,
+            before the device is read), or the device's home app is listed or
+            cannot be read (`AlsoTargetError`; read once, only when the list
+            is not empty; a transport failure raises its own error).
         UiprobeError: The device reads fail; the errors of `Device.dump`,
             `Device.foreground` and `Device.keyboard_shown` propagate
             unchanged.
@@ -104,6 +109,19 @@ def preview(device: Device, package: str, policy: Policy | None = None) -> Previ
     elif not isinstance(policy, Policy):
         msg = f"policy must be a Policy or None, not {type(policy).__name__}"
         raise TypeError(msg)
+    if policy.also_target:
+        # The checks that need no device: a listed system UI, fixed home app,
+        # the target itself, a duplicate or a bad name never marks an element
+        # pressable (the device's own home app is checked by a pressing run
+        # and by `uiprobe crawl --dry-run`).
+        from uiprobe.also_target import check_also_target
+
+        check_also_target(package, policy.also_target)
+        # And the device's own home app, read once before the screen: an
+        # unreadable one refuses too (fail closed), as in a pressing run.
+        from uiprobe.also_target import check_home
+
+        check_home(policy.also_target, device.home_package())
     screen = device.dump()
     foreground = device.foreground()
     keyboard = device.keyboard_shown()

@@ -670,6 +670,9 @@ def _drawn(tree: RunTree, *, ids: bool, why: bool, html: bool = False) -> _Rende
     """Draw the tree: everything above the legend."""
     label = tree.label if tree.label is not None else tree.package
     first = f"{_printable(label)} ({_printable(tree.package)})"
+    if tree.also_target:
+        listed = ", ".join(_printable(name) for name in tree.also_target)
+        first += f"  also target: {listed}"
     if not tree.record_text:
         first += f"  {_NO_TEXT}"
     drawn = _Renderer(tree, ids=ids, why=why, html=html)
@@ -682,7 +685,8 @@ def _drawn(tree: RunTree, *, ids: bool, why: bool, html: bool = False) -> _Rende
     rest = [
         sid
         for sid, node in tree.screens.items()
-        if node.package == tree.package and sid not in tree.unreached
+        if (node.package == tree.package or node.package in tree.also_target)
+        and sid not in tree.unreached
     ]
     for sid in (*tree.unreached, *rest):
         if sid not in drawn.expanded and sid not in drawn.hidden:

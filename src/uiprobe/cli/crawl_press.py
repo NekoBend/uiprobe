@@ -10,6 +10,7 @@ from dataclasses import replace
 from typing import TYPE_CHECKING, Final, Literal
 
 from uiprobe._json import dumps
+from uiprobe.also_target import AlsoTargetError
 from uiprobe.cli.commands import _single_serial
 from uiprobe.cli.crawl_dry import (
     _check_plan_stream,
@@ -262,6 +263,7 @@ def _cmd_crawl_press(args: argparse.Namespace, setup: _CrawlSetup) -> int:  # no
         "screenshots": args.screenshots,
         "restart": not args.no_restart,
         "record_text": record_text,
+        **({"also_target": list(policy.also_target)} if policy.also_target else {}),
     }
     # The plan is out (and flushed) before the first request that changes the
     # device; with --json it goes to stderr, so stdout stays one JSON document.
@@ -311,7 +313,9 @@ def _cmd_crawl_press(args: argparse.Namespace, setup: _CrawlSetup) -> int:  # no
             _hide_device_text(exc)
         raise
     except Exception as exc:
-        if record_text or isinstance(exc, _UsageError | BrokenPipeError):
+        if record_text or isinstance(
+            exc, _UsageError | AlsoTargetError | BrokenPipeError
+        ):
             raise
         # Whatever an unexpected error says may hold text from the device.
         name = type(exc).__name__
@@ -432,6 +436,7 @@ def _press_plan_text(plan: dict[str, object], *, settings: str) -> str:
             "check the window at each tap point: "
             + ("yes" if plan["check_tap_window"] else "no"),
             _RESTART_PLAN[bool(plan["restart"])],
+            *_also_target_plan(plan),
             *(
                 []
                 if plan.get("record_text", True)
@@ -442,6 +447,19 @@ def _press_plan_text(plan: dict[str, object], *, settings: str) -> str:
             ),
         ]
     )
+
+
+def _also_target_plan(plan: dict[str, object]) -> list[str]:
+    """The plan line that names the listed packages; none with an empty list."""
+    listed = plan.get("also_target")
+    if not listed:
+        return []
+    assert isinstance(listed, list)  # noqa: S101 - built in _cmd_crawl_press
+    names = ", ".join(_printable(str(name)) for name in listed)
+    return [
+        f"also pressing in: {names} (also_target in the settings file; system UI,"
+        " the home app and permission screens are never pressed)"
+    ]
 
 
 def _press_because_text(plan: dict[str, object], settings: str) -> str:

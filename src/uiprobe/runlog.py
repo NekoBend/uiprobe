@@ -450,6 +450,7 @@ class RunWriter:
         deny_exceptions: Iterable[str] = (),
         restart: bool | None = None,
         record_text: bool | None = None,
+        also_target: Iterable[str] = (),
     ) -> RunWriter:
         """Make the run folder `out` and write ``run-start.json`` into it.
 
@@ -472,7 +473,9 @@ class RunWriter:
         label lines of ``summary.txt`` as ``[text not recorded]``, the
         ``window`` of a ``covered_by_other`` end line as ``""``, and refuses
         `write_screenshot`. None is True. A password field's text is
-        hidden either way.
+        hidden either way. `also_target` (``Policy.also_target``) is written
+        as ``also_target``, a list, only when it is not empty: the packages
+        besides `package` whose screens the crawl counted as the app's own.
 
         Before anything is made, `out` gets the checks of
         `uiprobe.pngfile.check_new_path`: it must not be empty, hold a null
@@ -516,6 +519,7 @@ class RunWriter:
         if record_text is not None and not isinstance(record_text, bool):
             msg = "record_text must be a bool or None"
             raise TypeError(msg)
+        also = _check_texts("also_target", also_target)
         words = _check_texts("deny_words", deny_words)
         exceptions = _check_texts("deny_exceptions", deny_exceptions)
         limit_values = _limits_dict(limits)
@@ -539,6 +543,8 @@ class RunWriter:
             record["restart"] = restart
         if record_text is not None:
             record["record_text"] = record_text
+        if also:
+            record["also_target"] = also
         text = _json_text(record, indent=2) + "\n"
         try:
             _make_dir(folder)  # the very str that was checked
