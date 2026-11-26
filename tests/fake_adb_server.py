@@ -593,7 +593,7 @@ class FakeAdbServer:
         allow_port(self.port)
         self._thread = threading.Thread(
             target=self._server.serve_forever,
-            kwargs={"poll_interval": 0.01},
+            kwargs={"poll_interval": 0.001},
             name="fake-adb",
             daemon=True,
         )
