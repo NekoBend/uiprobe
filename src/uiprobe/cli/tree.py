@@ -324,6 +324,7 @@ class _Renderer:
             # What the popup's screen leaves out is still left out of the tree.
             self.tally.texts += scratch.texts
             self.tally.unnamed += scratch.unnamed
+            self.tally.unmatched += scratch.unmatched
         return True
 
     def open_screen(self, sid: str, name: str, path: tuple[str, ...]) -> list[_Entry]:

@@ -2628,7 +2628,9 @@ def test_a_pressed_again_line_of_a_folded_element_to_a_popup_is_marked(
     assert "rows inside popups: 1" in lines[-1]
 
 
-def test_a_popup_screens_texts_and_unnamed_elements_are_still_counted(tmp_path, capsys):
+def test_a_popup_screens_texts_unnamed_and_unmatched_skips_are_still_counted(
+    tmp_path, capsys
+):
     folder = Folder(tmp_path)
     home = _button_screen(".Home", ["Ask"])
     dialog = make_screen(
@@ -2645,9 +2647,13 @@ def test_a_popup_screens_texts_and_unnamed_elements_are_still_counted(tmp_path, 
     folder.start("launch")
     folder.end(home_id)
     folder.tap(home, 2, dialog_id)
+    folder.writer.write_skip(
+        dialog_id, "f-" + "0" * 32, ("deny_word",), dialog.elements[3]
+    )
     folder.finish()
     _, out, _ = run_tree(capsys, str(folder.path))
     assert out.splitlines()[-1] == (
         "left out of the tree (see --json): rows inside popups: 1, "
-        "texts outside rows: 2, unnamed elements: 1"
+        "texts outside rows: 2, unnamed elements: 1, "
+        "skip records not matched to a row: 1"
     )
