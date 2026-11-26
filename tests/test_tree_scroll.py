@@ -1284,3 +1284,173 @@ def test_every_member_keeps_its_own_unmatched_entry(tmp_path):
         ("slider",),
         ("toggle",),
     ]
+
+
+# -- the second round of the ids of a scrolling list ------------------------------
+
+
+def page_with(inner, *, extra=()):
+    """A clickable parent holding a clickable child labelled "Child", and a list;
+    the parent's own label and extra elements differ from page to page."""
+    return make_screen(
+        ".Page",
+        [
+            el(1, cls="LinearLayout", flags=CLICK),
+            el(2, 1, text="Child", flags=CLICK),
+            el(3, 1, text=inner),
+            el(4, cls="RecyclerView", flags=("scrollable",)),
+            *extra,
+        ],
+    )
+
+
+def test_a_label_under_another_parent_is_not_a_repeat(tmp_path):
+    # A and joined B each hold a clickable "Child" under a clickable parent, the
+    # parents labelled differently: a tap on B's "Child" is B's, not A's
+    folder = Folder(tmp_path)
+    page_a = page_with("Parent A")
+    page_b = page_with("Parent B", extra=(el(5, 4, text="More"),))
+    assert page_a.screen_id != page_b.screen_id
+    for screen in (page_a, page_b, LEAF):
+        folder.screen(screen)
+    folder.start("launch")
+    folder.end(page_a.screen_id)
+    scroll(folder, page_a, page_b, read=False)
+    folder.tap(page_b, 2, LEAF.screen_id)  # B's child
+    folder.finish()
+    tree = read_tree(folder.path)
+    assert tree.warnings == []
+    children = [r for r in tree.screens[page_a.screen_id].rows if r.element_id == "e2"]
+    assert len(children) == 2
+    by_read = {r.view_key: r for r in children}
+    assert not by_read[None].pressed  # A's is untouched
+    assert by_read[-1].pressed  # B's carries the press
+    assert by_read[-1].to == {"screen_id": LEAF.screen_id}
+
+
+def test_a_tap_that_cannot_be_hung_on_its_own_id_is_said_not_attached_elsewhere(
+    tmp_path,
+):
+    # scroll A to B, no read of B at all, then a tap on B's e3: A has an e3 of its
+    # own, which is no place for it
+    folder = Folder(tmp_path)
+    a = listing(["A", "B", "C"])
+    b = listing(["A", "B"])
+    folder.screen(a)
+    folder.screen(LEAF)
+    folder.start("launch")
+    folder.end(a.screen_id)
+    scroll(folder, a, b, read=False)
+    folder.tap(b, 3, LEAF.screen_id)
+    folder.finish()
+    tree = read_tree(folder.path)
+    rows = {r.element_id: r for r in tree.screens[a.screen_id].rows if r.kind == "row"}
+    assert not rows["e3"].pressed
+    assert rows["e3"].to is None
+    assert [w for w in tree.warnings if b.screen_id in w and "e3" in w]
+
+
+def test_hidden_texts_do_not_carry_a_reason_to_another_ids_row(tmp_path):
+    folder = Folder(tmp_path, record_text=False)
+    a = listing(["A", "B", "C"])
+    b = listing(["A", "B"])
+    for screen in (a, b):
+        folder.screen(screen)
+    folder.start("launch")
+    folder.end(a.screen_id)
+    scroll(folder, a, b, read=False)
+    folder.skip(a, 3, "toggle")
+    folder.skip(b, 3, "slider")
+    folder.finish()
+    tree = read_tree(folder.path)
+    node = tree.screens[a.screen_id]
+    by_read = {r.view_key: r for r in node.rows if r.element_id == "e3"}
+    assert by_read[None].reasons == ("toggle",)
+    assert by_read[-1].reasons == ("slider",)
+    assert node.unmatched == []
+
+
+def test_an_edge_between_ids_of_two_activities_joins_nothing_through_it(tmp_path):
+    folder = Folder(tmp_path)
+    a = listing(["A", "B", "C"])
+    b = listing(["A", "B"], activity=".Other")
+    c = listing(["A"])
+    x = make_screen(".X", [el(1, cls="FrameLayout"), el(2, 1, text="Go", flags=CLICK)])
+    for screen in (a, b, c, x):
+        folder.screen(screen)
+    folder.start("launch")
+    folder.end(a.screen_id)
+    scroll(folder, a, b)
+    scroll(folder, b, c)
+    folder.tap(x, 2, c.screen_id)
+    folder.finish()
+    tree = read_tree(folder.path)
+    assert {a.screen_id, b.screen_id, c.screen_id} <= set(tree.screens)
+    go = next(r for r in tree.screens[x.screen_id].rows if r.name == "Go")
+    assert go.to == {"screen_id": c.screen_id}  # not redirected to A
+
+
+def test_the_target_is_taken_from_the_snapshot_when_the_end_line_has_none(tmp_path):
+    folder = Folder(tmp_path)
+    a = listing(["A", "B", "C"])
+    b = listing(["C", "D"])
+    folder.screen(a)
+    folder.screen(b)
+    folder.start("launch")
+    folder.end(a.screen_id)
+    folder.action += 1
+    folder.writer.write_transition_start(
+        folder.action, "scroll", a.screen_id, point=(5, 50), amount=3
+    )
+    folder.end(dump_failed=True)  # the end line names no screen
+    folder.writer.write_scroll_screen(folder.action, b)  # a later read worked
+    folder.finish()
+    tree = read_tree(folder.path)
+    assert b.screen_id not in tree.screens
+    names = [r.name for r in tree.screens[a.screen_id].rows if r.kind == "row"]
+    assert names == ["A", "B", "C", "D"]  # B's rows once, not under both ids
+
+
+def test_a_stray_scroll_snapshot_changes_nothing(tmp_path):
+    def run(parent, *, stray):
+        folder = Folder(parent)
+        first = listing(["A", "B"])
+        folder.screen(first)
+        folder.screen(LEAF)
+        folder.start("launch")
+        folder.end(first.screen_id)
+        folder.tap(first, 3, LEAF.screen_id)
+        if stray:
+            foreign = make_screen(
+                ".F",
+                [el(1, cls="FrameLayout"), el(2, 1, text="F")],
+                package="com.other",
+            )
+            folder.writer.write_scroll_screen(99, foreign)
+        folder.finish()
+        return read_tree(folder.path), first
+
+    (tmp_path / "a").mkdir()
+    (tmp_path / "b").mkdir()
+    plain, first = run(tmp_path / "a", stray=False)
+    stray, _ = run(tmp_path / "b", stray=True)
+    assert stray.warnings == plain.warnings == []
+    rows = lambda t: [  # noqa: E731
+        (r.name, r.pressed, r.to) for r in t.screens[first.screen_id].rows
+    ]
+    assert rows(stray) == rows(plain)
+    assert any(pressed for _, pressed, _ in rows(stray))
+
+
+def test_a_foreign_snapshot_that_a_scroll_names_still_fails_the_gate(tmp_path):
+    folder = Folder(tmp_path)
+    first = listing(["A", "B"])
+    foreign = make_screen(
+        ".F", [el(1, cls="FrameLayout"), el(2, 1, text="F")], package="com.other"
+    )
+    folder.screen(first)
+    folder.start("launch")
+    folder.end(first.screen_id)
+    scroll(folder, first, foreign)
+    folder.finish()
+    assert GATE_WARNING in read_tree(folder.path).warnings
