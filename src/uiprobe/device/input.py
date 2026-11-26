@@ -48,21 +48,6 @@ _NEGATIVE = re.compile(
     re.IGNORECASE,
 )
 _PLACEHOLDER = re.compile(r"<[^<>\s]+>")
-_COMMAND_WORDS = frozenset(
-    {
-        "text",
-        "keyevent",
-        "keycombination",
-        "tap",
-        "swipe",
-        "draganddrop",
-        "press",
-        "roll",
-        "motionevent",
-        "scroll",
-        "fling",
-    }
-)
 _SOURCE_WORDS = frozenset(
     {
         "dpad",
@@ -117,67 +102,86 @@ def _bracket_axes(rest: str) -> set[str]:
     return names
 
 
-def _lists_wheel(usage: str) -> bool:
-    """Whether the usage text of ``input`` lists the ``mouse`` source and a
-    ``scroll <x> <y>`` command of that source with ``VSCROLL`` as an axis.
-
-    Read per source: the scroll line must be the mouse source's (the word before
-    the command, its ``(Default: ...)``, or ``(for pointer-based sources)``, which
-    includes the mouse); a line for another source (``rotary``, say) that lists
-    ``VSCROLL`` is no support, and neither is a line that names no source. A
-    line that says it is unsupported or not supported (also in a note such as
-    ``(unsupported: [--axis VSCROLL,<v>])``) is no support. The axes are every
-    ``--axis NAME`` of the line's bracket groups (``VSCROLL`` must be a word of its
-    own with its value placeholder) and the names of an ``Axis options:`` line
-    (``SCROLL, HSCROLL, VSCROLL``, as the real usage prints them), which must be
-    nothing but such names. ``VSCROLL`` anywhere else does not count.
-    """
-    listed = [line.strip() for line in _lines(usage)]
-    mouse = any(
-        line == "mouse"
-        or (line.startswith("The sources are") and "mouse" in re.split(r"[\s,]+", line))
-        for line in listed
-    )
-    if not mouse:
-        return False
-    axes: set[str] = set()
-    for index, line in enumerate(listed):
-        found = _SCROLL_LINE.fullmatch(line)
-        if (
-            found is None
-            or "mouse" not in _line_sources(found)
-            or _NEGATIVE.search(line)
+def _scroll_blocks(raw: list[str]) -> list[list[str]]:
+    """The blocks of the usage that belong to a ``scroll`` command: its command
+    line (``scroll ...``, or ``<source> scroll ...``) and every following line
+    that is indented deeper than it, up to the next line at that same or a lower
+    indentation (blank lines do not count). Each block is its stripped lines."""
+    blocks = []
+    for index, line in enumerate(raw):
+        words = line.split()
+        if not words:
+            continue
+        first = words[0].lower()
+        if first != "scroll" and not (
+            len(words) > 1 and words[1] == "scroll" and first in _SOURCE_WORDS
         ):
             continue
-        axes |= _bracket_axes(found["rest"])
-        axes |= _options_after(listed, index)
+        indent = len(line) - len(line.lstrip())
+        block = [line.strip()]
+        for following in raw[index + 1 :]:
+            if not following.strip():
+                continue
+            if len(following) - len(following.lstrip()) <= indent:
+                break
+            block.append(following.strip())
+        blocks.append(block)
+    return blocks
+
+
+def _block_supports_vscroll(block: list[str]) -> bool:
+    """Whether one ``scroll`` block has a pointer-based syntax line that names
+    the mouse and ``VSCROLL`` among the axes of that block, and no wording that
+    says it is unsupported."""
+    if any(_NEGATIVE.search(line) for line in block):
+        return False
+    if not any(
+        (found := _SCROLL_LINE.fullmatch(line)) is not None
+        and "mouse" in _line_sources(found)
+        for line in block
+    ):
+        return False
+    axes: set[str] = set()
+    for line in block:
+        axes |= _bracket_axes(line)
+        options = _AXIS_OPTIONS_LINE.fullmatch(line)
+        if options is not None and _AXIS_NAMES.fullmatch(options["names"].strip()):
+            axes |= {w for w in re.split(r"[,\s]+", options["names"]) if w}
     return "VSCROLL" in axes
 
 
-def _options_after(listed: list[str], index: int) -> set[str]:
-    """The axis names of the ``Axis options:`` line that belongs to the scroll
-    line at `index`: the next such line after it, before another command or
-    source line. A line that says it is unsupported, or holds anything but
-    names, gives none."""
-    for line in listed[index + 1 :]:
-        options = _AXIS_OPTIONS_LINE.fullmatch(line)
-        if options is not None:
-            if _NEGATIVE.search(line) or not _AXIS_NAMES.fullmatch(
-                options["names"].strip()
-            ):
-                return set()
-            return {w for w in re.split(r"[,\s]+", options["names"]) if w}
-        first = line.split(None, 1)[0].lower() if line.split() else ""
-        if (
-            _SCROLL_LINE.fullmatch(line)
-            or line.startswith("The ")
-            or "(Default:" in line
-            or "<" in line
-            or first in _SOURCE_WORDS
-            or first in _COMMAND_WORDS
-        ):
-            return set()  # another command or a source line comes first
-    return set()
+def _lists_wheel(usage: str) -> bool:
+    """Whether the usage text of ``input`` lists the ``mouse`` source and a
+    ``scroll`` command block with a pointer-based syntax line for it and
+    ``VSCROLL`` among its axes.
+
+    The usage is read by blocks. The sources list must include ``mouse``. The
+    ``scroll`` command block runs from its command line to the next line at the
+    same or a lower indentation (the API 36 and 37 emulators print the command
+    with ``Has the following syntax:`` and, indented under it, the syntax lines
+    ``scroll <x> <y> [axis_value] (for pointer-based sources)`` and ``scroll
+    [axis_value] (for non-pointer-based sources)``, then ``Axis options: SCROLL,
+    HSCROLL, VSCROLL``). In that block only: there must be a pointer-based syntax
+    line (``scroll <x> <y> ...``) that is the mouse's (``(for pointer-based
+    sources)``, which includes the mouse, a source word before the command, or its
+    own ``(Default: ...)``; a line for another source, or naming none, is no
+    support); the axes are every ``--axis NAME`` of the bracket groups (``VSCROLL``
+    as a word of its own with its value placeholder) and the names of the
+    ``Axis options:`` lines (nothing but names); and any ``unsupported``, ``not
+    supported``, ``unavailable``, ``not available`` or ``disabled`` in the block
+    means no support. Lines outside the block (another command's, another
+    source's) are never read for the axes.
+    """
+    raw = _lines(usage)
+    stripped = [line.strip() for line in raw]
+    mouse = any(
+        line == "mouse"
+        or (line.startswith("The sources are") and "mouse" in re.split(r"[\s,]+", line))
+        for line in stripped
+    )
+    return mouse and any(
+        _block_supports_vscroll(block) for block in _scroll_blocks(raw)
+    )
 
 
 class _InputMixin(_DeviceState):

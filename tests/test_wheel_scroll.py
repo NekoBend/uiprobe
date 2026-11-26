@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pytest
@@ -243,28 +244,27 @@ def test_vscroll_on_the_mouse_line_is_support_whatever_other_lines_say(
 
 # -- the exact reading of the axis options -----------------------------------------
 
-REAL = (
-    "Usage: input [<source>] [-d DISPLAY_ID] <command> [<arg>...]\n"
-    "\n"
-    "The sources are:\n"
-    "      dpad\n"
-    "      keyboard\n"
-    "      mouse\n"
-    "      touchpad\n"
-    "      touchscreen\n"
-    "The commands and default sources are:\n"
-    "      text <string> (Default: touchscreen)\n"
-    "      tap <x> <y> (Default: touchscreen)\n"
-    "      scroll <x> <y> [axis_value] (for pointer-based sources)\n"
-    "Axis options: SCROLL, HSCROLL, VSCROLL\n"
-    "      swipe <x1> <y1> <x2> <y2> [duration(ms)] (Default: touchscreen)\n"
-)
+DATA = Path(__file__).parent / "data"
+# The `input` usage of the API 36 and API 37 emulators, as they print it.
+REAL_36 = (DATA / "input_usage_api36.txt").read_text(encoding="utf-8")
+REAL_37 = (DATA / "input_usage_api37.txt").read_text(encoding="utf-8")
+REAL = REAL_37
+
+
+@pytest.mark.parametrize("usage", [REAL_36, REAL_37], ids=["api36", "api37"])
+def test_the_real_usage_of_the_emulators_is_support(device, android, usage):
+    # The command block: "scroll (Default: rotaryencoder). Has the following
+    # syntax:", the pointer-based line under it, then the axis options.
+    assert "scroll <x> <y> [axis_value] (for pointer-based sources)" in usage
+    assert "Axis options: SCROLL, HSCROLL, VSCROLL" in usage
+    android.input_usage = usage
+    assert device._wheel_supported() is True
 
 
 def test_the_real_shape_with_an_axis_options_line_is_support(device, android):
     android.input_usage = REAL
     assert device._wheel_supported() is True
-    android.input_usage = REAL.replace("Axis options:", "      Axis options:")
+    android.input_usage = REAL.replace("Axis options:", "   Axis options:")
     assert device._wheel_supported() is True
 
 
@@ -326,7 +326,7 @@ def test_a_line_that_says_it_is_unsupported_is_no_support(device, android, usage
         "scroll <x> <y> [--axis HSCROLL,<h>] [--axis VSCROLL,<v>] (Default: mouse)\n",
         # a mouse line with the options on their own line
         "The sources are:\n  mouse\n"
-        "mouse scroll <x> <y> [axis_value]\nAxis options: HSCROLL, VSCROLL\n",
+        "mouse scroll <x> <y> [axis_value]\n    Axis options: HSCROLL, VSCROLL\n",
     ],
 )
 def test_every_axis_of_the_line_counts(device, android, usage):
@@ -344,40 +344,58 @@ def test_an_axis_options_line_alone_is_no_support_without_a_mouse_scroll_line(
     assert device._wheel_supported() is False
 
 
-def test_the_options_line_belongs_to_the_scroll_line_it_follows(device, android):
-    # VSCROLL under the rotary line, HSCROLL on the mouse line: not pooled
+def test_the_options_line_belongs_to_the_scroll_block_it_is_in(device, android):
+    # VSCROLL under the rotary block, HSCROLL in the mouse block: not pooled
     android.input_usage = (
         "The sources are:\n  mouse\n  rotary\n"
-        "mouse scroll <x> <y> [axis_value]\nAxis options: SCROLL, HSCROLL\n"
-        "rotary scroll <x> <y> [axis_value]\nAxis options: SCROLL, VSCROLL\n"
+        "mouse scroll <x> <y> [axis_value]\n    Axis options: SCROLL, HSCROLL\n"
+        "rotary scroll [axis_value]\n    Axis options: SCROLL, VSCROLL\n"
     )
     assert device._wheel_supported() is False
-    # and the other way round it is support: the mouse line's own options
+    # and the other way round it is support: the mouse block's own options
     android.input_usage = (
         "The sources are:\n  mouse\n  rotary\n"
-        "mouse scroll <x> <y> [axis_value]\nAxis options: SCROLL, VSCROLL\n"
-        "rotary scroll <x> <y> [axis_value]\nAxis options: SCROLL, HSCROLL\n"
+        "mouse scroll <x> <y> [axis_value]\n    Axis options: SCROLL, VSCROLL\n"
+        "rotary scroll [axis_value]\n    Axis options: SCROLL, HSCROLL\n"
     )
     assert device._wheel_supported() is True
 
 
-def test_an_options_line_after_another_command_is_not_the_scroll_lines(device, android):
+def test_an_options_line_outside_the_block_is_not_the_scroll_lines(device, android):
+    # at the indentation of the command, or after another command: not inside
     android.input_usage = (
-        REAL.replace(
-            "Axis options: SCROLL, HSCROLL, VSCROLL\n      swipe <x1>",
-            "      swipe <x1>",
-        )
-        + "Axis options: SCROLL, HSCROLL, VSCROLL\n"
+        "The sources are:\n  mouse\n"
+        "      scroll <x> <y> [axis_value] (for pointer-based sources)\n"
+        "      Axis options: SCROLL, HSCROLL, VSCROLL\n"
+    )
+    assert device._wheel_supported() is False
+    android.input_usage = (
+        REAL.replace("            Axis options: SCROLL, HSCROLL, VSCROLL\n", "")
+        + "            Axis options: SCROLL, HSCROLL, VSCROLL\n"
     )
     assert device._wheel_supported() is False
 
 
-def test_a_description_line_between_does_not_end_the_search(device, android):
+def test_the_block_needs_a_pointer_based_syntax_line(device, android):
     android.input_usage = REAL.replace(
-        "(for pointer-based sources)\n",
-        "(for pointer-based sources)\n      Scrolls at a point.\n",
+        "            scroll <x> <y> [axis_value] (for pointer-based sources)\n", ""
     )
-    assert device._wheel_supported() is True
+    assert device._wheel_supported() is False
+
+
+def test_unsupported_wording_anywhere_in_the_block_is_no_support(device, android):
+    android.input_usage = REAL.replace(
+        "None or one or multiple axis value options can be specified.",
+        "VSCROLL is not supported here.",
+    )
+    assert device._wheel_supported() is False
+
+
+def test_another_commands_block_is_not_read_for_the_axes(device, android):
+    # VSCROLL in the text of the next command does not count for scroll
+    android.input_usage = REAL.replace("SCROLL, HSCROLL, VSCROLL", "SCROLL, HSCROLL")
+    android.input_usage += "      keycombination [-t duration(ms)] --axis VSCROLL,2\n"
+    assert device._wheel_supported() is False
 
 
 def test_a_command_or_source_line_ends_the_search_for_the_options(device, android):
