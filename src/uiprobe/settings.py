@@ -52,9 +52,9 @@ Version 8 added the rule ``also_target``, a list of package names (empty by
 default) that a pressing crawl may also press in (see `uiprobe.also_target`).
 It is optional in every file, like ``[deny] except``, and ``uiprobe init``
 writes it as a comment, so no file needs it; an older file reads as ``[]``.
-Version 9 added the rule ``back_on_other_screens`` (a missing one reads False);
-a file written at version 9 must have it, and an older uiprobe refuses a
-version 9 file. With true, a pressing crawl presses BACK on a screen of another
+Version 10 added the rule ``back_on_other_screens`` (a missing one reads False);
+a file written at version 10 must have it, and an older uiprobe refuses a
+version 10 file. With true, a pressing crawl presses BACK on a screen of another
 app instead of restarting the app (``Policy.back_on_other_screens``).
 
 ``[deny] except`` holds exception words (see `uiprobe.guards.word_matches`): a
@@ -159,7 +159,7 @@ __all__ = [
 
 SETTINGS_FILE: Final = "uiprobe.toml"
 FORMAT_VERSION: Final = 1
-DEFAULTS_VERSION: Final = 9
+DEFAULTS_VERSION: Final = 10
 MAX_SETTINGS_BYTES: Final = 1024 * 1024
 
 # Every default list item with the defaults version that introduced it. Each
@@ -183,8 +183,10 @@ MAX_SETTINGS_BYTES: Final = 1024 * 1024
 # Version 7 added the state-changing deny words (forget, disconnect, ...).
 # Version 8 added the rule also_target (a list of packages; optional in every
 # file, a missing one reads as the empty list; `uiprobe init` writes it
-# commented). Version 9 added the rule back_on_other_screens (no list items; a
-# missing one reads False).
+# commented). Version 9 added the confirm words turn on, enable, オンにする
+# and 有効にする (a dialog's "Turn on" button changes a device setting).
+# Version 10 added the rule back_on_other_screens (no list items; a missing one
+# reads False).
 _LATER_DENY: Final[dict[str, int]] = {
     "やり直": 2,
     "元に戻": 2,
@@ -195,9 +197,14 @@ _LATER_DENY: Final[dict[str, int]] = {
 # The [deny] except list has no built-in words. One added later starts at the
 # next defaults version (raise DEFAULTS_VERSION with it); before that, the
 # test that no default is tagged beyond the current version fails.
-_FIRST_EXCEPT: Final = 10
+_FIRST_EXCEPT: Final = 11
 _LATER_EXCEPT: Final[dict[str, int]] = {}
-_LATER_CONFIRM: Final[dict[str, int]] = {}
+_LATER_CONFIRM: Final[dict[str, int]] = {
+    "turn on": 9,
+    "enable": 9,
+    "オンにする": 9,
+    "有効にする": 9,
+}
 # The [irreversible] table came with version 2, so its items start there.
 _FIRST_IRREVERSIBLE: Final = 2
 _LATER_IRREVERSIBLE: Final[dict[str, int]] = {}
@@ -278,7 +285,7 @@ _LATER_RULES: Final[dict[str, int]] = {
     "skip_navigate_up": 4,
     "skip_sliders": 4,
     "replay_path": 5,
-    "back_on_other_screens": 9,
+    "back_on_other_screens": 10,
 }
 # Top-level keys a later version added, with that version (a missing one reads
 # True).
@@ -336,7 +343,7 @@ class Settings:
     optional key that needed no new defaults version), follow it for the same
     reason. ``also_target`` (default ``()``), added with defaults version 8,
     comes after it for the same reason, and ``back_on_other_screens`` (default
-    False), added with defaults version 9, last.
+    False), added with defaults version 10, last.
     """
 
     source: Path
@@ -380,7 +387,7 @@ class Settings:
     # Added with defaults version 8: the packages (besides the target app)
     # that a pressing crawl may also press in. Empty by default.
     also_target: tuple[str, ...] = ()
-    # Added with defaults version 9: press BACK on a screen of another app
+    # Added with defaults version 10: press BACK on a screen of another app
     # instead of restarting the app (``Policy.back_on_other_screens``).
     back_on_other_screens: bool = False
 
