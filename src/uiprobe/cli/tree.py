@@ -49,7 +49,11 @@ KIND_LABELS: Final = (
         "back",
         "[back] = the screen's navigate-up button, which is not pressed",
     ),
-    ("slider", "slider", "[slider] = a slider, which is not pressed"),
+    (
+        "slider",
+        "slider",
+        "[slider] = it is or overlaps a slider, so it was not pressed",
+    ),
     ("disabled", "disabled", "[disabled] = it was disabled, so it was not pressed"),
 )
 LEGEND_DESC: Final = (

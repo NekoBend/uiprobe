@@ -11,6 +11,7 @@ import pytest
 from tests.test_tree import (
     LEGEND,
     LEGEND_ARROW,
+    LEGEND_BACK,
     LEGEND_DESC,
     LEGEND_DISABLED,
     LEGEND_EMPTY,
@@ -375,7 +376,12 @@ def test_ids_and_why_are_taken_from_the_options(tmp_path, capsys):
     out_dir.mkdir()
     text, _ = page_of(out_dir, capsys, folder, "--ids", "--why")
     assert "(screen s-" in text
-    assert "[toggle]" in text
+    assert (
+        '<span class="line unpressed"><span class="name">Wi-Fi</span>'
+        " · [toggle]</span>" in text
+    )
+    assert "[toggle] = " not in text
+    assert "[back] = " not in text
 
 
 def test_an_existing_file_is_refused_and_left_alone(tmp_path, capsys):
@@ -696,3 +702,23 @@ def test_the_page_shows_kind_labels_in_place_of_the_dot_with_legend_lines(
     )
     lines = [ln for ln in page.footer.splitlines() if ln.strip()]
     assert lines == [LEGEND, LEGEND_TOGGLE, LEGEND_DISABLED]
+
+
+def test_a_kind_label_in_a_popup_row_is_in_the_page_and_not_in_the_text_legend(
+    tmp_path, capsys
+):
+    folder, _ = _popup_run(tmp_path, cancel_reasons=("navigate_up",))
+    out_dir = tmp_path / "w"
+    out_dir.mkdir()
+    text, page = page_of(out_dir, capsys, folder)
+    assert (
+        '<span class="line unpressed"><span class="name">Cancel</span> [back]</span>'
+        in text
+    )
+    fold = text[text.index(FOLD_POPUP) :]
+    assert "Cancel</span> [back]" in fold
+    footer = [ln for ln in page.footer.splitlines() if ln.strip()]
+    assert LEGEND_BACK in footer
+    _, out, _ = run_tree(capsys, str(folder.path))
+    assert "[back]" not in out
+    assert LEGEND_BACK not in out.splitlines()

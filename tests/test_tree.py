@@ -25,7 +25,7 @@ OTHER_SCREEN = "s-aaaaaaaaaaaa"
 LEGEND = "· = not pressed, so nothing below it was looked at"
 LEGEND_TOGGLE = "[toggle] = it holds a switch or checkbox, so it was not pressed"
 LEGEND_BACK = "[back] = the screen's navigate-up button, which is not pressed"
-LEGEND_SLIDER = "[slider] = a slider, which is not pressed"
+LEGEND_SLIDER = "[slider] = it is or overlaps a slider, so it was not pressed"
 LEGEND_DISABLED = "[disabled] = it was disabled, so it was not pressed"
 LEGEND_DESC = (
     '"..." = the element has no visible text; this is its accessibility description'
@@ -2427,7 +2427,7 @@ def _button_screen(activity, names, *, popup=False):
     return make_screen(activity, elements)
 
 
-def _popup_run(tmp_path, *, first_is_popup=False):
+def _popup_run(tmp_path, *, first_is_popup=False, cancel_reasons=()):
     folder = Folder(tmp_path)
     home = _button_screen(".Home", ["Plain", "Ask", "Ask again"], popup=first_is_popup)
     plain = _button_screen(".Plain", ["Leaf"])
@@ -2448,6 +2448,8 @@ def _popup_run(tmp_path, *, first_is_popup=False):
     folder.tap(home, 3, ids["dialog"])
     folder.tap(home, 4, ids["dialog"])  # the same popup again
     folder.tap(dialog, 2, ids["behind"])  # OK, reached only through the popup
+    if cancel_reasons:
+        folder.skip(dialog, 3, *cancel_reasons)
     folder.finish()
     return folder, ids
 
