@@ -15,6 +15,7 @@ from tests.test_tree import (
     LEGEND_DESC,
     LEGEND_DISABLED,
     LEGEND_EMPTY,
+    LEGEND_NO_CHANGE,
     LEGEND_SEE,
     LEGEND_TOGGLE,
     SUMMARY,
@@ -159,11 +160,11 @@ def test_the_other_items_fold_is_closed_and_labelled(tmp_path, capsys):
     for item in (
         "text outside rows: Welcome",
         "unnamed element: [icon: ImageButton]",
-        "result of pressing Same: → (same screen)",
         "result of pressing Broken: → (could not be read)",
         "result of pressing Blocked: → (not sent: covered_by_other)",
     ):
         assert f">{item}<" in text
+    assert "result of pressing Same" not in text  # its line says [no change]
 
 
 def test_a_popup_row_gets_a_closed_fold_with_the_popup_rows(tmp_path, capsys):
@@ -204,7 +205,9 @@ def test_unpressed_rows_are_grey_and_keep_the_dot_or_label(tmp_path, capsys):
         in text
     )
     # A pressed row is not grey and has no dot.
-    assert '<span class="line"><span class="name">Same</span></span>' in text
+    assert (
+        '<span class="line"><span class="name">Same</span> [no change]</span>' in text
+    )
     assert ".unpressed{" in text
 
 
@@ -231,6 +234,7 @@ def test_the_legend_and_the_summary_are_at_the_bottom(tmp_path, capsys):
     assert lines == [
         LEGEND,
         LEGEND_TOGGLE,
+        LEGEND_NO_CHANGE,
         LEGEND_DESC,
         LEGEND_ARROW,
         LEGEND_SEE,
@@ -722,3 +726,51 @@ def test_a_kind_label_in_a_popup_row_is_in_the_page_and_not_in_the_text_legend(
     _, out, _ = run_tree(capsys, str(folder.path))
     assert "[back]" not in out
     assert LEGEND_BACK not in out.splitlines()
+
+
+def _same_run(tmp_path, *results):
+    from tests.test_tree import _same_row_run
+
+    return _same_row_run(tmp_path, *results)
+
+
+def test_the_html_has_the_label_and_no_fold_line_for_a_no_change_row(tmp_path, capsys):
+    (tmp_path / "r").mkdir()
+    folder = _same_run(tmp_path / "r", "same")
+    out_dir = tmp_path / "w"
+    out_dir.mkdir()
+    text, page = page_of(out_dir, capsys, folder)
+    assert '<span class="name">Same</span> [no change]</span>' in text
+    assert "result of pressing Same" not in text
+    assert FOLD_OTHER not in text
+    lines = [ln for ln in page.footer.splitlines() if ln.strip()]
+    assert lines == [LEGEND, LEGEND_NO_CHANGE]
+
+
+def test_the_html_keeps_the_fold_line_and_the_count_for_mixed_results(tmp_path, capsys):
+    (tmp_path / "r").mkdir()
+    folder = _same_run(tmp_path / "r", "same", "about")
+    out_dir = tmp_path / "w"
+    out_dir.mkdir()
+    text, page = page_of(out_dir, capsys, folder)
+    assert "[no change]" not in text
+    assert ">result of pressing Same: → (same screen)<" in text
+    lines = [ln for ln in page.footer.splitlines() if ln.strip()]
+    assert lines[-1].startswith(HTML_HEAD + "rows that stayed on the same screen: 1")
+
+
+@pytest.mark.parametrize("later", ["failed", "unfinished", "not_sent"])
+def test_the_html_keeps_the_fold_line_when_a_later_attempt_blocks_the_label(
+    tmp_path, capsys, later
+):
+    from tests.test_tree import _same_then
+
+    (tmp_path / "r").mkdir()
+    folder = _same_then(tmp_path / "r", later)
+    out_dir = tmp_path / "w"
+    out_dir.mkdir()
+    text, page = page_of(out_dir, capsys, folder)
+    assert "[no change]" not in text
+    assert ">result of pressing Same: → (same screen)<" in text
+    lines = [ln for ln in page.footer.splitlines() if ln.strip()]
+    assert "rows that stayed on the same screen: 1" in lines[-1]
