@@ -189,13 +189,15 @@ def _keeps_line(row: Row, *, folded: bool) -> bool:
 
 def _no_change(row: Row, *, kept: bool) -> bool:
     """Whether a line ends in ` [no change]`: the row (with its folded
-    elements) was pressed and every recorded result of its taps is the same
-    screen. It is not used while `NOTES_IN_TEXT` writes that note instead."""
+    elements) was pressed and every attempt on it was sent, finished and ended
+    on the same screen. It is not used while `NOTES_IN_TEXT` writes that note
+    instead."""
     endings = _endings(row)
     return (
         kept
         and row.pressed
         and bool(endings)
+        and not row.other_attempt
         and "same_screen" not in NOTES_IN_TEXT
         and all(_kind_of(to) == "same_screen" for to in endings)
     )
@@ -271,6 +273,7 @@ def _merged(row: Row, folded: list[Row]) -> Row:
         to=endings[0] if endings else None,
         also_to=endings[1:],
         reasons=reasons,
+        other_attempt=any(r.other_attempt for r in group),
     )
 
 

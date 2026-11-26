@@ -757,3 +757,20 @@ def test_the_html_keeps_the_fold_line_and_the_count_for_mixed_results(tmp_path, 
     assert ">result of pressing Same: → (same screen)<" in text
     lines = [ln for ln in page.footer.splitlines() if ln.strip()]
     assert lines[-1].startswith(HTML_HEAD + "rows that stayed on the same screen: 1")
+
+
+@pytest.mark.parametrize("later", ["failed", "unfinished", "not_sent"])
+def test_the_html_keeps_the_fold_line_when_a_later_attempt_blocks_the_label(
+    tmp_path, capsys, later
+):
+    from tests.test_tree import _same_then
+
+    (tmp_path / "r").mkdir()
+    folder = _same_then(tmp_path / "r", later)
+    out_dir = tmp_path / "w"
+    out_dir.mkdir()
+    text, page = page_of(out_dir, capsys, folder)
+    assert "[no change]" not in text
+    assert ">result of pressing Same: → (same screen)<" in text
+    lines = [ln for ln in page.footer.splitlines() if ln.strip()]
+    assert "rows that stayed on the same screen: 1" in lines[-1]

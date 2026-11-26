@@ -2911,3 +2911,42 @@ def test_json_is_unchanged_by_the_label(tmp_path, capsys):
         {"same_screen": True},
     )
     assert "also_to" not in row
+
+
+def _same_then(tmp_path, later):
+    """A run in which "Same" stayed on the same screen, and a later attempt on
+    it failed ("failed"), has no end line ("unfinished") or was not sent."""
+    folder = Folder(tmp_path)
+    home = _same_row_screen()
+    home_id = folder.screen(home)
+    folder.start("launch")
+    folder.end(home_id)
+    folder.tap(home, 2, home_id)
+    if later == "failed":
+        folder.tap(home, 2, dump_failed=True)
+    elif later == "not_sent":
+        folder.tap(home, 2, not_sent="covered_by_other")
+    else:
+        folder.start("tap", home_id, home.elements[1])
+    if later == "unfinished":
+        folder.writer.close()
+    else:
+        folder.finish()
+    return folder
+
+
+@pytest.mark.parametrize("later", ["failed", "unfinished", "not_sent"])
+def test_a_later_attempt_that_was_not_a_finished_same_screen_tap_blocks_the_label(
+    tmp_path, capsys, later
+):
+    folder = _same_then(tmp_path, later)
+    _, out, _ = run_tree(capsys, str(folder.path))
+    lines = out.splitlines()
+    assert "[no change]" not in out
+    assert "├─ Same" in lines
+    assert LEGEND_NO_CHANGE not in lines
+    assert "rows that stayed on the same screen: 1" in lines[-1]
+    _, out, _ = run_tree(capsys, str(folder.path), "--json")
+    row = json.loads(out)["screens"][_same_row_screen().screen_id]["elements"][0]
+    assert row["to"] == {"same_screen": True}
+    assert "other_attempt" not in out

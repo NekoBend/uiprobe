@@ -100,6 +100,10 @@ class Row:
     to: Ending | None = None
     also_to: list[Ending] = field(default_factory=list)
     reasons: tuple[str, ...] = ()
+    # In memory only (not in the JSON): some attempt on the element was not sent,
+    # was not finished, or did not end on the same screen. `also_to` leaves
+    # such attempts out when a sent one exists.
+    other_attempt: bool = False
 
 
 @dataclass(slots=True)
@@ -1271,6 +1275,11 @@ def _attach(
     if row.pressed:
         _rename(row, best.element)
     shown = [row.to]
+    row.other_attempt = any(
+        _rank(tap) != 0
+        or "same_screen" not in _ending(tap, sid, package, reader, moves)
+        for tap in taps
+    )
     for tap in taps:
         if tap is best or _rank(tap) != 0:
             continue
