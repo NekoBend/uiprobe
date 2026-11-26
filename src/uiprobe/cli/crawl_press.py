@@ -40,12 +40,16 @@ if TYPE_CHECKING:
     from typing import TextIO
 
     from uiprobe.crawl_driver import Progress
+    from uiprobe.guards import Policy
 
 CRAWL_RUN_SCHEMA = "uiprobe.crawl_run/1"
 
 
 # Where a limit of a pressing run came from (the "limits_source" values).
 _LimitSource = Literal["option", "file", "default"]
+# Where BACK on screens of other apps came from (the
+# "back_on_other_screens_source" values).
+_BackSource = Literal["option", "file", "default"]
 
 
 def _cmd_crawl(args: argparse.Namespace) -> int:
@@ -121,6 +125,35 @@ def _press_limits(
 def _limit_source_text(name: str, source: str) -> str:
     """Where a limit came from, as the plan text says it."""
     return {"option": f"--{name}", "file": "settings file"}.get(source, "default")
+
+
+def _press_back(args: argparse.Namespace, policy: Policy) -> tuple[bool, _BackSource]:
+    """Whether the run presses BACK on screens of other apps, and why.
+
+    An option decides when given (the parser refuses both together), else the
+    settings file's ``back_on_other_screens`` (already in `policy`), else off.
+    """
+    if args.back_on_other_screens:
+        return True, "option"
+    if args.no_back_on_other_screens:
+        return False, "option"
+    if policy.back_on_other_screens:
+        return True, "file"
+    return False, "default"
+
+
+def _back_plan_text(plan: dict[str, object]) -> str:
+    """The value of the plan line about BACK on screens of other apps."""
+    source = plan["back_on_other_screens_source"]
+    if plan["back_on_other_screens"]:
+        return (
+            "yes (settings file)"
+            if source == "file"
+            else "yes (--back-on-other-screens)"
+        )
+    if source == "option":
+        return "no (--no-back-on-other-screens)"
+    return "no (restart the app)"
 
 
 def _press_settle(args: argparse.Namespace) -> float:
@@ -214,9 +247,10 @@ def _cmd_crawl_press(args: argparse.Namespace, setup: _CrawlSetup) -> int:  # no
             " (nothing was pressed or written)"
         )
         raise _UsageError(msg)
+    back, back_source = _press_back(args, setup.policy)
     policy = replace(
         setup.policy,
-        back_on_other_screens=args.back_on_other_screens,
+        back_on_other_screens=back,
         check_tap_window=not args.no_tap_window_check,
     )
     assert setup.out is not None  # noqa: S101 - _crawl_policy sets it to press
@@ -259,6 +293,7 @@ def _cmd_crawl_press(args: argparse.Namespace, setup: _CrawlSetup) -> int:  # no
         "out": out,
         "out_source": setup.out_source,
         "back_on_other_screens": policy.back_on_other_screens,
+        "back_on_other_screens_source": back_source,
         "check_tap_window": policy.check_tap_window,
         "screenshots": args.screenshots,
         "restart": not args.no_restart,
@@ -327,7 +362,10 @@ def _cmd_crawl_press(args: argparse.Namespace, setup: _CrawlSetup) -> int:  # no
         raise hidden from None
     moves = result.repins  # as run.json counts them
     hints = _press_hints(
-        result, package=args.package, back=policy.back_on_other_screens
+        result,
+        package=args.package,
+        back=policy.back_on_other_screens,
+        file_says_back=setup.policy.back_on_other_screens,
     )
     if args.json:
         _emit(dumps(_press_json(plan, result, hints, moves), indent=2))
@@ -431,8 +469,7 @@ def _press_plan_text(plan: dict[str, object], *, settings: str) -> str:
             _press_because_text(plan, settings),
             _press_limits_text(plan),
             _press_out_text(plan, settings),
-            "BACK on screens of other apps: "
-            + ("yes" if plan["back_on_other_screens"] else "no (restart the app)"),
+            "BACK on screens of other apps: " + _back_plan_text(plan),
             "check the window at each tap point: "
             + ("yes" if plan["check_tap_window"] else "no"),
             _RESTART_PLAN[bool(plan["restart"])],
@@ -457,8 +494,9 @@ def _also_target_plan(plan: dict[str, object]) -> list[str]:
     assert isinstance(listed, list)  # noqa: S101 - built in _cmd_crawl_press
     names = ", ".join(_printable(str(name)) for name in listed)
     return [
-        f"also pressing in: {names} (also_target in the settings file; system UI,"
-        " the home app and permission screens are never pressed)"
+        f"also pressing in: {names} (also_target in the settings file; system UI"
+        " and the home app are refused; the controls of permission screens are"
+        " never tapped, and they get BACK when BACK on other screens is on)"
     ]
 
 
@@ -518,11 +556,15 @@ def _other_apps_text(other_apps: tuple[tuple[str, int], ...]) -> str:
     )
 
 
-def _press_hints(result: CrawlResult, *, package: str, back: bool) -> list[str]:
+def _press_hints(
+    result: CrawlResult, *, package: str, back: bool, file_says_back: bool = False
+) -> list[str]:
     """Advice for the endings a real device runs into; only those that apply.
 
     `package` is the target app and `back` whether BACK was allowed on
-    screens of other apps.
+    screens of other apps. `file_says_back` is whether the settings file turns
+    it on, so that a run with BACK off for this run only (by
+    ``--no-back-on-other-screens``) is not told to set what is already set.
     """
     hints: list[str] = []
     refused = dict(result.not_sent)
@@ -555,12 +597,19 @@ def _press_hints(result: CrawlResult, *, package: str, back: bool) -> list[str]:
         and front != package
         and result.other_apps
     ):
+        how = (
+            "without --no-back-on-other-screens, back_on_other_screens = true in"
+            " the settings file"
+            if file_says_back
+            else "--back-on-other-screens (or back_on_other_screens = true under"
+            " [rules] in the settings file)"
+        )
         hints.append(
             "the restarts kept ending on screens of other apps"
-            f" ({_other_apps_text(result.other_apps)}); --back-on-other-screens"
-            " presses BACK on such a screen (up to twice before it restarts the"
-            " app), and that BACK reaches whichever window has the input focus,"
-            " not the app being crawled"
+            f" ({_other_apps_text(result.other_apps)}); {how} presses BACK on"
+            " such a screen (up to twice before it restarts the app), and that"
+            " BACK reaches whichever window has the input focus, not the app"
+            " being crawled"
         )
     if (
         result.stop_reason == "relaunch_limit"

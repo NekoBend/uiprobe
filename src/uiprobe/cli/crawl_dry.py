@@ -400,6 +400,11 @@ def _crawl_policy(args: argparse.Namespace) -> _CrawlSetup:
     if args.press and args.dry_run:
         msg = "--press and --dry-run cannot be combined"
         raise _UsageError(msg)
+    if args.back_on_other_screens and args.no_back_on_other_screens:
+        msg = (
+            "--back-on-other-screens and --no-back-on-other-screens cannot be combined"
+        )
+        raise _UsageError(msg)
     # A plain str, whatever the subclass (as crawl_run does), for the check,
     # the run folder's name and the run itself.
     args.package = str.__str__(args.package)
