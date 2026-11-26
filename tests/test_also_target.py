@@ -46,10 +46,10 @@ def with_also(text: str, value: str) -> str:
 # -- the settings key ----------------------------------------------------------
 
 
-def test_the_generated_file_is_version_8_and_writes_the_key_commented():
+def test_the_generated_file_writes_the_key_commented():
     text = settings.render_default_settings()
-    assert "format_version = 1\ndefaults_version = 8\n" in text
-    assert settings.DEFAULTS_VERSION == 8
+    assert "format_version = 1\ndefaults_version = 9\n" in text
+    assert settings.DEFAULTS_VERSION == 9
     assert text.count("also_target") == 1
     assert ENTRY + "\n" in text
     rules = text.split("[rules]\n")[1].split("[limits]")[0]
@@ -63,13 +63,13 @@ def test_the_generated_file_loads_with_an_empty_list(tmp_path):
     assert settings.policy_from_settings(loaded).also_target == ()
 
 
-@pytest.mark.parametrize("version", range(1, 9))
+@pytest.mark.parametrize("version", range(1, 10))
 def test_every_defaults_version_loads_with_an_empty_list(tmp_path, version):
     if version <= 6:
         text = (DATA / f"settings_v{version}.toml").read_text(encoding="utf-8")
     else:
         text = settings.render_default_settings()
-        text = text.replace("defaults_version = 8", f"defaults_version = {version}")
+        text = text.replace("defaults_version = 9", f"defaults_version = {version}")
         text = text.replace(ENTRY + "\n", "")
         assert "also_target" not in text
     loaded = load_settings(write(tmp_path, text))
@@ -78,13 +78,13 @@ def test_every_defaults_version_loads_with_an_empty_list(tmp_path, version):
     assert loaded.warnings == ()
 
 
-@pytest.mark.parametrize("version", range(1, 9))
+@pytest.mark.parametrize("version", range(1, 10))
 def test_every_defaults_version_may_list_packages(tmp_path, version):
     if version <= 6:
         text = (DATA / f"settings_v{version}.toml").read_text(encoding="utf-8")
     else:
         text = settings.render_default_settings().replace(
-            "defaults_version = 8", f"defaults_version = {version}"
+            "defaults_version = 9", f"defaults_version = {version}"
         )
     path = write(tmp_path, with_also(text, f'["{HELPER}", "com.example.two"]'))
     loaded = load_settings(path)

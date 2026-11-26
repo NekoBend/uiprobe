@@ -261,7 +261,15 @@ CONFIRM_WORDS: Final[tuple[str, ...]] = (
     "allow",
     "apply",
     "done",
+    "turn on",
+    "enable",
+    "オンにする",
+    "有効にする",
 )
+
+# The resource id of the positive button of a platform dialog. On a dialog
+# screen it is refused whatever its label (``dialog_confirm_button``).
+_DIALOG_POSITIVE_ID: Final = "android:id/button1"
 
 # A screen with more elements than this is not judged: every candidate gets
 # ``screen_too_large`` (see `judge`).

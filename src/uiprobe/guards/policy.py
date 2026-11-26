@@ -188,8 +188,9 @@ class Policy:
     ``RatingBar`` or ``Slider``), or whose press point lies on one, is not
     pressed, because a tap moves the control and changes a value.
     ``refuse_dialog_confirm`` (default True) applies the ``dialog_confirm_button``
-    reason; False drops only that reason (the ``confirm_button`` reason, a deny
-    word on the screen, stays).
+    reason, for a confirm label and for the dialog's positive button
+    (``android:id/button1``); False drops only that reason (the
+    ``confirm_button`` reason, a deny word on the screen, stays).
 
     ``skip_irreversible`` (default True) applies the ``irreversible_screen``
     reason with the phrases of ``irreversible_phrases``; False turns it off.

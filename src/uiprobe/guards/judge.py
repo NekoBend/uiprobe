@@ -8,6 +8,7 @@ from uiprobe.guards.constants import (
     _ACTION_BAR_ID,
     _CHECKABLE,
     _CLICKABLE,
+    _DIALOG_POSITIVE_ID,
     _DISABLED,
     _MIN_JOINED_PARTS,
     _NAVIGATE_UP,
@@ -658,6 +659,7 @@ class _Judge:
         self._word_rules(found, reasons, details)
         if found[_CONFIRM] != _NONE:
             self._confirm_reasons(i, own, found, reasons, details)
+        self._positive_button_reason(i, reasons, details)
         if point is not None and any(_contains(area, point) for area in self._avoid):
             reasons.append("screen_edge")
         return Decision(element, point, tuple(reasons), tuple(details))
@@ -798,6 +800,30 @@ class _Judge:
                     element_id=self.elements[root].id,
                 )
         return None
+
+    def _positive_button_reason(
+        self, i: int, reasons: list[Reason], details: list[Detail]
+    ) -> None:
+        if not self._in_positive_button(i):
+            return
+        if "dialog_confirm_button" not in reasons:
+            reasons.append("dialog_confirm_button")
+        note = f"the dialog's positive button ({_DIALOG_POSITIVE_ID})"
+        details.append(Detail("dialog_confirm_button", note=note))
+
+    def _in_positive_button(self, i: int) -> bool:
+        """True on a dialog screen (with ``refuse_dialog_confirm``) when the
+        element or one of its ancestors has the id of the dialog's positive
+        button, whatever its label.
+        """
+        if not (self.dialog and self.policy.refuse_dialog_confirm):
+            return False
+        parent = self.tree.parent
+        while i != -1:
+            if self.elements[i].resource_id == _DIALOG_POSITIVE_ID:
+                return True
+            i = parent[i]
+        return False
 
     def _confirm_reasons(
         self,
@@ -943,7 +969,11 @@ def judge(
     * ``dialog_confirm_button``: a confirm word is the label (same sources) and
       the screen is
       a dialog (its first top-level element is smaller than the display; the first
-      element with an unknown parent counts as top-level too).
+      element with an unknown parent counts as top-level too). On such a screen
+      the element whose resource id is exactly ``android:id/button1`` (the
+      platform dialog's positive button), and anything inside it, gets the
+      reason whatever its label (detail note: the dialog's positive button).
+      Both follow ``policy.refuse_dialog_confirm``.
     * ``screen_edge``: the press point lies in a ``policy.avoid`` rectangle
       (None means ``api36_fallback_areas(screen.display)``; ``()`` turns it off).
 
