@@ -197,6 +197,7 @@ from uiprobe.errors import (
     UiprobeError,
 )
 from uiprobe.guards import REASONS, Policy
+from uiprobe.htmlfile import HtmlInterruptedError
 from uiprobe.model import MAX_CANDIDATES, _describe
 from uiprobe.pngfile import (
     PngFileError,
@@ -360,7 +361,7 @@ def _interrupt_failure(exc: KeyboardInterrupt, *, as_json: bool) -> int:
             " incomplete, so delete it before running uiprobe init again"
         )
         return _fail(INTERRUPTED, msg, as_json=as_json)
-    if isinstance(exc, PngInterruptedError):
+    if isinstance(exc, PngInterruptedError | HtmlInterruptedError):
         shown = _printable(exc.path)
         msg = f"interrupted; {shown} was created and may be incomplete"
         details: dict[str, object] = {"path": exc.path, "created": True}

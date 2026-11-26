@@ -17,7 +17,10 @@ owner can open; no `exist_ok`, no parents),
 (create-only: an existing file is an error), and `handle.write(data)` (the
 write into a file that was just created). pngfile.py (the screenshot file)
 has only two of them, `open(path, 'xb')` and `handle.write(data)`, each with
-exactly one call site there. Each
+exactly one call site there. htmlfile.py (the page of `uiprobe tree --html`)
+has the other two, the create-only text `open(path, 'x', encoding='utf-8',
+newline='\\n')` and `handle.write(data)`, each with exactly one call site
+there. Each
 allowance holds only in its own file: a changed call, or an allowed call in a
 file whose entry does not list it, is flagged. Instead of listing what is
 dangerous after the fact, this check flags every REFERENCE (a call, but also
@@ -221,6 +224,7 @@ def process_starters(source: str) -> list[int]:
 # this check already flags. Anything else is flagged, whatever it is.
 APPROVED_IMPORTS: dict[str, str] = {
     "__future__": "compiler flags only",
+    "html": "html.escape() returns a string; the module has no file access",
     "argparse": "reads arguments; FileType is flagged, output goes to given streams",
     "collections.abc": "abstract base classes",
     "contextlib": "context-manager helpers; no file access",
@@ -385,6 +389,8 @@ RUNLOG_WRITE = "handle.write(data)"
 RUNLOG_CALLS = (RUNLOG_MKDIR, RUNLOG_OPEN_TEXT, RUNLOG_OPEN_BINARY, RUNLOG_WRITE)
 # The screenshot file: one create-only binary open and the one write after it.
 PNGFILE_CALLS = (RUNLOG_OPEN_BINARY, RUNLOG_WRITE)
+# The page of `tree --html`: one create-only text open and the one write after it.
+HTMLFILE_CALLS = (RUNLOG_OPEN_TEXT, RUNLOG_WRITE)
 
 # The permitted call sites: file name in src/uiprobe -> calls as `ast.unparse`
 # prints them. Each has a reason; keep the list short.
@@ -418,6 +424,10 @@ ALLOWED_CALLS: dict[str, frozenset[str]] = {
     # mode 'xb' fails when anything is at the path, a link and a folder
     # included. It makes no folder and opens no text file.
     "pngfile.py": frozenset(PNGFILE_CALLS),
+    # The page writer of `uiprobe tree --html` creates one new text file and
+    # writes the page into it: mode 'x' fails when anything is at the path, a
+    # link included. It makes no folder and opens no binary file.
+    "htmlfile.py": frozenset(HTMLFILE_CALLS),
 }
 
 
@@ -1760,12 +1770,13 @@ def test_a_changed_runlog_call_is_flagged(source, filename):
 
 # Where each runlog call is accepted, written out by hand. settings.py has its
 # own allowance for the identical create-only text open (the settings file),
-# and pngfile.py for the binary open and the write (the screenshot file).
+# pngfile.py for the binary open and the write (the screenshot file), and
+# htmlfile.py for the text open and the write (the page of `tree --html`).
 RUNLOG_CALL_FILES = {
     RUNLOG_MKDIR: {"runlog.py"},
-    RUNLOG_OPEN_TEXT: {"runlog.py", "settings.py"},
+    RUNLOG_OPEN_TEXT: {"runlog.py", "settings.py", "htmlfile.py"},
     RUNLOG_OPEN_BINARY: {"runlog.py", "pngfile.py"},
-    RUNLOG_WRITE: {"runlog.py", "pngfile.py"},
+    RUNLOG_WRITE: {"runlog.py", "pngfile.py", "htmlfile.py"},
 }
 
 
@@ -1777,6 +1788,7 @@ def test_a_runlog_call_is_accepted_only_where_listed(call):
         "sub/runlog.py",
         "sub/settings.py",
         "sub/pngfile.py",
+        "sub/htmlfile.py",
         "other.py",
     )
     accepted = {name for name in files if not file_changes(source, name)}
@@ -1831,20 +1843,22 @@ def _own_scope(node: ast.AST):
             yield from _own_scope(child)
 
 
-def write_handle_problems(source: str) -> list[str]:
-    """Why the one write in `source` may not go to the file `save_png` creates.
+def write_handle_problems(
+    source: str, saver: str = "save_png", opener: str = RUNLOG_OPEN_BINARY
+) -> list[str]:
+    """Why the one write in `source` may not go to the file `saver` creates.
 
-    The write must sit in `save_png`'s own scope, inside `with handle:`, where
-    `handle` is bound exactly once in the module: by the create-only open in
-    `save_png`. Any other binding of `handle` anywhere (a parameter, a match
+    The write must sit in `saver`'s own scope, inside `with handle:`, where
+    `handle` is bound exactly once in the module: by the create-only `opener`
+    in `saver`. Any other binding of `handle` anywhere (a parameter, a match
     capture, an except name, `with ... as handle`, `del`, ...) is a problem.
     """
     tree = ast.parse(source)
     problems = []
     functions = [n for n in tree.body if isinstance(n, ast.FunctionDef)]
-    save = next((f for f in functions if f.name == "save_png"), None)
+    save = next((f for f in functions if f.name == saver), None)
     if save is None:
-        return ["no save_png"]
+        return [f"no {saver}"]
     all_writes = [
         n
         for n in ast.walk(tree)
@@ -1870,7 +1884,7 @@ def write_handle_problems(source: str) -> list[str]:
         for n in _own_scope(save)
         if isinstance(n, ast.Assign)
         and [ast.unparse(t) for t in n.targets] == ["handle"]
-        and ast.unparse(n.value) == RUNLOG_OPEN_BINARY
+        and ast.unparse(n.value) == opener
     ]
     if unapproved_bindings(source, frozenset({"handle"})) != ["name store"] or (
         len(opens) != 1
@@ -1987,3 +2001,52 @@ def test_a_pngfile_call_still_has_its_arguments_checked():
     assert file_changes(nested, "pngfile.py", allowed) == [3]
     two = "import os\nopen(path, 'xb')\nopen(path, 'w')"
     assert file_changes(two, "pngfile.py") == [3]
+
+
+# --- the page writer of `tree --html`: two allowed calls, one site each ---
+
+
+def test_each_htmlfile_call_has_exactly_one_call_site():
+    tree = ast.parse(SOURCE_DIR.joinpath("htmlfile.py").read_text(encoding="utf-8"))
+    texts = [ast.unparse(n) for n in ast.walk(tree) if isinstance(n, ast.Call)]
+    for call in HTMLFILE_CALLS:
+        assert texts.count(call) == 1, call
+    assert ALLOWED_CALLS["htmlfile.py"] == frozenset(HTMLFILE_CALLS)
+
+
+def test_the_htmlfile_write_goes_to_the_file_it_created():
+    source = SOURCE_DIR.joinpath("htmlfile.py").read_text(encoding="utf-8")
+    assert write_handle_problems(source, "save_html", RUNLOG_OPEN_TEXT) == []
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        MOVED_WRITE.replace("save_png", "save_html").replace("'xb'", "'x'"),
+        REBOUND_HANDLE.replace("save_png", "save_html").replace("'xb'", "'x'"),
+        WRITE_AFTER_WITH.replace("save_png", "save_html").replace("'xb'", "'x'"),
+    ],
+)
+def test_a_write_to_another_handle_in_htmlfile_is_caught(source):
+    opener = "open(path, 'x')"
+    assert write_handle_problems(source, "save_html", opener)
+
+
+# The binary open and the folder call stay forbidden in htmlfile.py.
+HTMLFILE_ONLY_VARIANTS = [RUNLOG_MKDIR, RUNLOG_OPEN_BINARY]
+
+
+@pytest.mark.parametrize("source", [*RUNLOG_VARIANTS, *HTMLFILE_ONLY_VARIANTS])
+def test_a_changed_htmlfile_call_is_flagged(source):
+    source = source if source.startswith(("import", "from")) else "import os\n" + source
+    assert file_changes(source, "htmlfile.py")
+    assert file_changes(source, "other.py")
+
+
+@pytest.mark.parametrize("call", HTMLFILE_CALLS)
+def test_an_htmlfile_call_is_accepted_only_in_its_files(call):
+    source = "import os\n" + call
+    assert not file_changes(source, "htmlfile.py")
+    for other in ("cli.py", "device.py", "sub/htmlfile.py", "other.py"):
+        assert file_changes(source, other)
+    assert file_changes(source)

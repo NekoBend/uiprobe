@@ -6,18 +6,31 @@ import argparse  # noqa: TC003 (a runtime import in the former cli.py)
 import re
 import sys
 from dataclasses import dataclass, field, replace
-from typing import Final
+from pathlib import Path
+from typing import Final, Literal
 
 from uiprobe._json import dumps
 from uiprobe.cli.output import _emit, _printable
 from uiprobe.cli.parser import _UsageError
+from uiprobe.cli.tree_html import (
+    FOLD_OTHER,
+    FOLD_POPUP,
+    HFold,
+    HPage,
+    HRow,
+    HSection,
+    anchor_id,
+    render_page,
+)
 from uiprobe.crawl_tree import (
     Row,
     RunTree,
+    ScreenNode,
     TreeError,
     read_tree,
     tree_to_dict,
 )
+from uiprobe.htmlfile import HtmlFileError, check_html_path, save_html
 from uiprobe.settings import _shown
 
 LEGEND: Final = "· = not pressed, so nothing below it was looked at"
@@ -34,6 +47,9 @@ LEGEND_AGAIN: Final = (
     "(pressed again) = the row above was pressed again and led to the screen below"
 )
 LEGEND_POPUP: Final = "[popup] = pressing it opened a popup; its contents are in --json"
+LEGEND_POPUP_HTML: Final = (
+    "[popup] = pressing it opened a popup; its rows are in the fold below it"
+)
 POPUP_MARK: Final = " [popup]"
 _NO_TEXT: Final = "screen texts were not recorded in this run (record_text = false)"
 _FIRST_SCREEN: Final = "first screen"
@@ -92,6 +108,11 @@ class _Entry:
     again: bool = False  # a further sent tap on the same row
     more: tuple[dict[str, object], ...] = ()
     name: str = ""
+    # The parts of the line, for the HTML page (`text` is their text form).
+    label: str | None = None
+    note: str = ""
+    dot: bool = False
+    reasons: str = ""
 
 
 def _heading_text(tree: RunTree, sid: str) -> str:
@@ -141,11 +162,9 @@ def _keeps_line(row: Row, *, folded: bool) -> bool:
     return True
 
 
-def _row_line(
-    row: Row, note: str | None, *, why: bool, tally: _Tally
-) -> tuple[str, str]:
-    """The line of a row and its name as shown. The marks it uses are noted in
-    `tally`, for the legend."""
+def _row_line(row: Row, note: str | None, *, why: bool, tally: _Tally) -> _Entry:
+    """The entry of a row: its line (`text`) and the parts of the line. The marks
+    it uses are noted in `tally`, for the legend."""
     name = _label(row.name)
     if row.name_from == "content_desc" and DESC_ONLY_ROWS == "quoted":
         name = '"' + name.translate({ord('"'): '\\"'}) + '"'
@@ -153,12 +172,22 @@ def _row_line(
     line = name + (note or "")
     if note is not None and row.to is not None and "other_app" in row.to:
         tally.marks.add("arrow")
+    reasons = ""
     if not row.pressed:
         tally.marks.add("dot")
         line += " ·"
         if why and row.reasons:
-            line += " [" + ", ".join(_printable(r) for r in row.reasons) + "]"
-    return line, name
+            reasons = " [" + ", ".join(_printable(r) for r in row.reasons) + "]"
+            line += reasons
+    return _Entry(
+        line,
+        row.to,
+        name=name,
+        label=name,
+        note=note or "",
+        dot=not row.pressed,
+        reasons=reasons,
+    )
 
 
 def _merged(row: Row, folded: list[Row]) -> Row:
@@ -193,14 +222,93 @@ def _merged(row: Row, folded: list[Row]) -> Row:
     )
 
 
+def _left_out_lines(row: Row, name: str, *, kept: bool) -> list[str]:
+    """What the text tree leaves out of a row's endings, for the HTML page."""
+    lines: list[str] = []
+    for to in _endings(row):
+        kind = _kind_of(to)
+        if kind not in _COUNTED:
+            continue
+        note = _note(to, kind)
+        if kept and kind in NOTES_IN_TEXT and note is not None:
+            continue
+        result = note if note is not None else " → (another app)"
+        line = f"result of pressing {name}:{result}"
+        if line not in lines:
+            lines.append(line)
+    return lines
+
+
+class _Others:
+    """What the text tree leaves out of one screen, as lines for the HTML page."""
+
+    def __init__(self) -> None:
+        self.lines: list[str] = []
+
+    def unmatched(self, node: ScreenNode) -> None:
+        self.lines.extend(_unmatched_lines(node))
+
+    def row(self, row: Row, *, kept: bool) -> None:
+        self.lines.extend(_left_out(row, kept=kept))
+
+
+class _NoOthers(_Others):
+    """The text path: nothing is collected."""
+
+    def unmatched(self, node: ScreenNode) -> None:
+        pass
+
+    def row(self, row: Row, *, kept: bool) -> None:
+        pass
+
+
+_NO_OTHERS: Final = _NoOthers()
+
+
+def _unmatched_lines(node: ScreenNode) -> list[str]:
+    suffix = f" ({_printable(node.unmatched_why)})" if node.unmatched_why else ""
+    return [
+        "skip record not matched to a row: "
+        f"{_printable(fingerprint)} [{', '.join(_printable(r) for r in reasons)}]"
+        f"{suffix}"
+        for fingerprint, reasons in node.unmatched
+    ]
+
+
+def _left_out(row: Row, *, kept: bool) -> list[str]:
+    """The lines of the HTML page for what the text tree leaves out of a row."""
+    shown = _label(row.name)
+    lines: list[str] = []
+    if row.kind == "text":
+        lines.append(f"text outside rows: {shown}")
+    elif not kept:
+        what = (
+            "unnamed element"
+            if row.name_from == "none"
+            else "row named only by a description"
+        )
+        lines.append(f"{what}: {shown}")
+    return [*lines, *_left_out_lines(row, shown, kept=kept)]
+
+
 def _entries(
-    tree: RunTree, sid: str, *, ids: bool, why: bool, tally: _Tally
+    tree: RunTree,
+    sid: str,
+    *,
+    ids: bool,
+    why: bool,
+    tally: _Tally,
+    others: _Others | None = None,
 ) -> list[_Entry]:
+    """The entries of a screen. `others`, when given, collects each item the
+    text tree leaves out (for the HTML page only)."""
     node = tree.screens[sid]
     entries: list[_Entry] = []
     if ids:
         entries.append(_Entry(_heading_text(tree, sid)))
     tally.unmatched += len(node.unmatched)
+    extra = _NO_OTHERS if others is None else others
+    extra.unmatched(node)
     folds: dict[str, list[Row]] = {}
     for row in node.rows:
         if row.folded_into is not None:
@@ -211,8 +319,10 @@ def _entries(
         row = _merged(line_row, folds.get(line_row.element_id, []))
         if row.kind == "text":
             tally.texts += 1
+            extra.row(row, kept=False)
             continue
         kept = _keeps_line(row, folded=line_row.element_id in folds)
+        extra.row(row, kept=kept)
         note = None
         if row.to is not None and _kind_of(row.to) != "screen":
             kind = _kind_of(row.to)
@@ -232,9 +342,10 @@ def _entries(
             else:
                 tally.desc_only += 1
             continue
-        line, name = _row_line(row, note, why=why, tally=tally)
-        tally.names[name] = tally.names.get(name, 0) + 1
-        entries.append(_Entry(line, row.to, more=tuple(row.also_to), name=name))
+        entry = _row_line(row, note, why=why, tally=tally)
+        tally.names[entry.name] = tally.names.get(entry.name, 0) + 1
+        entry.more = tuple(row.also_to)
+        entries.append(entry)
     return entries
 
 
@@ -247,7 +358,13 @@ _SUMMARY: Final = (
 )
 
 
-def _summary(tally: _Tally) -> str | None:
+_SUMMARY_TEXT: Final = "left out of the tree (see --json): "
+_SUMMARY_HTML: Final = (
+    "not shown as rows (in the folds below each screen, and in --json): "
+)
+
+
+def _summary(tally: _Tally, prefix: str = _SUMMARY_TEXT) -> str | None:
     """The last line: what the text tree leaves out, with counts."""
     parts = [
         f"{label}: {tally.ends[kind]}" for kind, label in _SUMMARY if kind in tally.ends
@@ -263,7 +380,7 @@ def _summary(tally: _Tally) -> str | None:
             parts.append(f"{label}: {count}")
     if not parts:
         return None
-    return "left out of the tree (see --json): " + ", ".join(parts)
+    return prefix + ", ".join(parts)
 
 
 def _orphan_heading(tree: RunTree, sid: str) -> str:
@@ -296,10 +413,34 @@ def _draw(items: list[tuple[int, str]]) -> list[str]:
 _SEE: Final = re.compile("\x00([^\x00]*)\x00")  # a note waiting for its name
 
 
+@dataclass(slots=True)
+class _Node:
+    """A drawn line, for the HTML page: its entry and what hangs on it."""
+
+    depth: int
+    entry: _Entry
+    popup: str | None = None  # the popup screen the line ends in ` [popup]` for
+    see: str | None = None  # the screen the line ends in `→ see:` for
+    opens: str | None = None  # the screen whose rows are drawn below the line
+
+
+@dataclass(slots=True)
+class _Section:
+    """The first line of the tree, or a screen no pressed row led to."""
+
+    sid: str | None
+    heading: str
+    popup: bool = False
+    nodes: list[_Node] = field(default_factory=list)
+
+
 class _Renderer:
     """Draws the tree: each screen is listed once, where it is first reached."""
 
-    def __init__(self, tree: RunTree, *, ids: bool, why: bool) -> None:
+    def __init__(
+        self, tree: RunTree, *, ids: bool, why: bool, html: bool = False
+    ) -> None:
+        self.html = html  # build what only the HTML page needs
         self.tree = tree
         self.ids = ids
         self.why = why
@@ -308,6 +449,10 @@ class _Renderer:
         self.paths: dict[str, tuple[str, ...]] = {}  # ... and the rows above it
         self.tally = _Tally()
         self.hidden: set[str] = set()  # popup screens named by a mark, not drawn
+        self.sections: list[_Section] = []
+        self.nodes: list[_Node] = []  # the lines of the run being drawn
+        self.others: dict[str, _Others] = {}  # what a drawn screen leaves out
+        self.html_marks: set[str] = set()  # marks of rows only the HTML shows
 
     def popup(self, sid: str) -> bool:
         """Whether a row that led to `sid` ends in ` [popup]`: the screen is a
@@ -330,7 +475,15 @@ class _Renderer:
     def open_screen(self, sid: str, name: str, path: tuple[str, ...]) -> list[_Entry]:
         self.expanded[sid] = name
         self.paths[sid] = path
-        return _entries(self.tree, sid, ids=self.ids, why=self.why, tally=self.tally)
+        others = self.others.setdefault(sid, _Others() if self.html else _NO_OTHERS)
+        return _entries(
+            self.tree,
+            sid,
+            ids=self.ids,
+            why=self.why,
+            tally=self.tally,
+            others=others,
+        )
 
     def see(self, sid: str) -> str:
         """The note for a row that led to a screen that is already drawn. The
@@ -339,18 +492,44 @@ class _Renderer:
         self.tally.marks.add("see")
         return f" → see: \x00{sid}\x00"
 
+    def seen_name(self, sid: str) -> str:
+        """The name that `→ see:` gives for the screen `sid`."""
+        name = self.expanded[sid]
+        path = self.paths[sid]
+        if self.tally.names.get(name, 0) > 1 and path:
+            return " > ".join(path)
+        return name
+
     def seen_as(self, line: str) -> str:
         """Put the names into the notes of a line."""
+        return _SEE.sub(lambda match: self.seen_name(match[1]), line)
 
-        def name_of(match: re.Match[str]) -> str:
-            sid = match[1]
-            name = self.expanded[sid]
-            path = self.paths[sid]
-            if self.tally.names.get(name, 0) > 1 and path:
-                return " > ".join(path)
-            return name
+    def track(self, depth: int, entry: _Entry) -> None:
+        """Remember a drawn line (the HTML page needs it)."""
+        if self.html:
+            self.nodes.append(_Node(depth, entry))
 
-        return _SEE.sub(name_of, line)
+    def tag(self, what: Literal["popup", "see", "opens"], sid: str) -> None:
+        """Say what hangs on the line just drawn."""
+        if not self.html:
+            return
+        node = self.nodes[-1]
+        if what == "popup":
+            node.popup = sid
+        elif what == "see":
+            node.see = sid
+        else:
+            node.opens = sid
+
+    def mark_popup(self, items: list[tuple[int, str]], target: str) -> None:
+        depth, text = items[-1]
+        items[-1] = (depth, text + POPUP_MARK)
+        self.tag("popup", target)
+
+    def mark_see(self, items: list[tuple[int, str]], target: str) -> None:
+        depth, text = items[-1]
+        items[-1] = (depth, text + self.see(target))
+        self.tag("see", target)
 
     def below_of(
         self, entry: _Entry, items: list[tuple[int, str]], path: tuple[str, ...]
@@ -364,13 +543,12 @@ class _Renderer:
         target = to.get("screen_id")
         if isinstance(target, str):
             if self.popup(target):
-                depth, text = items[-1]
-                items[-1] = (depth, text + POPUP_MARK)
+                self.mark_popup(items, target)
             elif target not in self.expanded:
                 below = self.screen_below(target, entry.name, (*path, entry.name))
+                self.tag("opens", target)
             elif "screen_above" in NOTES_IN_TEXT:
-                depth, text = items[-1]
-                items[-1] = (depth, text + self.see(target))
+                self.mark_see(items, target)
         again: list[_Entry] = []
         for e in entry.more:
             kind = _kind_of(e)
@@ -394,6 +572,8 @@ class _Renderer:
     def run(self, sid: str, name: str, path: tuple[str, ...] = ()) -> None:
         """List the screen `sid` and everything first reached below it."""
         items: list[tuple[int, str]] = []
+        self.nodes = self.sections[-1].nodes
+        self.sections[-1].sid = sid
         frames = [(self.open_screen(sid, name, path), 0, 0, path)]
         while frames:
             entries, index, depth, here = frames.pop()
@@ -407,17 +587,20 @@ class _Renderer:
                 assert isinstance(target, str)  # noqa: S101
                 self.tally.marks.add("again")
                 items.append((depth, entry.text))
+                self.track(depth, entry)
                 if self.popup(target):
-                    items[-1] = (depth, entry.text + POPUP_MARK)
+                    self.mark_popup(items, target)
                     continue
                 if target in self.expanded:
                     if "screen_above" in NOTES_IN_TEXT:
-                        items[-1] = (depth, entry.text + self.see(target))
+                        self.mark_see(items, target)
                     continue
                 below = self.screen_below(target, entry.name, here)
+                self.tag("opens", target)
                 child = here
             else:
                 items.append((depth, entry.text))
+                self.track(depth, entry)
                 below = self.below_of(entry, items, here)
                 child = (*here, entry.name)
             if below:
@@ -425,14 +608,15 @@ class _Renderer:
         self.lines.extend(_draw(items))
 
 
-def render_text(tree: RunTree, *, ids: bool = False, why: bool = False) -> list[str]:
-    """The lines of the text tree."""
+def _drawn(tree: RunTree, *, ids: bool, why: bool, html: bool = False) -> _Renderer:
+    """Draw the tree: everything above the legend."""
     label = tree.label if tree.label is not None else tree.package
     first = f"{_printable(label)} ({_printable(tree.package)})"
     if not tree.record_text:
         first += f"  {_NO_TEXT}"
-    drawn = _Renderer(tree, ids=ids, why=why)
+    drawn = _Renderer(tree, ids=ids, why=why, html=html)
     drawn.lines.append(first)
+    drawn.sections.append(_Section(None, first))
     if tree.root is not None:
         drawn.run(tree.root, _FIRST_SCREEN)
     # Screens no tap led to come first; then any that only taps among
@@ -447,25 +631,189 @@ def render_text(tree: RunTree, *, ids: bool = False, why: bool = False) -> list[
             heading = _orphan_heading(tree, sid)
             if drawn.popup(sid):  # the rows of a popup are never drawn
                 drawn.lines.append(heading + POPUP_MARK)
+                drawn.sections.append(_Section(sid, heading, popup=True))
                 continue
             drawn.lines.append(heading)
+            drawn.sections.append(_Section(sid, heading))
             name = f"screen {_printable(sid)}"
             drawn.run(sid, name, (name,))
-    for mark, text in (
-        ("dot", LEGEND),
-        ("desc", LEGEND_DESC),
-        ("arrow", LEGEND_ARROW),
-        ("see", LEGEND_SEE),
-        ("popup", LEGEND_POPUP),
-        ("again", LEGEND_AGAIN),
-        ("empty", LEGEND_EMPTY),
-    ):
+    return drawn
+
+
+_LEGENDS: Final = (
+    ("dot", LEGEND),
+    ("desc", LEGEND_DESC),
+    ("arrow", LEGEND_ARROW),
+    ("see", LEGEND_SEE),
+    ("popup", LEGEND_POPUP),
+    ("again", LEGEND_AGAIN),
+    ("empty", LEGEND_EMPTY),
+)
+
+
+def render_text(tree: RunTree, *, ids: bool = False, why: bool = False) -> list[str]:
+    """The lines of the text tree."""
+    drawn = _drawn(tree, ids=ids, why=why)
+    for mark, text in _LEGENDS:
         if mark in drawn.tally.marks:
             drawn.lines.append(text)
     summary = _summary(drawn.tally)
     if summary is not None:
         drawn.lines.append(summary)
     return [drawn.seen_as(line) for line in drawn.lines]
+
+
+class _HtmlBuilder:
+    """Turns what `_Renderer` drew into the model of the HTML page."""
+
+    def __init__(self, drawn: _Renderer) -> None:
+        self.drawn = drawn
+        self.used: set[str] = set()
+        self.anchors: dict[str, str] = {}
+        self.popups: dict[str, HFold] = {}
+
+    def anchor(self, sid: str) -> str:
+        if sid not in self.anchors:
+            self.anchors[sid] = anchor_id(sid, self.used)
+        return self.anchors[sid]
+
+    def other_fold(self, others: _Others | None) -> HFold | None:
+        if others is None or not others.lines:
+            return None
+        return HFold(f"{FOLD_OTHER} ({len(others.lines)})", list(others.lines))
+
+    def popup_fold(self, sid: str) -> HFold:
+        """The rows of a popup screen, flat, then what it leaves out. Its marks
+        are kept for the legend; nothing here changes the counts."""
+        if sid not in self.popups:
+            drawn = self.drawn
+            scratch = _Tally()
+            others = _Others()
+            entries = _entries(
+                drawn.tree, sid, ids=False, why=drawn.why, tally=scratch, others=others
+            )
+            drawn.html_marks |= scratch.marks - {"popup"}
+            children: list[HRow | HFold | str] = [self.retried(e) for e in entries]
+            fold = self.other_fold(others)
+            if fold is not None:
+                children.append(fold)
+            self.popups[sid] = HFold(f"{FOLD_POPUP} ({len(entries)})", children)
+        return self.popups[sid]
+
+    def retried(self, entry: _Entry) -> HRow:
+        """A row of a popup fold with its further results, in the forms the
+        text tree uses below a row: `(pressed again)`, with `→ PACKAGE` for
+        another app. A further result of another kind is a line of the
+        `Other items` fold."""
+        row = self.row(entry)
+        for ending in entry.more:
+            kind = _kind_of(ending)
+            note = _note(ending, kind) if kind != "screen" else None
+            if kind == "screen" or (kind in NOTES_IN_TEXT and note is not None):
+                self.drawn.html_marks.add("again")
+                if kind == "other_app":
+                    self.drawn.html_marks.add("arrow")
+                row.children.append(HRow("(pressed again)", note or ""))
+        return row
+
+    def row(self, entry: _Entry) -> HRow:
+        if entry.label is None:
+            return HRow(entry.text)
+        return HRow(entry.label, entry.note, entry.dot, entry.reasons)
+
+    def forest(self, section: _Section) -> list[HRow | HFold]:
+        """The rows of a section, with the folds that hang on them."""
+        roots: list[HRow | HFold] = []
+        stack: list[tuple[int, HRow, str | None]] = []
+
+        def finish(opens: str | None, row: HRow | None) -> None:
+            fold = self.other_fold(self.drawn.others.get(opens)) if opens else None
+            if fold is not None:
+                (roots if row is None else row.children).append(fold)
+
+        for node in section.nodes:
+            while stack and stack[-1][0] >= node.depth:
+                _, done, opens = stack.pop()
+                finish(opens, done)
+            row = self.row(node.entry)
+            if node.opens is not None:
+                row.anchor = self.anchor(node.opens)
+            if node.see is not None:
+                row.see = (self.anchor(node.see), self.drawn.seen_name(node.see))
+            if node.popup is not None:
+                row.popup = True
+                row.children.append(self.popup_fold(node.popup))
+            (stack[-1][1].children if stack else roots).append(row)
+            stack.append((node.depth, row, node.opens))
+        while stack:
+            _, done, opens = stack.pop()
+            finish(opens, done)
+        if section.sid is not None:
+            finish(section.sid, None)
+        return roots
+
+    def section(self, section: _Section) -> HSection:
+        built = HSection(section.heading, popup=section.popup)
+        if section.sid is not None and not section.popup:
+            built.anchor = self.anchor(section.sid)
+        built.children = self.forest(section)
+        if section.popup and section.sid is not None:
+            built.children.append(self.popup_fold(section.sid))
+        return built
+
+
+def render_html(tree: RunTree, *, ids: bool = False, why: bool = False) -> str:
+    """The HTML page of the tree: the rows of the text tree, collapsible, with
+    the rows of each popup and what the text tree leaves out in closed folds."""
+    drawn = _drawn(tree, ids=ids, why=why, html=True)
+    builder = _HtmlBuilder(drawn)
+    sections = [builder.section(s) for s in drawn.sections]
+    marks = drawn.tally.marks | drawn.html_marks
+    page = HPage(
+        package=_printable(tree.package),
+        head=sections[0],
+        orphans=sections[1:],
+        legend=[
+            LEGEND_POPUP_HTML if mark == "popup" else text
+            for mark, text in _LEGENDS
+            if mark in marks
+        ],
+        summary=_summary(drawn.tally, _SUMMARY_HTML),
+    )
+    return render_page(page)
+
+
+def _html_refusal(out: str, error: Exception) -> _UsageError:
+    shown = _printable(out)
+    if isinstance(error, FileExistsError):
+        return _UsageError(f"--html {shown}: already exists; give a new file name")
+    if isinstance(error, FileNotFoundError):
+        return _UsageError(f"--html {shown}: the folder does not exist")
+    detail = error.strerror if isinstance(error, OSError) else str(error)
+    return _UsageError(f"--html {shown}: cannot be created: {_printable(detail or '')}")
+
+
+def _check_html_target(out: str, run_dir: str) -> None:
+    """Refuse an output path `save_html` would refuse, and one inside the run
+    folder (both resolved), before the run folder is read."""
+    try:
+        check_html_path(out)
+        inside = Path(out).resolve().is_relative_to(Path(run_dir).resolve())
+    except (OSError, ValueError) as error:
+        raise _html_refusal(out, error) from None
+    if inside:
+        shown = _printable(out)
+        msg = f"--html {shown}: is inside the run folder; give a path outside it"
+        raise _UsageError(msg)
+
+
+def _save_html(out: str, page: str) -> None:
+    try:
+        save_html(out, page)
+    except (OSError, ValueError) as error:
+        if isinstance(error, HtmlFileError):
+            raise
+        raise _html_refusal(out, error) from None
 
 
 def _cmd_tree(args: argparse.Namespace) -> int:
@@ -480,11 +828,23 @@ def _cmd_tree(args: argparse.Namespace) -> int:
         )
         raise _UsageError(msg)
     path = str.__str__(args.run_dir)
+    out = args.html
+    if out is not None:
+        if args.json:
+            msg = "--html cannot be combined with --json"
+            raise _UsageError(msg)
+        _check_html_target(out, path)
     try:
         tree = read_tree(path)
     except TreeError as exc:
         msg = f"{_shown(path)}: {exc}"
         raise _UsageError(msg) from None
+    if out is not None:
+        for warning in tree.warnings:
+            _emit(f"uiprobe: warning: {_printable(warning)}", stream=sys.stderr)
+        _save_html(out, render_html(tree, ids=args.ids, why=args.why))
+        _emit(_printable(out))
+        return 0
     if args.json:
         _emit(_json_text(tree))
         return 0
