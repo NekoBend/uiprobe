@@ -264,8 +264,8 @@ def drive(eng, phone, *, policy=POLICY, max_steps=3000, depth=None, watch=None):
 def check_tap(tap, observation, policy):
     screen = observation.screen
     assert screen is not None
-    assert screen.package == PKG
-    assert observation.foreground == PKG
+    assert screen.package in (PKG, *policy.also_target)
+    assert observation.foreground == screen.package
     judgement = judge(screen, PKG, policy, foreground=observation.foreground)
     matching = [
         d

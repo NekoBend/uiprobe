@@ -149,6 +149,7 @@ from uiprobe.device.launch import (  # noqa: F401
     MAX_LAUNCH_TIMEOUT,
     SYSTEM_PACKAGE,
     _check_launch_timeout,
+    _home_package,
     _is_component,
     _launcher_component,
     _shown_foreground,

@@ -28,9 +28,14 @@ relaunch), so a wrong estimate costs actions, not safety. The edge cases
 where screen ids change are listed under the stated limits below.
 
 * Range. A screen is the target only when the package of the dump and the
-  foreground package both equal the target package; an unknown foreground
-  (None) is not the target. Off target the engine sends nothing to the screen
-  in front: it relaunches the app (the driver force-stops it, then starts it).
+  foreground package both equal the target package, or both equal one package
+  of ``Policy.also_target`` (never a permission package, which stays off
+  target); an unknown foreground (None) is not the target. A listed package's
+  screens are target screens in every respect (judged with every guard, depth
+  and tried marks, the path and BACK); the engine never launches it, a
+  relaunch always starts the target app. Off target the engine sends nothing to
+  the screen in front: it relaunches the app (the driver force-stops it, then
+  starts it).
   Only with ``Policy.back_on_other_screens`` True does it press BACK off
   target, and then it relaunches after 2 BACKs in a row without a target
   screen. After 3 relaunches in a row it stops with ``relaunch_limit``; the 4th

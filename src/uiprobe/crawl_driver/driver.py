@@ -8,6 +8,11 @@ import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from uiprobe.also_target import (
+    check_also_target,
+    check_home,
+    not_installed_error,
+)
 from uiprobe.crawl import CrawlEngine, Limits, _check_clock
 from uiprobe.crawl_driver.constants import (
     _OWN_CLOCK,
@@ -22,7 +27,7 @@ from uiprobe.crawl_driver.run import _Run
 from uiprobe.crawl_preview import check_package
 from uiprobe.device import PIN_WAIT_STOPPED, _monotonic, forget_displays
 from uiprobe.errors import DeviceNotFoundError, NotEmulatorError, UiprobeError
-from uiprobe.guards import Policy
+from uiprobe.guards import PERMISSION_PACKAGES, Policy
 from uiprobe.runlog import RunFolderError, RunWriter
 
 if TYPE_CHECKING:
@@ -30,6 +35,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from uiprobe.device import Device
+    from uiprobe.packageuid import PackageUid
 
 
 @dataclass(frozen=True, slots=True)
@@ -51,7 +57,9 @@ class CrawlResult:
     ``other_apps`` the packages in front when the engine acted on a screen of
     another app (a BACK, a relaunch, or the stop at the relaunch limit), with
     how many times each, most frequent first and, for equal counts, first seen
-    first.
+    first. ``also_target_notes`` holds the notes about ``Policy.also_target``
+    made before the run folder existed (the home app of the device could not
+    be read); it is empty when the list is empty.
     """
 
     out: Path
@@ -67,6 +75,7 @@ class CrawlResult:
     cover_rule: str | None = None
     last_focus: str | None = None
     other_apps: tuple[tuple[str, int], ...] = ()
+    also_target_notes: tuple[str, ...] = ()
 
 
 def _check_flag(name: str, value: object) -> None:
@@ -189,7 +198,8 @@ def crawl(
     image is taken after the dump, so it can differ if the app changed
     between them.
 
-    Only screens of the target app are written to ``screens/``; a screen of
+    Only screens of the target app, and of the packages of
+    ``policy.also_target``, are written to ``screens/``; a screen of
     another app (a permission dialog, the launcher) gets its id in the
     transition lines and, on the start line of a BACK or relaunch decided on
     it, ``off_target`` with its package, the foreground and the focus owner.
@@ -211,6 +221,12 @@ def crawl(
             value outside [0, 2**40) before the run folder was made.
         NotEmulatorError: The device is not an emulator (or the check cannot
             be read) and `allow_real_device` is False. Nothing was written.
+        AlsoTargetError: ``policy.also_target`` lists a package that is not
+            a package name, is listed twice, is `package`, is the system UI,
+            a home app (the fixed list, or the device's own, read once with
+            ``Device.home_package``), or is not installed (only read with
+            ``policy.check_tap_window``). Nothing was written or sent; with
+            the list empty nothing extra is read.
         AdbError: The adb server reported no transport id for the device, so
             it cannot be pinned. Nothing was written.
         LaunchFailedError: A launch failed other than by not coming to the
@@ -231,6 +247,8 @@ def crawl(
         msg = f"policy must be a Policy, not {type(policy).__name__}"
         raise TypeError(msg)
     policy = _plain_policy(policy)
+    # Pure checks of the list, before any device is contacted.
+    check_also_target(package, policy.also_target)
     if not isinstance(limits, Limits):
         msg = f"limits must be a Limits, not {type(limits).__name__}"
         raise TypeError(msg)
@@ -323,6 +341,7 @@ def _crawl_on(
     # and whether other packages share it; None when it cannot be read: then
     # every tap is refused (cover_unknown) before any window is read.
     app_uid = device.package_uid(package) if policy.check_tap_window else None
+    also_notes, also_uids = _check_also_target(device, policy)
     # The run's end by uiprobe's own clock, set once. With uiprobe's own
     # clock (the default) it is read once, for both. With a clock of the
     # caller's, uiprobe's is read before the caller's first value, and a
@@ -347,6 +366,7 @@ def _crawl_on(
         check_tap_window=policy.check_tap_window,
         restart=restart,
         record_text=record_text,
+        also_target=policy.also_target,
     )
     try:
         run = _Run(
@@ -357,6 +377,7 @@ def _crawl_on(
             policy,
             emulator=not allow_real_device,
             app_uid=app_uid,
+            also_uids=also_uids,
             screenshots=screenshots,
             settle=settle,
             deadline=started_at + limits.minutes * 60,
@@ -368,6 +389,7 @@ def _crawl_on(
             restart=restart,
         )
         run.repins_before = repins_before  # moves made before this call
+        run.also_target_notes = also_notes
         # Asked only while the device waits for a renumbered transport.
         device.set_pin_watch(run.waiting_stopped)
         return _drive(run, writer)
@@ -381,6 +403,41 @@ def _crawl_on(
         except BaseException as error:  # an interrupt while it closes
             _mark_own_run_folder(error)
             raise
+
+
+def _check_also_target(
+    device: Device, policy: Policy
+) -> tuple[tuple[str, ...], dict[str, PackageUid]]:
+    """Read what the listed packages need, before the run folder is made.
+
+    With ``policy.also_target`` empty nothing is read or sent. Otherwise the
+    device's home app is read once (`Device.home_package`; a listed package
+    that equals it is refused, a read that fails gives a note and leaves the
+    fixed list, which `check_also_target` already applied), then, with
+    ``policy.check_tap_window``, the uid of each listed package with the same
+    ``package_uid`` read as the app's (one that cannot be read is refused: the
+    package is not installed). A permission package is not read: it never
+    counts as the app (its screens stay off target). Returns the notes and the
+    uids.
+
+    Raises:
+        AlsoTargetError: A listed package is the device's home app, or is not
+            installed.
+    """
+    listed = policy.also_target
+    if not listed:
+        return (), {}
+    note = check_home(listed, device.home_package())
+    uids: dict[str, PackageUid] = {}
+    if policy.check_tap_window:
+        for name in listed:
+            if name in PERMISSION_PACKAGES:
+                continue  # never the app's own: its uid is not needed
+            uid = device.package_uid(name)
+            if uid is None:
+                raise not_installed_error(name)
+            uids[name] = uid
+    return (() if note is None else (note,)), uids
 
 
 def _mark_own_run_folder(error: BaseException) -> None:
@@ -451,7 +508,7 @@ def _end(
     by the result, not raised.
     """
     screens, actions = run.count()
-    notes = list(run.notes)
+    notes = [*run.also_target_notes, *run.notes]
     repins = run.device.repins[run.repins_before :]
     notes.extend(
         f"transport {old} -> {new} for {run.device.serial}:"
@@ -497,4 +554,5 @@ def _result(run: _Run, writer: RunWriter, reason: str) -> CrawlResult:
         last_foreground=run.last_foreground,
         last_focus=None if run.focus is None else run.focus.owner,
         other_apps=_ranked(run.other_apps),
+        also_target_notes=run.also_target_notes,
     )

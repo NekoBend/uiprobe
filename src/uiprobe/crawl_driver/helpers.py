@@ -136,6 +136,7 @@ def _plain_policy(policy: Policy) -> Policy:
         skip_navigate_up=_flag("skip_navigate_up", policy.skip_navigate_up),
         skip_sliders=_flag("skip_sliders", policy.skip_sliders),
         replay_path=_flag("replay_path", policy.replay_path),
+        also_target=_words("also_target", policy.also_target),
     )
 
 
@@ -289,7 +290,10 @@ def _skipped_element(
         index = found.get(screen.screen_id)
         if index is None:
             prints = _Prints(screen)
-            judgement = judge(screen, package, policy, foreground=package)
+            # The foreground is the screen's own package for a listed one
+            # (Policy.also_target), else the app, as on every judged screen.
+            front = screen.package if screen.package in policy.also_target else package
+            judgement = judge(screen, package, policy, foreground=front)
             reasons = {d.element.id: tuple(d.reasons) for d in judgement.decisions}
             index = {}
             for element in screen.elements:

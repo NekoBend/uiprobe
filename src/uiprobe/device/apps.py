@@ -5,11 +5,13 @@ from __future__ import annotations
 from typing import Final
 
 from uiprobe.adb import quote_args
+from uiprobe.also_target import HOME_COMMAND
 from uiprobe.crawl_preview import check_package
 from uiprobe.device.failure import _EXIT_SUFFIX, _escaped, _escaped_line, _input_failure
 from uiprobe.device.launch import (
     _FOREGROUND_LIMIT,
     _check_launch_timeout,
+    _home_package,
     _launcher_component,
     _shown_foreground,
     _start_failure,
@@ -371,6 +373,24 @@ class _AppsMixin(_DeviceState):
         if isinstance(package, str):
             package = str.__str__(package)
         return self._launcher_activity(check_package(package))
+
+    def home_package(self) -> str | None:
+        """Return the package of the device's home app, None when not readable.
+
+        It sends `uiprobe.also_target.HOME_COMMAND` followed by ``; echo
+        uiprobe-exit:$?`` (a read: nothing on the device changes) and takes
+        the package of the last line before the marker (``pkg/.Activity``).
+        None means the output was not of that form (another exit status, no
+        component, ``android`` when the system asks which home app to use).
+
+        Raises:
+            AdbError: The adb protocol or the command failed.
+            AdbServerUnavailableError: The adb server cannot be reached.
+            DeviceNotFoundError: The device is gone.
+            DeviceOfflineError: The device is offline.
+            DeviceUnauthorizedError: The device has not authorized this host.
+        """
+        return _home_package(self._shell_text(HOME_COMMAND + _EXIT_SUFFIX))
 
     def _launcher_activity(self, package: str, *, strict: bool = False) -> str:
         """Read the launcher activity; `strict` sends the read only to a device

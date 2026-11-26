@@ -108,7 +108,7 @@ class _ObserveMixin(_RunState):
             reason = error.details.get("reason", "unknown")
             self.notes.append(f"no screenshot of {screen.screen_id}: {reason}")
             return
-        if after != self.package:
+        if after != screen.package:
             # Another app may have come forward while the image was taken.
             self.notes.append(
                 f"no screenshot of {screen.screen_id}: the app was not in front"
@@ -123,8 +123,11 @@ class _ObserveMixin(_RunState):
         self.writer.write_screenshot(screen.screen_id, png)
 
     def on_target(self, screen: Screen, foreground: str | None) -> bool:
-        # The engine's own rule: both the dump and the foreground name the app.
-        return screen.package == self.package and foreground == self.package
+        # The engine's own rule: both the dump and the foreground name the app
+        # (or one of the packages of Policy.also_target).
+        return foreground == screen.package and (
+            screen.package == self.package or screen.package in self.also
+        )
 
     def write_skips(self, *screens: Screen | None, tap: Tap | None = None) -> None:
         """Write the engine's new skipped elements; `screens` hold the elements.

@@ -90,7 +90,16 @@ class _Judge:
         self._open_ended = frozenset(
             form for form in self.confirm if _is_japanese_letter(form[-1])
         )
-        self.target = target_package
+        # A screen of a listed also_target package is judged as the target's
+        # own: its package is then the target of this screen (an element of
+        # any other package, the app's own included, is outside it).
+        self.target = (
+            foreground
+            if foreground is not None
+            and foreground != target_package
+            and foreground in policy.also_target
+            else target_package
+        )
         self._confirm_forms: dict[str, str] = {}
         self.visible = [self._visible_part(e) for e in self.elements]
         self.clickable = [_CLICKABLE in e.flags for e in self.elements]
@@ -101,9 +110,9 @@ class _Judge:
         self.screen_note = ""
         if foreground is None:
             self.screen_note = "foreground app unknown"
-        elif foreground != target_package:
+        elif foreground != self.target:
             self.screen_note = f"foreground is {foreground}"
-        elif screen.package != target_package:
+        elif screen.package != self.target:
             self.screen_note = f"screen package is {screen.package}"
         self.dialog = _is_dialog(self.tree)
         self._screen_hit: Detail | Literal[False] | None = False
@@ -851,7 +860,9 @@ def judge(
       Every candidate gets only this reason, no point and no other work is
       done (the cost of the other rules grows with the number of elements).
     * ``outside_target_app``: foreground unknown or not the target, or the
-      screen is in another package, or any hit target is.
+      screen is in another package, or any hit target is. A package in
+      ``policy.also_target`` counts as the target when it is the foreground
+      app: the screen and every hit target must then be in that package.
     * ``permission_screen``: any hit target belongs to a permission package.
     * ``not_visible``: no part of the element is on the display, or the part
       is under 8 pixels wide or under 8 pixels high.

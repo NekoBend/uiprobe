@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING
 
 from uiprobe.crawl import CrawlEngine, Tap  # noqa: TC001
 from uiprobe.device import _monotonic
-from uiprobe.guards import Policy  # noqa: TC001
+from uiprobe.guards import PERMISSION_PACKAGES, Policy
 from uiprobe.runlog import RunWriter  # noqa: TC001
 
 if TYPE_CHECKING:
@@ -33,6 +33,7 @@ class _RunState:
         *,
         emulator: bool,
         app_uid: PackageUid | None = None,
+        also_uids: dict[str, PackageUid] | None = None,
         screenshots: bool,
         settle: float,
         deadline: float,
@@ -50,6 +51,11 @@ class _RunState:
         self.policy = policy
         self.emulator = emulator
         self.app_uid = app_uid  # read once at the start (check_tap_window)
+        # The packages of Policy.also_target that count as the app, and each
+        # one's uid read once at the start (only with check_tap_window).
+        # (a permission package never counts, as in the engine)
+        self.also = frozenset(policy.also_target) - PERMISSION_PACKAGES
+        self.also_uids = {} if also_uids is None else dict(also_uids)
         # Whether the first launch force-stops the app before it starts it.
         self.restart = restart
         # The launcher activity read in the gate of the start about to go
@@ -73,6 +79,8 @@ class _RunState:
         self.clock = clock
         self.sleep = sleep
         self.notes: list[str] = []
+        # Notes about Policy.also_target from before the run folder existed.
+        self.also_target_notes: tuple[str, ...] = ()
         self.screens_seen: set[str] = set()  # target screens, when observed
         self.focus: FocusedWindow | None = None  # at the last observation
         self._stop_seen = False  # stop() once returned True: it stays so
@@ -121,12 +129,16 @@ class _RunState:
             focus: tuple[FocusedWindow | None, ...],
             screen: Screen | None,
         ) -> tuple[str, dict[str, str | int]] | None: ...
-        def app_window(self, window: InputWindow, app: PackageUid) -> bool: ...
+        def tap_package(self, screen: Screen | None) -> str: ...
+        def app_window(
+            self, window: InputWindow, app: PackageUid, package: str | None = None
+        ) -> bool: ...
         def uncovered(
             self,
             app: PackageUid,
             focus: tuple[FocusedWindow | None, ...],
             screen: Screen | None,
+            package: str | None = None,
         ) -> str | None: ...
         def refused_tap(
             self, tap: Tap, screen: Screen | None, seen: _Seen

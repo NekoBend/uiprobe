@@ -48,6 +48,10 @@ file. Version 6 added the top-level key ``record_text`` (a missing one reads
 True); a file written at version 6 must have it, and an older uiprobe refuses a
 version 6 file. It is about the run folder, not about judging: with false the
 records of a pressing crawl hold no screen text (see `uiprobe.crawl_driver`).
+Version 8 added the rule ``also_target``, a list of package names (empty by
+default) that a pressing crawl may also press in (see `uiprobe.also_target`).
+It is optional in every file, like ``[deny] except``, and ``uiprobe init``
+writes it as a comment, so no file needs it; an older file reads as ``[]``.
 
 ``[deny] except`` holds exception words (see `uiprobe.guards.word_matches`): a
 deny-word hit that lies completely inside one of them, where it stands as a
@@ -110,6 +114,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Final
 
+from uiprobe.crawl_preview import check_package
 from uiprobe.device import DEVICE_WIDE_KEY_PREFIXES, DEVICE_WIDE_KEYS, FIXED_DEVICE_KEYS
 from uiprobe.guards import (
     _STATE_DENY_WORDS,
@@ -150,7 +155,7 @@ __all__ = [
 
 SETTINGS_FILE: Final = "uiprobe.toml"
 FORMAT_VERSION: Final = 1
-DEFAULTS_VERSION: Final = 7
+DEFAULTS_VERSION: Final = 8
 MAX_SETTINGS_BYTES: Final = 1024 * 1024
 
 # Every default list item with the defaults version that introduced it. Each
@@ -172,6 +177,9 @@ MAX_SETTINGS_BYTES: Final = 1024 * 1024
 # Version 5 added the rule replay_path (no list items). Version 6 added the
 # top-level key record_text (no list items; a missing one reads True).
 # Version 7 added the state-changing deny words (forget, disconnect, ...).
+# Version 8 added the rule also_target (a list of packages; optional in every
+# file, a missing one reads as the empty list; `uiprobe init` writes it
+# commented).
 _LATER_DENY: Final[dict[str, int]] = {
     "やり直": 2,
     "元に戻": 2,
@@ -182,7 +190,7 @@ _LATER_DENY: Final[dict[str, int]] = {
 # The [deny] except list has no built-in words. One added later starts at the
 # next defaults version (raise DEFAULTS_VERSION with it); before that, the
 # test that no default is tagged beyond the current version fails.
-_FIRST_EXCEPT: Final = 8
+_FIRST_EXCEPT: Final = 9
 _LATER_EXCEPT: Final[dict[str, int]] = {}
 _LATER_CONFIRM: Final[dict[str, int]] = {}
 # The [irreversible] table came with version 2, so its items start there.
@@ -280,7 +288,7 @@ _TABLE_KEYS: Final[dict[str, frozenset[str]]] = {
     "deny": frozenset({"words", "except", "remove"}),
     "confirm": frozenset({"words", "remove"}),
     "irreversible": frozenset({"phrases", "remove"}),
-    "rules": frozenset(_BOOL_RULES) | frozenset(_INT_RANGES["rules"]),
+    "rules": frozenset(_BOOL_RULES) | frozenset(_INT_RANGES["rules"]) | {"also_target"},
     "limits": frozenset(_INT_RANGES["limits"]),
     "keys": frozenset({"refuse", "refuse_prefixes", "remove"}),
 }
@@ -318,7 +326,8 @@ class Settings:
     with defaults version 5, ``record_text`` (default True), added with
     defaults version 6, and ``runs_dir`` (default None, an
     optional key that needed no new defaults version), follow it for the same
-    reason.
+    reason. ``also_target`` (default ``()``), added with defaults version 8,
+    comes last for the same reason.
     """
 
     source: Path
@@ -359,6 +368,9 @@ class Settings:
     # Added with defaults version 6: False keeps screen text out of the
     # records of a pressing crawl. Not a Policy field: it does not judge.
     record_text: bool = True
+    # Added with defaults version 8: the packages (besides the target app)
+    # that a pressing crawl may also press in. Empty by default.
+    also_target: tuple[str, ...] = ()
 
 
 def _separators() -> str:
@@ -454,6 +466,7 @@ def policy_from_settings(
         skip_navigate_up=settings.skip_navigate_up,
         skip_sliders=settings.skip_sliders,
         replay_path=settings.replay_path,
+        also_target=settings.also_target,
         refuse_dialog_confirm=settings.refuse_dialog_confirm,
         edges=(
             settings.edge_top_px,
@@ -581,6 +594,7 @@ def render_default_settings() -> str:
         '# "do not press the same row twice when only a badge changed" behaviour',
         "# to the earlier behaviour.",
         "replay_path = true",
+        '# also_target = ["com.example.helper"]   # apps the crawl may also press in; system UI and the home app are refused, permission screens are never pressed',  # noqa: E501
         f"min_visible_px = {MIN_VISIBLE_PX}",
         f"edge_top_px = {API36_TOP_PX}",
         f"edge_bottom_px = {API36_BOTTOM_PX}",
@@ -878,6 +892,19 @@ def _phrase_identity(phrase: str) -> str:
         )
         raise ValueError(msg)
     return key
+
+
+def _package_identity(name: str) -> str:
+    """Check an ``also_target`` entry as the command's PACKAGE is checked
+    (the format only); return what makes two entries equal (the name itself).
+
+    The system UI and the home app are refused where the crawl starts
+    (`uiprobe.also_target`), not here: a settings file only holds names.
+    """
+    try:
+        return check_package(name)
+    except ValueError as error:
+        raise ValueError(_capped(_shown(str(error)))) from None
 
 
 def _key_identity(name: str) -> str:
@@ -1214,6 +1241,13 @@ def load_settings(path: str | os.PathLike[str]) -> Settings:
         )
         for key in _BOOL_RULES
     }
+    also_target = reader.strings(
+        rules,
+        "rules",
+        "also_target",
+        _package_identity,
+        optional=True,  # written commented by `uiprobe init`, so never required
+    )
     sizes = {
         key: reader.integer(rules, "rules", key, *bounds)
         for key, bounds in _INT_RANGES["rules"].items()
@@ -1283,6 +1317,7 @@ def load_settings(path: str | os.PathLike[str]) -> Settings:
         skip_navigate_up=flags["skip_navigate_up"],
         skip_sliders=flags["skip_sliders"],
         replay_path=flags["replay_path"],
+        also_target=also_target,
         min_visible_px=sizes["min_visible_px"],
         edge_top_px=sizes["edge_top_px"],
         edge_bottom_px=sizes["edge_bottom_px"],

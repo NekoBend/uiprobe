@@ -59,6 +59,7 @@ DUMP_OK = "UI hierchary dumped to: {}\n"
 DUMP_FAILED = "ERROR: could not get idle state.\n"
 LAUNCHER_CATEGORY = "android.intent.category.LAUNCHER"
 MAIN_ACTION = "android.intent.action.MAIN"
+HOME_CATEGORY = "android.intent.category.HOME"
 INPUT_MARKER_SUFFIX = "; echo uiprobe-exit:$?"
 # ``cmd package resolve-activity --brief -c android.intent.category.LAUNCHER
 # PKG``, captured on API 24 and 36 emulators and a Samsung API 36 phone (the
@@ -283,6 +284,11 @@ class FakeAndroid:
     # The shared user (``android:sharedUserId``) per package, for the
     # ``sharedUser=`` line of ``dumpsys package``; packages not listed have none.
     shared_users: dict[str, str]
+    # Packages that ``dumpsys package`` prints no stanza of (not installed).
+    not_installed: frozenset[str] = frozenset()
+    # The package that ``resolve-activity ... -c android.intent.category.HOME``
+    # names (as ``package/.Home``); None: the read prints ``No activity found``.
+    home: str | None = "com.example.launcher"
     # The display's orientation in ``dumpsys input`` (0 to 3); None: the input
     # reader prints no Viewport line for display 0.
     orientation: int | None = 0
@@ -455,6 +461,12 @@ class FakeAndroid:
                 + r"); echo uiprobe-exit:\$\?\Z"
             ),
             re.compile(rf"^am force-stop (?:{names}); echo uiprobe-exit:\$\?\Z"),
+            # The read of the home app (a crawl that lists a package sends it).
+            re.compile(
+                r"^cmd package resolve-activity --brief"
+                rf" -a {re.escape(MAIN_ACTION)} -c {re.escape(HOME_CATEGORY)}"
+                r"; echo uiprobe-exit:\$\?\Z"
+            ),
         ]
         if extra:
             missing = "|".join(re.escape(p) for p in extra)
@@ -770,7 +782,7 @@ class FakeAndroid:
                 return Reset()
         return out
 
-    def _launch_command(self, words: list[str]) -> bytes:
+    def _launch_command(self, words: list[str]) -> bytes:  # noqa: PLR0911
         match words:
             case [
                 "cmd",
@@ -789,6 +801,19 @@ class FakeAndroid:
                 return (
                     RESOLVE_INFO + _short_component(first.component) + "\n"
                 ).encode()
+            case [
+                "cmd",
+                "package",
+                "resolve-activity",
+                "--brief",
+                "-a",
+                action,
+                "-c",
+                category,
+            ] if (action, category) == (MAIN_ACTION, HOME_CATEGORY):
+                if self.home is None:
+                    return RESOLVE_NONE.encode()
+                return (RESOLVE_INFO + f"{self.home}/.Home\n").encode()
             case ["am", "force-stop", package]:
                 self._stop(package)
                 return b""
@@ -1116,6 +1141,10 @@ class FakeAndroid:
             f"  Package [{other}] ({_hex(other)}):",
             f"    {key}={self.uid_of(other)}",
             f"    pkg=Package{{{_hex(other)} {other}}}",
+        ]
+        if name in self.not_installed:  # no stanza of its own: not readable
+            return "\n".join([*lines, "", "Queries:"]) + "\n"
+        lines += [
             f"  Package [{name}] ({_hex(name)}):",
             f"    {key}={self.uid_of(name)}",
         ]

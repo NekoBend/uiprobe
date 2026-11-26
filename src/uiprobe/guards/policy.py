@@ -147,6 +147,14 @@ class Policy:
     whose resource id contains ``badge``) as one row. False gives the crawl
     that does neither.
 
+    ``also_target`` (default ``()``) lists packages besides the target app whose
+    screens `judge` and the crawl engine treat as the target's own: a screen
+    whose package and foreground app are both listed is judged exactly like
+    the target's screens, with every rule. Permission screens stay refused
+    (``permission_screen``) and an element of another package than the screen's
+    stays refused (``outside_target_app``). With the empty default nothing
+    differs from a policy without the field.
+
     ``edges`` holds the sizes in pixels ``(top, bottom, left, right)`` that
     `judge` turns into `edge_areas` of each screen's display when ``avoid`` is
     None; None keeps the API 36 sizes. An explicit ``avoid`` wins over
@@ -165,7 +173,8 @@ class Policy:
             is not an integer of at least 1.
         TypeError: ``edges`` is not a sequence, ``deny_exceptions`` is one
             string, or ``back_on_other_screens``, ``check_tap_window`` or
-            ``replay_path`` is not a bool.
+            ``replay_path`` is not a bool, or ``also_target`` is not a tuple of
+            strings.
     """
 
     deny_words: tuple[str, ...] = DEFAULT_DENY_WORDS
@@ -187,6 +196,7 @@ class Policy:
     skip_navigate_up: bool = True
     skip_sliders: bool = True
     replay_path: bool = True
+    also_target: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if type(self.back_on_other_screens) is not bool:
@@ -197,6 +207,11 @@ class Policy:
             raise TypeError(msg)
         if type(self.replay_path) is not bool:
             msg = "replay_path must be a bool"
+            raise TypeError(msg)
+        if not isinstance(self.also_target, tuple | list) or not all(
+            type(name) is str for name in self.also_target
+        ):
+            msg = "also_target must be a tuple of package names"
             raise TypeError(msg)
         for word in (*self.deny_words, *self.confirm_words, *self.irreversible_phrases):
             _check_word(word)
@@ -257,6 +272,7 @@ class Policy:
             skip_navigate_up=self.skip_navigate_up,
             skip_sliders=self.skip_sliders,
             replay_path=self.replay_path,
+            also_target=self.also_target,
         )
 
 

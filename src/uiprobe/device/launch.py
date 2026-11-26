@@ -132,6 +132,34 @@ def _launcher_component(output: str, package: str) -> str | None:
     return last if _is_component(last, package) else None
 
 
+def _home_package(output: str) -> str | None:
+    """Read the home app's package from ``cmd package resolve-activity --brief
+    -a android.intent.action.MAIN -c android.intent.category.HOME; echo
+    uiprobe-exit:$?`` output.
+
+    The package is the part before the slash of the last line before the
+    marker line ``uiprobe-exit:0`` (which must be the last line; empty lines
+    and one CR at each line end are ignored). The lines before it are not
+    looked at, so a device that prints other information lines still gives
+    its home app. None when the marker is missing or not 0, the last line is
+    not ``PACKAGE/CLASS`` with a valid package name, or the package has
+    fewer than two segments (``android`` is the answer when the system asks
+    which home app to use: that names no home app).
+    """
+    lines = [line for line in _lines(output) if line]
+    if len(lines) < 2 or lines[-1] != f"{EXIT_MARKER}0":
+        return None
+    owner, slash, name = lines[-2].partition("/")
+    valid = (
+        slash == "/"
+        and len(owner) <= MAX_PACKAGE_LENGTH
+        and PACKAGE_PATTERN.fullmatch(owner) is not None
+        and len(name) <= _MAX_CLASS_NAME
+        and _CLASS_NAME.fullmatch(name) is not None
+    )
+    return owner if valid else None
+
+
 def _spellings(component: str) -> frozenset[str]:
     """The short (``.Name``) and full spellings of ``PACKAGE/CLASS``."""
     package, _, name = component.partition("/")

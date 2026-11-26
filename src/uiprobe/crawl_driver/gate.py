@@ -97,13 +97,16 @@ class _GateMixin(_RunState):
         The same test tells the reader which windows may print
         ``samsungFlags=0x1`` (`uiprobe.inputwindows.read_window_at`).
         """
-        app = self.app_uid
-        unknown = "target_uid" if app is None else self.uncovered(app, focus, screen)
+        package = self.tap_package(screen)
+        app = self.app_uid if package == self.package else self.also_uids.get(package)
+        unknown = (
+            "target_uid" if app is None else self.uncovered(app, focus, screen, package)
+        )
         if app is None or unknown is not None:
             return NOT_SENT_COVER_UNKNOWN, {"unreadable": unknown or "target_uid"}
 
         def owned(window: InputWindow) -> bool:
-            return self.app_window(window, app)
+            return self.app_window(window, app, package)
 
         found = self.device.window_at(point, owned=owned)
         if isinstance(found, Unreadable):  # the reason, and the check that refused
@@ -113,18 +116,29 @@ class _GateMixin(_RunState):
             }
         if isinstance(found, str):
             return NOT_SENT_COVER_UNKNOWN, {"unreadable": found}
-        if self.app_window(found, app):
+        if self.app_window(found, app, package):
             return None
         return NOT_SENT_COVERED, {"window": found.title, "owner_uid": found.owner_uid}
 
-    def app_window(self, window: InputWindow, app: PackageUid) -> bool:
-        return _app_window(self.package, window, app)
+    def tap_package(self, screen: Screen | None) -> str:
+        """The package whose window must take a tap on `screen`: the screen's
+        own package when it is one of `Policy.also_target`, else the app (a
+        screen of any other package is refused by the engine's re-check)."""
+        if screen is not None and screen.package in self.also:
+            return screen.package
+        return self.package
+
+    def app_window(
+        self, window: InputWindow, app: PackageUid, package: str | None = None
+    ) -> bool:
+        return _app_window(self.package if package is None else package, window, app)
 
     def uncovered(
         self,
         app: PackageUid,
         focus: tuple[FocusedWindow | None, ...],
         screen: Screen | None,
+        package: str | None = None,
     ) -> str | None:
         """What makes the window at a tap's point not worth reading (see
         `cover`), checked in this order, or None.
@@ -141,7 +155,7 @@ class _GateMixin(_RunState):
             return "target_uid"
         if screen is not None and screen.rotation != 0:
             return ROTATION
-        if self.device.package_uid(self.package) != app:
+        if self.device.package_uid(self.package if package is None else package) != app:
             return "target_uid"
         return None
 
@@ -225,12 +239,13 @@ class _GateMixin(_RunState):
             )
             allowed = self.engine.recheck(action, seen.observation)
             owners = {None if f is None else f.owner for f in (before, focus)}
+            package = self.tap_package(screen)
             checks = (
                 (unchecked, NOT_SENT_FOCUS_UNKNOWN),
                 (keyboard is None, NOT_SENT_KEYBOARD_UNKNOWN),
                 (keyboard is True, NOT_SENT_KEYBOARD_SHOWN),
                 (before is None or focus is None, NOT_SENT_FOCUS_UNKNOWN),
-                (owners != {self.package}, NOT_SENT_FOCUS_OTHER),
+                (owners != {package}, NOT_SENT_FOCUS_OTHER),
                 (before != focus, NOT_SENT_FOCUS_CHANGED),
                 (
                     cover is not None,
@@ -259,7 +274,11 @@ class _GateMixin(_RunState):
                 (foreground is None, NOT_SENT_FOREGROUND_UNKNOWN),
                 (focus is None, NOT_SENT_FOCUS_UNKNOWN),
                 (
-                    own_back and focus is not None and focus.owner != self.package,
+                    own_back
+                    and before is not None
+                    and before.screen is not None
+                    and focus is not None
+                    and focus.owner != self.tap_package(before.screen),
                     NOT_SENT_FOCUS_OTHER,
                 ),
                 (back and keyboard is None, NOT_SENT_KEYBOARD_UNKNOWN),
