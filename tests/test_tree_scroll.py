@@ -1048,3 +1048,239 @@ def test_a_skip_decided_on_a_joined_id_with_its_own_file_still_shows(tmp_path):
     tree = read_tree(folder.path)
     rows = {r.name: r for r in tree.screens[first.screen_id].rows if r.kind == "row"}
     assert rows["D"].reasons == ("deny_word",)
+
+
+# -- one representative for the ids of a screen -----------------------------------
+
+
+def render_all(capsys, folder, tmp_path):
+    """The text, the JSON and the HTML of a folder; none may raise."""
+    code, text, err = run_tree(capsys, str(folder.path))
+    assert (code, err) == (0, "")
+    code, js, err = run_tree(capsys, str(folder.path), "--json")
+    assert (code, err) == (0, "")
+    out = tmp_path / "tree.html"
+    code, _, err = run_tree(capsys, str(folder.path), "--html", str(out))
+    assert (code, err) == (0, "")
+    return text, json.loads(js), out.read_text(encoding="utf-8")
+
+
+def three_lists():
+    return listing(["A", "B", "C"]), listing(["A", "B"]), listing(["A"])
+
+
+def test_a_chain_back_to_the_first_id_does_not_crash_or_drop_it(tmp_path, capsys):
+    # launch A; scroll A to B; scroll C to A; tap X to B: A used to be removed
+    # but still linked to
+    folder = Folder(tmp_path)
+    a, b, c = three_lists()
+    x = make_screen(".X", [el(1, cls="FrameLayout"), el(2, 1, text="Go", flags=CLICK)])
+    for screen in (a, b, c, x):
+        folder.screen(screen)
+    folder.start("launch")
+    folder.end(a.screen_id)
+    scroll(folder, a, b)
+    scroll(folder, c, a)
+    folder.tap(x, 2, b.screen_id)
+    folder.finish()
+    tree = read_tree(folder.path)
+    assert tree.warnings == []
+    assert a.screen_id in tree.screens
+    assert {b.screen_id, c.screen_id}.isdisjoint(tree.screens)
+    go = next(r for r in tree.screens[x.screen_id].rows if r.name == "Go")
+    assert go.to == {"screen_id": a.screen_id}
+    text, data, html = render_all(capsys, folder, tmp_path)
+    assert "A" in text
+    assert a.screen_id in data["screens"]
+    assert "<html" in html.lower()
+
+
+def test_a_cycle_of_ids_keeps_one_representative(tmp_path, capsys):
+    folder = Folder(tmp_path)
+    a, b, c = three_lists()
+    for screen in (a, b, c):
+        folder.screen(screen)
+    folder.start("launch")
+    folder.end(a.screen_id)
+    scroll(folder, a, b)
+    scroll(folder, b, c)
+    scroll(folder, c, a)  # the ring is closed
+    scroll(folder, a, a)  # and a scroll that did not change the id
+    folder.finish()
+    tree = read_tree(folder.path)
+    assert tree.warnings == []
+    assert list(tree.screens) == [a.screen_id]  # one screen, not none
+    render_all(capsys, folder, tmp_path)
+
+
+def test_a_hostile_family_never_removes_every_id(tmp_path):
+    # scrolls in both directions, among ids with no file at all
+    folder = Folder(tmp_path)
+    a, b, c = three_lists()
+    folder.screen(c)  # the only readable id
+    folder.start("launch")
+    folder.end(c.screen_id)
+    scroll(folder, a, b)
+    scroll(folder, b, a)
+    scroll(folder, b, c)
+    folder.finish()
+    tree = read_tree(folder.path)
+    assert c.screen_id in tree.screens
+
+
+def test_the_representative_is_a_readable_id(tmp_path):
+    # A to B with only B's file: B keeps its rows, and a tap to B is read
+    folder = Folder(tmp_path)
+    a, b, _c = three_lists()
+    x = make_screen(".X", [el(1, cls="FrameLayout"), el(2, 1, text="Go", flags=CLICK)])
+    folder.screen(b)
+    folder.screen(x)
+    folder.start("launch")
+    folder.end(a.screen_id)
+    scroll(folder, a, b)
+    folder.tap(x, 2, b.screen_id)
+    folder.finish()
+    tree = read_tree(folder.path)
+    assert b.screen_id in tree.screens
+    assert [r.name for r in tree.screens[b.screen_id].rows if r.kind == "row"] == [
+        "A",
+        "B",
+    ]
+    go = next(r for r in tree.screens[x.screen_id].rows if r.name == "Go")
+    assert go.to == {"screen_id": b.screen_id}
+
+
+def test_ids_of_another_activity_are_not_joined(tmp_path):
+    folder = Folder(tmp_path)
+    a = listing(["A", "B", "C"])
+    b = listing(["A", "B"], activity=".Other")
+    for screen in (a, b):
+        folder.screen(screen)
+    folder.start("launch")
+    folder.end(a.screen_id)
+    scroll(folder, a, b)  # no scroll_effect on the end line
+    folder.finish()
+    tree = read_tree(folder.path)
+    assert {a.screen_id, b.screen_id} <= set(tree.screens)
+    assert [r.name for r in tree.screens[b.screen_id].rows if r.kind == "row"] == [
+        "A",
+        "B",
+    ]
+
+
+def test_an_unmarked_tap_is_matched_in_the_id_s_own_file_first(tmp_path):
+    folder = Folder(tmp_path)
+    first = listing(["A", "B", "C"])
+    own = listing(["Own", "Q"])
+    read_after = listing(["Scroll", "Q"])
+    assert own.screen_id == read_after.screen_id
+    for screen in (first, own, LEAF):
+        folder.screen(screen)
+    folder.start("launch")
+    folder.end(first.screen_id)
+    scroll(folder, first, read_after)
+    folder.tap(own, 3, LEAF.screen_id)  # the container of "Own", no label of its own
+    folder.finish()
+    rows = {r.name: r for r in read_tree(folder.path).screens[first.screen_id].rows}
+    assert rows["Own"].pressed
+    assert rows["Own"].to == {"screen_id": LEAF.screen_id}
+    assert not rows["Scroll"].pressed
+
+
+def test_a_tap_that_matches_no_read_is_kept_as_an_attempt(tmp_path):
+    # its recorded label ("F") is in neither read of the id
+    folder = Folder(tmp_path)
+    first = flat(["A", "B", "C"])
+    own = flat(["C", "E"])
+    read_after = flat(["C", "D"])
+    newer = flat(["C", "F"])
+    for screen in (first, own, LEAF):
+        folder.screen(screen)
+    folder.start("launch")
+    folder.end(first.screen_id)
+    scroll(folder, first, read_after)
+    folder.tap(newer, 4, LEAF.screen_id)
+    folder.finish()
+    tree = read_tree(folder.path)
+    pressed = [r for r in tree.screens[first.screen_id].rows if r.pressed]
+    assert [(r.name, r.to) for r in pressed] == [("F", {"screen_id": LEAF.screen_id})]
+
+
+def test_a_fold_of_one_read_is_not_taken_for_the_outer_row_of_another(tmp_path, capsys):
+    folder = Folder(tmp_path)
+
+    def page(inner, *, extra=()):
+        return make_screen(
+            ".Page",
+            [
+                el(1, cls="LinearLayout", flags=CLICK),
+                el(2, 1, text=inner, flags=CLICK),
+                el(3, cls="RecyclerView", flags=("scrollable",)),
+                *extra,
+            ],
+        )
+
+    one = page("One")
+    two = page("Two", extra=(el(4, 3, text="More"),))
+    assert one.screen_id != two.screen_id
+    for screen in (one, two, LEAF):
+        folder.screen(screen)
+    folder.start("launch")
+    folder.end(one.screen_id)
+    scroll(folder, one, two, read=False)  # no snapshot of the scrolled read
+    folder.tap(two, 2, LEAF.screen_id)  # B's nested e2
+    folder.finish()
+    tree = read_tree(folder.path)
+    rows = tree.screens[one.screen_id].rows
+    assert all(r.folded_into is None for r in rows)  # no fold crosses two reads
+    code, text, err = run_tree(capsys, str(folder.path))
+    assert (code, err) == (0, "")
+    lines = text.splitlines()
+    ends = [
+        i
+        for i, line in enumerate(lines)
+        if line.strip() == "└─ (screen with no named rows)"
+    ]
+    assert len(ends) == 1  # one pressed row, one destination shown
+    assert "Two" in lines[ends[0] - 1]  # under B's row, not under an outer "One"
+
+
+def test_the_reasons_of_every_id_for_one_fingerprint_are_merged(tmp_path):
+    folder = Folder(tmp_path)
+    first = listing(["A", "B", "C"])
+    second = listing(["C", "D"])
+    stray = listing(["C", "Zzz"])  # a row no read of the screen holds
+    assert second.screen_id == stray.screen_id
+    for screen in (first, second):
+        folder.screen(screen)
+    folder.start("launch")
+    folder.end(first.screen_id)
+    scroll(folder, first, second)
+    folder.skip(first, 7, "deny_word")  # C, decided on the first id
+    folder.skip(second, 3, "toggle")  # the same row, decided on the second id
+    folder.skip(stray, 5, "slider")  # matches nothing
+    folder.finish()
+    tree = read_tree(folder.path)
+    node = tree.screens[first.screen_id]
+    rows = {r.name: r for r in node.rows if r.kind == "row"}
+    assert rows["C"].reasons == ("deny_word", "toggle")
+    assert [reasons for _fp, reasons in node.unmatched] == [("slider",)]
+
+
+def test_every_member_keeps_its_own_unmatched_entry(tmp_path):
+    folder = Folder(tmp_path)
+    first = listing(["A", "B", "C"])
+    second = listing(["C", "D"])
+    for screen in (first, second):
+        folder.screen(screen)
+    folder.start("launch")
+    folder.end(first.screen_id)
+    scroll(folder, first, second)
+    folder.skip(listing(["A", "B", "Q1"]), 7, "slider")  # first id, no row
+    folder.skip(listing(["C", "Q2"]), 5, "toggle")  # second id, no row
+    folder.finish()
+    node = read_tree(folder.path).screens[first.screen_id]
+    assert sorted(reasons for _fp, reasons in node.unmatched) == [
+        ("slider",),
+        ("toggle",),
+    ]

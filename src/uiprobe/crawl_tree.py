@@ -1250,21 +1250,56 @@ def _read_moves(base: Path, warnings: _Warnings, *, distrust: bool) -> _Moves:
         len(lines.order),
         lines.off_after,
         scrolls,
-        _family_of(scrolls),
     )
 
 
-def _family_of(scrolls: list[_Scroll]) -> dict[str, str]:
-    """Which screen ids are one screen: a sent scroll that led from one id to
-    another makes the second part of the first one's screen."""
-    family: dict[str, str] = {}
-    for scroll in scrolls:
+def _families(moves: _Moves, reader: _Reader) -> dict[str, str]:
+    """Which screen ids are one screen: member id -> its one representative.
+
+    A sent scroll that did not navigate and led from one id to another links the
+    two. The links are taken as they come into groups (a union, so a chain, a
+    cycle or a hostile folder cannot leave a dangling or looping alias), and each
+    group keeps ONE representative that is never mapped away: its first id, in the
+    order the scrolls name them, that has a readable file. Only ids whose files
+    agree on package and activity are joined; an id with another package or
+    activity stays a screen of its own, and an id with no readable file is mapped
+    to the representative (it has nothing to say of its own). A group with no
+    readable id is not joined at all. The map has no key that is also a value."""
+    parent: dict[str, str] = {}
+    order: list[str] = []
+
+    def find(one: str) -> str:
+        while parent[one] != one:
+            parent[one] = parent[parent[one]]
+            one = parent[one]
+        return one
+
+    for scroll in moves.scrolls:
         if not _scroll_read(scroll) or scroll.end is None or _scroll_navigated(scroll):
             continue
         target = _screen_id(scroll.end.get("to_screen_id"))
-        first = family.get(scroll.from_screen_id, scroll.from_screen_id)
-        if target is not None and target != first and target not in family:
-            family[target] = first
+        if target is None or target == scroll.from_screen_id:
+            continue
+        for one in (scroll.from_screen_id, target):
+            if one not in parent:
+                parent[one] = one
+                order.append(one)
+        parent[find(target)] = find(scroll.from_screen_id)
+    groups: dict[str, list[str]] = {}
+    for one in order:
+        groups.setdefault(find(one), []).append(one)
+    family: dict[str, str] = {}
+    for members in groups.values():
+        readable = [(one, reader.load(one)) for one in members]
+        known = [(one, found) for one, found in readable if found is not None]
+        if not known:
+            continue
+        rep, home = known[0]
+        for one, found in readable:
+            if one == rep:
+                continue
+            if found is None or (found[1], found[2]) == (home[1], home[2]):
+                family[one] = rep
     return family
 
 
@@ -1433,7 +1468,13 @@ def _view_of(
             and any(e.id == tap.element_id for e in screen.elements)
         ):
             return True, scroll_id
-    own = [v for v in views if owners.get(v[0]) == tap.from_screen_id]
+    # The reads of the id the tap was decided on first, its own file before the
+    # reads that scrolls brought (an unmarked tap is of the file the id was first
+    # written from), then the others.
+    own = sorted(
+        (v for v in views if owners.get(v[0]) == tap.from_screen_id),
+        key=lambda v: v[0] is not None and v[0] > 0,
+    )
     rest = [v for v in views if v not in own]
     for scroll_id, screen in (*own, *rest):
         for element in screen.elements:
@@ -1441,6 +1482,12 @@ def _view_of(
                 tap.element, element, texts=texts
             ):
                 return True, scroll_id
+    # No read has the element as the tap recorded it (its label changed since):
+    # an attempt is still an attempt of the element of that id, in the reads of
+    # the id it was decided on.
+    for scroll_id, screen in own:
+        if any(e.id == tap.element_id for e in screen.elements):
+            return True, scroll_id
     return False, None
 
 
@@ -1555,6 +1602,37 @@ def _match_skips(
     return seen
 
 
+def _unmatched(
+    skips: _Skips, ids: list[str], seen: set[str]
+) -> list[tuple[str, tuple[str, ...]]]:
+    """The skip entries of every id of a screen that found no row: each id's own
+    reasons for a fingerprint, in the order of the ids, once each."""
+    found: list[tuple[str, tuple[str, ...]]] = []
+    for one in ids:
+        for fingerprint, reasons in skips.by_screen.get(one, {}).items():
+            entry = (fingerprint, tuple(reasons))
+            if fingerprint not in seen and entry not in found:
+                found.append(entry)
+    return found
+
+
+def _check_folds(rows: list[Row]) -> None:
+    """Keep a row's fold only where it still means what it said: the outer row of
+    its own read is the one row listed with that element id. The rows of several
+    reads can share element ids (two reads each have an outer ``e1``), and the
+    renderers look a fold up by element id, so a fold that is not unambiguous is
+    dropped: the row is then listed on its own line."""
+    by_id: dict[str, list[Row]] = {}
+    for row in rows:
+        by_id.setdefault(row.element_id, []).append(row)
+    for row in rows:
+        if row.folded_into is None:
+            continue
+        outer = by_id.get(row.folded_into, [])
+        if len(outer) != 1 or outer[0].view_key != row.view_key:
+            row.folded_into = None
+
+
 def _node(  # noqa: PLR0912 - one step per kind of read
     sid: str,
     loaded: tuple[Screen, str, str | None],
@@ -1587,20 +1665,21 @@ def _node(  # noqa: PLR0912 - one step per kind of read
     rows, owner, stand_in = _scrolled_rows(
         views, first, taps_by, record_text=record_text
     )
-    own_fp = skips.by_screen.get(sid, {})
     ids = [sid, *sorted(members - {sid})]
     by_fp: dict[str, list[str]] = {}
     for one in ids:
         for fingerprint, reasons in skips.by_screen.get(one, {}).items():
-            by_fp.setdefault(fingerprint, reasons)
+            # one fingerprint decided under two ids: the reasons of both
+            merged = [*by_fp.get(fingerprint, []), *reasons]
+            by_fp[fingerprint] = list(dict.fromkeys(merged))
     unmatched: list[tuple[str, tuple[str, ...]]] = []
     unchecked = False
     if by_fp and any(len(v.elements) > _MAX_FINGERPRINTED for _, v in views):
         unchecked = True
-        unmatched = [(fp, tuple(r)) for fp, r in own_fp.items()]
+        unmatched = _unmatched(skips, ids, set())
     elif by_fp:
         seen = _match_skips(owner, by_fp, skips, ids, record_text=record_text)
-        unmatched = [(fp, tuple(r)) for fp, r in own_fp.items() if fp not in seen]
+        unmatched = _unmatched(skips, ids, seen)
     # Every tap of a row, also those decided on a later read of a row that is
     # shown once (its repeat), so that no destination is lost.
     attached: dict[int, tuple[Row, list[_Tap]]] = {}
@@ -1613,6 +1692,7 @@ def _node(  # noqa: PLR0912 - one step per kind of read
             attached.setdefault(id(row), (row, []))[1].extend(taps_by[key])
     for row, taps in attached.values():
         _attach(row, taps, sid, own, reader, moves)
+    _check_folds(rows)
     return ScreenNode(
         sid,
         screen_package,
@@ -1667,6 +1747,7 @@ def read_tree(run_dir: str | Path) -> RunTree:
         found is not None and found[1] not in own for found in read
     )
     moves = _read_moves(base, warnings, distrust=foreign)
+    moves.family = _families(moves, reader)
     screens: dict[str, ScreenNode] = {}
     family = moves.family
     for sid in _screen_ids(reader, moves):
