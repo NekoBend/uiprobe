@@ -262,6 +262,12 @@ Stated limits (known, not fixed here):
   elements. With ``Policy.back_on_other_screens`` the dialog gets BACK and
   that screen is tried further.
 
+A driver that lists packages in ``Policy.also_target`` must also read the
+device's home app and refuse it (`uiprobe.also_target.check_home`), as
+`uiprobe.crawl_driver.crawl` does; the engine has no device. The static rules
+(system UI, fixed home apps, the target itself, format, duplicates) are checked
+when the `Policy` and the `CrawlEngine` are built.
+
 How a driver uses it::
 
     engine = CrawlEngine(package, policy, Limits(), started_at=clock())

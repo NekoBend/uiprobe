@@ -589,12 +589,18 @@ def _text_row(element: Element, *, record_text: bool) -> Row | None:
     return _row_of(element, "text", text, (text,), hidden=False, name_from="text")
 
 
-def _read_start(base: Path) -> dict[str, object]:
+def _read_start(base: Path) -> tuple[dict[str, object], bool]:
     if not base.is_dir():
         msg = "the run folder does not exist or is not a folder"
         raise TreeError(msg)
     try:
-        start = _read_json(base / "run-start.json")
+        data = _read_bytes(base / "run-start.json", MAX_FILE_BYTES)
+        start = _loads(data)
+        try:
+            _loads_strict(data)
+            repeated = False
+        except ValueError:
+            repeated = True  # a key twice in an object: not as uiprobe writes it
     except FileNotFoundError:
         msg = "run-start.json is missing, so this is not a run folder"
         raise TreeError(msg) from None
@@ -611,7 +617,7 @@ def _read_start(base: Path) -> dict[str, object]:
     ):
         msg = "run-start.json is not a uiprobe.run_start/1 record with a package"
         raise TreeError(msg)
-    return start
+    return start, repeated
 
 
 def _also_target(start: dict[str, object], package: str) -> tuple[str, ...] | None:
@@ -1212,12 +1218,14 @@ def read_tree(run_dir: str | Path) -> RunTree:
     """
     base = Path(run_dir)
     warnings = _Warnings()
-    start = _read_start(base)
+    start, repeated = _read_start(base)
     package = str(start["package"])
     record_text = start.get("record_text") is not False
     label = _str_or_none(start.get("app_label"))
-    listed = _also_target(start, package)
-    if listed is None:
+    listed = None if repeated else _also_target(start, package)
+    if repeated:
+        warnings.append("run-start.json repeats a key, so its also_target is not used")
+    elif listed is None:
         warnings.append(
             "run-start.json has an also_target that is not a list of other"
             " packages; it is not used"

@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import TYPE_CHECKING, Literal
 
-from uiprobe.also_target import AlsoTargetError, check_also_target, check_home
+from uiprobe.also_target import AlsoTargetError, check_also_target
 from uiprobe.cli.output import _emit, _printable
 from uiprobe.cli.parser import _GuidedUsageError, _press_only, _UsageError
 from uiprobe.crawl_preview import check_package
@@ -461,18 +461,6 @@ def _check_also_target(package: str, settings: Settings) -> None:
     (`_check_also_home` for the preview)."""
     try:
         check_also_target(package, settings.also_target)
-    except AlsoTargetError as exc:
-        where = _printable(_shown(str(settings.source)))
-        raise _UsageError(f"{where}: [rules] {_printable(str(exc))}") from None
-
-
-def _check_also_home(device: Device, settings: Settings) -> None:
-    """For the dry run: refuse the device's home app when it is listed, and
-    refuse when it cannot be read. Nothing is read with an empty list."""
-    if not settings.also_target:
-        return
-    try:
-        check_home(settings.also_target, device.home_package())
     except AlsoTargetError as exc:
         where = _printable(_shown(str(settings.source)))
         raise _UsageError(f"{where}: [rules] {_printable(str(exc))}") from None

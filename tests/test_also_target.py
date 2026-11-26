@@ -307,3 +307,78 @@ def test_a_direct_preview_refuses_the_names_that_need_no_device():
     for listed in ((SYSTEM_UI,), (FIXED_HOME_APPS[0],), (SHOP,), (HELPER, HELPER)):
         with pytest.raises(AlsoTargetError):
             preview(NoDevice(), SHOP, Policy(also_target=listed))  # ty: ignore[invalid-argument-type]
+
+
+# -- every entry point refuses ----------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "listed",
+    [
+        (SYSTEM_UI,),
+        (HELPER, SYSTEM_UI),
+        *[(name,) for name in FIXED_HOME_APPS],
+        ("nope",),
+        ("com." + "a" * 252,),  # 256 characters
+        (HELPER, HELPER),
+    ],
+)
+def test_a_policy_cannot_be_built_with_a_refused_entry(listed):
+    with pytest.raises(AlsoTargetError):
+        Policy(also_target=listed)
+
+
+def test_a_policy_keeps_a_good_list_and_replace_checks_again():
+    import dataclasses
+
+    good = Policy(also_target=(HELPER,))
+    assert good.also_target == (HELPER,)
+    with pytest.raises(AlsoTargetError):
+        dataclasses.replace(good, also_target=(SYSTEM_UI,))
+
+
+def test_an_engine_cannot_be_built_for_a_policy_that_lists_its_target():
+    from uiprobe.crawl import CrawlEngine, Limits
+
+    CrawlEngine(SHOP, Policy(also_target=(HELPER,)), Limits(), started_at=0.0)
+    with pytest.raises(AlsoTargetError, match="target app itself"):
+        CrawlEngine(SHOP, Policy(also_target=(SHOP,)), Limits(), started_at=0.0)
+
+
+class _Home:
+    """A device that only knows its home app, and fails on any screen read."""
+
+    def __init__(self, home: str | None) -> None:
+        self.home = home
+        self.reads = 0
+
+    def home_package(self) -> str | None:
+        self.reads += 1
+        return self.home
+
+    def dump(self):
+        raise AssertionError("no screen may be read")
+
+
+def test_a_direct_preview_reads_the_home_app_and_fails_closed():
+    from uiprobe import preview
+
+    policy = Policy(also_target=(HELPER,))
+    unreadable = _Home(None)
+    with pytest.raises(AlsoTargetError) as info:
+        preview(unreadable, SHOP, policy)  # ty: ignore[invalid-argument-type]
+    assert str(info.value) == HOME_UNREADABLE
+    assert unreadable.reads == 1
+    listed = _Home(HELPER)
+    with pytest.raises(AlsoTargetError, match="home app of this device"):
+        preview(listed, SHOP, policy)  # ty: ignore[invalid-argument-type]
+    assert listed.reads == 1
+
+
+def test_a_direct_preview_without_a_list_reads_no_home_app():
+    from uiprobe import preview
+
+    device = _Home("com.vendor.home")
+    with pytest.raises(AssertionError, match="no screen"):
+        preview(device, SHOP, Policy())  # ty: ignore[invalid-argument-type]
+    assert device.reads == 0

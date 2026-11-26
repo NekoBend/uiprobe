@@ -48,6 +48,7 @@ from uiprobe.guards import (
     MAX_ELEMENTS,
     PERMISSION_PACKAGES,
     Detail,
+    check_also_target,
     judge,
 )
 from uiprobe.model import Screen  # noqa: TC001
@@ -221,6 +222,14 @@ class _BadgeFree:
         return (self.screen_id, self._prints.of(element))
 
 
+def _checked(package: str, policy: Policy) -> Policy:
+    """The target itself cannot be listed (the other static rules of
+    ``Policy.also_target`` were checked when the policy was built)."""
+    if policy.also_target:
+        check_also_target(package, policy.also_target)
+    return policy
+
+
 class CrawlEngine:
     """Decides the next action of a pressing crawl from observations.
 
@@ -233,7 +242,8 @@ class CrawlEngine:
     Raises (on construction):
         TypeError: `package` is not a string, or `started_at` is not a number.
         ValueError: `package` is empty, or `started_at` is below 0, not
-            finite, or not below 2**40.
+            finite, or not below 2**40, or ``policy.also_target`` lists
+            `package` itself (`AlsoTargetError`).
     """
 
     def __init__(
@@ -252,7 +262,7 @@ class CrawlEngine:
             raise ValueError(msg)
         _check_clock("started_at", started_at)
         self._package = package
-        self._policy = policy
+        self._policy = _checked(package, policy)
         # Packages that count as the target besides `package` (never launched).
         # A permission package never does: its screens stay off target (a
         # relaunch, as without the list), so nothing is sent to them either.

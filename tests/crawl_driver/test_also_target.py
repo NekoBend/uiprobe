@@ -686,3 +686,25 @@ def test_a_permission_package_never_owns_a_screen_file(
         json.dumps(data), encoding="utf-8"
     )
     assert GATE_WARNING in read_tree(out).warnings
+
+
+@pytest.mark.usefixtures("android")
+def test_a_run_start_that_repeats_a_key_fails_the_check(tmp_path, device, clock):
+    from uiprobe.crawl_tree import GATE_WARNING, read_tree
+
+    out = tmp_path / "run"
+    run_listed(device, clock, out)
+    path = out / "run-start.json"
+    text = path.read_text("utf-8")
+    assert text.count('"also_target"') == 1
+    # a second also_target key: the second one would win in a plain reader
+    path.write_text(
+        text.replace(
+            '"also_target"', '"also_target": ["com.android.systemui"], "also_target"'
+        ),
+        encoding="utf-8",
+    )
+    tree = read_tree(out)
+    assert tree.also_target == ()
+    assert GATE_WARNING in tree.warnings
+    assert any("repeats a key" in w for w in tree.warnings)

@@ -12,7 +12,6 @@ from uiprobe._json import dumps
 from uiprobe.also_target import AlsoTargetError
 from uiprobe.cli.commands import _single_serial
 from uiprobe.cli.crawl_dry import (
-    _check_also_home,
     _check_plan_stream,
     _crawl_policy,
     _CrawlSetup,
@@ -59,7 +58,6 @@ def _cmd_crawl(args: argparse.Namespace) -> int:
         adb=args.adb,
         start_server=args.start_server,
     )
-    _check_also_home(device, setup.settings)
     result = make_preview(device, args.package, setup.policy)
     if args.json:
         _emit(dumps(_preview_json(result, settings_path), indent=2))

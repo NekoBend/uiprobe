@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import re
 import unicodedata
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Final
 
 from uiprobe.guards.constants import (
     _EDGE_SIDES,
@@ -35,6 +36,85 @@ if TYPE_CHECKING:
     from uiprobe.model import Element
 
 # -- policy ----------------------------------------------------------------------
+
+
+# The package of the lock screen and the notification shade.
+SYSTEM_UI: Final = "com.android.systemui"
+# Home apps (launchers) that are refused without asking the device: AOSP's,
+# Google's Pixel launcher and Samsung's One UI Home.
+FIXED_HOME_APPS: Final = (
+    "com.android.launcher3",
+    "com.google.android.apps.nexuslauncher",
+    "com.sec.android.app.launcher",
+)
+
+
+_PACKAGE: Final = re.compile(
+    r"[A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z][A-Za-z0-9_]*)+", re.ASCII
+)
+_MAX_PACKAGE: Final = 255
+
+
+def _package_name(item: object) -> str:
+    """`item` when it follows the Android package rule (the rule of
+    `uiprobe.crawl_preview.check_package`, which this module cannot import)."""
+    if not isinstance(item, str):
+        msg = f"also_target: package must be a str, not {type(item).__name__}"
+        raise AlsoTargetError(msg)
+    if len(item) > _MAX_PACKAGE or not _PACKAGE.fullmatch(item):
+        shown = item if len(item) <= 80 else item[:80] + "..."
+        msg = (
+            f"also_target: not a valid package name: {shown!r} (two or more"
+            " segments separated by dots, each an ASCII letter followed by"
+            f" letters, digits or underscores; at most {_MAX_PACKAGE} characters)"
+        )
+        raise AlsoTargetError(msg)
+    return item
+
+
+class AlsoTargetError(ValueError):
+    """A package listed in ``also_target`` is refused (nothing was sent)."""
+
+
+def check_also_target(target: str | None, listed: Iterable[str]) -> tuple[str, ...]:
+    """Check the list before any device is contacted; return it as a tuple.
+
+    `target` None skips the check against the target app (`Policy` does not
+    know it; `CrawlEngine`, `preview` and `crawl` do).
+
+    Raises:
+        AlsoTargetError: An entry is not a valid package name, is listed twice,
+            is `target` itself, is the system UI or is in `FIXED_HOME_APPS`.
+    """
+    if isinstance(listed, str):
+        msg = "also_target must be a list of package names, not one string"
+        raise AlsoTargetError(msg)
+    found: list[str] = []
+    for item in listed:
+        package = _package_name(item)
+        if package in found:
+            msg = f"also_target lists {package} more than once"
+            raise AlsoTargetError(msg)
+        if package == target:
+            msg = (
+                f"also_target lists {package}, which is the target app itself;"
+                " remove it from the list"
+            )
+            raise AlsoTargetError(msg)
+        if package == SYSTEM_UI:
+            msg = (
+                f"also_target cannot list {package}: it is the system UI (lock"
+                " screen, notification shade); nothing was pressed"
+            )
+            raise AlsoTargetError(msg)
+        if package in FIXED_HOME_APPS:
+            msg = (
+                f"also_target cannot list {package}: it is a home app"
+                " (launcher); nothing was pressed"
+            )
+            raise AlsoTargetError(msg)
+        found.append(package)
+    return tuple(found)
 
 
 def edge_areas(
@@ -164,7 +244,9 @@ class Policy:
     ``Screen.visible_bounds`` keep the fixed `MIN_VISIBLE_PX`.
 
     Raises:
-        ValueError: A deny word, confirm word or irreversible phrase is empty
+        ValueError: An ``also_target`` entry is refused (`AlsoTargetError`: not
+            a package name, listed twice, the system UI or a fixed home app), or
+            a deny word, confirm word or irreversible phrase is empty
             after normalization, or a confirm word is empty after the label
             cleaning (invisible characters, normalization, surrounding
             punctuation), or an exception word is not one word of letters and
@@ -213,6 +295,11 @@ class Policy:
         ):
             msg = "also_target must be a tuple of package names"
             raise TypeError(msg)
+        if self.also_target:
+            # The static rules (package format and length, duplicates, the
+            # system UI, the fixed home apps); a refused entry cannot be built.
+            # The target itself is checked where the target is known.
+            check_also_target(None, self.also_target)
         for word in (*self.deny_words, *self.confirm_words, *self.irreversible_phrases):
             _check_word(word)
         _exception_keys(self.deny_exceptions)

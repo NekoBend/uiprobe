@@ -433,12 +433,16 @@ from uiprobe.guards.matching import (  # noqa: F401
     deny_word_in,
     word_matches,
 )
-from uiprobe.guards.policy import (
+from uiprobe.guards.policy import (  # noqa: F401
+    FIXED_HOME_APPS,
+    SYSTEM_UI,
+    AlsoTargetError,
     Decision,
     Detail,
     Judgement,
     Policy,
     api36_fallback_areas,
+    check_also_target,
     edge_areas,
     parse_deny_file,
 )

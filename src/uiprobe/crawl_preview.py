@@ -96,7 +96,9 @@ def preview(device: Device, package: str, policy: Policy | None = None) -> Previ
             characters), or two elements of the screen have the same id, or
             ``policy.also_target`` lists the system UI, a fixed home app,
             `package` itself, a duplicate or a bad name (`AlsoTargetError`,
-            before the device is read).
+            before the device is read), or the device's home app is listed or
+            cannot be read (`AlsoTargetError`; read once, only when the list
+            is not empty; a transport failure raises its own error).
         UiprobeError: The device reads fail; the errors of `Device.dump`,
             `Device.foreground` and `Device.keyboard_shown` propagate
             unchanged.
@@ -115,6 +117,11 @@ def preview(device: Device, package: str, policy: Policy | None = None) -> Previ
         from uiprobe.also_target import check_also_target
 
         check_also_target(package, policy.also_target)
+        # And the device's own home app, read once before the screen: an
+        # unreadable one refuses too (fail closed), as in a pressing run.
+        from uiprobe.also_target import check_home
+
+        check_home(policy.also_target, device.home_package())
     screen = device.dump()
     foreground = device.foreground()
     keyboard = device.keyboard_shown()
