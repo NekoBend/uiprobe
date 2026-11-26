@@ -56,6 +56,8 @@ KIND_LABELS: Final = (
     ),
     ("disabled", "disabled", "[disabled] = it was disabled, so it was not pressed"),
 )
+NO_CHANGE_MARK: Final = " [no change]"
+LEGEND_NO_CHANGE: Final = "[no change] = pressing it left the same screen"
 LEGEND_DESC: Final = (
     '"..." = the element has no visible text; this is its accessibility description'
 )
@@ -185,13 +187,34 @@ def _keeps_line(row: Row, *, folded: bool) -> bool:
     return True
 
 
-def _row_line(row: Row, note: str | None, *, why: bool, tally: _Tally) -> _Entry:
+def _no_change(row: Row, *, kept: bool) -> bool:
+    """Whether a line ends in ` [no change]`: the row (with its folded
+    elements) was pressed and every attempt on it was sent, finished and ended
+    on the same screen. It is not used while `NOTES_IN_TEXT` writes that note
+    instead."""
+    endings = _endings(row)
+    return (
+        kept
+        and row.pressed
+        and bool(endings)
+        and not row.other_attempt
+        and "same_screen" not in NOTES_IN_TEXT
+        and all(_kind_of(to) == "same_screen" for to in endings)
+    )
+
+
+def _row_line(
+    row: Row, note: str | None, *, why: bool, tally: _Tally, no_change: bool = False
+) -> _Entry:
     """The entry of a row: its line (`text`) and the parts of the line. The marks
     it uses are noted in `tally`, for the legend."""
     name = _label(row.name)
     if row.name_from == "content_desc" and DESC_ONLY_ROWS == "quoted":
         name = '"' + name.translate({ord('"'): '\\"'}) + '"'
         tally.marks.add("desc")
+    if no_change:
+        note = NO_CHANGE_MARK
+        tally.marks.add("no_change")
     line = name + (note or "")
     if note is not None and row.to is not None and "other_app" in row.to:
         tally.marks.add("arrow")
@@ -250,12 +273,15 @@ def _merged(row: Row, folded: list[Row]) -> Row:
         to=endings[0] if endings else None,
         also_to=endings[1:],
         reasons=reasons,
+        other_attempt=any(r.other_attempt for r in group),
     )
 
 
 def _left_out_lines(row: Row, name: str, *, kept: bool) -> list[str]:
     """What the text tree leaves out of a row's endings, for the HTML page."""
     lines: list[str] = []
+    if _no_change(row, kept=kept):
+        return lines  # the line says it
     for to in _endings(row):
         kind = _kind_of(to)
         if kind not in _COUNTED:
@@ -359,9 +385,10 @@ def _entries(
             kind = _kind_of(row.to)
             note = _note(row.to, kind) if kind in NOTES_IN_TEXT and kept else None
         # Each kind of result that no line shows is counted once for the row.
+        no_change = _no_change(row, kept=kept)
         left_out = {
             kind
-            for to in _endings(row)
+            for to in ([] if no_change else _endings(row))
             if (kind := _kind_of(to)) in _COUNTED
             and not (kept and kind in NOTES_IN_TEXT and _note(to, kind) is not None)
         }
@@ -373,7 +400,7 @@ def _entries(
             else:
                 tally.desc_only += 1
             continue
-        entry = _row_line(row, note, why=why, tally=tally)
+        entry = _row_line(row, note, why=why, tally=tally, no_change=no_change)
         tally.names[entry.name] = tally.names.get(entry.name, 0) + 1
         entry.more = tuple(row.also_to)
         entries.append(entry)
@@ -674,6 +701,7 @@ def _drawn(tree: RunTree, *, ids: bool, why: bool, html: bool = False) -> _Rende
 _LEGENDS: Final = (
     ("dot", LEGEND),
     *((f"kind:{reason}", text) for reason, _, text in KIND_LABELS),
+    ("no_change", LEGEND_NO_CHANGE),
     ("desc", LEGEND_DESC),
     ("arrow", LEGEND_ARROW),
     ("see", LEGEND_SEE),
