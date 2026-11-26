@@ -211,6 +211,10 @@ def test_off_target_names_the_dump_and_the_foreground_apart(
     # The dump shows the shop while another app is said to be in front.
     driver, _, _ = _gate_run(tmp_path, device, clock)
     monkeypatch.setattr(device, "foreground", lambda: OTHER)
+    # The relaunch waits out its launch timeout for the shop, which never
+    # comes to the front: on the test's clock, not on real seconds.
+    monkeypatch.setattr(device, "_clock", clock.monotonic)
+    monkeypatch.setattr(device, "_sleep", clock.sleep)
     observation = driver.observe()
     assert observation.screen is not None
     assert observation.screen.package == SHOP

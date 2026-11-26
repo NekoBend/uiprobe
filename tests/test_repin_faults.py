@@ -16,6 +16,8 @@ too.
 from __future__ import annotations
 
 import contextlib
+import functools
+import os
 from typing import TYPE_CHECKING
 
 import pytest
@@ -33,6 +35,7 @@ from uiprobe.errors import (
     DeviceOfflineError,
     UiprobeError,
 )
+from uiprobe.guards import matching, words
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -92,6 +95,21 @@ class Faults:
             return result
 
         return call
+
+
+@pytest.fixture(autouse=True)
+def _cheap_pure_work(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Save time on work that decides nothing in this file.
+
+    The test runs about 100 crawls per case. The per-character class of the
+    label guard is a pure function, so a cache returns the same answers, and
+    the run files are not read back after a power loss, so their fsync is
+    skipped (the data is still written).
+    """
+    cached = functools.lru_cache(maxsize=None)(words._is_invisible)
+    monkeypatch.setattr(words, "_is_invisible", cached)
+    monkeypatch.setattr(matching, "_is_invisible", cached)
+    monkeypatch.setattr(os, "fsync", lambda _fd: None)
 
 
 def crawl_with(
