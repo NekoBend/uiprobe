@@ -137,19 +137,23 @@ def _home_package(output: str) -> str | None:
     -a android.intent.action.MAIN -c android.intent.category.HOME; echo
     uiprobe-exit:$?`` output.
 
-    The package is the part before the slash of the last line before the
-    marker line ``uiprobe-exit:0`` (which must be the last line; empty lines
-    and one CR at each line end are ignored). The lines before it are not
-    looked at, so a device that prints other information lines still gives
-    its home app. None when the marker is missing or not 0, the last line is
-    not ``PACKAGE/CLASS`` with a valid package name, or the package has
-    fewer than two segments (``android`` is the answer when the system asks
-    which home app to use: that names no home app).
+    Accepted: zero or more lines of the `_RESOLVE_INFO` form, then exactly one
+    line ``PACKAGE/CLASS`` with a valid package name (two or more segments)
+    and class, then the line ``uiprobe-exit:0`` last (empty lines and one CR
+    at each line end are ignored). The package is returned. Anything else is
+    None, and the run is refused: no component, ``No activity found``, more
+    than one component or any other line, another exit status, output that
+    ends early (no marker), and ``android/...ResolverActivity`` (the answer
+    when the system asks which home app to use), whose package has one
+    segment.
     """
     lines = [line for line in _lines(output) if line]
     if len(lines) < 2 or lines[-1] != f"{EXIT_MARKER}0":
         return None
-    owner, slash, name = lines[-2].partition("/")
+    *info, last = lines[:-1]
+    if not all(_RESOLVE_INFO.fullmatch(line) for line in info):
+        return None
+    owner, slash, name = last.partition("/")
     valid = (
         slash == "/"
         and len(owner) <= MAX_PACKAGE_LENGTH

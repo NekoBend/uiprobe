@@ -79,8 +79,6 @@ class _RunState:
         self.clock = clock
         self.sleep = sleep
         self.notes: list[str] = []
-        # Notes about Policy.also_target from before the run folder existed.
-        self.also_target_notes: tuple[str, ...] = ()
         self.screens_seen: set[str] = set()  # target screens, when observed
         self.focus: FocusedWindow | None = None  # at the last observation
         self._stop_seen = False  # stop() once returned True: it stays so

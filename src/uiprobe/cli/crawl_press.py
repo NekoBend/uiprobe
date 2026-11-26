@@ -254,7 +254,6 @@ def _cmd_crawl_press(args: argparse.Namespace, setup: _CrawlSetup) -> int:  # no
     hints = _press_hints(
         result, package=args.package, back=policy.back_on_other_screens
     )
-    hints.extend(result.also_target_notes)
     if args.json:
         _emit(dumps(_press_json(plan, result, hints, moves), indent=2))
     else:

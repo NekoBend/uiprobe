@@ -183,18 +183,23 @@ def test_the_devices_home_app_is_refused_with_a_usage_error(
     assert len(home_reads(fake_adb)) == 1
 
 
-def test_a_home_read_that_fails_is_a_note_after_the_run(
+def test_a_home_read_that_fails_is_a_usage_error_before_anything_is_pressed(
     fake_adb, android, capsys, here
 ):
     android.home = None
     settings_with(here, f'["{HELPER}"]')
-    code, text, err = crawl(
-        capsys, fake_adb, "--press", *FAST, "--out", str(here / "r"), "--json"
-    )
-    assert code == 0  # the plan is on stderr with --json
-    assert "also pressing in" in err
-    notes = json.loads(text)["notes"]
-    assert any("home app of this device could not be read" in n for n in notes)
+    out = here / "r"
+    code, _text, err = crawl(capsys, fake_adb, "--press", *FAST, "--out", str(out))
+    assert code == 2
+    assert (
+        "also_target: could not read this device's home app, which also_target"
+        " needs in order to refuse it; nothing was pressed"
+    ) in err
+    assert writes(fake_adb) == []
+    assert not out.exists()
+    code, _text, err = crawl(capsys, fake_adb, "--dry-run")
+    assert code == 2
+    assert "could not read this device's home app" in err
 
 
 def test_a_package_that_is_not_installed_is_a_usage_error(

@@ -24,7 +24,9 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Final
 
+from uiprobe.also_target import AlsoTargetError, check_also_target
 from uiprobe.crawl import _Prints
+from uiprobe.guards import PERMISSION_PACKAGES
 from uiprobe.guards.tree import _is_dialog, _Tree
 from uiprobe.model import Bounds, Element, Screen
 from uiprobe.settings import SettingsError
@@ -46,9 +48,6 @@ __all__ = [
 TREE_SCHEMA: Final = "uiprobe.crawl_tree/1"
 
 _SCREEN_ID: Final = re.compile(r"s-[0-9a-f]{12}")
-_PACKAGE: Final = re.compile(
-    r"[A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z][A-Za-z0-9_]*)+", re.ASCII
-)
 # The most one file is read: the line files (transitions.jsonl, skipped.jsonl)
 # up to 64 MiB; a screen file, run-start.json and run.json up to 8 MiB.
 MAX_LOG_BYTES: Final = 64 * 1024 * 1024
@@ -616,21 +615,20 @@ def _read_start(base: Path) -> dict[str, object]:
 
 
 def _also_target(start: dict[str, object], package: str) -> tuple[str, ...] | None:
-    """The ``also_target`` of run-start.json: a list of distinct package names
-    other than `package`, as `RunWriter.create` writes it. A missing key is the
-    empty tuple; anything else that is not such a list is None."""
+    """The ``also_target`` of run-start.json, checked with the rules of the
+    settings (`check_also_target`: package format and length, distinct, not
+    `package`, not the system UI, not a fixed home app), and not empty (the
+    writer leaves an empty list out). A missing key is the empty tuple;
+    anything else that is not such a list is None."""
     if "also_target" not in start:
         return ()
     listed = start["also_target"]
-    if (
-        not isinstance(listed, list)
-        or not listed
-        or not all(isinstance(n, str) and _PACKAGE.fullmatch(n) for n in listed)
-        or len(set(listed)) != len(listed)
-        or package in listed
-    ):
+    if not isinstance(listed, list) or not listed:
         return None
-    return tuple(listed)
+    try:
+        return check_also_target(package, listed)
+    except AlsoTargetError:
+        return None
 
 
 def _read_end(base: Path, warnings: _Warnings) -> dict[str, object] | None:
@@ -1225,7 +1223,9 @@ def read_tree(run_dir: str | Path) -> RunTree:
             " packages; it is not used"
         )
     also = listed or ()
-    own = frozenset((package, *also))
+    # A permission package never owns screen files, listed or not: the crawl
+    # never writes them, so one in the folder fails the check below.
+    own = frozenset((package, *(n for n in also if n not in PERMISSION_PACKAGES)))
     ended = _read_end(base, warnings)
     skips = _read_skips(base, warnings)
     reader = _Reader(base, warnings)

@@ -5,6 +5,7 @@ records."""
 from __future__ import annotations
 
 import json
+import re
 from typing import TYPE_CHECKING, Any
 
 import pytest
@@ -36,7 +37,7 @@ from uiprobe.also_target import (
 from uiprobe.crawl import Limits
 from uiprobe.device import Device
 from uiprobe.errors import NotEmulatorError
-from uiprobe.guards import Policy
+from uiprobe.guards import PERMISSION_PACKAGES, Policy
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -322,19 +323,35 @@ def test_the_devices_home_app_is_refused_after_one_read_and_nothing_else_is_sent
     assert not (tmp_path / "run").exists()
 
 
-def test_a_failed_home_read_continues_with_the_fixed_list_and_a_note(
-    tmp_path, device, android, fake_adb, clock
+HOME_FAILURES = {
+    "no activity": "No activity found\nuiprobe-exit:0\n",
+    "no component": "uiprobe-exit:0\n",
+    "resolver": "android/com.android.internal.app.ResolverActivity\nuiprobe-exit:0\n",
+    "error": "Error: could not resolve\nuiprobe-exit:1\n",
+    "non-zero exit": "com.vendor.home/.Home\nuiprobe-exit:2\n",
+    "no marker": "com.vendor.home/.Home\n",
+    "two components": "com.vendor.home/.Home\ncom.other.home/.Home\nuiprobe-exit:0\n",
+    "empty": "",
+}
+
+
+@pytest.mark.parametrize("answer", HOME_FAILURES.values(), ids=HOME_FAILURES.keys())
+def test_a_home_read_that_fails_refuses_the_run_before_any_input(
+    tmp_path, device, android, fake_adb, clock, answer
 ):
-    android.home = None  # "No activity found"
-    out = tmp_path / "run"
-    result = run_listed(device, clock, out)
-    assert result.stop_reason == "exhausted"
+    android.override(
+        re.compile(r"^cmd package resolve-activity .*HOME"),
+        lambda _c: answer.encode(),
+    )
+    with pytest.raises(AlsoTargetError) as info:
+        run_listed(device, clock, tmp_path / "run")
+    assert str(info.value) == (
+        "also_target: could not read this device's home app, which also_target"
+        " needs in order to refuse it; nothing was pressed"
+    )
     assert len(home_reads(fake_adb)) == 1
-    assert len(result.also_target_notes) == 1
-    assert "could not be read" in result.also_target_notes[0]
-    assert "com.android.launcher3" in result.also_target_notes[0]
-    assert result.also_target_notes[0] in (out / "summary.txt").read_text("utf-8")
-    assert tapped(android)
+    assert not any(c.startswith(("am ", "input ")) for c in commands(fake_adb))
+    assert not (tmp_path / "run").exists()
 
 
 def test_a_package_that_is_not_installed_is_refused_at_the_start(
@@ -481,6 +498,18 @@ def test_permission_screens_are_never_pressed_even_when_listed(
         if "action" in r and "off_target" in r
     }
     assert PERMISSION_PACKAGE in shown  # still an off-target screen in the records
+    from uiprobe.crawl_tree import read_tree
+
+    tree = read_tree(out)
+    assert tree.warnings == []
+    endings = [
+        row.to
+        for node in tree.screens.values()
+        for row in node.rows
+        if row.to is not None
+    ]
+    # the recorded permission transition keeps its `→ PACKAGE` display
+    assert {"other_app": PERMISSION_PACKAGE} in endings
     assert PERMISSION_PACKAGE not in {
         json.loads(p.read_text("utf-8"))["app"]["package"]
         for p in (out / "screens").glob("*.json")
@@ -599,3 +628,61 @@ def test_a_bad_also_target_in_run_start_is_a_warning_and_the_gate_fails(
     assert tree.also_target == ()
     assert GATE_WARNING in tree.warnings
     assert any("also_target" in w for w in tree.warnings)
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        ["com.android.systemui"],
+        ["com.android.launcher3"],
+        ["com.google.android.apps.nexuslauncher"],
+        ["com.sec.android.app.launcher"],
+        ["com." + "a" * 252],  # 256 characters
+        [HELPER, "com.android.systemui"],
+    ],
+    ids=["systemui", "launcher3", "nexus", "samsung", "256-chars", "mixed"],
+)
+@pytest.mark.usefixtures("android")
+def test_the_tree_checks_the_recorded_list_with_the_settings_rules(
+    tmp_path, device, clock, bad
+):
+    from uiprobe.crawl_tree import GATE_WARNING, read_tree
+
+    out = tmp_path / "run"
+    run_listed(device, clock, out)
+    path = out / "run-start.json"
+    start = json.loads(path.read_text("utf-8"))
+    start["also_target"] = bad
+    path.write_text(json.dumps(start), encoding="utf-8")
+    tree = read_tree(out)
+    assert tree.also_target == ()
+    assert GATE_WARNING in tree.warnings
+    assert any("also_target" in w for w in tree.warnings)
+
+
+def test_a_256_character_name_is_really_256_characters():
+    assert len("com." + "a" * 252) == 256
+
+
+@pytest.mark.parametrize("permission", sorted(PERMISSION_PACKAGES))
+@pytest.mark.usefixtures("android")
+def test_a_permission_package_never_owns_a_screen_file(
+    tmp_path, device, clock, permission
+):
+    from uiprobe.crawl_tree import GATE_WARNING, read_tree
+
+    out = tmp_path / "run"
+    run_listed(device, clock, out)
+    path = out / "run-start.json"
+    start = json.loads(path.read_text("utf-8"))
+    start["also_target"] = [HELPER, permission]  # a valid list
+    path.write_text(json.dumps(start), encoding="utf-8")
+    assert GATE_WARNING not in read_tree(out).warnings
+    # a screen file of the permission package is one uiprobe never writes
+    source = next((out / "screens").glob("*.json"))
+    data = json.loads(source.read_text("utf-8"))
+    data["app"]["package"] = permission
+    (out / "screens" / "s-aaaaaaaaaaaa.json").write_text(
+        json.dumps(data), encoding="utf-8"
+    )
+    assert GATE_WARNING in read_tree(out).warnings

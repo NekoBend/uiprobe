@@ -467,17 +467,15 @@ def _check_also_target(package: str, settings: Settings) -> None:
 
 
 def _check_also_home(device: Device, settings: Settings) -> None:
-    """For the preview: refuse the device's home app when it is listed, and say
-    on stderr when it could not be read. Nothing is read with an empty list."""
+    """For the dry run: refuse the device's home app when it is listed, and
+    refuse when it cannot be read. Nothing is read with an empty list."""
     if not settings.also_target:
         return
     try:
-        note = check_home(settings.also_target, device.home_package())
+        check_home(settings.also_target, device.home_package())
     except AlsoTargetError as exc:
         where = _printable(_shown(str(settings.source)))
         raise _UsageError(f"{where}: [rules] {_printable(str(exc))}") from None
-    if note is not None:
-        _emit(f"uiprobe: note: {_printable(note)}", stream=sys.stderr)
 
 
 def _detail_text(decision: Decision, detail: Detail) -> str:

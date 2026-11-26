@@ -12,6 +12,7 @@ from uiprobe import settings
 from uiprobe.also_target import (
     FIXED_HOME_APPS,
     HOME_COMMAND,
+    HOME_UNREADABLE,
     SYSTEM_UI,
     AlsoTargetError,
     check_also_target,
@@ -19,6 +20,7 @@ from uiprobe.also_target import (
     not_installed_error,
 )
 from uiprobe.device import _home_package
+from uiprobe.guards import Policy
 from uiprobe.settings import SETTINGS_FILE, SettingsError, load_settings
 
 DATA = Path(__file__).parent / "data"
@@ -219,18 +221,18 @@ def test_a_listed_home_app_of_the_device_is_refused():
     )
 
 
-def test_another_home_app_gives_no_note():
+def test_another_home_app_passes():
     assert check_home([HELPER], "com.vendor.home") is None
 
 
-def test_an_unreadable_home_app_gives_the_note_and_the_fixed_list_stays():
-    note = check_home([HELPER], None)
-    assert note == (
-        "the home app of this device could not be read, so also_target was"
-        " checked against the fixed list of home apps only"
-        " (com.android.launcher3, com.google.android.apps.nexuslauncher,"
-        " com.sec.android.app.launcher)"
+def test_an_unreadable_home_app_refuses_the_run():
+    with pytest.raises(AlsoTargetError) as info:
+        check_home([HELPER], None)
+    assert str(info.value) == (
+        "also_target: could not read this device's home app, which also_target"
+        " needs in order to refuse it; nothing was pressed"
     )
+    assert str(info.value) == HOME_UNREADABLE
 
 
 def test_the_not_installed_refusal_names_the_package():
@@ -265,15 +267,10 @@ def test_the_home_command_is_the_read_only_resolve():
             "com.vendor.home/com.vendor.home.ui.Main\r\nuiprobe-exit:0\r\n",
             "com.vendor.home",
         ),
-        # the lines before the last one are not looked at
-        (
-            "some other line\nanother\ncom.vendor.home/.Home\nuiprobe-exit:0\n",
-            "com.vendor.home",
-        ),
         ("\ncom.vendor.home/.Home\n\nuiprobe-exit:0\n\n", "com.vendor.home"),
     ],
 )
-def test_the_package_comes_from_the_last_line_before_the_marker(output, package):
+def test_the_package_comes_from_the_one_component_line(output, package):
     assert _home_package(output) == package
 
 
@@ -286,6 +283,10 @@ def test_the_package_comes_from_the_last_line_before_the_marker(output, package)
         "com.vendor.home/.Home\n",  # no marker: output may be cut
         "com.vendor.home/.Home\nuiprobe-exit:1\n",
         "com.vendor.home/.Home\nuiprobe-exit:0\nextra\n",
+        # a line that is not an information line, or a second component
+        "some other line\ncom.vendor.home/.Home\nuiprobe-exit:0\n",
+        "com.vendor.home/.Home\ncom.other.home/.Home\nuiprobe-exit:0\n",
+        "error: closed\n",
         "com.vendor.home\nuiprobe-exit:0\n",  # no component
         "android/com.android.internal.app.ResolverActivity\nuiprobe-exit:0\n",
         "com.vendor.home/bad name\nuiprobe-exit:0\n",
@@ -294,3 +295,15 @@ def test_the_package_comes_from_the_last_line_before_the_marker(output, package)
 )
 def test_output_that_names_no_home_app_gives_none(output):
     assert _home_package(output) is None
+
+
+def test_a_direct_preview_refuses_the_names_that_need_no_device():
+    from uiprobe import preview
+
+    class NoDevice:
+        def dump(self):
+            raise AssertionError("the device must not be read")
+
+    for listed in ((SYSTEM_UI,), (FIXED_HOME_APPS[0],), (SHOP,), (HELPER, HELPER)):
+        with pytest.raises(AlsoTargetError):
+            preview(NoDevice(), SHOP, Policy(also_target=listed))  # ty: ignore[invalid-argument-type]
