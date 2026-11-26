@@ -968,5 +968,7 @@ def judge(
     return Judgement(
         tuple(
             state.decide(i) for i, element in enumerate(elements) if state.clickable[i]
-        )
+        ),
+        dialog=state.dialog,
+        irreversible=state.irreversible_detail() is not None,
     )

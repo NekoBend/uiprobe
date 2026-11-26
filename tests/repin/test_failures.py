@@ -68,7 +68,7 @@ def test_a_failed_request_swallowed_by_the_dump_is_proven_before_a_tap(
     with pytest.raises(DeviceNotFoundError) as caught:
         run(device, clock, out)
     assert caught.value.details["reason"] == "device_changed"
-    assert not [c for _, _, c in fake_adb.commands if c.startswith("input")]
+    assert not [c for _, _, c in fake_adb.commands if c.startswith("input ")]
     assert android.inputs == []
 
 

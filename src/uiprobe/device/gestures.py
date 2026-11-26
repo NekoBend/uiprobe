@@ -43,6 +43,10 @@ SCROLL_INSET_PERCENT: Final = 20
 SCROLL_EDGE_PERCENT: Final = 5
 
 
+# The largest wheel amount of `Device._wheel_scroll`.
+MAX_WHEEL_AMOUNT: Final = 10
+
+
 _DIRECTIONS: Final = frozenset({"up", "down", "left", "right"})
 
 

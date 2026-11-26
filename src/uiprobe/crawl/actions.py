@@ -6,7 +6,13 @@ from dataclasses import dataclass
 from typing import Final
 
 # Detail at runtime too, so that typing.get_type_hints(SkippedElement) works.
-from uiprobe.guards import Detail  # noqa: TC001
+from uiprobe.guards import (
+    DEFAULT_SCROLL_AMOUNT,
+    DEFAULT_SCROLL_INCIDENTS,
+    DEFAULT_SCROLLS_PER_SCREEN,
+    MAX_SCROLL_AMOUNT,
+    Detail,
+)
 from uiprobe.model import Screen
 
 # A stop reason is a plain string so the driver can add its own (``interrupted``
@@ -84,7 +90,16 @@ def _check_clock(name: str, value: object) -> None:
 
 @dataclass(frozen=True, slots=True)
 class Limits:
-    """The stop limits: screens deep on one path, actions sent, minutes.
+    """The stop limits: screens deep on one path, actions sent, minutes, and
+    (with ``Policy.scroll_lists``) swipes per screen.
+
+    ``scrolls_per_screen`` is the most scrolls the engine sends on one screen
+    (the screen ids a scroll leads through count as one screen; a landing on
+    another screen does not reset it); it does not stop the crawl, it only stops
+    scrolling that screen. ``scroll_amount`` is the size of a wheel turn (1 to
+    ``MAX_SCROLL_AMOUNT``) and ``scroll_incidents`` how many scrolls that
+    changed something or navigated are allowed before scrolling stops for the
+    run.
 
     Raises (on construction):
         TypeError: a value is not an int.
@@ -94,11 +109,17 @@ class Limits:
     depth: int = 5
     actions: int = 300
     minutes: int = 30
+    scrolls_per_screen: int = DEFAULT_SCROLLS_PER_SCREEN
+    scroll_amount: int = DEFAULT_SCROLL_AMOUNT
+    scroll_incidents: int = DEFAULT_SCROLL_INCIDENTS
 
     def __post_init__(self) -> None:
         _check_count("depth", self.depth, MAX_DEPTH)
         _check_count("actions", self.actions)
         _check_count("minutes", self.minutes)
+        _check_count("scrolls_per_screen", self.scrolls_per_screen)
+        _check_count("scroll_amount", self.scroll_amount, MAX_SCROLL_AMOUNT)
+        _check_count("scroll_incidents", self.scroll_incidents)
 
 
 @dataclass(frozen=True, slots=True)
@@ -169,6 +190,52 @@ class Tap:
             raise TypeError(msg)
 
 
+def _check_point(name: str, point: object) -> None:
+    if (
+        not isinstance(point, tuple)
+        or len(point) != 2
+        or any(isinstance(v, bool) or not isinstance(v, int) for v in point)
+    ):
+        msg = f"{name} must be a tuple of two ints"
+        raise TypeError(msg)
+
+
+@dataclass(frozen=True, slots=True)
+class Scroll:
+    """Turn a mouse wheel at ``point`` (x, y) of screen ``screen_id``, ``amount``
+    steps, so that the content further down comes up (``VSCROLL,-amount``).
+
+    There is no direction field: the wheel is never turned the other way, and
+    there is no swipe, so nothing else can be built. A wheel event goes to the
+    window under the pointer, not to the focused window.
+
+    Raises (on construction):
+        TypeError: ``screen_id`` is not a non-empty string, ``point`` is not a
+            tuple of two ints, or ``amount`` is not an int.
+        ValueError: a coordinate is negative, or ``amount`` is outside 1 to
+            ``MAX_SCROLL_AMOUNT``.
+    """
+
+    screen_id: str
+    point: tuple[int, int]
+    amount: int
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.screen_id, str) or not self.screen_id:
+            msg = "screen_id must be a non-empty string"
+            raise TypeError(msg)
+        _check_point("point", self.point)
+        if min(self.point) < 0:
+            msg = "point must not be negative"
+            raise ValueError(msg)
+        if isinstance(self.amount, bool) or not isinstance(self.amount, int):
+            msg = "amount must be an int"
+            raise TypeError(msg)
+        if not 1 <= self.amount <= MAX_SCROLL_AMOUNT:
+            msg = f"amount must be from 1 to {MAX_SCROLL_AMOUNT}"
+            raise ValueError(msg)
+
+
 @dataclass(frozen=True, slots=True)
 class Back:
     """Press the BACK key."""
@@ -196,7 +263,7 @@ class Stop:
             raise TypeError(msg)
 
 
-Action = Launch | Tap | Back | Relaunch | Reread | Stop
+Action = Launch | Tap | Scroll | Back | Relaunch | Reread | Stop
 
 
 @dataclass(frozen=True, slots=True)
@@ -204,10 +271,13 @@ class Transition:
     """One action that was sent and where it led.
 
     ``action_id`` counts every sent action from 1 (the launch is 1). ``kind`` is
-    ``launch``, ``tap``, ``back`` or ``relaunch``. ``from_screen_id`` is the
-    screen the action was decided on (None for the launch). ``fingerprint`` and
-    ``point`` are set for taps. ``to_screen_id`` is the first screen seen
-    afterwards, or None when that dump failed (``dump_failed`` is then True).
+    ``launch``, ``tap``, ``scroll``, ``back`` or ``relaunch``. ``from_screen_id``
+    is the screen the action was decided on (None for the launch).
+    ``fingerprint`` and ``point`` are set for taps; ``point`` and ``amount``
+    are set for scrolls, and ``scroll_effect`` says what a scroll did beyond
+    scrolling (``changed``, ``navigation``; None when nothing).
+    ``to_screen_id`` is the first screen seen afterwards, or None when that dump
+    failed (``dump_failed`` is then True).
     When the next action is withdrawn (`CrawlEngine.withdraw`), the screen
     seen before it does not count: ``to_screen_id`` is the screen of the
     fresh observation that `next` gets after the withdrawal (a driver's own
@@ -221,6 +291,8 @@ class Transition:
     fingerprint: str | None = None
     point: tuple[int, int] | None = None
     dump_failed: bool = False
+    amount: int | None = None
+    scroll_effect: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

@@ -5,7 +5,7 @@ from __future__ import annotations
 import contextlib
 import os
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 
 from uiprobe.also_target import (
@@ -267,6 +267,9 @@ def crawl(
         depth=int.__int__(limits.depth),
         actions=int.__int__(limits.actions),
         minutes=int.__int__(limits.minutes),
+        scrolls_per_screen=int.__int__(limits.scrolls_per_screen),
+        scroll_amount=int.__int__(limits.scroll_amount),
+        scroll_incidents=int.__int__(limits.scroll_incidents),
     )
     if not isinstance(out, str | os.PathLike):
         msg = f"out must be a str or a path, not {type(out).__name__}"
@@ -352,6 +355,17 @@ def _crawl_on(
     forget_displays(device)  # several displays seen count within one run
     device.pin_transport()
     _check_device(device, allow_real_device=allow_real_device)
+    # Whether the device can scroll with a mouse wheel is read once, here, from
+    # its own `input` usage, before anything is sent; when it cannot be read or
+    # does not list `scroll`, the run does not scroll (the engine gets the
+    # policy with the switch off). With the switch off nothing is read.
+    wheel = False
+    asked = policy.scroll_lists
+    if asked:
+        # Only the driver reads it: no caller can claim support.
+        wheel = device._wheel_supported()  # noqa: SLF001 - internal to uiprobe
+        if not wheel:
+            policy = replace(policy, scroll_lists=False)
     # The app's uid, which a tap's window must have (Policy.check_tap_window),
     # and whether other packages share it; None when it cannot be read: then
     # every tap is refused (cover_unknown) before any window is read.
@@ -382,6 +396,10 @@ def _crawl_on(
         restart=restart,
         record_text=record_text,
         also_target=policy.also_target,
+        scrolls_per_screen=limits.scrolls_per_screen if asked else None,
+        scroll_amount=limits.scroll_amount,
+        scroll_incidents=limits.scroll_incidents,
+        scroll_input=wheel,
     )
     try:
         run = _Run(

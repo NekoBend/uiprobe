@@ -5,7 +5,7 @@ from __future__ import annotations
 import contextlib
 from typing import TYPE_CHECKING
 
-from uiprobe.crawl import Back, Launch, Observation, Tap
+from uiprobe.crawl import Back, Launch, Observation, Scroll, Tap
 from uiprobe.crawl_driver.constants import (
     _SEND_PATHS,
     FOCUS_CAUSE_SEVERAL_DISPLAYS,
@@ -160,15 +160,17 @@ class _GateMixin(_RunState):
         return None
 
     def refused_tap(
-        self, tap: Tap, screen: Screen | None, seen: _Seen
+        self, action: Tap | Scroll, screen: Screen | None, seen: _Seen
     ) -> Observation | None:
-        """Record what a refused tap's gate read; return it as the next
-        observation, or None to read the screen again.
+        """Record what a refused tap's (or scroll's) gate read; return it as
+        the next observation, or None to read the screen again.
 
         The gate's reads began after its own pin check. If something happened
         to the pin during them they are mixed: they are not recorded, and the
         screen is read again from scratch.
         """
+        # The skip rows name the element of a tap; a scroll has none.
+        tap = action if isinstance(action, Tap) else None
         if self.device.pin_epoch != self.gate_epoch:
             # The skip rows come from the screen the tap was chosen on, now
             # and when the engine releases the tap.
@@ -208,9 +210,9 @@ class _GateMixin(_RunState):
         if self.stopped():
             return NOT_SENT_STOPPED, None
         self.gate_epoch = self.device.pin_epoch
-        tap = isinstance(action, Tap)
-        # For a tap: the focused window before and after the dump must be the
-        # same window of the app, so the dump shows that window (uiautomator
+        tap = isinstance(action, Tap | Scroll)
+        # For a tap or a scroll: the focused window before and after the dump
+        # must be the same window of the app, so the dump shows that window (uiautomator
         # dumps the focused window: seen on API 24, 30 and 36 with the shade).
         before = self.device.focused_window() if tap else None
         screen = self.dump() if tap else None
@@ -224,14 +226,20 @@ class _GateMixin(_RunState):
         # tap point is the guard: without it, a tap or BACK is not sent. Any
         # read of this device in the run that showed several displays counts
         # (the observation's too), and this reason comes before the others.
-        guard = isinstance(action, Tap | Back) and not self.policy.check_tap_window
+        guard = isinstance(action, Tap | Scroll | Back) and (
+            not self.policy.check_tap_window
+        )
         unchecked = guard and displays_seen(self.device)
         if unchecked:
             before = focus = None
             self.gate_focus_details = {"cause": FOCUS_CAUSE_SEVERAL_DISPLAYS}
         seen = _Seen(Observation(screen, foreground, keyboard, now), focus)
-        if isinstance(action, Tap):
-            # The last read: the window that takes a touch at the point.
+        if isinstance(action, Tap | Scroll):
+            # The last read: the window that takes a touch at the point. A scroll
+            # is a mouse wheel event, which goes to the window under the pointer,
+            # not to the focused window: the focus checks below still hold (the
+            # app must own the focus, as for a tap), but it is this read that
+            # says which window the wheel reaches, at the scroll's one point.
             cover = (
                 self.cover(action.point, (before, focus), screen)
                 if self.policy.check_tap_window
@@ -317,6 +325,8 @@ class _GateMixin(_RunState):
         path = (
             "tap"
             if isinstance(action, Tap)
+            else "scroll"
+            if isinstance(action, Scroll)
             else "back"
             if isinstance(action, Back)
             else "force-stop"

@@ -33,6 +33,7 @@ from uiprobe.crawl.actions import (
     Records,
     Relaunch,
     Reread,
+    Scroll,
     SkippedElement,
     Stop,
     StopReason,
@@ -48,8 +49,13 @@ from uiprobe.guards import (
     MAX_ELEMENTS,
     PERMISSION_PACKAGES,
     Detail,
+    changed_by_wheel,
     check_also_target,
+    container_key,
+    is_dialog,
     judge,
+    scroll_container,
+    scroll_target,
 )
 from uiprobe.model import Screen  # noqa: TC001
 
@@ -73,6 +79,13 @@ class _Pending:
     replay: bool = False
     element_id: str | None = None
     bounds: tuple[int, ...] | None = None
+    amount: int | None = None
+    # The screen read right before a scroll was sent, to see what it changed.
+    scroll_pre: Screen | None = None
+    scroll_key: str | None = None
+    # What the scroll did beyond scrolling, once seen (see `scroll_effect`).
+    effect: str | None = None
+    effect_seen: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -92,6 +105,21 @@ class _Plan:
     # Which marks this proposal added (a deadline cancel removes only those).
     new_full: bool = True
     new_bare: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class _ScrollPlan:
+    """The scroll handed out last: its container, its key (see
+    `uiprobe.guards.container_key`), the whole screen as it was (every element's
+    id, class, package, texts, flags and bounds) and, once it was re-checked,
+    the screen read right before it was sent."""
+
+    scroll: Scroll
+    container: str
+    key: str
+    content: tuple[tuple[object, ...], ...]
+    activity: str | None
+    pre: Screen | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -177,6 +205,15 @@ class _State:
     replay_tap: Tap | None
     replay_ids: set[int]
     approved_bounds: tuple[int, ...] | None
+    scrolls: dict[str, int]
+    scrolled_end: set[str]
+    family: dict[str, str]
+    seen_prints: dict[str, set[str]]
+    scroll_plan: _ScrollPlan | None
+    scroll_approved: _ScrollPlan | None
+    after_scroll: str | None
+    scroll_blocked: set[str]
+    scroll_incidents: int
 
 
 class _BadgeFree:
@@ -246,7 +283,7 @@ class CrawlEngine:
             `package` itself (`AlsoTargetError`).
     """
 
-    def __init__(
+    def __init__(  # noqa: PLR0915 - one field per piece of state
         self,
         package: str,
         policy: Policy,
@@ -307,9 +344,28 @@ class CrawlEngine:
         self._replay_tap: Tap | None = None
         self._replay_ids: set[int] = set()
         self._approved_bounds: tuple[int, ...] | None = None
+        self._init_scrolling()
         # The action `next` returned last, with the state from before that
         # call, while it can still be withdrawn.
         self._returned: tuple[Action, _State] | None = None
+
+    def _init_scrolling(self) -> None:
+        """The state of scrolling (`Policy.scroll_lists`): all empty, and unused
+        with the switch off. The keys are "families" of screen ids: a screen
+        whose id changed after a scroll belongs to the family of the screen it
+        was scrolled from, so its tried marks, fingerprints and scroll count
+        are the same screen's."""
+        self._scrolls: dict[str, int] = {}
+        self._scrolled_end: set[str] = set()
+        self._family: dict[str, str] = {}
+        self._seen_prints: dict[str, set[str]] = {}
+        self._scroll_plan: _ScrollPlan | None = None
+        self._scroll_approved: _ScrollPlan | None = None
+        self._after_scroll: str | None = None
+        # Screens (families) where a scroll changed something or navigated, and
+        # how many such scrolls there were in the run.
+        self._scroll_blocked: set[str] = set()
+        self._scroll_incidents = 0
 
     # -- what the driver can read ------------------------------------------------
 
@@ -380,7 +436,7 @@ class CrawlEngine:
             return self._stop
         before = self._snapshot()
         action = self._decide(observation)
-        withdrawable = isinstance(action, Tap | Back | Relaunch)
+        withdrawable = isinstance(action, Tap | Scroll | Back | Relaunch)
         self._returned = (action, before) if withdrawable else None
         return action
 
@@ -447,6 +503,15 @@ class CrawlEngine:
             replay_tap=self._replay_tap,
             replay_ids=set(self._replay_ids),
             approved_bounds=self._approved_bounds,
+            scrolls=dict(self._scrolls),
+            scrolled_end=set(self._scrolled_end),
+            family=dict(self._family),
+            seen_prints={k: set(v) for k, v in self._seen_prints.items()},
+            scroll_plan=self._scroll_plan,
+            scroll_approved=self._scroll_approved,
+            after_scroll=self._after_scroll,
+            scroll_blocked=set(self._scroll_blocked),
+            scroll_incidents=self._scroll_incidents,
         )
 
     def _restore(self, state: _State) -> None:
@@ -487,10 +552,20 @@ class CrawlEngine:
         self._replay_tap = state.replay_tap
         self._replay_ids = set(state.replay_ids)
         self._approved_bounds = state.approved_bounds
+        self._scrolls = dict(state.scrolls)
+        self._scrolled_end = set(state.scrolled_end)
+        self._family = dict(state.family)
+        self._seen_prints = {k: set(v) for k, v in state.seen_prints.items()}
+        self._scroll_plan = state.scroll_plan
+        self._scroll_approved = state.scroll_approved
+        self._after_scroll = state.after_scroll
+        self._scroll_blocked = set(state.scroll_blocked)
+        self._scroll_incidents = state.scroll_incidents
 
     def _decide(self, observation: Observation) -> Action:
         """The body of `next`, after its checks."""
         self._drop_unsent_tap()
+        self._after_scroll = None  # set again below when a scroll just ended
         was_keyboard_back = self._keyboard_back
         screen = observation.screen
         if screen is not None and not _ids_unique(screen):
@@ -508,6 +583,7 @@ class CrawlEngine:
                 sid,
                 on_target=on_target,
                 keyboard=observation.keyboard_shown is True,
+                effect=self._resolve_effect(screen, on_target=on_target),
             )
         limit = self._limit_reached(observation.now)
         if limit is not None:
@@ -518,8 +594,15 @@ class CrawlEngine:
             return self._off_target(sid)
         return self._on_target(screen, sid, observation, was_keyboard_back)
 
-    def recheck(self, tap: Tap, observation: Observation) -> bool:
-        """Say whether `tap` may be sent, judging the fresh observation.
+    def recheck(self, tap: Tap | Scroll, observation: Observation) -> bool:
+        """Say whether `tap` (or a `Scroll`) may be sent, judging the fresh
+        observation.
+
+        For a `Scroll`, see `_recheck_scroll`: the fresh screen must be the
+        target with the same screen id and no keyboard, before the deadline,
+        `uiprobe.guards.scroll_target` must give exactly the planned container
+        and point on it, and everything in the container and at the point must
+        be as it was when the scroll was planned, text included.
 
         Call it right after `next` returned the tap, with a screen read just
         before pressing, passing the very `Tap` instance `next` returned (an
@@ -537,6 +620,8 @@ class CrawlEngine:
         Raises:
             ValueError: `tap` is not the instance `next` returned last.
         """
+        if isinstance(tap, Scroll):
+            return self._recheck_scroll(tap, observation)
         planned = self._planned
         if planned is None or planned.tap is not tap:
             msg = "tap is not the tap that next() returned last"
@@ -614,6 +699,41 @@ class CrawlEngine:
         self._label_run = 0
         self._landed.clear()
 
+    def scroll_sent(self, scroll: Scroll) -> None:
+        """Note that `scroll` was really sent to the device.
+
+        The same rules as `tap_sent`, for the very `Scroll` instance `recheck`
+        allowed last: only this counts the scroll as an action and records its
+        transition (settled by the next observation), and ends the runs of
+        relaunches and refused re-checks. A scroll that was dropped, refused or
+        failed to send must not be reported here; `next` releases it.
+
+        Raises:
+            ValueError: `scroll` is not the instance `recheck` allowed last, or
+                it was reported already, or `next` was called since.
+        """
+        approved = self._scroll_approved
+        if approved is None or approved.scroll is not scroll:
+            msg = "scroll is not the scroll that recheck() allowed last"
+            raise ValueError(msg)
+        self._scroll_approved = None
+        self._returned = None  # sent: it can no longer be withdrawn
+        self._sent += 1
+        self._scrolls[approved.key] = self._scrolls.get(approved.key, 0) + 1  # sent
+        self._pending = _Pending(
+            self._sent,
+            "scroll",
+            scroll.screen_id,
+            point=scroll.point,
+            amount=scroll.amount,
+            scroll_pre=approved.pre,
+            scroll_key=approved.key,
+        )
+        self._relaunches = 0
+        self._refused = 0
+        self._label_run = 0
+        self._landed.clear()
+
     @property
     def replay_actions(self) -> frozenset[int]:
         """The action ids of the taps that were path replay taps."""
@@ -646,6 +766,14 @@ class CrawlEngine:
         if unsent is not None:
             self._refused += 1
             self._add_skip(unsent.screen_id, unsent.fingerprint, (TAP_NOT_SENT,))
+        # A scroll handed out (rechecked or not) and never reported as sent is
+        # released the same way: not counted, no transition, no path change.
+        # It was not counted in the screen's scroll count, and counts toward
+        # MAX_REFUSALS, so a driver that never sends cannot keep the crawl going.
+        if self._scroll_plan is not None or self._scroll_approved is not None:
+            self._scroll_plan = None
+            self._scroll_approved = None
+            self._refused += 1
 
     def _is_target(self, screen: Screen, observation: Observation) -> bool:
         # The dump and the foreground both name the app: the target, or one of
@@ -679,7 +807,14 @@ class CrawlEngine:
         if pending is not None and not pending.recorded:
             self._record(pending, None, dump_failed=True)
 
-    def _record(self, pending: _Pending, to: str | None, *, dump_failed: bool) -> None:
+    def _record(
+        self,
+        pending: _Pending,
+        to: str | None,
+        *,
+        dump_failed: bool,
+        effect: str | None = None,
+    ) -> None:
         pending.recorded = True
         self._transitions.append(
             Transition(
@@ -690,14 +825,77 @@ class CrawlEngine:
                 fingerprint=pending.fingerprint,
                 point=pending.point,
                 dump_failed=dump_failed,
+                amount=pending.amount,
+                scroll_effect=effect,
             )
         )
 
-    def _note_screen(self, sid: str, *, on_target: bool, keyboard: bool) -> None:
+    def scroll_effect(
+        self, screen: Screen | None, foreground: str | None
+    ) -> str | None:
+        """What the scroll that was sent last did beyond scrolling, seen on
+        ``screen`` (the first screen read after it) with ``foreground`` in
+        front: ``navigation`` (another app, another activity or a dialog came
+        up), ``changed`` (a state or text of something that is the same element
+        on both screens changed, see `uiprobe.guards.changed_by_wheel`), or None.
+
+        The driver asks it to write the transition's end line, before it calls
+        `next`. The first answer is kept with the pending scroll and the
+        incident (the screen blocked, the run's count) is taken at that moment,
+        so it belongs to the state `next` snapshots and a `withdraw` of the next
+        action cannot undo it; `next` with the same read then finds it taken."""
+        on_target = (
+            screen is not None
+            and screen.package == self._package
+            and foreground == self._package
+        )
+        return self._resolve_effect(screen, on_target=on_target)
+
+    def _resolve_effect(self, screen: Screen | None, *, on_target: bool) -> str | None:
+        pending = self._pending
+        pre = None if pending is None else pending.scroll_pre
+        if pending is None or pending.kind != "scroll" or pre is None:
+            return None
+        if pending.effect_seen:
+            return pending.effect
+        if screen is None:
+            return None
+        if not on_target:
+            effect = "navigation"
+        elif screen.activity != pre.activity or is_dialog(screen):
+            # A dialog is told by its top-level element being smaller than the
+            # display, also when the screen id did not change.
+            effect = "navigation"
+        elif changed_by_wheel(pre, screen):
+            effect = "changed"
+        else:
+            effect = None
+        pending.effect_seen = True
+        pending.effect = effect
+        if effect is not None:
+            self._scroll_incident(pending.scroll_key)
+        return effect
+
+    def _scroll_incident(self, key: str | None) -> None:
+        """A scroll changed something or navigated: never scroll that container
+        again, and after `Limits.scroll_incidents` of them, nothing more."""
+        if key is not None:
+            self._scroll_blocked.add(key)
+        self._scroll_incidents += 1
+
+    def _note_screen(  # noqa: PLR0912 - one branch per kind of action
+        self,
+        sid: str,
+        *,
+        on_target: bool,
+        keyboard: bool,
+        effect: str | None = None,
+    ) -> None:
+        navigated = effect == "navigation" and on_target
         deferred, self._deferred = self._deferred, None
         pending = self._pending
         if pending is not None and not pending.recorded:
-            self._record(pending, sid, dump_failed=False)
+            self._record(pending, sid, dump_failed=False, effect=effect)
         self._pending = None
         kind = None if pending is None else pending.kind
         pressed_on = None if pending is None else pending.from_screen_id
@@ -714,6 +912,13 @@ class CrawlEngine:
             # off-target BACK leaves the path alone (see _settle_after_dialogs).
             if pending.navigation and len(self._path) > 1:
                 self._path.pop()
+        elif pending is not None and kind == "scroll":
+            self._after_scroll = self._canon(pressed_on)
+            # Like a tap that lands off target, or on another activity or a
+            # dialog (a new screen on top, depth + 1); a scroll that stays on
+            # the screen pushes nothing.
+            if not on_target or navigated:
+                self._path.append(sid if on_target else _OFF)
         elif kind in ("launch", "relaunch"):
             if self._path:
                 self._prior = self._path
@@ -737,7 +942,29 @@ class CrawlEngine:
             and self._after_back(sid, pending, deferred, keyboard=keyboard)
         ):
             return
+        if pending is not None and kind == "scroll":
+            self._place_scrolled(sid, pending.from_screen_id, navigated=navigated)
+            return
         self._place(sid, tapped=kind == "tap")
+
+    def _place_scrolled(
+        self, sid: str, scrolled_on: str | None, *, navigated: bool
+    ) -> None:
+        """Place a target screen seen after a scroll. A scroll never deepens
+        the path: the same id changes nothing, another id (the list gained or
+        lost a row) replaces the top of the path in place, the depth stays, and
+        the new id joins the family of the screen scrolled on. A dialog was
+        pushed already (see `_note_screen`) and is placed like a tapped screen,
+        and so is another activity.
+        """
+        if not self._path:
+            self._place(sid, tapped=False)
+        elif navigated:
+            self._place(sid, tapped=True)
+        else:
+            if scrolled_on is not None and sid != scrolled_on:
+                self._family[sid] = self._canon(scrolled_on)
+            self._same_frame(sid, may_pop=False)
 
     def _after_back(
         self,
@@ -926,9 +1153,16 @@ class CrawlEngine:
             or self._volatile_count.get(sid, 0) >= MAX_VOLATILE
             or self._label_run >= MAX_VOLATILE
         )
-        tap = self._next_tap(screen, sid, judgement, prints, refused_out=refused_out)
-        if tap is not None:
-            return tap
+        self._note_prints(sid, screen, judgement, prints)
+        chosen: Tap | Scroll | None = self._next_tap(
+            screen, sid, judgement, prints, refused_out=refused_out
+        )
+        if chosen is None:
+            chosen = self._next_scroll(
+                screen, sid, judgement, prints, refused_out=refused_out
+            )
+        if chosen is not None:
+            return chosen
         if len(self._path) == 1:
             return self._finish(EXHAUSTED)
         return self._send_back(sid)
@@ -995,14 +1229,165 @@ class CrawlEngine:
             self._untried[sid] = len(others)
         return self._send_tap(sid, chosen)
 
+    # -- scrolling (Policy.scroll_lists) -------------------------------------------
+    # A screen with nothing left to press, or at the depth limit, gets a turn of
+    # the mouse wheel (content further down comes up) at the point
+    # `uiprobe.guards.scroll_target` gives inside its largest scrollable
+    # element. The wheel event goes to the window under the pointer, not to the
+    # focused window (the driver checks the window there). The screen read
+    # afterwards is judged like any other, so its new rows are tried as usual.
+    # The rows seen on a screen are its candidates' fingerprints, kept per
+    # family of screen ids. A scroll after which no fingerprint is new marks
+    # the screen as scrolled to the end. With the switch off none of this state
+    # is used.
+
+    def _canon(self, sid: str | None) -> str:
+        """The first screen id of the family ``sid`` belongs to."""
+        return self._family.get(sid, sid) if sid is not None else ""
+
+    def _note_prints(
+        self,
+        sid: str,
+        screen: Screen,
+        judgement: Judgement,
+        prints: _Prints | None,
+    ) -> None:
+        """Remember what the screen's family shows: the fingerprints of its
+        candidates and of every element in its scroll container (rows that
+        cannot be pressed count too), and mark the family as scrolled to the end
+        when a scroll showed none that was not seen before."""
+        if not self._policy.scroll_lists or prints is None:
+            return
+        family = self._canon(sid)
+        current = {prints.of(d.element) for d in judgement.decisions}
+        container = scroll_container(screen)
+        if container is not None:
+            current.update(prints.of(e) for e in prints.descendants(container))
+        known = self._seen_prints.setdefault(family, set())
+        new = current - known
+        known |= current
+        if new:
+            self._scrolled_end.discard(family)
+        elif self._after_scroll == family:
+            self._scrolled_end.add(family)
+
+    def _next_scroll(
+        self,
+        screen: Screen,
+        sid: str,
+        judgement: Judgement,
+        prints: _Prints | None,
+        *,
+        refused_out: bool,
+    ) -> Scroll | None:
+        """A scroll of this screen, when nothing is left to press on it (or it
+        is at the depth limit) and every condition holds; else None.
+
+        The conditions: the switch is on, the screen is judged and refusals are
+        not piling up, scrolling has not been stopped for the run (too many
+        scrolls that changed something or navigated), the container is not
+        blocked by such a scroll, the screen's family has not been scrolled to
+        its end, fewer than ``Limits.scrolls_per_screen`` scrolls were sent on the
+        container (a proposal that is refused does not count), and
+        `scroll_target` finds a point (it says no on a dialog, an irreversible
+        screen, without a container of an allowed class, or when no point has
+        only plain elements at it). The container is counted and blocked under
+        its key (see `uiprobe.guards.container_key`), which does not change when
+        a header does. Only the target screen gets here: a screen of another
+        app, a shown keyboard and a due relaunch are decided before.
+        """
+        if not self._policy.scroll_lists or prints is None or refused_out:
+            return None
+        family = self._canon(sid)
+        if self._scroll_incidents >= self._limits.scroll_incidents or (
+            family in self._scrolled_end
+        ):
+            return None
+        target = scroll_target(screen, judgement)
+        if target is None:
+            return None
+        container, point = target
+        box = next(e for e in screen.elements if e.id == container)
+        key = container_key(screen, box)
+        if (
+            key in self._scroll_blocked
+            or self._scrolls.get(key, 0) >= self._limits.scrolls_per_screen
+        ):
+            return None
+        scroll = Scroll(sid, point, self._limits.scroll_amount)
+        self._scroll_plan = _ScrollPlan(
+            scroll, container, key, self._screen_state(screen), screen.activity
+        )
+        return scroll
+
+    @staticmethod
+    def _screen_state(screen: Screen) -> tuple[tuple[object, ...], ...]:
+        """The whole screen, as the re-check compares it: every element's id,
+        class, package, text, description, hint, flags and bounds."""
+        return tuple(
+            (
+                e.id,
+                e.class_name,
+                e.package,
+                e.text,
+                e.content_desc,
+                e.hint,
+                e.flags,
+                tuple(e.bounds.to_list()),
+            )
+            for e in screen.elements
+        )
+
+    def _recheck_scroll(self, scroll: Scroll, observation: Observation) -> bool:
+        """The re-check of a scroll, as `recheck` does it for a tap."""
+        planned = self._scroll_plan
+        if planned is None or planned.scroll is not scroll:
+            msg = "scroll is not the scroll that next() returned last"
+            raise ValueError(msg)
+        self._scroll_plan = None
+        if self._past_deadline(observation.now):
+            # Cancelled, not refused.
+            self._expired = True
+            return False
+        if self._scroll_allowed(planned, observation):
+            self._scroll_approved = replace(planned, pre=observation.screen)
+            return True
+        self._refused += 1
+        return False
+
+    def _scroll_allowed(self, plan: _ScrollPlan, observation: Observation) -> bool:
+        """Whether the fresh screen is the same target screen, with no keyboard,
+        `scroll_target` gives exactly the planned container and point on it, and
+        the whole screen is identical to the one the scroll was planned on: every
+        element's id, class, package, text, description, hint, flags and bounds
+        (not only the layout)."""
+        screen = observation.screen
+        if (
+            screen is None
+            or not _ids_unique(screen)
+            or not self._is_target(screen, observation)
+            or observation.keyboard_shown is True
+            or screen.screen_id != plan.scroll.screen_id
+            or screen.activity != plan.activity
+            or len(screen.elements) > MAX_ELEMENTS
+        ):
+            return False
+        judgement = judge(
+            screen, self._package, self._policy, foreground=observation.foreground
+        )
+        if scroll_target(screen, judgement) != (plan.container, plan.scroll.point):
+            return False
+        return self._screen_state(screen) == plan.content
+
     def _send_tap(self, sid: str, plan: _Plan) -> Tap:
         tap = plan.tap
         # Nothing is counted and nothing is pending until tap_sent reports
         # that the tap was really sent.
         plan = replace(
             plan,
-            new_full=(sid, tap.fingerprint) not in self._tried,
-            new_bare=plan.bare is not None and plan.bare not in self._bare_tried,
+            new_full=(self._canon(sid), tap.fingerprint) not in self._tried,
+            new_bare=plan.bare is not None
+            and self._bare_key(plan.bare) not in self._bare_tried,
         )
         self._mark_tried(sid, tap.fingerprint, plan.bare)
         self._planned = plan
@@ -1016,27 +1401,37 @@ class CrawlEngine:
     # is None, so only the full-id marks exist, as before. A separate switch for
     # this part would only have to change where `_next_tap` builds `_BadgeFree`.
 
+    # Every mark is made and looked up under the family of the screen id (see
+    # `_canon`), so a screen whose id changed after a scroll shares the marks of
+    # the screen it was scrolled from. Without a scroll `_canon` is the id.
+
+    def _bare_key(self, bare: tuple[str, str] | None) -> tuple[str, str] | None:
+        return None if bare is None else (self._canon(bare[0]), bare[1])
+
     def _mark_tried(
         self, sid: str, fingerprint: str, bare: tuple[str, str] | None
     ) -> None:
-        self._tried.add((sid, fingerprint))
-        if bare is not None:
-            self._bare_tried.add(bare)
+        self._tried.add((self._canon(sid), fingerprint))
+        key = self._bare_key(bare)
+        if key is not None:
+            self._bare_tried.add(key)
 
     def _unmark_tried(self, sid: str, fingerprint: str, plan: _Plan) -> None:
         if plan.new_full:
-            self._tried.discard((sid, fingerprint))
-        if plan.new_bare and plan.bare is not None:
-            self._bare_tried.discard(plan.bare)
+            self._tried.discard((self._canon(sid), fingerprint))
+        key = self._bare_key(plan.bare)
+        if plan.new_bare and key is not None:
+            self._bare_tried.discard(key)
 
     def _is_tried(
         self, sid: str, fingerprint: str, bare: tuple[str, str] | None
     ) -> bool:
-        if (sid, fingerprint) in self._tried:
+        full = (self._canon(sid), fingerprint)
+        if full in self._tried:
             return True
-        if bare is not None and bare in self._bare_tried:
+        if bare is not None and self._bare_key(bare) in self._bare_tried:
             # Skipped only because of the badge-free mark: keep the full one.
-            self._tried.add((sid, fingerprint))
+            self._tried.add(full)
             return True
         return False
 

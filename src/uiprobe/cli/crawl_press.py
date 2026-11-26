@@ -33,7 +33,13 @@ from uiprobe.crawl_driver import crawl as crawl_run
 from uiprobe.crawl_preview import preview as make_preview
 from uiprobe.device import PIN_WAIT_STOPPED, Device
 from uiprobe.errors import INTERRUPTED, NotEmulatorError, UiprobeError
-from uiprobe.settings import Settings, _shown
+from uiprobe.settings import (
+    _DEFAULT_SCROLL_AMOUNT,
+    _DEFAULT_SCROLL_INCIDENTS,
+    _DEFAULT_SCROLLS_PER_SCREEN,
+    Settings,
+    _shown,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -119,7 +125,22 @@ def _press_limits(
             raise _UsageError(msg)
         values[name] = value
         sources[name] = source
-    return Limits(**values), sources
+    # The scroll values have no option: the file's [limits] value, else the
+    # default (`uiprobe init` writes the same).
+    scrolls = (
+        {
+            "scrolls_per_screen": _DEFAULT_SCROLLS_PER_SCREEN,
+            "scroll_amount": _DEFAULT_SCROLL_AMOUNT,
+            "scroll_incidents": _DEFAULT_SCROLL_INCIDENTS,
+        }
+        if settings is None
+        else {
+            "scrolls_per_screen": settings.scrolls_per_screen,
+            "scroll_amount": settings.scroll_amount,
+            "scroll_incidents": settings.scroll_incidents,
+        }
+    )
+    return Limits(**values, **scrolls), sources
 
 
 def _limit_source_text(name: str, source: str) -> str:
@@ -280,6 +301,11 @@ def _cmd_crawl_press(args: argparse.Namespace, setup: _CrawlSetup) -> int:  # no
                 details={"serial": device.serial, "reason": reason},
             )
             raise _cli_not_emulator(device, refusal)
+    # The plan says whether the device's own `input` usage lists the wheel
+    # scroll, so it is read here for the plan; crawl_run reads it again itself
+    # and decides on its own read (run-start.json records that one). Nothing is
+    # read when the run was not asked to scroll.
+    wheel = device._wheel_supported() if policy.scroll_lists else None  # noqa: SLF001
     plan: dict[str, object] = {
         "package": args.package,
         "device": {"serial": device.serial, "emulator": emulator},
@@ -299,6 +325,11 @@ def _cmd_crawl_press(args: argparse.Namespace, setup: _CrawlSetup) -> int:  # no
         "restart": not args.no_restart,
         "record_text": record_text,
         **({"also_target": list(policy.also_target)} if policy.also_target else {}),
+        "scroll_lists": policy.scroll_lists and wheel is True,
+        "scroll_input": wheel,
+        "scrolls_per_screen": limits.scrolls_per_screen,
+        "scroll_amount": limits.scroll_amount,
+        "scroll_incidents": limits.scroll_incidents,
     }
     # The plan is out (and flushed) before the first request that changes the
     # device; with --json it goes to stderr, so stdout stays one JSON document.
@@ -474,6 +505,7 @@ def _press_plan_text(plan: dict[str, object], *, settings: str) -> str:
             + ("yes" if plan["check_tap_window"] else "no"),
             _RESTART_PLAN[bool(plan["restart"])],
             *_also_target_plan(plan),
+            *_press_scroll_text(plan),
             *(
                 []
                 if plan.get("record_text", True)
@@ -497,6 +529,25 @@ def _also_target_plan(plan: dict[str, object]) -> list[str]:
         f"also pressing in: {names} (also_target in the settings file; system UI"
         " and the home app are refused; the controls of permission screens are"
         " never tapped, and they get BACK when BACK on other screens is on)"
+    ]
+
+
+def _press_scroll_text(plan: dict[str, object]) -> list[str]:
+    """The plan line about scrolling lists (none for a plan without the key)."""
+    if "scroll_lists" not in plan:
+        return []
+    if plan["scroll_lists"]:
+        answer = (
+            f"yes, at most {plan['scrolls_per_screen']} per screen,"
+            f" wheel amount {plan['scroll_amount']}"
+        )
+    elif plan.get("scroll_input") is False:
+        answer = "no (this device's input does not list the wheel scroll)"
+    else:
+        answer = "no"
+    return [
+        "scroll lists with the mouse wheel on screens with nothing left to press:"
+        f" {answer}"
     ]
 
 

@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
-from uiprobe.adb import quote_args
-from uiprobe.device.failure import _EXIT_SUFFIX, _input_failure
+import re
+
+from uiprobe.adb import AdbError, quote_args
+from uiprobe.device.failure import _EXIT_SUFFIX, _input_failure, _lines
 from uiprobe.device.gestures import (
     _SWIPE_SLACK,
     DEFAULT_PRESS_MS,
     DEFAULT_SWIPE_MS,
     LONG_PRESS_MS,
+    MAX_WHEEL_AMOUNT,
     DisplaySizeUnknownError,
     _check_direction,
     _check_duration,
@@ -27,8 +30,42 @@ from uiprobe.device.text import (
     _text_pieces,
     _typing_stopped,
 )
-from uiprobe.errors import UiprobeError
+from uiprobe.errors import InputFailedError, UiprobeError
 from uiprobe.model import Bounds, Element
+
+_SCROLL_LINE = re.compile(r"scroll\s+<x>\s+<y>(?P<rest>.*)")
+_AXIS_LIST = re.compile(r"\[\s*--axis\s+(?P<axes>[^\]]*)\]")
+_PLACEHOLDER = re.compile(r"<[^<>\s]+>")
+
+
+def _lists_wheel(usage: str) -> bool:
+    """Whether the usage text of ``input`` lists the ``mouse`` source, a
+    ``scroll <x> <y>`` line and ``VSCROLL`` as an axis of that line.
+
+    The axis is read from the bracketed ``[--axis ...]`` option list of the
+    scroll line only, split into comma and space separated words: ``VSCROLL``
+    must be a word of its own, followed by its value placeholder (``<v>``) or
+    by the end of the list. The word anywhere else (outside the brackets, in
+    a note such as ``VSCROLL unsupported``, inside a longer word) does not
+    count.
+    """
+    listed = [line.strip() for line in _lines(usage)]
+    mouse = any(
+        line == "mouse"
+        or (line.startswith("The sources are") and "mouse" in re.split(r"[\s,]+", line))
+        for line in listed
+    )
+    for line in listed:
+        found = _SCROLL_LINE.fullmatch(line)
+        axes = _AXIS_LIST.search(found["rest"]) if found else None
+        if axes is None:
+            continue
+        words = [w for w in re.split(r"[,\s]+", axes["axes"]) if w]
+        for index, word in enumerate(words):
+            after = words[index + 1] if index + 1 < len(words) else None
+            if word == "VSCROLL" and (after is None or _PLACEHOLDER.fullmatch(after)):
+                return mouse
+    return False
 
 
 class _InputMixin(_DeviceState):
@@ -148,6 +185,62 @@ class _InputMixin(_DeviceState):
         if failure is not None:
             raise self._doubt(failure)
         return point
+
+    def _wheel_scroll(
+        self,
+        point: tuple[int, int],
+        amount: int,
+        *,
+        _send_by: float | None = None,
+        _epoch: int | None = None,
+    ) -> tuple[int, int]:
+        """Turn a mouse wheel one way (content further down) at one point.
+
+        For uiprobe's crawl only, not part of the API; `scroll` and `swipe` are
+        unchanged. It sends ``input mouse scroll X Y --axis VSCROLL,-N`` once,
+        with `_send_by` and `_epoch` checked on the request's own connection
+        right before it is written, exactly as `tap` does. Unlike a touch, the
+        wheel event goes to the window under the pointer, not to the focused
+        window: whoever calls this must have checked which window that is.
+        `amount` is N, from 1 to `MAX_WHEEL_AMOUNT`; the sign is always
+        negative, so this never scrolls up. Returns the point.
+
+        Raises:
+            TypeError: `amount` is not an int, or a private argument has the
+                wrong type.
+            ValueError: `amount` is outside 1 to `MAX_WHEEL_AMOUNT`, or a
+                coordinate is not usable (see `tap`).
+            InputFailedError: The device did not report success.
+        """
+        dispatch = _dispatch(_send_by, _epoch)
+        if type(amount) is not int:
+            msg = f"amount must be an int, not {type(amount).__name__}"
+            raise TypeError(msg)
+        if not 1 <= amount <= MAX_WHEEL_AMOUNT:
+            msg = f"amount must be from 1 to {MAX_WHEEL_AMOUNT}, not {amount}"
+            raise ValueError(msg)
+        x, y = _press_point(point)
+        words = ("input", "mouse", "scroll", str(x), str(y), "--axis")
+        words = (*words, f"VSCROLL,-{amount}")
+        output = self._shell_text(quote_args(*words) + _EXIT_SUFFIX, dispatch=dispatch)
+        failure = _input_failure("wheel", {"point": [x, y], "amount": amount}, output)
+        if failure is not None:
+            raise self._doubt(failure)
+        return (x, y)
+
+    def _wheel_supported(self) -> bool:
+        """Whether the usage text of ``input`` lists the wheel scroll (see
+        `_lists_wheel`).
+
+        Read through the ordinary shell path, nothing is changed on the device.
+        When the read fails (any adb error but a lost device) or the usage does
+        not list it, the answer is False: the crawl then does not scroll.
+        """
+        try:
+            text = self._shell_text("input")
+        except (AdbError, InputFailedError):
+            return False
+        return _lists_wheel(text)
 
     def swipe(
         self,

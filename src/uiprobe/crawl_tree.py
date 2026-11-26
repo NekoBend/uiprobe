@@ -11,6 +11,13 @@ line names the screen and the element, its end line says where it led. BACK
 and relaunch are not edges. Every element of a screen is listed under that
 screen, pressed or not, so the tree shows what the crawl collected and not
 only what it dived into.
+
+A scroll is no edge and no row. The screen read after a sent scroll
+(``screens/scroll-<action id>.json``) adds its rows under the screen the
+scroll was sent on, after the rows already listed, in the order of the
+actions; each such row has ``after_scroll`` (the action id). What happens to a
+row that the earlier reads of the screen already listed is the one switch
+`SCROLLED_REPEATS`.
 """
 
 from __future__ import annotations
@@ -47,7 +54,15 @@ __all__ = [
 
 TREE_SCHEMA: Final = "uiprobe.crawl_tree/1"
 
+# What a row read after a scroll does when the screen's earlier reads listed it
+# already (the same fingerprint): ``"once"`` shows it once, where it was first
+# listed; ``"as_seen"`` lists it again, every time it was seen. The owner has
+# not decided; this is the only place that says. A run that did not record
+# texts has no way to tell rows apart and always lists them as seen.
+SCROLLED_REPEATS: Final = "once"
+
 _SCREEN_ID: Final = re.compile(r"s-[0-9a-f]{12}")
+_SCROLL_FILE: Final = re.compile(r"scroll-([1-9][0-9]{0,9})\.json")
 # The most one file is read: the line files (transitions.jsonl, skipped.jsonl)
 # up to 64 MiB; a screen file, run-start.json and run.json up to 8 MiB.
 MAX_LOG_BYTES: Final = 64 * 1024 * 1024
@@ -106,6 +121,9 @@ class Row:
     # was not finished, or did not end on the same screen. `also_to` leaves
     # such attempts out when a sent one exists.
     other_attempt: bool = False
+    # The action id of the scroll whose result screen this row was read from;
+    # None for a row of the screen's own file.
+    after_scroll: int | None = None
 
 
 @dataclass(slots=True)
@@ -150,6 +168,16 @@ class _Tap:
     element_id: str
     end: dict[str, object] | None
     element: dict[str, object]
+    # The scroll whose result screen the tap was decided on, when the start
+    # line says (``after_scroll``).
+    after_scroll: int | None = None
+
+
+@dataclass(slots=True)
+class _Scroll:
+    action_id: int
+    from_screen_id: str
+    end: dict[str, object] | None
 
 
 class _Warnings:
@@ -336,7 +364,10 @@ class _Reader:
         self._dir = run_dir / "screens"
         self._warnings = warnings
         self._cache: dict[str, tuple[Screen, str, str | None] | None] = {}
+        self._scroll_cache: dict[int, tuple[Screen, str, str | None] | None] = {}
         self.names: dict[str, str] = {}
+        # scroll action id -> the exact file name found in the listing
+        self.scroll_names: dict[int, str] = {}
         if os.path.lexists(self._dir) and not _is_folder(self._dir):
             warnings.append("screens is a link or not a folder, so it is not read")
         elif _is_folder(self._dir):
@@ -351,24 +382,41 @@ class _Reader:
                 for name in listed
                 if name.endswith(".json") and _SCREEN_ID.fullmatch(name[:-5])
             }
+            self.scroll_names = {
+                int(found[1]): name
+                for name in listed
+                if (found := _SCROLL_FILE.fullmatch(name)) is not None
+            }
 
     def load(self, screen_id: str) -> tuple[Screen, str, str | None] | None:
         """The screen, its package and its activity, or None when no usable file."""
         if screen_id in self._cache:
             return self._cache[screen_id]
-        found: tuple[Screen, str, str | None] | None = None
-        name = self.names.get(screen_id)
-        if name is not None:
-            try:
-                found = _parse_screen(_read_json(self._dir / name))
-            except FileNotFoundError:
-                pass
-            except _UnreadableError as exc:
-                self._warnings.append(f"screens/{name} {exc}")
-            except (ValueError, KeyError, TypeError, AttributeError, OverflowError):
-                self._warnings.append(f"screens/{name} cannot be read")
+        found = self._read(self.names.get(screen_id))
         self._cache[screen_id] = found
         return found
+
+    def load_scroll(self, action_id: int) -> tuple[Screen, str, str | None] | None:
+        """The screen read after the scroll with this action id (its
+        ``screens/scroll-<id>.json``), or None when there is no usable file."""
+        if action_id in self._scroll_cache:
+            return self._scroll_cache[action_id]
+        found = self._read(self.scroll_names.get(action_id))
+        self._scroll_cache[action_id] = found
+        return found
+
+    def _read(self, name: str | None) -> tuple[Screen, str, str | None] | None:
+        if name is None:
+            return None
+        try:
+            return _parse_screen(_read_json(self._dir / name))
+        except FileNotFoundError:
+            pass
+        except _UnreadableError as exc:
+            self._warnings.append(f"screens/{name} {exc}")
+        except (ValueError, KeyError, TypeError, AttributeError, OverflowError):
+            self._warnings.append(f"screens/{name} cannot be read")
+        return None
 
 
 def _parse_screen(data: object) -> tuple[Screen, str, str | None]:
@@ -677,7 +725,15 @@ def _tap_of(
         or not isinstance(element_id, str)
     ):
         return None
-    return _Tap(action_id, from_id, element_id, end, element)
+    after = start_line.get("after_scroll")
+    return _Tap(
+        action_id,
+        from_id,
+        element_id,
+        end,
+        element,
+        after if isinstance(after, int) else None,
+    )
 
 
 @dataclass(slots=True)
@@ -687,6 +743,10 @@ class _Moves:
     first_from: str | None
     count: int
     off_after: dict[int, str]
+    scrolls: list[_Scroll] = field(default_factory=list)
+    # A screen id that a scroll led to from another id -> the first id of its
+    # screen (one list whose id changes as it scrolls is one screen).
+    family: dict[str, str] = field(default_factory=dict)
 
 
 def _rank(tap: _Tap) -> int:
@@ -702,7 +762,10 @@ _END: Final = "uiprobe.transition_end/1"
 _STAMP: Final = re.compile(
     r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:[+-]\d{2}:\d{2}(?::\d{2})?)?"
 )
-_KINDS: Final = frozenset({"launch", "tap", "back", "relaunch"})
+_SCROLL_EFFECTS: Final = ("changed", "navigation")
+# The largest amount of a wheel turn (`uiprobe.guards.MAX_SCROLL_AMOUNT`).
+_MAX_AMOUNT: Final = 10
+_KINDS: Final = frozenset({"launch", "tap", "scroll", "back", "relaunch"})
 _ELEMENT_STRINGS: Final = ("text", "resource_id", "content_desc", "hint", "parent")
 _HIDDEN_FIELDS: Final = ("text", "content_desc", "hint")
 GATE_WARNING: Final = (
@@ -779,11 +842,12 @@ def _action_ok(line: dict[str, object]) -> str | None:
     start line, or None."""
     action = line["action"]
     if not isinstance(action, dict) or not _keys_ok(
-        action, {"kind"}, {"point", "element"}
+        action, {"kind"}, {"point", "element", "amount"}
     ):
         return "action"
     kind = action["kind"]
     point = action.get("point")
+    amount = action.get("amount")
     has_from = "from_screen_id" in line
     checks = (
         (not _is_text(kind) or kind not in _KINDS, "action.kind"),
@@ -796,10 +860,32 @@ def _action_ok(line: dict[str, object]) -> str | None:
             ),
             "action.point",
         ),
+        (
+            "amount" in action
+            and not (_is_int(amount) and 1 <= int(str(amount)) <= _MAX_AMOUNT),
+            "action.amount",
+        ),
         ("element" in action and not _element_ok(action["element"]), "action.element"),
         (has_from and _screen_id(line["from_screen_id"]) is None, "from_screen_id"),
+        (
+            kind == "scroll"
+            and isinstance(point, list)
+            and any(_is_int(n) and int(str(n)) < 0 for n in point),
+            "action.point",
+        ),
         (kind == "tap" and not (has_from and "point" in action), "tap fields"),
-        (kind != "tap" and ("point" in action or "element" in action), "tap fields"),
+        (
+            kind == "scroll"
+            and not (has_from and "point" in action and "amount" in action),
+            "scroll fields",
+        ),
+        (
+            kind not in ("tap", "scroll")
+            and ("point" in action or "element" in action),
+            "tap fields",
+        ),
+        (kind != "scroll" and "amount" in action, "scroll fields"),
+        (kind == "scroll" and "element" in action, "scroll fields"),
         (kind == "launch" and (has_from or "off_target" in line), "launch fields"),
         (
             "restart" in line and not (line["restart"] is True and kind == "launch"),
@@ -808,6 +894,15 @@ def _action_ok(line: dict[str, object]) -> str | None:
         (
             "replay" in line and not (line["replay"] is True and kind == "tap"),
             "replay",
+        ),
+        (
+            "after_scroll" in line
+            and not (
+                kind == "tap"
+                and _is_int(line["after_scroll"])
+                and int(str(line["after_scroll"])) >= 1
+            ),
+            "after_scroll",
         ),
     )
     return next((why for bad, why in checks if bad), None)
@@ -833,7 +928,7 @@ def _start_problem(line: dict[str, object]) -> str | None:
     if not _keys_ok(
         line,
         {"schema", "recorded_at", "action_id", "action"},
-        {"from_screen_id", "off_target", "restart", "replay"},
+        {"from_screen_id", "off_target", "restart", "replay", "after_scroll"},
     ):
         return "start line keys"
     if not _stamped(line, _START):
@@ -877,8 +972,9 @@ def _end_problem(line: dict[str, object]) -> str | None:
         ok = _keys_ok(line, base | {"dump_failed"}, set())
         return None if ok else "dump_failed end line"
     if line.get("dump_failed") is False:
-        ok = _keys_ok(line, base | {"dump_failed", "to_screen_id"}, set())
+        ok = _keys_ok(line, base | {"dump_failed", "to_screen_id"}, {"scroll_effect"})
         ok = ok and _screen_id(line.get("to_screen_id")) is not None
+        ok = ok and line.get("scroll_effect", "changed") in _SCROLL_EFFECTS
         return None if ok else "end line with a screen"
     return "end line without a result"
 
@@ -895,9 +991,13 @@ def _line_problem(line: dict[str, object]) -> str | None:
 def _sequence_problem(entries: list[dict[str, object]]) -> tuple[int, str] | None:
     """The first line (counted from 1) that breaks the strict alternation of
     start and end lines, ids rising: ``S1 E1 S2 E2 ...`` with a last start line
-    that may have no end line."""
+    that may have no end line. Also: a ``scroll_effect`` only on the end line of
+    a scroll, and an ``after_scroll`` only naming a scroll that was sent before
+    the tap."""
     open_id: object = None
+    open_kind: object = None
     last_id = 0
+    scrolls: set[int] = set()
     for number, line in enumerate(entries, 1):
         action_id = int(str(line["action_id"]))
         if line["schema"] == _START:
@@ -905,10 +1005,22 @@ def _sequence_problem(entries: list[dict[str, object]]) -> tuple[int, str] | Non
                 return number, "a start line while an action is open"
             if action_id <= last_id:
                 return number, "an action id that does not rise"
+            action = line["action"]
+            kind = action["kind"] if isinstance(action, dict) else None
+            after = line.get("after_scroll")
+            if after is not None and int(str(after)) not in scrolls:
+                return number, "an after_scroll that names no earlier scroll"
+            if kind == "scroll":
+                scrolls.add(action_id)
             open_id = last_id = action_id
+            open_kind = kind
         elif open_id != action_id:
             return number, "an end line that does not close the open action"
         else:
+            if "scroll_effect" in line and open_kind != "scroll":
+                return number, "a scroll_effect on the end line of another action"
+            if line.get("not_sent") or line.get("failed"):
+                scrolls.discard(action_id)  # a scroll that was not sent
             open_id = None
     return None
 
@@ -1081,6 +1193,7 @@ def _read_moves(base: Path, warnings: _Warnings, *, distrust: bool) -> _Moves:
     """The taps of transitions.jsonl, and the screen the launch led to."""
     lines = _read_transitions(base, warnings, distrust=distrust)
     taps: dict[tuple[str, str], list[_Tap]] = {}
+    scrolls: list[_Scroll] = []
     root: str | None = lines.root_hint
     first_from: str | None = None
     for action_id in lines.order:
@@ -1091,6 +1204,11 @@ def _read_moves(base: Path, warnings: _Warnings, *, distrust: bool) -> _Moves:
         kind = action["kind"]
         if kind == "launch" and root is None and end is not None:
             root = _screen_id(end.get("to_screen_id"))
+        if kind == "scroll":
+            from_id = _screen_id(start_line.get("from_screen_id"))
+            if from_id is not None:
+                scrolls.append(_Scroll(action_id, from_id, end))
+            continue
         if kind != "tap":
             continue
         tap = _tap_of(action_id, start_line, action, end)
@@ -1098,7 +1216,29 @@ def _read_moves(base: Path, warnings: _Warnings, *, distrust: bool) -> _Moves:
             continue
         first_from = first_from or tap.from_screen_id
         taps.setdefault((tap.from_screen_id, tap.element_id), []).append(tap)
-    return _Moves(taps, root, first_from, len(lines.order), lines.off_after)
+    return _Moves(
+        taps,
+        root,
+        first_from,
+        len(lines.order),
+        lines.off_after,
+        scrolls,
+        _family_of(scrolls),
+    )
+
+
+def _family_of(scrolls: list[_Scroll]) -> dict[str, str]:
+    """Which screen ids are one screen: a sent scroll that led from one id to
+    another makes the second part of the first one's screen."""
+    family: dict[str, str] = {}
+    for scroll in scrolls:
+        if not _scroll_read(scroll) or scroll.end is None:
+            continue
+        target = _screen_id(scroll.end.get("to_screen_id"))
+        first = family.get(scroll.from_screen_id, scroll.from_screen_id)
+        if target is not None and target != first and target not in family:
+            family[target] = first
+    return family
 
 
 def _sent_target(tap: _Tap) -> str | None:
@@ -1153,12 +1293,177 @@ def _screen_ids(reader: _Reader, moves: _Moves) -> list[str]:
     """The ids of the screens to read: the ones the taps name, then the rest."""
     wanted: list[str] = []
     named = [moves.root, moves.first_from, *(key[0] for key in moves.taps)]
+    named.extend(scroll.from_screen_id for scroll in moves.scrolls)
     named.extend(_sent_target(tap) for taps in moves.taps.values() for tap in taps)
     for sid in named:
         if sid is not None and sid not in wanted:
             wanted.append(sid)
     wanted.extend(sid for sid in sorted(reader.names) if sid not in wanted)
     return wanted
+
+
+_View = tuple[int | None, Screen]
+
+
+def _scroll_views(
+    screen: Screen, moves: _Moves, reader: _Reader, members: set[str]
+) -> list[_View]:
+    """The reads of a screen: its own file (scroll id None), then the
+    screen read after each sent scroll that was sent on it (or on another id of
+    the same screen, ``members``), in action order."""
+    views: list[_View] = [(None, screen)]
+    for scroll in moves.scrolls:
+        if scroll.from_screen_id not in members or not _scroll_read(scroll):
+            continue
+        loaded = reader.load_scroll(scroll.action_id)
+        if loaded is not None:
+            views.append((scroll.action_id, loaded[0]))
+    return views
+
+
+def _scroll_read(scroll: _Scroll) -> bool:
+    """Whether a scroll was sent. The screen after it may have been read only
+    on a later try (the end line then says ``dump_failed``): its file is
+    written when it is read, so it is used whenever the scroll was sent."""
+    end = scroll.end
+    return end is not None and not end.get("failed") and not end.get("not_sent")
+
+
+def _same_element(
+    recorded: dict[str, object], element: Element, *, texts: bool
+) -> bool:
+    """Whether the element a tap recorded is this element of a read: the same
+    class, resource id and bounds, and (when texts are recorded and this one
+    is not hidden) the same text, description and hint."""
+    same = (
+        recorded.get("class") == element.class_name
+        and recorded.get("resource_id", "") == element.resource_id
+        and recorded.get("bounds") == element.bounds.to_list()
+    )
+    if same and texts and "hidden" not in recorded:
+        same = (
+            recorded.get("text", "") == element.text
+            and recorded.get("content_desc", "") == element.content_desc
+            and recorded.get("hint", "") == element.hint
+        )
+    return same
+
+
+def _view_of(tap: _Tap, views: list[_View], *, texts: bool) -> tuple[bool, int | None]:
+    """Whether a read of the screen holds the element the tap recorded, and the
+    scroll id of that read (None: the screen's own file).
+
+    The read the start line names (``after_scroll``) comes first. Otherwise the
+    first read that has the element's id with the fields the tap recorded; for
+    a row whose text sits in a child, the row itself says nothing of the text,
+    so a tap that does not name its read can then be put on the wrong read.
+    """
+    for scroll_id, screen in views:
+        if (
+            scroll_id is not None
+            and scroll_id == tap.after_scroll
+            and any(e.id == tap.element_id for e in screen.elements)
+        ):
+            return True, scroll_id
+    for scroll_id, screen in views:
+        for element in screen.elements:
+            if element.id == tap.element_id and _same_element(
+                tap.element, element, texts=texts
+            ):
+                return True, scroll_id
+    return False, None
+
+
+def _scrolled_rows(
+    views: list[_View],
+    first: list[Row],
+    taps_by: dict[tuple[int | None, str], list[_Tap]],
+    *,
+    record_text: bool,
+) -> tuple[list[Row], list[tuple[Row, Screen]], dict[tuple[int | None, str], Row]]:
+    """The rows of all the reads, in order, and for each read after a scroll
+    the rows it adds: `SCROLLED_REPEATS` says whether one that an earlier read
+    listed already is added again.
+
+    Returns the rows, each (row, its read) pair for matching skip reasons, and
+    for each row dropped as a repeat the row that stands for it.
+    """
+    rows = list(first)
+    owner: list[tuple[Row, Screen]] = [(row, views[0][1]) for row in first]
+    stand_in: dict[tuple[int | None, str], Row] = {}
+    once = SCROLLED_REPEATS == "once" and record_text
+    # The rows listed so far by fingerprint, in order: a row of a later read is
+    # a repeat of the n-th of them when it is the n-th of its fingerprint in its
+    # own read, so two identical rows that show up together stay two.
+    listed: dict[str, list[Row]] = {}
+    if once and len(views) > 1:
+        listed = _first_by_print(views[0][1], first)
+    for scroll_id, screen in views[1:]:
+        tapped = {eid for (vid, eid) in taps_by if vid == scroll_id}
+        later = _rows_of(screen, tapped, record_text=record_text)
+        prints = _Prints(screen) if once else None
+        by_id = {e.id: e for e in screen.elements}
+        here: dict[str, int] = {}
+        added: list[tuple[str, Row]] = []
+        for row in later:
+            row.after_scroll = scroll_id
+            if prints is not None:
+                fingerprint = prints.of(by_id[row.element_id])
+                number = here.get(fingerprint, 0)
+                here[fingerprint] = number + 1
+                earlier = listed.get(fingerprint, [])
+                if number < len(earlier):
+                    stand_in[scroll_id, row.element_id] = earlier[number]
+                    continue
+                added.append((fingerprint, row))
+            rows.append(row)
+            owner.append((row, screen))
+        for fingerprint, row in added:
+            listed.setdefault(fingerprint, []).append(row)
+    return rows, owner, stand_in
+
+
+def _first_by_print(screen: Screen, rows: list[Row]) -> dict[str, list[Row]]:
+    prints = _Prints(screen)
+    by_id = {e.id: e for e in screen.elements}
+    found: dict[str, list[Row]] = {}
+    for row in rows:
+        found.setdefault(prints.of(by_id[row.element_id]), []).append(row)
+    return found
+
+
+def _match_skips(
+    owner: list[tuple[Row, Screen]],
+    by_fp: dict[str, list[str]],
+    skips: _Skips,
+    sid: str,
+    *,
+    record_text: bool,
+) -> set[str]:
+    """Put the skip reasons on the rows whose fingerprint they name; return the
+    fingerprints that found a row."""
+    seen: set[str] = set()
+    indexes: dict[int, tuple[_Prints, dict[str, Element]]] = {}
+    for row, view in owner:
+        if row.kind != "row":
+            continue
+        held = indexes.get(id(view))
+        if held is None:
+            held = indexes[id(view)] = (
+                _Prints(view),  # one index of the read, built once
+                {e.id: e for e in view.elements},
+            )
+        prints, by_id = held
+        element = by_id[row.element_id]
+        fp = prints.of(element)
+        if fp not in by_fp and (not record_text or "password" in element.flags):
+            # The texts were blanked when the line was written, so the
+            # fingerprint cannot match; the element id of the line does.
+            fp = skips.by_element.get(sid, {}).get(row.element_id, fp)
+        if fp in by_fp:
+            row.reasons = tuple(by_fp[fp])
+            seen.add(fp)
+    return seen
 
 
 def _node(
@@ -1172,34 +1477,47 @@ def _node(
     record_text: bool,
 ) -> ScreenNode:
     screen, screen_package, activity = loaded
-    tapped = {key[1] for key in moves.taps if key[0] == sid}
-    rows = _rows_of(screen, tapped, record_text=record_text)
+    members = {sid, *(a for a, first in moves.family.items() if first == sid)}
+    views = _scroll_views(screen, moves, reader, members)
+    taps_by: dict[tuple[int | None, str], list[_Tap]] = {}
+    for (from_id, element_id), taps in moves.taps.items():
+        if from_id not in members:
+            continue
+        for tap in taps:
+            found, view = (
+                _view_of(tap, views, texts=record_text)
+                if len(views) > 1
+                else (False, None)
+            )
+            if from_id != sid and (not found or view is None):
+                continue  # another id of this screen: only what a scroll showed
+            taps_by.setdefault((view, element_id), []).append(tap)
+    own_ids = {eid for (vid, eid) in taps_by if vid is None}
+    first = _rows_of(screen, own_ids, record_text=record_text)
+    rows, owner, stand_in = _scrolled_rows(
+        views, first, taps_by, record_text=record_text
+    )
     by_fp = skips.by_screen.get(sid, {})
     unmatched: list[tuple[str, tuple[str, ...]]] = []
     unchecked = False
-    if by_fp and len(screen.elements) > _MAX_FINGERPRINTED:
+    if by_fp and any(len(v.elements) > _MAX_FINGERPRINTED for _, v in views):
         unchecked = True
         unmatched = [(fp, tuple(r)) for fp, r in by_fp.items()]
     elif by_fp:
-        prints = _Prints(screen)  # one index of the screen, built once
-        by_id = {e.id: e for e in screen.elements}
-        seen: set[str] = set()
-        for row in rows:
-            if row.kind != "row":
-                continue
-            element = by_id[row.element_id]
-            fp = prints.of(element)
-            if fp not in by_fp and (not record_text or "password" in element.flags):
-                # The texts were blanked when the line was written, so the
-                # fingerprint cannot match; the element id of the line does.
-                fp = skips.by_element.get(sid, {}).get(row.element_id, fp)
-            if fp in by_fp:
-                row.reasons = tuple(by_fp[fp])
-                seen.add(fp)
+        seen = _match_skips(owner, by_fp, skips, sid, record_text=record_text)
         unmatched = [(fp, tuple(r)) for fp, r in by_fp.items() if fp not in seen]
+    # Every tap of a row, also those decided on a later read of a row that is
+    # shown once (its repeat), so that no destination is lost.
+    attached: dict[int, tuple[Row, list[_Tap]]] = {}
     for row in rows:
-        if (sid, row.element_id) in moves.taps:
-            _attach(row, moves.taps[sid, row.element_id], sid, own, reader, moves)
+        key = (row.after_scroll, row.element_id)
+        if key in taps_by:
+            attached.setdefault(id(row), (row, []))[1].extend(taps_by[key])
+    for key, row in stand_in.items():
+        if key in taps_by:
+            attached.setdefault(id(row), (row, []))[1].extend(taps_by[key])
+    for row, taps in attached.values():
+        _attach(row, taps, sid, own, reader, moves)
     return ScreenNode(
         sid,
         screen_package,
@@ -1244,9 +1562,10 @@ def read_tree(run_dir: str | Path) -> RunTree:
     # uiprobe writes only screens of the target app and of the packages the
     # run listed in also_target: another package's file means the folder is
     # not as uiprobe wrote it.
+    read = [reader.load(sid) for sid in sorted(reader.names)]
+    read.extend(reader.load_scroll(n) for n in sorted(reader.scroll_names))
     foreign = listed is None or any(
-        found is not None and found[1] not in own
-        for found in (reader.load(sid) for sid in sorted(reader.names))
+        found is not None and found[1] not in own for found in read
     )
     moves = _read_moves(base, warnings, distrust=foreign)
     screens: dict[str, ScreenNode] = {}
@@ -1426,6 +1745,8 @@ def _element_dict(row: Row) -> dict[str, object]:
         data["hidden"] = True
     if row.folded_into is not None:
         data["folded_into"] = row.folded_into
+    if row.after_scroll is not None:
+        data["after_scroll"] = row.after_scroll
     if row.kind == "row":
         data["pressed"] = row.pressed
         data["action_id"] = row.action_id

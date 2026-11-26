@@ -21,6 +21,7 @@ from uiprobe.crawl import (
     Limits,
     Observation,
     Relaunch,
+    Scroll,
     Tap,
 )
 from uiprobe.crawl_driver import crawl
@@ -105,9 +106,15 @@ def engine_log(monkeypatch: pytest.MonkeyPatch, device: Device) -> EngineLog:
             log.events.append(Event("next", tap=tap))
             return action
 
-        def recheck(self, tap: Tap, observation: Observation) -> bool:
+        def recheck(self, tap: Tap | Scroll, observation: Observation) -> bool:
             allowed = super().recheck(tap, observation)
-            log.events.append(Event("recheck", tap=tap, allowed=allowed))
+            log.events.append(
+                Event(
+                    "recheck",
+                    tap=tap if isinstance(tap, Tap) else None,
+                    allowed=allowed,
+                )
+            )
             return allowed
 
         def tap_sent(self, tap: Tap) -> None:

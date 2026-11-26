@@ -35,10 +35,12 @@ def test_guards_imports_only_allowed_modules(path: Path) -> None:
         "typing",
         "unicodedata",
         "uiprobe.model",
+        "uiprobe.scrollgeom",
         "uiprobe.guards.constants",
         "uiprobe.guards.judge",
         "uiprobe.guards.matching",
         "uiprobe.guards.policy",
+        "uiprobe.guards.scroll",
         "uiprobe.guards.tree",
         "uiprobe.guards.words",
     }
@@ -62,6 +64,7 @@ def test_the_guards_package_holds_exactly_the_known_files() -> None:
         "judge.py",
         "matching.py",
         "policy.py",
+        "scroll.py",
         "tree.py",
         "words.py",
     ]
@@ -72,16 +75,18 @@ def test_every_annotation_in_the_guards_package_resolves() -> None:
     # a test may supply them, nothing else may be missing at run time.
     from collections.abc import Iterable, Sequence
 
+    from uiprobe.guards.policy import Judgement
     from uiprobe.model import Element, Screen
 
     extra = {
+        "Judgement": Judgement,
         "Iterable": Iterable,
         "Sequence": Sequence,
         "Element": Element,
         "Screen": Screen,
     }
     functions = []
-    for name in ("constants", "judge", "matching", "policy", "tree", "words"):
+    for name in ("constants", "judge", "matching", "policy", "scroll", "tree", "words"):
         module = importlib.import_module(f"uiprobe.guards.{name}")
         for value in vars(module).values():
             if getattr(value, "__module__", None) != module.__name__:

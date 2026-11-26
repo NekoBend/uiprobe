@@ -24,7 +24,9 @@ if TYPE_CHECKING:
 
 @pytest.fixture
 def android(fake_adb: FakeAdbServer) -> FakeAndroid:
-    return FakeAndroid(fake_adb, SERIAL, SCREENS, start="home", transport_id=TRANSPORT)
+    return FakeAndroid(
+        fake_adb, SERIAL, SCREENS, start="home", transport_id=TRANSPORT, wheel=True
+    )
 
 
 @pytest.fixture
@@ -69,15 +71,21 @@ def test_press_runs_a_short_crawl_on_an_emulator(fake_adb, android, capsys, tmp_
         " activity is started; what it had not saved is lost (--no-restart"
         " starts from the screen it shows now)"
     )
-    assert lines[7].startswith("stopped: ")
+    assert lines[7] == (
+        "scroll lists with the mouse wheel on screens with nothing left to press: no"
+    )
+    assert lines[8].startswith("stopped: ")
     assert any(line.startswith("actions: ") for line in lines)
-    assert f"run folder: {out}" in lines[8:]
+    assert f"run folder: {out}" in lines[9:]
     assert [i for i in android.inputs if i.kind == "tap"]
     begin = json.loads((out / "run-start.json").read_bytes())
     assert begin["limits"] == {"depth": 5, "actions": 300, "minutes": 30}
     assert begin["check_tap_window"] is True
     assert begin["back_on_other_screens"] is False
     assert begin["restart"] is True
+    # Scrolling is off by default, so the run says nothing of it.
+    assert "scroll_lists" not in begin
+    assert "scroll_input" not in begin
     assert android.stopped == [SHOP]  # the first launch's force-stop
     assert (out / "run.json").exists()
 
@@ -115,6 +123,10 @@ def test_press_in_json(fake_adb, capsys, tmp_path):
     assert result["back_on_other_screens"] is True
     assert result["check_tap_window"] is False
     assert result["restart"] is False
+    assert result["scroll_lists"] is False
+    assert result["scrolls_per_screen"] == 10
+    assert result["scroll_amount"] == 3
+    assert result["scroll_input"] is None
     assert result["out"] == str(out)
     assert result["stop_reason"] == "max_actions"
     assert result["actions"] == 4
@@ -1056,3 +1068,43 @@ def test_an_error_reply_is_hidden_in_json_too(fake_adb, capsys, tmp_path):
     assert body["code"] == "adb_error"
     assert HIDDEN_REPLY in body["message"]
     assert body["details"]["message"] == HIDDEN_REPLY
+
+
+@pytest.mark.usefixtures("here")
+def test_the_plan_says_when_the_device_does_not_list_the_wheel_scroll(
+    fake_adb, android, capsys, tmp_path
+):
+    android.input_usage = FakeAndroid.USAGE_OLD
+    (tmp_path / SETTINGS_FILE).write_text(
+        render_default_settings().replace(
+            "scroll_lists = false", "scroll_lists = true"
+        ),
+        encoding="utf-8",
+    )
+    out = tmp_path / "run"
+    code, text, err = press(capsys, fake_adb, "--press", "--out", str(out), "--quiet")
+    assert (code, err) == (0, "")
+    assert (
+        "scroll lists with the mouse wheel on screens with nothing left to press:"
+        " no (this device's input does not list the wheel scroll)"
+    ) in text.splitlines()
+    begin = json.loads((out / "run-start.json").read_bytes())
+    assert begin["scroll_lists"] is True
+    assert begin["scroll_input"] is False
+    reads = [c for _, _, c in fake_adb.commands if c == "input"]
+    # once by the command for the plan, once by the run itself: only the run's
+    # own read decides, and it is the one run-start.json records
+    assert len(reads) == 2
+
+
+@pytest.mark.usefixtures("here", "android")
+def test_the_usage_is_not_read_when_the_setting_is_off(fake_adb, capsys, tmp_path):
+    (tmp_path / SETTINGS_FILE).write_text(render_default_settings(), encoding="utf-8")
+    code, text, _err = press(capsys, fake_adb, "--press", "--out", str(tmp_path / "r"))
+    assert code == 0
+    assert (
+        "scroll lists with the mouse wheel on screens with nothing left to press: no"
+    ) in text.splitlines()
+    assert not [c for _, _, c in fake_adb.commands if c == "input"]
+    begin = json.loads((tmp_path / "r" / "run-start.json").read_bytes())
+    assert "scroll_lists" not in begin

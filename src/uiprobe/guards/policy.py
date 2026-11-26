@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 import unicodedata
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Final
 
 from uiprobe.guards.constants import (
@@ -17,6 +17,7 @@ from uiprobe.guards.constants import (
     CONFIRM_WORDS,
     DEFAULT_DENY_EXCEPTIONS,
     DEFAULT_DENY_WORDS,
+    DEFAULT_SCROLL_LISTS,
     IRREVERSIBLE_PHRASES,
     Reason,
 )
@@ -235,6 +236,14 @@ class Policy:
     stays refused (``outside_target_app``). With the empty default nothing
     differs from a policy without the field.
 
+    ``scroll_lists`` (default `DEFAULT_SCROLL_LISTS`, False) is read by the
+    pressing crawl only, not by `judge`. True lets the crawl turn a mouse wheel
+    over a list (content further down comes up) on a screen with nothing left
+    to press, to reach the rows below the fold, when the device's own ``input``
+    usage lists the wheel scroll (see `uiprobe.guards.scroll_target` for where
+    the wheel is turned and what it is never turned over). False gives the
+    crawl that sends no wheel input and reads no usage.
+
     ``edges`` holds the sizes in pixels ``(top, bottom, left, right)`` that
     `judge` turns into `edge_areas` of each screen's display when ``avoid`` is
     None; None keeps the API 36 sizes. An explicit ``avoid`` wins over
@@ -255,8 +264,8 @@ class Policy:
             is not an integer of at least 1.
         TypeError: ``edges`` is not a sequence, ``deny_exceptions`` is one
             string, or ``back_on_other_screens``, ``check_tap_window`` or
-            ``replay_path`` is not a bool, or ``also_target`` is not a tuple of
-            strings.
+            ``replay_path`` or ``scroll_lists`` is not a bool, or ``also_target``
+            is not a tuple of strings.
     """
 
     deny_words: tuple[str, ...] = DEFAULT_DENY_WORDS
@@ -279,6 +288,7 @@ class Policy:
     skip_sliders: bool = True
     replay_path: bool = True
     also_target: tuple[str, ...] = ()
+    scroll_lists: bool = DEFAULT_SCROLL_LISTS
 
     def __post_init__(self) -> None:
         if type(self.back_on_other_screens) is not bool:
@@ -300,6 +310,9 @@ class Policy:
             # system UI, the fixed home apps); a refused entry cannot be built.
             # The target itself is checked where the target is known.
             check_also_target(None, self.also_target)
+        if type(self.scroll_lists) is not bool:
+            msg = "scroll_lists must be a bool"
+            raise TypeError(msg)
         for word in (*self.deny_words, *self.confirm_words, *self.irreversible_phrases):
             _check_word(word)
         _exception_keys(self.deny_exceptions)
@@ -360,6 +373,7 @@ class Policy:
             skip_sliders=self.skip_sliders,
             replay_path=self.replay_path,
             also_target=self.also_target,
+            scroll_lists=self.scroll_lists,
         )
 
 
@@ -487,9 +501,17 @@ class Decision:
 
 @dataclass(frozen=True)
 class Judgement:
-    """One `Decision` per candidate, in document order."""
+    """One `Decision` per candidate, in document order.
+
+    ``dialog`` says that the screen is a dialog (see ``dialog_confirm_button``)
+    and ``irreversible`` that a phrase of ``Policy.irreversible_phrases`` is on
+    it. Both are facts about the whole screen (even with no candidate), are
+    False for a screen too large to judge, and are not compared.
+    """
 
     decisions: tuple[Decision, ...]
+    dialog: bool = field(default=False, compare=False)
+    irreversible: bool = field(default=False, compare=False)
 
     @property
     def pressable(self) -> tuple[Decision, ...]:

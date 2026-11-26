@@ -839,6 +839,8 @@ def test_the_records_of_a_transition_keep_their_old_fields() -> None:
         "fingerprint",
         "point",
         "dump_failed",
+        "amount",  # added with scrolling; None for everything but a scroll
+        "scroll_effect",
     ]
     eng, _phone, _log = crawl_run2(Policy())
     for transition in eng.records.transitions:
