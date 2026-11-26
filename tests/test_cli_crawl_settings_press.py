@@ -13,6 +13,7 @@ import pytest
 
 from tests.crawl_driver.helpers import SCREENS, SERIAL, SHOP, TRANSPORT
 from tests.fake_device import FakeAndroid
+from tests.helpers import no_out_message
 from uiprobe import cli
 from uiprobe import settings as settings_module
 from uiprobe.crawl import Limits
@@ -32,11 +33,7 @@ DATA = Path(__file__).parent / "data"
 # No pause after a press, so that a pressing run in a test ends quickly.
 FAST = ("--settle", "0")
 LIMITS_TEXT = "depth = 5\nactions = 300\nminutes = 30\n"
-NO_OUT = (
-    f"the settings file {SETTINGS_FILE} says press = true, so this crawl presses"
-    " and needs --out DIR, the new folder to record the run into; add --dry-run"
-    " to preview instead"
-)
+NO_OUT = no_out_message(SETTINGS_FILE, press_in_file=True)
 
 
 @pytest.fixture
@@ -246,6 +243,7 @@ def test_press_true_without_out_is_a_usage_error(
         assert err == ""
         error = json.loads(text)["error"]
         assert (error["code"], error["message"]) == ("usage_error", NO_OUT)
+        assert "details" not in error
     else:
         assert (text, err) == ("", f"uiprobe: error: {NO_OUT}\n")
     assert fake_adb.requests == []
