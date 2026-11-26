@@ -360,6 +360,10 @@ def instrumented_run(
         log.caller("stop")
         return Answer()  # ty: ignore[invalid-explicit-return]
 
+    def caller_progress(progress: object) -> None:
+        del progress
+        log.caller("on_progress")
+
     crawl(
         device,
         SHOP,
@@ -371,6 +375,7 @@ def instrumented_run(
         clock=caller_clock,
         sleep=caller_sleep,
         restart=row.restart,
+        on_progress=caller_progress,
     )
     return log.events
 
@@ -468,6 +473,9 @@ def test_no_caller_code_runs_between_the_final_comparison_and_the_send(
     assert not any(what.startswith("word.") for _, what in events)
     assert any(kind == "caller" and what == "clock.__float__" for kind, what in events)
     assert any(kind == "caller" and what.endswith("__del__") for kind, what in events)
+    # The progress callback is caller code too: it ran, and check_rule (run by
+    # the rows below) shows it never lay between a decision and its send.
+    assert ("caller", "on_progress") in events
     sends = check_rule(events)  # every send of the run, whatever its path
     row = ROWS[path]
     assert sends.get(row.path, 0) > 0, f"the scenario sent no {row.path}"
@@ -573,6 +581,29 @@ def test_the_rule_test_fails_on_a_clock_call_before_the_tap_after_a_relaunch(
     events = instrumented_run(tmp_path, fake_adb, monkeypatch, ROWS["start"])
     assert injected
     with pytest.raises(AssertionError, match=r"tap: .* ran before"):
+        check_rule(events)
+
+
+@pytest.mark.parametrize("path", ["tap", "back", "start"])
+def test_the_rule_test_fails_on_a_progress_call_inside_the_window(
+    tmp_path, fake_adb, monkeypatch, path
+):
+    # report_progress put after the decision and before the input is caught.
+    send_input = crawl_driver._Run.send_input
+    relaunch_stop = crawl_driver._Run.relaunch_stop
+
+    def progress_then_send(self, action, action_id):
+        self.report_progress()
+        return send_input(self, action, action_id)
+
+    def progress_then_stop(self, action_id, action):
+        self.report_progress()
+        return relaunch_stop(self, action_id, action)
+
+    monkeypatch.setattr(crawl_driver._Run, "send_input", progress_then_send)
+    monkeypatch.setattr(crawl_driver._Run, "relaunch_stop", progress_then_stop)
+    events = instrumented_run(tmp_path, fake_adb, monkeypatch, ROWS[path])
+    with pytest.raises(AssertionError, match="on_progress"):
         check_rule(events)
 
 

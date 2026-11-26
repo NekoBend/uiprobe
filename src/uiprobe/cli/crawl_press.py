@@ -5,8 +5,9 @@ from __future__ import annotations
 import argparse  # noqa: TC003 (a runtime import in the former cli.py)
 import contextlib
 import sys
+import time
 from dataclasses import replace
-from typing import Final, Literal
+from typing import TYPE_CHECKING, Final, Literal
 
 from uiprobe._json import dumps
 from uiprobe.cli.commands import _single_serial
@@ -32,6 +33,12 @@ from uiprobe.crawl_preview import preview as make_preview
 from uiprobe.device import PIN_WAIT_STOPPED, Device
 from uiprobe.errors import INTERRUPTED, NotEmulatorError, UiprobeError
 from uiprobe.settings import Settings, _shown
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+    from typing import TextIO
+
+    from uiprobe.crawl_driver import Progress
 
 CRAWL_RUN_SCHEMA = "uiprobe.crawl_run/1"
 
@@ -117,6 +124,68 @@ def _limit_source_text(name: str, source: str) -> str:
 
 def _press_settle(args: argparse.Namespace) -> float:
     return _PRESS_SETTLE if args.settle is None else args.settle
+
+
+# The least number of seconds between two progress lines.
+PROGRESS_INTERVAL: Final = 5.0
+
+
+def _duration_text(seconds: float) -> str:
+    """Whole seconds as ``14s``, ``2m 14s`` or ``1h 02m 03s``."""
+    total = max(0, int(seconds))
+    hours, rest = divmod(total, 3600)
+    minutes, secs = divmod(rest, 60)
+    if hours:
+        return f"{hours}h {minutes:02d}m {secs:02d}s"
+    if minutes:
+        return f"{minutes}m {secs:02d}s"
+    return f"{secs}s"
+
+
+def _progress_text(progress: Progress) -> str:
+    """The progress line, for example
+    ``progress: 2m 14s of 30m, 37 of 300 actions, 12 screens, depth 3 of 5``."""
+    screens = "screen" if progress.screens == 1 else "screens"
+    return (
+        f"progress: {_duration_text(progress.elapsed)} of {progress.minutes}m,"
+        f" {progress.actions} of {progress.action_limit} actions,"
+        f" {progress.screens} {screens},"
+        f" depth {progress.depth} of {progress.depth_limit}"
+    )
+
+
+class _ProgressPrinter:
+    """The ``on_progress`` callback of the command: a line on `stream`, the
+    first time at once, then at most one every `PROGRESS_INTERVAL` seconds.
+
+    It writes through `_emit` and flushes right away, as the other lines on
+    stderr (warnings, notes) do, so a line is never cut by another. A closed
+    stream raises ``BrokenPipeError`` out of the callback and ends the run,
+    as `_emit` does everywhere.
+    """
+
+    def __init__(
+        self,
+        stream: TextIO | None,
+        *,
+        clock: Callable[[], float] | None = None,
+        interval: float = PROGRESS_INTERVAL,
+    ) -> None:
+        self._stream = stream
+        self._clock = time.monotonic if clock is None else clock
+        self._interval = interval
+        self._last: float | None = None
+
+    def __call__(self, progress: Progress) -> None:
+        stream = self._stream
+        if stream is None:  # a closed stderr: nothing to write to
+            return
+        now = self._clock()
+        if self._last is not None and now - self._last < self._interval:
+            return
+        self._last = now
+        _emit(_progress_text(progress), stream=stream)
+        _flush(stream)
 
 
 def _cmd_crawl_press(args: argparse.Namespace, setup: _CrawlSetup) -> int:  # noqa: PLR0912, PLR0915 - one error path per kind of failure
@@ -213,6 +282,7 @@ def _cmd_crawl_press(args: argparse.Namespace, setup: _CrawlSetup) -> int:  # no
             settle=settle,
             restart=not args.no_restart,
             record_text=record_text,
+            on_progress=None if args.quiet else _ProgressPrinter(sys.stderr),
         )
     except KeyboardInterrupt as exc:
         # crawl_run wrote run.json with "interrupted" when it still could.

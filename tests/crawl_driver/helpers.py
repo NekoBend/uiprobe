@@ -35,6 +35,7 @@ if TYPE_CHECKING:
     import pytest
 
     from tests.fake_adb_server import FakeAdbServer
+    from uiprobe.crawl_driver import Progress
 
 
 SERIAL = "emulator-5554"
@@ -131,6 +132,7 @@ def run(
     policy: Policy | None = None,
     restart: bool = True,
     record_text: bool = True,
+    on_progress: Callable[[Progress], None] | None = None,
 ) -> CrawlResult:
     return crawl(
         device,
@@ -146,6 +148,7 @@ def run(
         sleep=clock.sleep,
         restart=restart,
         record_text=record_text,
+        on_progress=on_progress,
     )
 
 

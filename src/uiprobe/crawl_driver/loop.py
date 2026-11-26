@@ -18,7 +18,7 @@ from uiprobe.crawl_driver.constants import (
     PAUSE_STEP,
     STOP_NOT_SENT,
 )
-from uiprobe.crawl_driver.helpers import _Ended, _kind, _seconds
+from uiprobe.crawl_driver.helpers import Progress, _Ended, _kind, _seconds
 from uiprobe.crawl_driver.state import _RunState
 from uiprobe.device import _monotonic
 from uiprobe.errors import LaunchFailedError, UiprobeError
@@ -55,6 +55,8 @@ class _LoopMixin(_RunState):
             return reason
         engine = self.engine
         observation = self.next_observation()
+        if observation is not None:
+            self.report_progress()  # the first launch is sent and closed
         while observation is not None:
             if self.stopped():
                 return INTERRUPTED
@@ -82,7 +84,34 @@ class _LoopMixin(_RunState):
             # A tap the gate did not send: the screen it re-read goes to the
             # engine, which releases the unreported tap.
             observation = fresh if fresh is not None else self.next_observation()
+            if observation is not None and refused is None:
+                self.report_progress()
         return INTERRUPTED
+
+    def report_progress(self) -> None:
+        """Tell `on_progress` where the run is, after a sent action's end line.
+
+        Called from the loop only: the end line of the action is written, and
+        the next send is a whole gate away, so the caller's code never runs
+        between a gate's last comparison and its input. It is not called for
+        an action that was not sent, or once the run has stopped (the loop
+        calls it only with a screen read in hand). An error of the callback
+        ends the run like any other error of the loop; it is not caught here.
+        """
+        callback, limits = self.on_progress, self.limits
+        if callback is None or limits is None:
+            return
+        callback(
+            Progress(
+                elapsed=max(0.0, self.now() - self.started_at),
+                actions=self.engine.actions_sent,
+                action_limit=limits.actions,
+                screens=len(self.screens_seen),
+                depth=max(1, self.engine.depth),
+                depth_limit=limits.depth,
+                minutes=limits.minutes,
+            )
+        )
 
     def note_landing(self, observation: Observation) -> None:
         """Count the app in front when the engine acted on another app's screen.
