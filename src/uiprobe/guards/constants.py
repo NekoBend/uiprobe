@@ -239,6 +239,17 @@ IRREVERSIBLE_PHRASES: Final[tuple[str, ...]] = (
     "完全に削除",
 )
 
+# Confirm words that count on a dialog only (``dialog_confirm_button``): a
+# full-screen "Enable" row is an ordinary row. They are part of CONFIRM_WORDS
+# (settings and policy carry them like the others), but the screen-wide
+# ``confirm_button`` reason ignores them.
+DIALOG_ONLY_CONFIRM_WORDS: Final[tuple[str, ...]] = (
+    "turn on",
+    "enable",
+    "オンにする",
+    "有効にする",
+)
+
 # Labels of buttons that confirm what the screen asks for.
 CONFIRM_WORDS: Final[tuple[str, ...]] = (
     "OK",
@@ -261,14 +272,13 @@ CONFIRM_WORDS: Final[tuple[str, ...]] = (
     "allow",
     "apply",
     "done",
-    "turn on",
-    "enable",
-    "オンにする",
-    "有効にする",
+    *DIALOG_ONLY_CONFIRM_WORDS,
 )
 
-# The resource id of the positive button of a platform dialog. On a dialog
+# The resource id of the positive button of a platform dialog, ``button1``
+# under the ``android`` package or the screen's own package. On a dialog
 # screen it is refused whatever its label (``dialog_confirm_button``).
+_DIALOG_POSITIVE_ENTRY: Final = "button1"
 _DIALOG_POSITIVE_ID: Final = "android:id/button1"
 
 # A screen with more elements than this is not judged: every candidate gets

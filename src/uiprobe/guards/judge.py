@@ -8,6 +8,7 @@ from uiprobe.guards.constants import (
     _ACTION_BAR_ID,
     _CHECKABLE,
     _CLICKABLE,
+    _DIALOG_POSITIVE_ENTRY,
     _DIALOG_POSITIVE_ID,
     _DISABLED,
     _MIN_JOINED_PARTS,
@@ -17,6 +18,7 @@ from uiprobe.guards.constants import (
     _TWO_TARGET_DIVIDER,
     _UP_CLASSES,
     _UP_IDS,
+    DIALOG_ONLY_CONFIRM_WORDS,
     MAX_ELEMENTS,
     PERMISSION_PACKAGES,
     Reason,
@@ -85,6 +87,9 @@ class _Judge:
         self.confirm = frozenset(_confirm_form(w) for w in policy.confirm_words)
         # The lengths of the confirm words, shortest first: only a start of a
         # label of one of these lengths can be a confirm word.
+        self._dialog_only = frozenset(
+            _confirm_form(w) for w in DIALOG_ONLY_CONFIRM_WORDS
+        )
         self._confirm_lengths = sorted({len(form) for form in self.confirm})
         # A confirm word that ends in a letter of the Japanese script can be
         # followed by anything; the others need a boundary (`_is_confirm`).
@@ -116,6 +121,12 @@ class _Judge:
         elif screen.package != self.target:
             self.screen_note = f"screen package is {screen.package}"
         self.dialog = _is_dialog(self.tree)
+        self._positive = [
+            i
+            for i, e in enumerate(self.elements)
+            if self._is_positive_id(e.resource_id)
+        ]
+        self._positive_set = frozenset(self._positive)
         self._screen_hit: Detail | Literal[False] | None = False
         self._irreversible: Detail | Literal[False] | None = False
         self._summarize()
@@ -124,6 +135,7 @@ class _Judge:
         # joined text holds a deny word (only used with exception words).
         self._joined_below: dict[int, int] = {}
         self._labels: dict[int, str] = {}
+        self._wide_labels: dict[int, str] = {}
         self._contrib: dict[int, _Agg] = {}
         self._everywhere: _Agg | None = None
         self._cells: dict[int, _Agg] = {}
@@ -282,23 +294,26 @@ class _Judge:
                 return value
         return self.below_label[i] or ""
 
-    def _is_confirm(self, form: str) -> bool:
+    def _is_confirm(self, form: str, *, wide: bool = False) -> bool:
         """True when the form is a confirm word or starts with one.
 
         A confirm word at the start counts when a boundary follows it: a
         character that is not a letter, or nothing. A word ending in a
-        letter of the Japanese script needs no boundary.
+        letter of the Japanese script needs no boundary. With ``wide``, the
+        dialog-only words (`DIALOG_ONLY_CONFIRM_WORDS`) do not count.
         """
         if not form:
             return False
-        if form in self.confirm:
+        if form in self.confirm and not (wide and form in self._dialog_only):
             return True
         for end in self._confirm_lengths:
             if end >= len(form):
                 break
             head = form[:end]
-            if head in self.confirm and (
-                head in self._open_ended or not form[end].isalpha()
+            if (
+                head in self.confirm
+                and not (wide and head in self._dialog_only)
+                and (head in self._open_ended or not form[end].isalpha())
             ):
                 return True
         return False
@@ -457,6 +472,36 @@ class _Judge:
             values = (getter(self.elements[j]) for j in below)
             for form in self._joined_forms(values):
                 if self._is_confirm(form):
+                    return form
+        return ""
+
+    def wide_label(self, i: int) -> str:
+        """Return the confirm form of a clickable element that counts on any
+        screen, or ``""``: `confirm_label` without the dialog-only words.
+        """
+        cached = self._wide_labels.get(i)
+        if cached is None:
+            cached = self._wide_labels[i] = self._find_wide_label(i)
+        return cached
+
+    def _find_wide_label(self, i: int) -> str:
+        subtree = self.tree.subtree(i)
+        for j in subtree:
+            element = self.elements[j]
+            for value in (element.text, element.content_desc, element.hint):
+                form = self._form(value)
+                if self._is_confirm(form, wide=True):
+                    return form
+        below = subtree[1:]
+        for getter, count in (
+            (lambda e: e.text, self.sub_core_text[i] - self.core_text[i]),
+            (lambda e: e.content_desc, self.sub_core_desc[i] - self.core_desc[i]),
+        ):
+            if count < _MIN_JOINED_PARTS:
+                continue
+            values = (getter(self.elements[j]) for j in below)
+            for form in self._joined_forms(values):
+                if self._is_confirm(form, wide=True):
                     return form
         return ""
 
@@ -659,7 +704,7 @@ class _Judge:
         self._word_rules(found, reasons, details)
         if found[_CONFIRM] != _NONE:
             self._confirm_reasons(i, own, found, reasons, details)
-        self._positive_button_reason(i, reasons, details)
+        self._positive_button_reason(i, point, reasons, details)
         if point is not None and any(_contains(area, point) for area in self._avoid):
             reasons.append("screen_edge")
         return Decision(element, point, tuple(reasons), tuple(details))
@@ -802,27 +847,60 @@ class _Judge:
         return None
 
     def _positive_button_reason(
-        self, i: int, reasons: list[Reason], details: list[Detail]
+        self,
+        i: int,
+        point: tuple[int, int] | None,
+        reasons: list[Reason],
+        details: list[Detail],
     ) -> None:
-        if not self._in_positive_button(i):
+        if not self._in_positive_button(i, point):
             return
         if "dialog_confirm_button" not in reasons:
             reasons.append("dialog_confirm_button")
         note = f"the dialog's positive button ({_DIALOG_POSITIVE_ID})"
         details.append(Detail("dialog_confirm_button", note=note))
 
-    def _in_positive_button(self, i: int) -> bool:
+    def _is_positive_id(self, resource_id: str) -> bool:
+        """True for ``button1`` under ``android`` or the screen's own package."""
+        package, separator, rest = resource_id.partition(":id/")
+        return (
+            bool(separator)
+            and rest == _DIALOG_POSITIVE_ENTRY
+            and package in ("android", self.screen.package)
+        )
+
+    def _in_positive_button(self, i: int, point: tuple[int, int] | None) -> bool:
         """True on a dialog screen (with ``refuse_dialog_confirm``) when the
-        element or one of its ancestors has the id of the dialog's positive
-        button, whatever its label.
+        element, one of its ancestors, the element its press point resolves
+        to (or one of that element's ancestors) or any element whose visible
+        part holds the press point is the dialog's positive button, whatever
+        its label. The last check does not rely on parent links.
         """
         if not (self.dialog and self.policy.refuse_dialog_confirm):
             return False
+        if not self._positive:
+            return False
+        starts = [i]
+        if point is not None:
+            top = self.topmost(point)
+            if top != -1:
+                starts.append(top)
+            x, y = point
+            for j in self._positive:
+                rect = self.screen._clip(self.elements[j])  # noqa: SLF001
+                if (
+                    rect is not None
+                    and rect.left <= x < rect.right
+                    and rect.top <= y < rect.bottom
+                ):
+                    return True
         parent = self.tree.parent
-        while i != -1:
-            if self.elements[i].resource_id == _DIALOG_POSITIVE_ID:
-                return True
-            i = parent[i]
+        for start in starts:
+            at = start
+            while at != -1:
+                if at in self._positive_set:
+                    return True
+                at = parent[at]
         return False
 
     def _confirm_reasons(
@@ -836,7 +914,7 @@ class _Judge:
         hit, elsewhere = self._hit(own, found, _CONFIRM, i)
         label = self.confirm_label(hit)
         note = f"{label} (hit target {self.elements[hit].id})" if elsewhere else label
-        screen_deny = self.screen_deny()
+        screen_deny = self.screen_deny() if self.wide_label(hit) else None
         if screen_deny:
             reasons.append("confirm_button")
             details.append(
