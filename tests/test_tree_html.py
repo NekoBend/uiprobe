@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 from html.parser import HTMLParser
-from typing import TYPE_CHECKING
+from pathlib import Path
 
 import pytest
 
@@ -35,10 +35,9 @@ from uiprobe.cli.tree_html import (
     render_page,
 )
 
-if TYPE_CHECKING:
-    from pathlib import Path
-
-LEGEND_POPUP = "[popup] = pressing it opened a popup; its contents are in --json"
+LEGEND_POPUP = "[popup] = pressing it opened a popup; its rows are in the fold below it"
+SUMMARY_HEAD = "left out of the tree (see --json): "
+HTML_HEAD = "not shown as rows (in the folds below each screen, and in --json): "
 
 
 class Page(HTMLParser):
@@ -230,10 +229,10 @@ def test_the_legend_and_the_summary_are_at_the_bottom(tmp_path, capsys):
         LEGEND_ARROW,
         LEGEND_SEE,
         LEGEND_EMPTY,
-        SUMMARY,
+        SUMMARY.replace(SUMMARY_HEAD, HTML_HEAD),
     ]
     assert text.index("<footer>") > text.rindex('<span class="name">')
-    assert text.index("</footer>") > text.index(SUMMARY)
+    assert text.index("</footer>") > text.index(HTML_HEAD)
 
 
 def test_the_legend_has_a_line_for_each_mark_in_the_page(tmp_path, capsys):
@@ -495,3 +494,183 @@ def test_a_fold_without_a_row_is_still_closed():
     assert '<details class="fold">' in text
     assert "<details open" not in text
     assert "a &lt;b&gt;" in text
+
+
+def _html_run(tmp_path):
+    out_dir = tmp_path / "w"
+    out_dir.mkdir()
+    return out_dir
+
+
+def test_the_text_legend_and_summary_keep_their_wording(tmp_path, capsys):
+    folder, _ = _popup_run(tmp_path)
+    _, out, _ = run_tree(capsys, str(folder.path))
+    lines = out.splitlines()
+    assert "[popup] = pressing it opened a popup; its contents are in --json" in lines
+    assert lines[-1].startswith(SUMMARY_HEAD)
+    assert HTML_HEAD not in out
+
+
+@pytest.mark.parametrize("through", ["parent", "grandparent", "relative"])
+def test_a_linked_parent_is_refused_and_nothing_lands_behind_it(
+    tmp_path, capsys, monkeypatch, through
+):
+    folder = full_run(tmp_path)
+    real = tmp_path / "real"
+    (real / "sub").mkdir(parents=True)
+    link = tmp_path / "link"
+    try:
+        link.symlink_to(real, target_is_directory=True)
+    except OSError:
+        pytest.skip("links cannot be made here")
+    if through == "parent":
+        target = str(link / "out.html")
+    elif through == "grandparent":
+        target = str(link / "sub" / "out.html")
+    else:
+        monkeypatch.chdir(tmp_path)
+        target = "link/out.html"
+    code, out, err = run_tree(capsys, str(folder.path), "--html", target)
+    assert code == 2
+    assert out == ""
+    assert "link or a junction" in err
+    assert sorted(p.name for p in real.rglob("*")) == ["sub"]
+
+
+def test_a_real_parent_is_accepted(tmp_path, capsys):
+    folder = full_run(tmp_path)
+    out_dir = _html_run(tmp_path)
+    code, _, err, out = write_html(out_dir, capsys, folder)
+    assert code == 0, err
+    assert out.is_file()
+
+
+def test_the_text_path_does_no_html_work(tmp_path, capsys, monkeypatch):
+    (tmp_path / "a").mkdir()
+    (tmp_path / "b").mkdir()
+    runs = [full_run(tmp_path / "a"), _popup_run(tmp_path / "b")[0]]
+    before = [run_tree(capsys, str(r.path))[1] for r in runs]
+
+    def boom(*_args, **_kwargs):
+        msg = "HTML work on the text path"
+        raise AssertionError(msg)
+
+    for name in (
+        "_HtmlBuilder",
+        "_Node",
+        "_Others",
+        "_left_out",
+        "_left_out_lines",
+        "_unmatched_lines",
+        "render_page",
+        "HRow",
+        "HFold",
+    ):
+        monkeypatch.setattr(f"uiprobe.cli.tree.{name}", boom)
+    after = [run_tree(capsys, str(r.path))[1] for r in runs]
+    assert after == before
+    assert all(after)
+
+
+def test_duplicate_items_stay_separate_lines_and_match_the_count(tmp_path, capsys):
+    from tests.test_tree import CLICK, el, make_screen
+
+    folder = Folder(tmp_path)
+    home = make_screen(
+        ".Home",
+        [
+            el(1, cls="FrameLayout"),
+            el(2, 1, text="Dup"),
+            el(3, 1, text="Dup"),
+            el(4, 1, cls="Button", text="Go", flags=CLICK),
+        ],
+    )
+    home_id = folder.screen(home)
+    folder.start("launch")
+    folder.end(home_id)
+    folder.finish()
+    out_dir = _html_run(tmp_path)
+    text, page = page_of(out_dir, capsys, folder)
+    assert text.count(">text outside rows: Dup<") == 2
+    assert f"{FOLD_OTHER} (2)" in [s["text"] for s in page.summaries]
+
+
+def test_a_popup_row_keeps_its_further_results(tmp_path, capsys):
+    folder = Folder(tmp_path)
+    home = _button_screen(".Home", ["Ask"])
+    dialog = _button_screen(".Dialog", ["OK"], popup=True)
+    behind = _button_screen(".Behind", ["Deep"])
+    ids = [folder.screen(s) for s in (home, dialog, behind)]
+    folder.start("launch")
+    folder.end(ids[0])
+    folder.tap(home, 2, ids[1])
+    folder.tap(dialog, 2, ids[2])
+    folder.tap(dialog, 2, "s-aaaaaaaaaaaa")
+    folder.start("relaunch", "s-aaaaaaaaaaaa", off_target_package="com.other.app")
+    folder.end(ids[0])
+    folder.finish()
+    out_dir = _html_run(tmp_path)
+    text, page = page_of(out_dir, capsys, folder)
+    assert "(pressed again)</span> → com.other.app" in text
+    assert LEGEND_ARROW in page.footer
+    assert "→ PACKAGE" in page.footer
+
+
+def test_ctrl_c_right_after_the_file_is_made_names_the_file(
+    tmp_path, capsys, monkeypatch
+):
+    from uiprobe import htmlfile
+
+    folder = full_run(tmp_path)
+    out_dir = _html_run(tmp_path)
+    target = out_dir / "out.html"
+
+    def made_then_interrupted(path, *_args, **_kwargs):
+        Path(path).touch()
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(htmlfile, "open", made_then_interrupted, raising=False)
+    code, _, err = run_tree(capsys, str(folder.path), "--html", str(target))
+    assert code == 130
+    assert f"interrupted; {target} was created and may be incomplete" in err
+
+
+def test_ctrl_c_before_anything_exists_names_no_file(tmp_path, capsys, monkeypatch):
+    from uiprobe import htmlfile
+
+    folder = full_run(tmp_path)
+    out_dir = _html_run(tmp_path)
+
+    def interrupted(*_args, **_kwargs):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(htmlfile, "open", interrupted, raising=False)
+    code, _, err = run_tree(capsys, str(folder.path), "--html", str(out_dir / "o.html"))
+    assert code == 130
+    assert "was created" not in err
+
+
+@pytest.mark.parametrize("where", ["run/out.html", "run/screens/out.html"])
+def test_an_output_inside_the_run_folder_is_refused(tmp_path, capsys, where):
+    folder = full_run(tmp_path)
+    target = tmp_path / where
+    before = sorted(p.name for p in folder.path.rglob("*"))
+    code, out, err = run_tree(capsys, str(folder.path), "--html", str(target))
+    assert code == 2
+    assert out == ""
+    assert "inside the run folder" in err
+    assert sorted(p.name for p in folder.path.rglob("*")) == before
+
+
+def test_a_run_folder_given_by_a_link_still_counts_as_the_same_folder(tmp_path, capsys):
+    folder = full_run(tmp_path)
+    alias = tmp_path / "alias"
+    try:
+        alias.symlink_to(folder.path, target_is_directory=True)
+    except OSError:
+        pytest.skip("links cannot be made here")
+    target = folder.path / "out.html"
+    code, _, err = run_tree(capsys, str(alias), "--html", str(target))
+    assert code == 2
+    assert "inside the run folder" in err
+    assert not target.exists()

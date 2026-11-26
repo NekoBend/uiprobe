@@ -6,7 +6,8 @@ import argparse  # noqa: TC003 (a runtime import in the former cli.py)
 import re
 import sys
 from dataclasses import dataclass, field, replace
-from typing import Final
+from pathlib import Path
+from typing import Final, Literal
 
 from uiprobe._json import dumps
 from uiprobe.cli.output import _emit, _printable
@@ -46,6 +47,9 @@ LEGEND_AGAIN: Final = (
     "(pressed again) = the row above was pressed again and led to the screen below"
 )
 LEGEND_POPUP: Final = "[popup] = pressing it opened a popup; its contents are in --json"
+LEGEND_POPUP_HTML: Final = (
+    "[popup] = pressing it opened a popup; its rows are in the fold below it"
+)
 POPUP_MARK: Final = " [popup]"
 _NO_TEXT: Final = "screen texts were not recorded in this run (record_text = false)"
 _FIRST_SCREEN: Final = "first screen"
@@ -235,6 +239,32 @@ def _left_out_lines(row: Row, name: str, *, kept: bool) -> list[str]:
     return lines
 
 
+class _Others:
+    """What the text tree leaves out of one screen, as lines for the HTML page."""
+
+    def __init__(self) -> None:
+        self.lines: list[str] = []
+
+    def unmatched(self, node: ScreenNode) -> None:
+        self.lines.extend(_unmatched_lines(node))
+
+    def row(self, row: Row, *, kept: bool) -> None:
+        self.lines.extend(_left_out(row, kept=kept))
+
+
+class _NoOthers(_Others):
+    """The text path: nothing is collected."""
+
+    def unmatched(self, node: ScreenNode) -> None:
+        pass
+
+    def row(self, row: Row, *, kept: bool) -> None:
+        pass
+
+
+_NO_OTHERS: Final = _NoOthers()
+
+
 def _unmatched_lines(node: ScreenNode) -> list[str]:
     suffix = f" ({_printable(node.unmatched_why)})" if node.unmatched_why else ""
     return [
@@ -268,17 +298,17 @@ def _entries(
     ids: bool,
     why: bool,
     tally: _Tally,
-    others: list[str] | None = None,
+    others: _Others | None = None,
 ) -> list[_Entry]:
-    """The entries of a screen. `others`, when given, gets a line for each
-    item the text tree leaves out (for the HTML page)."""
+    """The entries of a screen. `others`, when given, collects each item the
+    text tree leaves out (for the HTML page only)."""
     node = tree.screens[sid]
     entries: list[_Entry] = []
     if ids:
         entries.append(_Entry(_heading_text(tree, sid)))
     tally.unmatched += len(node.unmatched)
-    extra = [] if others is None else others
-    extra.extend(_unmatched_lines(node))
+    extra = _NO_OTHERS if others is None else others
+    extra.unmatched(node)
     folds: dict[str, list[Row]] = {}
     for row in node.rows:
         if row.folded_into is not None:
@@ -289,10 +319,10 @@ def _entries(
         row = _merged(line_row, folds.get(line_row.element_id, []))
         if row.kind == "text":
             tally.texts += 1
-            extra.extend(_left_out(row, kept=False))
+            extra.row(row, kept=False)
             continue
         kept = _keeps_line(row, folded=line_row.element_id in folds)
-        extra.extend(_left_out(row, kept=kept))
+        extra.row(row, kept=kept)
         note = None
         if row.to is not None and _kind_of(row.to) != "screen":
             kind = _kind_of(row.to)
@@ -328,7 +358,13 @@ _SUMMARY: Final = (
 )
 
 
-def _summary(tally: _Tally) -> str | None:
+_SUMMARY_TEXT: Final = "left out of the tree (see --json): "
+_SUMMARY_HTML: Final = (
+    "not shown as rows (in the folds below each screen, and in --json): "
+)
+
+
+def _summary(tally: _Tally, prefix: str = _SUMMARY_TEXT) -> str | None:
     """The last line: what the text tree leaves out, with counts."""
     parts = [
         f"{label}: {tally.ends[kind]}" for kind, label in _SUMMARY if kind in tally.ends
@@ -344,7 +380,7 @@ def _summary(tally: _Tally) -> str | None:
             parts.append(f"{label}: {count}")
     if not parts:
         return None
-    return "left out of the tree (see --json): " + ", ".join(parts)
+    return prefix + ", ".join(parts)
 
 
 def _orphan_heading(tree: RunTree, sid: str) -> str:
@@ -401,7 +437,10 @@ class _Section:
 class _Renderer:
     """Draws the tree: each screen is listed once, where it is first reached."""
 
-    def __init__(self, tree: RunTree, *, ids: bool, why: bool) -> None:
+    def __init__(
+        self, tree: RunTree, *, ids: bool, why: bool, html: bool = False
+    ) -> None:
+        self.html = html  # build what only the HTML page needs
         self.tree = tree
         self.ids = ids
         self.why = why
@@ -412,7 +451,7 @@ class _Renderer:
         self.hidden: set[str] = set()  # popup screens named by a mark, not drawn
         self.sections: list[_Section] = []
         self.nodes: list[_Node] = []  # the lines of the run being drawn
-        self.others: dict[str, list[str]] = {}  # what a drawn screen leaves out
+        self.others: dict[str, _Others] = {}  # what a drawn screen leaves out
         self.html_marks: set[str] = set()  # marks of rows only the HTML shows
 
     def popup(self, sid: str) -> bool:
@@ -436,7 +475,7 @@ class _Renderer:
     def open_screen(self, sid: str, name: str, path: tuple[str, ...]) -> list[_Entry]:
         self.expanded[sid] = name
         self.paths[sid] = path
-        others = self.others.setdefault(sid, [])
+        others = self.others.setdefault(sid, _Others() if self.html else _NO_OTHERS)
         return _entries(
             self.tree,
             sid,
@@ -465,15 +504,32 @@ class _Renderer:
         """Put the names into the notes of a line."""
         return _SEE.sub(lambda match: self.seen_name(match[1]), line)
 
+    def track(self, depth: int, entry: _Entry) -> None:
+        """Remember a drawn line (the HTML page needs it)."""
+        if self.html:
+            self.nodes.append(_Node(depth, entry))
+
+    def tag(self, what: Literal["popup", "see", "opens"], sid: str) -> None:
+        """Say what hangs on the line just drawn."""
+        if not self.html:
+            return
+        node = self.nodes[-1]
+        if what == "popup":
+            node.popup = sid
+        elif what == "see":
+            node.see = sid
+        else:
+            node.opens = sid
+
     def mark_popup(self, items: list[tuple[int, str]], target: str) -> None:
         depth, text = items[-1]
         items[-1] = (depth, text + POPUP_MARK)
-        self.nodes[-1].popup = target
+        self.tag("popup", target)
 
     def mark_see(self, items: list[tuple[int, str]], target: str) -> None:
         depth, text = items[-1]
         items[-1] = (depth, text + self.see(target))
-        self.nodes[-1].see = target
+        self.tag("see", target)
 
     def below_of(
         self, entry: _Entry, items: list[tuple[int, str]], path: tuple[str, ...]
@@ -490,7 +546,7 @@ class _Renderer:
                 self.mark_popup(items, target)
             elif target not in self.expanded:
                 below = self.screen_below(target, entry.name, (*path, entry.name))
-                self.nodes[-1].opens = target
+                self.tag("opens", target)
             elif "screen_above" in NOTES_IN_TEXT:
                 self.mark_see(items, target)
         again: list[_Entry] = []
@@ -531,7 +587,7 @@ class _Renderer:
                 assert isinstance(target, str)  # noqa: S101
                 self.tally.marks.add("again")
                 items.append((depth, entry.text))
-                self.nodes.append(_Node(depth, entry))
+                self.track(depth, entry)
                 if self.popup(target):
                     self.mark_popup(items, target)
                     continue
@@ -540,11 +596,11 @@ class _Renderer:
                         self.mark_see(items, target)
                     continue
                 below = self.screen_below(target, entry.name, here)
-                self.nodes[-1].opens = target
+                self.tag("opens", target)
                 child = here
             else:
                 items.append((depth, entry.text))
-                self.nodes.append(_Node(depth, entry))
+                self.track(depth, entry)
                 below = self.below_of(entry, items, here)
                 child = (*here, entry.name)
             if below:
@@ -552,13 +608,13 @@ class _Renderer:
         self.lines.extend(_draw(items))
 
 
-def _drawn(tree: RunTree, *, ids: bool, why: bool) -> _Renderer:
+def _drawn(tree: RunTree, *, ids: bool, why: bool, html: bool = False) -> _Renderer:
     """Draw the tree: everything above the legend."""
     label = tree.label if tree.label is not None else tree.package
     first = f"{_printable(label)} ({_printable(tree.package)})"
     if not tree.record_text:
         first += f"  {_NO_TEXT}"
-    drawn = _Renderer(tree, ids=ids, why=why)
+    drawn = _Renderer(tree, ids=ids, why=why, html=html)
     drawn.lines.append(first)
     drawn.sections.append(_Section(None, first))
     if tree.root is not None:
@@ -621,10 +677,10 @@ class _HtmlBuilder:
             self.anchors[sid] = anchor_id(sid, self.used)
         return self.anchors[sid]
 
-    def other_fold(self, lines: list[str]) -> HFold | None:
-        if not lines:
+    def other_fold(self, others: _Others | None) -> HFold | None:
+        if others is None or not others.lines:
             return None
-        return HFold(f"{FOLD_OTHER} ({len(lines)})", list(dict.fromkeys(lines)))
+        return HFold(f"{FOLD_OTHER} ({len(others.lines)})", list(others.lines))
 
     def popup_fold(self, sid: str) -> HFold:
         """The rows of a popup screen, flat, then what it leaves out. Its marks
@@ -632,17 +688,33 @@ class _HtmlBuilder:
         if sid not in self.popups:
             drawn = self.drawn
             scratch = _Tally()
-            lines: list[str] = []
+            others = _Others()
             entries = _entries(
-                drawn.tree, sid, ids=False, why=drawn.why, tally=scratch, others=lines
+                drawn.tree, sid, ids=False, why=drawn.why, tally=scratch, others=others
             )
             drawn.html_marks |= scratch.marks - {"popup"}
-            children: list[HRow | HFold | str] = [self.row(e) for e in entries]
-            fold = self.other_fold(lines)
+            children: list[HRow | HFold | str] = [self.retried(e) for e in entries]
+            fold = self.other_fold(others)
             if fold is not None:
                 children.append(fold)
             self.popups[sid] = HFold(f"{FOLD_POPUP} ({len(entries)})", children)
         return self.popups[sid]
+
+    def retried(self, entry: _Entry) -> HRow:
+        """A row of a popup fold with its further results, in the forms the
+        text tree uses below a row: `(pressed again)`, with `→ PACKAGE` for
+        another app. A further result of another kind is a line of the
+        `Other items` fold."""
+        row = self.row(entry)
+        for ending in entry.more:
+            kind = _kind_of(ending)
+            note = _note(ending, kind) if kind != "screen" else None
+            if kind == "screen" or (kind in NOTES_IN_TEXT and note is not None):
+                self.drawn.html_marks.add("again")
+                if kind == "other_app":
+                    self.drawn.html_marks.add("arrow")
+                row.children.append(HRow("(pressed again)", note or ""))
+        return row
 
     def row(self, entry: _Entry) -> HRow:
         if entry.label is None:
@@ -655,7 +727,7 @@ class _HtmlBuilder:
         stack: list[tuple[int, HRow, str | None]] = []
 
         def finish(opens: str | None, row: HRow | None) -> None:
-            fold = self.other_fold(self.drawn.others.get(opens, [])) if opens else None
+            fold = self.other_fold(self.drawn.others.get(opens)) if opens else None
             if fold is not None:
                 (roots if row is None else row.children).append(fold)
 
@@ -693,7 +765,7 @@ class _HtmlBuilder:
 def render_html(tree: RunTree, *, ids: bool = False, why: bool = False) -> str:
     """The HTML page of the tree: the rows of the text tree, collapsible, with
     the rows of each popup and what the text tree leaves out in closed folds."""
-    drawn = _drawn(tree, ids=ids, why=why)
+    drawn = _drawn(tree, ids=ids, why=why, html=True)
     builder = _HtmlBuilder(drawn)
     sections = [builder.section(s) for s in drawn.sections]
     marks = drawn.tally.marks | drawn.html_marks
@@ -701,8 +773,12 @@ def render_html(tree: RunTree, *, ids: bool = False, why: bool = False) -> str:
         package=_printable(tree.package),
         head=sections[0],
         orphans=sections[1:],
-        legend=[text for mark, text in _LEGENDS if mark in marks],
-        summary=_summary(drawn.tally),
+        legend=[
+            LEGEND_POPUP_HTML if mark == "popup" else text
+            for mark, text in _LEGENDS
+            if mark in marks
+        ],
+        summary=_summary(drawn.tally, _SUMMARY_HTML),
     )
     return render_page(page)
 
@@ -717,13 +793,18 @@ def _html_refusal(out: str, error: Exception) -> _UsageError:
     return _UsageError(f"--html {shown}: cannot be created: {_printable(detail or '')}")
 
 
-def _check_html_target(out: str) -> None:
-    """Refuse an output path `save_html` would refuse, before the run folder is
-    read."""
+def _check_html_target(out: str, run_dir: str) -> None:
+    """Refuse an output path `save_html` would refuse, and one inside the run
+    folder (both resolved), before the run folder is read."""
     try:
         check_html_path(out)
+        inside = Path(out).resolve().is_relative_to(Path(run_dir).resolve())
     except (OSError, ValueError) as error:
         raise _html_refusal(out, error) from None
+    if inside:
+        shown = _printable(out)
+        msg = f"--html {shown}: is inside the run folder; give a path outside it"
+        raise _UsageError(msg)
 
 
 def _save_html(out: str, page: str) -> None:
@@ -752,7 +833,7 @@ def _cmd_tree(args: argparse.Namespace) -> int:
         if args.json:
             msg = "--html cannot be combined with --json"
             raise _UsageError(msg)
-        _check_html_target(out)
+        _check_html_target(out, path)
     try:
         tree = read_tree(path)
     except TreeError as exc:
