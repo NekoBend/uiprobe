@@ -440,7 +440,11 @@ def render_text(tree: RunTree, *, ids: bool = False, why: bool = False) -> list[
     ]
     for sid in (*tree.unreached, *rest):
         if sid not in drawn.expanded and sid not in drawn.hidden:
-            drawn.lines.append(_orphan_heading(tree, sid))
+            heading = _orphan_heading(tree, sid)
+            if drawn.popup(sid):  # the rows of a popup are never drawn
+                drawn.lines.append(heading + POPUP_MARK)
+                continue
+            drawn.lines.append(heading)
             name = f"screen {_printable(sid)}"
             drawn.run(sid, name, (name,))
     for mark, text in (

@@ -2548,3 +2548,81 @@ def test_a_popup_first_screen_is_not_counted_when_a_row_leads_back_to_it(
         "   └─ Back to start [popup]",
     ]
     assert "rows inside popups" not in out
+
+
+def _nested_popups(tmp_path, *, via_plain):
+    folder = Folder(tmp_path)
+    home = _button_screen(".Home", ["Ask P", "Plain"])
+    outer = _button_screen(".P", ["Inner"], popup=True)
+    inner = _button_screen(".B", ["Yes", "No"], popup=True)
+    plain = _button_screen(".A", ["Open B"])
+    ids = {
+        name: folder.screen(s)
+        for name, s in (("home", home), ("p", outer), ("b", inner), ("a", plain))
+    }
+    folder.start("launch")
+    folder.end(ids["home"])
+    folder.tap(home, 2, ids["p"])
+    folder.tap(outer, 2, ids["b"])
+    if via_plain:
+        folder.tap(home, 3, ids["a"])
+        folder.tap(plain, 2, ids["b"])
+    folder.finish()
+    return folder, ids
+
+
+def test_a_popup_only_a_popup_led_to_gets_a_heading_and_no_rows(tmp_path, capsys):
+    folder, ids = _nested_popups(tmp_path, via_plain=False)
+    _, out, _ = run_tree(capsys, str(folder.path))
+    lines = out.splitlines()
+    assert lines[1] == "├─ Ask P [popup]"
+    heads = [x for x in lines if x.startswith("(screen not reached")]
+    assert [h for h in heads if ids["b"] in h] == [
+        f"(screen not reached from a pressed row {ids['b']}  .B) [popup]"
+    ]
+    assert not any(n in out for n in ("Yes", "No ", "Inner"))
+    # The rows of P and B count: 1 + 2.
+    assert "rows inside popups: 3" in lines[-1]
+
+
+def test_nested_popups_never_draw_rows_and_count_each_screen_once(tmp_path, capsys):
+    folder, _ = _nested_popups(tmp_path, via_plain=True)
+    _, out, _ = run_tree(capsys, str(folder.path))
+    lines = out.splitlines()
+    assert "   └─ Open B [popup]" in lines
+    assert not any(n in out for n in ("Yes", "Inner"))
+    assert "rows inside popups: 3" in lines[-1]
+    assert out.count("rows inside popups") == 1
+
+
+def _folded_popup_run(tmp_path, *, outer_to):
+    folder = Folder(tmp_path)
+    home = _samsung_wifi()
+    dialog = _button_screen(".Dialog", ["OK"], popup=True)
+    home_id, dialog_id = folder.screen(home), folder.screen(dialog)
+    network_id = folder.screen(NETWORK)
+    folder.start("launch")
+    folder.end(home_id)
+    if outer_to == "network":
+        folder.tap(home, 2, network_id)
+    folder.tap(home, 4, dialog_id)
+    folder.finish()
+    return folder
+
+
+def test_a_folded_inner_element_that_opens_a_popup_marks_the_line(tmp_path, capsys):
+    folder = _folded_popup_run(tmp_path, outer_to=None)
+    _, out, _ = run_tree(capsys, str(folder.path))
+    assert out.splitlines()[1] == "└─ Wi-Fi [popup]"
+    assert "rows inside popups: 1" in out
+
+
+def test_a_pressed_again_line_of_a_folded_element_to_a_popup_is_marked(
+    tmp_path, capsys
+):
+    folder = _folded_popup_run(tmp_path, outer_to="network")
+    _, out, _ = run_tree(capsys, str(folder.path))
+    lines = out.splitlines()
+    assert any(x.endswith("(pressed again) [popup]") for x in lines)
+    assert not any("OK" in x for x in lines)
+    assert "rows inside popups: 1" in lines[-1]
