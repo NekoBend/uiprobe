@@ -505,6 +505,8 @@ These options work before or after the command, except for `init` and `tree`, wh
 | `--no-start-server` | Never start the adb server; fail if it is not running. |
 | `--json` | Print JSON. Errors are printed as JSON on stdout too. |
 
+`uiprobe crawl PACKAGE --press` also writes progress lines to stderr while it presses, for example `progress: 2m 14s of 30m, 37 of 300 actions, 12 screens, depth 3 of 5` (at most one every 5 seconds, the first one after the first action); `--quiet` turns them off, and only a pressing run takes it (given to a preview or a `--dry-run` it is a usage error, as the other pressing options). They never go to stdout, also without `--json`, where stdout holds the result. See [Pressing crawl](crawl.md#pressing-crawl---press).
+
 `uiprobe --version` prints one line of plain text to stdout, such as `uiprobe 0.1.0a1.dev0`, also with `--json`, and exits without contacting the adb server. It works only before a command. All development snapshots of one version print the same line, so when you report a problem, also name the commit you installed.
 
 ## Environment variables

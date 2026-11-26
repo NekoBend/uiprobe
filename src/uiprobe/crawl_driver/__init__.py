@@ -159,6 +159,7 @@ from uiprobe.crawl_driver.driver import (  # noqa: F401
     crawl,
 )
 from uiprobe.crawl_driver.helpers import (  # noqa: F401
+    Progress,
     _app_window,
     _bounds,
     _element_of,
@@ -208,4 +209,4 @@ if TYPE_CHECKING:
     from uiprobe.model import Element, Screen  # noqa: F401
     from uiprobe.packageuid import PackageUid  # noqa: F401
 
-__all__ = ["INTERRUPTED", "STOP_ERROR", "CrawlResult", "crawl"]
+__all__ = ["INTERRUPTED", "STOP_ERROR", "CrawlResult", "Progress", "crawl"]

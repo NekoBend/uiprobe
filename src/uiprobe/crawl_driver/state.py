@@ -12,8 +12,8 @@ from uiprobe.runlog import RunWriter  # noqa: TC001
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-    from uiprobe.crawl import Action, Launch, Observation, Relaunch
-    from uiprobe.crawl_driver.helpers import _Seen
+    from uiprobe.crawl import Action, Launch, Limits, Observation, Relaunch
+    from uiprobe.crawl_driver.helpers import Progress, _Seen
     from uiprobe.device import Device, FocusedWindow
     from uiprobe.inputwindows import InputWindow
     from uiprobe.model import Screen
@@ -42,6 +42,9 @@ class _RunState:
         send_limit: float | None = None,
         own_clock: bool = False,
         restart: bool = False,
+        on_progress: Callable[[Progress], None] | None = None,
+        started_at: float = 0.0,
+        limits: Limits | None = None,
     ) -> None:
         self.device = device
         self.package = package
@@ -72,6 +75,10 @@ class _RunState:
         self.stop = stop
         self.clock = clock
         self.sleep = sleep
+        # Called after an action's end line is written (see `report_progress`).
+        self.on_progress = on_progress
+        self.started_at = started_at  # by `clock`
+        self.limits = limits
         self.notes: list[str] = []
         self.screens_seen: set[str] = set()  # target screens, when observed
         self.focus: FocusedWindow | None = None  # at the last observation
@@ -176,6 +183,7 @@ class _RunState:
         def withdraw(self, action: Action) -> None: ...
         def ending(self, action: Action, refused: str | None) -> str | None: ...
         def waiting_stopped(self) -> bool: ...
+        def report_progress(self, observation: Observation) -> None: ...
         def now(self) -> float: ...
         def past(self) -> bool: ...
         def check_time(self) -> None: ...

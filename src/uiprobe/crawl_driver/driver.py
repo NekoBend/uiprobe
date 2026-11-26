@@ -17,7 +17,7 @@ from uiprobe.crawl_driver.constants import (
     NOT_SENT_TIME_LIMIT,
     STOP_ERROR,
 )
-from uiprobe.crawl_driver.helpers import _plain_policy, _seconds
+from uiprobe.crawl_driver.helpers import Progress, _plain_policy, _seconds
 from uiprobe.crawl_driver.run import _Run
 from uiprobe.crawl_preview import check_package
 from uiprobe.device import PIN_WAIT_STOPPED, _monotonic, forget_displays
@@ -128,6 +128,7 @@ def crawl(
     sleep: Callable[[float], None] = time.sleep,
     restart: bool = True,
     record_text: bool = True,
+    on_progress: Callable[[Progress], None] | None = None,
 ) -> CrawlResult:
     """Crawl `package` on `device`, pressing what the guards allow, into `out`.
 
@@ -184,6 +185,18 @@ def crawl(
     hides them (so it is a keyword here and not a `Policy` field). A password
     field's text is hidden whatever this says. It cannot be combined with
     `screenshots` (a picture shows the text): that is a `ValueError`.
+    `on_progress`, when given, is called with a `Progress` after each sent
+    action, once its end line is written and the screen after it was read
+    (also for the first launch), never for an action that was not sent and
+    never once the run has stopped. It runs in the crawl's own thread,
+    between two actions and never between a gate's last comparison and the
+    input (see the send rule in docs/safety.md), and it reads nothing from the
+    device. The library prints nothing itself. It is not called while a
+    transition is open or when the run is stopping, and it reads no clock.
+    An exception it raises ends the run like any other error of the loop
+    (``run.json`` has ``stop_reason`` ``error``, ``summary.txt`` the note
+    ``error: internal_error``, then it is raised again), a `KeyboardInterrupt`
+    like Ctrl+C; it is not swallowed.
     `screenshots` also saves a screenshot of each new screen; a screen that
     cannot be captured is noted in the summary and the crawl goes on. The
     image is taken after the dump, so it can differ if the app changed
@@ -265,6 +278,8 @@ def crawl(
         _check_callable("stop", stop)
     _check_callable("clock", clock)
     _check_callable("sleep", sleep)
+    if on_progress is not None:
+        _check_callable("on_progress", on_progress)
     # Pin first (unless Device(..., pin=True) already did, right when the
     # device was chosen), then check through the pinned transport: the device
     # that was checked is the only one that can receive anything afterwards.
@@ -293,6 +308,7 @@ def crawl(
             repins_before=repins_before,
             restart=restart,
             record_text=record_text,
+            on_progress=on_progress,
         )
     finally:
         device.set_pin_watch(caller_watch)
@@ -314,6 +330,7 @@ def _crawl_on(
     repins_before: int,
     restart: bool,
     record_text: bool,
+    on_progress: Callable[[Progress], None] | None,
 ) -> CrawlResult:
     """`crawl` after its arguments were checked: pin, check, run."""
     forget_displays(device)  # several displays seen count within one run
@@ -366,6 +383,9 @@ def _crawl_on(
             send_limit=send_limit,
             own_clock=own_clock,
             restart=restart,
+            on_progress=on_progress,
+            started_at=started_at,
+            limits=limits,
         )
         run.repins_before = repins_before  # moves made before this call
         # Asked only while the device waits for a renumbered transport.

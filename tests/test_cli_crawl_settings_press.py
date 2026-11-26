@@ -104,7 +104,7 @@ def test_press_true_presses_without_the_option(fake_adb, android, capsys, here):
     write_settings(here, settings_text(press=True))
     out = here / "run"
     code, text, err = crawl(
-        capsys, fake_adb, *FAST, "--out", str(out), "--actions", "6"
+        capsys, fake_adb, *FAST, "--out", str(out), "--actions", "6", "--quiet"
     )
     assert (code, err) == (0, "")
     lines = text.splitlines()
@@ -288,6 +288,7 @@ def test_press_true_needs_the_real_device_option_on_every_run(
         "--actions",
         "3",
         "--allow-real-device",
+        "--quiet",
     )
     assert (code, err) == (0, "")
     assert text.splitlines()[0] == f"pressing on {SERIAL} (real device): {SHOP}"
