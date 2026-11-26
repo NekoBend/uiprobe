@@ -7,6 +7,7 @@ from typing import Final
 from uiprobe.adb import quote_args
 from uiprobe.also_target import HOME_COMMAND
 from uiprobe.crawl_preview import check_package
+from uiprobe.device.displays import parse_display_zero_physical_id
 from uiprobe.device.failure import _EXIT_SUFFIX, _escaped, _escaped_line, _input_failure
 from uiprobe.device.launch import (
     _FOREGROUND_LIMIT,
@@ -28,6 +29,11 @@ from uiprobe.errors import (
 from uiprobe.pngfile import check_png
 
 DEFAULT_LAUNCH_TIMEOUT: Final = 10.0
+
+
+# What `screencap` prints, as text before the image, on a device with more than
+# one display (only the stable start is matched).
+MULTIPLE_DISPLAYS_WARNING: Final = b"[Warning] Multiple displays were found"
 
 
 LAUNCH_POLL_INTERVAL: Final = 0.5
@@ -52,6 +58,14 @@ START_MIN_WAIT: Final = 1.0
 # `screencap` prints nothing until the image is encoded, which a slow device
 # can take longer than the client's 10 s silence limit.
 SCREENSHOT_TIMEOUT: Final = 30.0
+
+
+def _png_error(data: bytes) -> ValueError | None:
+    try:
+        check_png(data)
+    except ValueError as error:
+        return error
+    return None
 
 
 class _AppsMixin(_DeviceState):
@@ -558,30 +572,68 @@ class _AppsMixin(_DeviceState):
         Android a mostly black image; the latter is a valid PNG and is
         returned as it is.
 
+        A device with more than one display (a foldable) makes ``screencap``
+        print a text warning before the image. Then the physical id of
+        logical display 0, the display `dump` reads, is read from ``dumpsys
+        display`` (it must be named the same in two places) and the screen is
+        captured again with ``screencap -p -d ID``. A device with one display
+        sends only the first command.
+
         Raises:
             ScreenshotFailedError: The output is empty or is not a complete
-                PNG image.
+                PNG image, or the display could not be told on a device with
+                several (``details["reason"]`` is ``multiple_displays_unresolved``).
         """
-        data = self._call(
+        data = self._screencap()
+        if _png_error(data) is None:
+            return data
+        if not data.startswith(MULTIPLE_DISPLAYS_WARNING):
+            raise self._screenshot_failure(data)
+        # A device with several displays warns in text and then shows the
+        # first display it finds. Take the one `dump` reads (logical display
+        # 0) by its physical id instead.
+        physical = parse_display_zero_physical_id(self._shell("dumpsys display"))
+        if physical is None:
+            msg = (
+                "this device has more than one display and uiprobe could not tell "
+                "which one the screen read (dump) uses, so no screenshot was taken"
+            )
+            raise ScreenshotFailedError(
+                msg,
+                details={
+                    "reason": "multiple_displays_unresolved",
+                    "bytes": len(data),
+                },
+            )
+        shot = self._screencap(physical)
+        if _png_error(shot) is not None:
+            raise self._screenshot_failure(shot)
+        return shot
+
+    def _screencap(self, display: str | None = None) -> bytes:
+        command = ["screencap", "-p"]
+        if display is not None:
+            command += ["-d", display]
+        return self._call(
             lambda pin: self._client.exec_out(
                 self.serial,
-                quote_args("screencap", "-p"),
+                quote_args(*command),
                 timeout=SCREENSHOT_TIMEOUT,
                 **pin,
             ),
             strict=False,
         )
-        try:
-            check_png(data)
-        except ValueError as error:
-            reason = "empty" if not data else "invalid"
-            raise ScreenshotFailedError(
-                f"{error}; the screen may forbid screenshots (for example a "
-                "private browser tab), and its structure can still be dumped "
-                "with uiprobe dump",
-                details={"reason": reason, "bytes": len(data)},
-            ) from error
-        return data
+
+    @staticmethod
+    def _screenshot_failure(data: bytes) -> ScreenshotFailedError:
+        error = _png_error(data)
+        reason = "empty" if not data else "invalid"
+        return ScreenshotFailedError(
+            f"{error}; the screen may forbid screenshots (for example a "
+            "private browser tab), and its structure can still be dumped "
+            "with uiprobe dump",
+            details={"reason": reason, "bytes": len(data)},
+        )
 
     def display_for_image(self, width: int, height: int) -> tuple[int, int] | None:
         """Return the display size that `dump` reports, turned like an image.

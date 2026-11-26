@@ -332,6 +332,7 @@ class FakeAndroid:
         re.compile(r"^getprop (?:ro\.build\.version\.sdk|ro\.kernel\.qemu)\Z"),
         re.compile(r"^dumpsys (?:window|activity activities|input_method)\Z"),
         re.compile(r"^dumpsys window displays\Z"),
+        re.compile(r"^dumpsys display\Z"),
         re.compile(r"^dumpsys window windows\Z"),
         re.compile(r"^dumpsys input\Z"),
         re.compile(r"^dumpsys package [A-Za-z][A-Za-z0-9_.]*\Z"),
@@ -379,6 +380,7 @@ class FakeAndroid:
     EXEC_ALLOWED = (
         re.compile(rf"^cat {_TMP}\Z"),
         re.compile(r"^screencap -p\Z"),
+        re.compile(r"^screencap -p -d [0-9]+\Z"),
     )
 
     @property

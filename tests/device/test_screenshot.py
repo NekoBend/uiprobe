@@ -21,6 +21,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
+from tests.device.test_displays import make as make_display_text
 from tests.fake_device import BLACK_PNG, PNG, El, FakeAndroid, Screen
 from tests.helpers import unused_address
 from uiprobe import cli, pngfile
@@ -245,6 +246,133 @@ def test_the_bytes_come_back_unchanged(device, android):
     script(android, CRLF_PNG)
     assert device.screenshot() == CRLF_PNG
     assert b"\r\n" in CRLF_PNG
+
+
+# --- Device.screenshot on a device with two displays ---
+
+WARNING = (
+    b"[Warning] Multiple displays were found, but no display id was specified!"
+    b" Defaulting to the first display found, however this default is not"
+    b" guaranteed to be consistent across captures. A display id should be"
+    b" specified.\nA display ID can be specified with the [-d display-id]"
+    b' option.\nSee "dumpsys SurfaceFlinger --display-id" for valid display IDs.\n'
+)
+FAKE_ID_A = "1111111111111111111"
+FAKE_ID_B = "2222222222222222222"
+SECOND_PNG = make_png(width=3, height=2)
+
+
+def two_display_text(viewport_id: str = FAKE_ID_A, logical_id: str = FAKE_ID_A) -> str:
+    # Built like a real two-display phone's text, with invented values.
+    return make_display_text(
+        [(0, viewport_id), (1, FAKE_ID_B)], [(0, logical_id), (1, FAKE_ID_B)]
+    )
+
+
+def two_displays(
+    android: FakeAndroid,
+    *,
+    dumpsys: str = "",
+    second: bytes = SECOND_PNG,
+    first: bytes = WARNING,
+) -> None:
+    android.override(re.compile(r"^screencap -p\Z"), first)
+    android.override(re.compile(r"^screencap -p -d [0-9]+\Z"), second)
+    text = dumpsys or two_display_text()
+    android.override(re.compile(r"^dumpsys display\Z"), text.encode())
+
+
+def commands(server: FakeAdbServer) -> list[str]:
+    return [r for r in server.requests if r.startswith(("exec:", "shell:"))]
+
+
+def test_the_warning_text_is_the_real_one_of_347_bytes():
+    assert len(WARNING) == 347
+
+
+def test_a_single_display_device_sends_one_command_only(device, fake_adb):
+    assert device.screenshot() == PNG
+    assert commands(fake_adb) == ["exec:screencap -p"]
+
+
+def test_two_displays_are_captured_by_the_id_of_logical_display_zero(
+    device, android, fake_adb
+):
+    two_displays(android)
+    assert device.screenshot() == SECOND_PNG
+    assert commands(fake_adb) == [
+        "exec:screencap -p",
+        "shell:dumpsys display",
+        f"exec:screencap -p -d {FAKE_ID_A}",
+    ]
+
+
+def test_the_folded_phone_uses_the_other_id(device, android, fake_adb):
+    two_displays(android, dumpsys=two_display_text(FAKE_ID_B, FAKE_ID_B))
+    assert device.screenshot() == SECOND_PNG
+    assert commands(fake_adb)[-1] == f"exec:screencap -p -d {FAKE_ID_B}"
+
+
+def test_a_warning_before_a_valid_png_is_still_recaptured(device, android, fake_adb):
+    two_displays(android, first=WARNING + PNG)
+    assert device.screenshot() == SECOND_PNG
+    assert len(commands(fake_adb)) == 3
+
+
+@pytest.mark.parametrize(
+    "dumpsys",
+    [
+        two_display_text(FAKE_ID_A, FAKE_ID_B),
+        two_display_text("12ab", "12ab"),
+        "nothing useful here\n",
+    ],
+    ids=["disagree", "not_digits", "no_ids"],
+)
+def test_an_unresolved_display_raises_and_sends_nothing_more(
+    device, android, fake_adb, dumpsys
+):
+    two_displays(android, dumpsys=dumpsys)
+    with pytest.raises(ScreenshotFailedError) as raised:
+        device.screenshot()
+    error = raised.value
+    assert (error.code, error.exit_code) == ("screenshot_failed", 16)
+    assert error.details == {
+        "reason": "multiple_displays_unresolved",
+        "bytes": len(WARNING),
+    }
+    assert "more than one display" in error.message
+    assert "DISPLAY MANAGER" not in error.message + repr(error.details)
+    assert commands(fake_adb) == ["exec:screencap -p", "shell:dumpsys display"]
+
+
+@pytest.mark.parametrize(
+    "second",
+    [b"", b"not an image", WARNING + SECOND_PNG],
+    ids=["empty", "text", "warn"],
+)
+def test_a_second_capture_that_is_no_png_raises_and_sends_nothing_more(
+    device, android, fake_adb, second
+):
+    two_displays(android, second=second)
+    with pytest.raises(ScreenshotFailedError) as raised:
+        device.screenshot()
+    assert raised.value.details == {
+        "reason": "empty" if not second else "invalid",
+        "bytes": len(second),
+    }
+    assert commands(fake_adb) == [
+        "exec:screencap -p",
+        "shell:dumpsys display",
+        f"exec:screencap -p -d {FAKE_ID_A}",
+    ]
+
+
+def test_other_bad_bytes_do_not_read_the_displays(device, android, fake_adb):
+    script(android, b"[Warning] something else\n")
+    with pytest.raises(ScreenshotFailedError) as raised:
+        device.screenshot()
+    assert raised.value.details["reason"] == "invalid"
+    assert commands(fake_adb) == ["exec:screencap -p"]
 
 
 @pytest.mark.parametrize("name", sorted(BAD_IMAGES))
