@@ -432,7 +432,8 @@ def _add_tree_parser(add_parser: Callable[..., argparse.ArgumentParser]) -> None
         description=(
             "Show what a crawl saw and pressed, as a tree of screens, from the"
             " files of its run folder. The command reads only that folder: it"
-            " contacts no device and no adb server, and writes no file."
+            " contacts no device and no adb server, and writes no file (except"
+            " the one given with --html)."
         ),
     )
     tree.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
@@ -445,6 +446,16 @@ def _add_tree_parser(add_parser: Callable[..., argparse.ArgumentParser]) -> None
         "--why",
         action="store_true",
         help="add the reasons a row was not pressed",
+    )
+    tree.add_argument(
+        "--html",
+        metavar="OUT.html",
+        default=None,
+        help=(
+            "write the tree as one self-contained HTML file with collapsible"
+            " rows (no scripts) instead of printing it; the file must not exist"
+            " and its folder must; cannot be combined with --json"
+        ),
     )
     tree.add_argument("run_dir", metavar="RUN_DIR", help="the run folder")
 
