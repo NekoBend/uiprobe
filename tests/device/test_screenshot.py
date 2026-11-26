@@ -262,10 +262,14 @@ FAKE_ID_B = "2222222222222222222"
 SECOND_PNG = make_png(width=3, height=2)
 
 
-def two_display_text(viewport_id: str = FAKE_ID_A, logical_id: str = FAKE_ID_A) -> str:
+def two_display_text(
+    viewport_id: str = FAKE_ID_A, logical_id: str = FAKE_ID_A, *, folded: bool = False
+) -> str:
     # Built like a real two-display phone's text, with invented values.
     return make_display_text(
-        [(0, viewport_id), (1, FAKE_ID_B)], [(0, logical_id), (1, FAKE_ID_B)]
+        [(0, viewport_id), (1, FAKE_ID_B)],
+        [(0, logical_id), (1, FAKE_ID_B)],
+        folded=folded,
     )
 
 
@@ -307,8 +311,8 @@ def test_two_displays_are_captured_by_the_id_of_logical_display_zero(
     ]
 
 
-def test_the_folded_phone_uses_the_other_id(device, android, fake_adb):
-    two_displays(android, dumpsys=two_display_text(FAKE_ID_B, FAKE_ID_B))
+def test_the_folded_phone_uses_the_display_that_is_on(device, android, fake_adb):
+    two_displays(android, dumpsys=two_display_text(folded=True))
     assert device.screenshot() == SECOND_PNG
     assert commands(fake_adb)[-1] == f"exec:screencap -p -d {FAKE_ID_B}"
 
@@ -325,8 +329,18 @@ def test_a_warning_before_a_valid_png_is_still_recaptured(device, android, fake_
         two_display_text(FAKE_ID_A, FAKE_ID_B),
         two_display_text("12ab", "12ab"),
         "nothing useful here\n",
+        make_display_text(
+            [(0, FAKE_ID_A), (1, FAKE_ID_B)],
+            [(0, FAKE_ID_A), (1, FAKE_ID_B)],
+            on=(True, True),
+        ),
+        make_display_text(
+            [(0, FAKE_ID_A), (1, FAKE_ID_B)],
+            [(0, FAKE_ID_A), (1, FAKE_ID_B)],
+            on=(False, False),
+        ),
     ],
-    ids=["disagree", "not_digits", "no_ids"],
+    ids=["disagree", "not_digits", "no_ids", "both_on", "none_on"],
 )
 def test_an_unresolved_display_raises_and_sends_nothing_more(
     device, android, fake_adb, dumpsys
@@ -365,6 +379,18 @@ def test_a_second_capture_that_is_no_png_raises_and_sends_nothing_more(
         "shell:dumpsys display",
         f"exec:screencap -p -d {FAKE_ID_A}",
     ]
+
+
+def test_only_the_warning_still_triggers_the_recapture(device, android):
+    two_displays(android, first=WARNING)
+    assert device.screenshot() == SECOND_PNG
+
+
+def test_the_png_error_stays_chained(device, android):
+    script(android, b"nope")
+    with pytest.raises(ScreenshotFailedError) as raised:
+        device.screenshot()
+    assert isinstance(raised.value.__cause__, ValueError)
 
 
 def test_other_bad_bytes_do_not_read_the_displays(device, android, fake_adb):

@@ -73,7 +73,7 @@ The screenshot is taken with exactly this command, through the binary-safe `exec
 screencap -p
 ```
 
-On a device with more than one display (a foldable), `screencap` prints a warning in text before the image. uiprobe then reads `dumpsys display` once and takes the screenshot again with `screencap -p -d ID`, where ID is the physical display behind logical display 0, the display that `uiprobe dump` reads. If that id cannot be found, or the second image is not a PNG, the command fails with exit 16 and nothing is saved.
+On a device with more than one display (a foldable), `screencap` prints a warning in text before the image. uiprobe then reads `dumpsys display` once and takes the screenshot again with `screencap -p -d ID`, where ID is the physical id of the display that is on, which is the one `uiprobe dump` reads. If exactly one display cannot be found to be on, or the second image is not a PNG, the command fails with exit 16 and nothing is saved.
 
 With `--json` uiprobe also asks for `wm size`, after the screenshot and before the file is made, for the optional `display` field; when that cannot be read the field is left out and the command still succeeds.
 

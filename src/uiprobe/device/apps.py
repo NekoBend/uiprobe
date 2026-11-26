@@ -7,7 +7,7 @@ from typing import Final
 from uiprobe.adb import quote_args
 from uiprobe.also_target import HOME_COMMAND
 from uiprobe.crawl_preview import check_package
-from uiprobe.device.displays import parse_display_zero_physical_id
+from uiprobe.device.displays import parse_active_display_physical_id
 from uiprobe.device.failure import _EXIT_SUFFIX, _escaped, _escaped_line, _input_failure
 from uiprobe.device.launch import (
     _FOREGROUND_LIMIT,
@@ -573,11 +573,13 @@ class _AppsMixin(_DeviceState):
         returned as it is.
 
         A device with more than one display (a foldable) makes ``screencap``
-        print a text warning before the image. Then the physical id of
-        logical display 0, the display `dump` reads, is read from ``dumpsys
-        display`` (it must be named the same in two places) and the screen is
-        captured again with ``screencap -p -d ID``. A device with one display
-        sends only the first command.
+        print a text warning before the image. Then the physical id of the
+        display that is on, which is the one the screen read (`dump`) uses, is
+        read from ``dumpsys display`` (exactly one display must be on, and both
+        places that name it must agree) and the screen is captured again with
+        ``screencap -p -d ID``. Any output that is not a PNG
+        and begins with the warning starts this, also one that is only the
+        warning text. A device with one display sends only the first command.
 
         Raises:
             ScreenshotFailedError: The output is empty or is not a complete
@@ -585,18 +587,20 @@ class _AppsMixin(_DeviceState):
                 several (``details["reason"]`` is ``multiple_displays_unresolved``).
         """
         data = self._screencap()
-        if _png_error(data) is None:
+        error = _png_error(data)
+        if error is None:
             return data
         if not data.startswith(MULTIPLE_DISPLAYS_WARNING):
-            raise self._screenshot_failure(data)
+            raise self._screenshot_failure(data, error) from error
         # A device with several displays warns in text and then shows the
-        # first display it finds. Take the one `dump` reads (logical display
-        # 0) by its physical id instead.
-        physical = parse_display_zero_physical_id(self._shell("dumpsys display"))
+        # first display it finds. Take the one that is on, which `dump` reads, by
+        # its physical id instead.
+        physical = parse_active_display_physical_id(self._shell("dumpsys display"))
         if physical is None:
             msg = (
                 "this device has more than one display and uiprobe could not tell "
-                "which one the screen read (dump) uses, so no screenshot was taken"
+                "which display is on (the one the screen read, dump, uses), so no "
+                "screenshot was taken"
             )
             raise ScreenshotFailedError(
                 msg,
@@ -606,8 +610,9 @@ class _AppsMixin(_DeviceState):
                 },
             )
         shot = self._screencap(physical)
-        if _png_error(shot) is not None:
-            raise self._screenshot_failure(shot)
+        second = _png_error(shot)
+        if second is not None:
+            raise self._screenshot_failure(shot, second) from second
         return shot
 
     def _screencap(self, display: str | None = None) -> bytes:
@@ -625,8 +630,7 @@ class _AppsMixin(_DeviceState):
         )
 
     @staticmethod
-    def _screenshot_failure(data: bytes) -> ScreenshotFailedError:
-        error = _png_error(data)
+    def _screenshot_failure(data: bytes, error: ValueError) -> ScreenshotFailedError:
         reason = "empty" if not data else "invalid"
         return ScreenshotFailedError(
             f"{error}; the screen may forbid screenshots (for example a "
