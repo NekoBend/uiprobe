@@ -613,7 +613,7 @@ def render_default_settings() -> str:
         "# app being crawled. --back-on-other-screens and --no-back-on-other-screens",
         "# override it for one run.",
         "back_on_other_screens = false",
-        '# also_target = ["com.example.helper"]   # apps the crawl may also press in; system UI and the home app are refused, permission screens are never pressed',  # noqa: E501
+        '# also_target = ["com.example.helper"]   # apps the crawl may also press in; system UI and the home app are refused, the controls of permission screens are never tapped (they get BACK when back_on_other_screens is true)',  # noqa: E501
         f"min_visible_px = {MIN_VISIBLE_PX}",
         f"edge_top_px = {API36_TOP_PX}",
         f"edge_bottom_px = {API36_BOTTOM_PX}",

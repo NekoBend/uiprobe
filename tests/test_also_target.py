@@ -28,7 +28,8 @@ HELPER = "com.example.helper"
 SHOP = "com.example.shop"
 ENTRY = (
     '# also_target = ["com.example.helper"]   # apps the crawl may also press in;'
-    " system UI and the home app are refused, permission screens are never pressed"
+    " system UI and the home app are refused, the controls of permission screens"
+    " are never tapped (they get BACK when back_on_other_screens is true)"
 )
 
 

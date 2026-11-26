@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING
 import pytest
 
 from tests.crawl_driver.helpers import OTHER, SCREENS, SERIAL, SHOP, TRANSPORT
-from tests.fake_device import FakeAndroid
+from tests.fake_device import FakeAndroid, Input
 from uiprobe import cli
 from uiprobe.device import Device
 from uiprobe.settings import SETTINGS_FILE, render_default_settings
@@ -27,6 +27,15 @@ NOTE = (
     f"note: the restarts kept ending on screens of other apps ({OTHER} 4 times);"
     " --back-on-other-screens (or back_on_other_screens = true under [rules] in"
     " the settings file) presses BACK on such a screen (up to twice before it"
+    " restarts the app), and that BACK reaches whichever window has the input"
+    " focus, not the app being crawled"
+)
+
+
+NOTE_FILE_TRUE = (
+    f"note: the restarts kept ending on screens of other apps ({OTHER} 4 times);"
+    " without --no-back-on-other-screens, back_on_other_screens = true in the"
+    " settings file presses BACK on such a screen (up to twice before it"
     " restarts the app), and that BACK reaches whichever window has the input"
     " focus, not the app being crawled"
 )
@@ -75,7 +84,7 @@ def lands_on_other_app(monkeypatch, android: FakeAndroid) -> None:
     monkeypatch.setattr(Device, "_launch_component", launch_then_cover)
 
 
-def keys(android: FakeAndroid) -> list[object]:
+def keys(android: FakeAndroid) -> list[Input]:
     return [i for i in android.inputs if i.kind == "key"]
 
 
@@ -110,7 +119,11 @@ def test_the_file_key_alone_sends_back(fake_adb, android, capsys, here):
     write_file(here, back=True)
     code, text, _err = run(capsys, fake_adb, here)
     assert code == 0
-    assert keys(android)
+    assert next((i.args, i.screen) for i in keys(android)) == (
+        ("KEYCODE_BACK",),
+        "ext1",
+    )
+    assert all(i.args == ("KEYCODE_BACK",) for i in keys(android))
     assert plan_line(text) == "yes (settings file)"
     assert not [
         x
@@ -145,11 +158,11 @@ def test_the_no_option_turns_it_off_over_a_true_file(fake_adb, android, capsys, 
     assert android.inputs == []
     assert "stopped: relaunch_limit" in text
     assert plan_line(text) == "no (--no-back-on-other-screens)"
-    assert NOTE in text.splitlines()  # BACK was off for this run
+    assert NOTE_FILE_TRUE in text.splitlines()  # BACK was off for this run
     assert run_start(here)["back_on_other_screens"] is False
 
 
-@pytest.mark.usefixtures("android")
+@pytest.mark.usefixtures("android", "lands_on_other_app")
 def test_the_no_option_with_a_false_file_changes_nothing_but_the_source(
     fake_adb, capsys, here
 ):
@@ -157,6 +170,7 @@ def test_the_no_option_with_a_false_file_changes_nothing_but_the_source(
     code, text, _err = run(capsys, fake_adb, here, "--no-back-on-other-screens")
     assert code == 0
     assert plan_line(text) == "no (--no-back-on-other-screens)"
+    assert NOTE in text.splitlines()  # the file does not say true: approved wording
 
 
 # --- the plan in JSON ---------------------------------------------------------

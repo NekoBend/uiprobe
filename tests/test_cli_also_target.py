@@ -72,8 +72,9 @@ def test_a_listed_package_is_pressed_and_named_in_the_plan_and_the_record(
     )
     assert (code, err) == (0, "")
     assert (
-        f"also pressing in: {HELPER} (also_target in the settings file; system UI,"
-        " the home app and permission screens are never pressed)"
+        f"also pressing in: {HELPER} (also_target in the settings file; system UI"
+        " and the home app are refused; the controls of permission screens are"
+        " never tapped, and they get BACK when BACK on other screens is on)"
     ) in text.splitlines()
     assert [i for i in android.inputs if i.kind == "tap" and i.screen == "helper"]
     start = json.loads((out / "run-start.json").read_text("utf-8"))
@@ -263,8 +264,9 @@ def test_init_writes_the_entry_commented_and_the_file_loads(
     text = out.read_text("utf-8")
     assert (
         '# also_target = ["com.example.helper"]   # apps the crawl may also press in;'
-        " system UI and the home app are refused, permission screens are never"
-        " pressed\n"
+        " system UI and the home app are refused, the controls of permission"
+        " screens are never tapped (they get BACK when back_on_other_screens"
+        " is true)\n"
     ) in text
     assert load_settings(out).also_target == ()
     assert fake_adb.requests == []
