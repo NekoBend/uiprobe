@@ -684,7 +684,10 @@ def _parenthesis(other_apps: tuple[tuple[str, int], ...]) -> str:
     head, _, tail = hint.partition(" (")
     assert head == "the restarts kept ending on screens of other apps"
     inside, _, rest = tail.partition("); ")
-    assert rest.startswith("--back-on-other-screens presses BACK on such a screen")
+    assert rest.startswith(
+        "--back-on-other-screens (or back_on_other_screens = true under [rules] in"
+        " the settings file) presses BACK on such a screen"
+    )
     return inside
 
 
@@ -859,6 +862,7 @@ def test_the_plan_text_names_the_start_choice():
         "out": "run",
         "out_source": "option",
         "back_on_other_screens": False,
+        "back_on_other_screens_source": "default",
         "check_tap_window": True,
         "screenshots": False,
     }

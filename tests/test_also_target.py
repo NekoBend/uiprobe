@@ -46,10 +46,10 @@ def with_also(text: str, value: str) -> str:
 # -- the settings key ----------------------------------------------------------
 
 
-def test_the_generated_file_is_version_8_and_writes_the_key_commented():
+def test_the_generated_file_is_current_and_writes_the_key_commented():
     text = settings.render_default_settings()
-    assert "format_version = 1\ndefaults_version = 8\n" in text
-    assert settings.DEFAULTS_VERSION == 8
+    assert "format_version = 1\ndefaults_version = 9\n" in text
+    assert settings.DEFAULTS_VERSION == 9
     assert text.count("also_target") == 1
     assert ENTRY + "\n" in text
     rules = text.split("[rules]\n")[1].split("[limits]")[0]
@@ -63,13 +63,12 @@ def test_the_generated_file_loads_with_an_empty_list(tmp_path):
     assert settings.policy_from_settings(loaded).also_target == ()
 
 
-@pytest.mark.parametrize("version", range(1, 9))
+@pytest.mark.parametrize("version", range(1, 10))
 def test_every_defaults_version_loads_with_an_empty_list(tmp_path, version):
-    if version <= 6:
+    if version <= 8:
         text = (DATA / f"settings_v{version}.toml").read_text(encoding="utf-8")
     else:
         text = settings.render_default_settings()
-        text = text.replace("defaults_version = 8", f"defaults_version = {version}")
         text = text.replace(ENTRY + "\n", "")
         assert "also_target" not in text
     loaded = load_settings(write(tmp_path, text))
@@ -78,21 +77,19 @@ def test_every_defaults_version_loads_with_an_empty_list(tmp_path, version):
     assert loaded.warnings == ()
 
 
-@pytest.mark.parametrize("version", range(1, 9))
+@pytest.mark.parametrize("version", range(1, 10))
 def test_every_defaults_version_may_list_packages(tmp_path, version):
-    if version <= 6:
+    if version <= 8:
         text = (DATA / f"settings_v{version}.toml").read_text(encoding="utf-8")
     else:
-        text = settings.render_default_settings().replace(
-            "defaults_version = 8", f"defaults_version = {version}"
-        )
+        text = settings.render_default_settings()
     path = write(tmp_path, with_also(text, f'["{HELPER}", "com.example.two"]'))
     loaded = load_settings(path)
     assert loaded.also_target == (HELPER, "com.example.two")
     assert settings.policy_from_settings(loaded).also_target == loaded.also_target
 
 
-def test_a_version_8_file_may_leave_the_key_out(tmp_path):
+def test_a_current_file_may_leave_the_key_out(tmp_path):
     text = settings.render_default_settings()
     assert "also_target" in text  # only as the comment
     assert load_settings(write(tmp_path, text)).also_target == ()
@@ -131,8 +128,9 @@ def test_the_settings_fields_end_with_also_target():
     import dataclasses
 
     names = [f.name for f in dataclasses.fields(settings.Settings)]
-    assert names[-1] == "also_target"
-    assert names[-2] == "record_text"
+    assert names[-1] == "back_on_other_screens"
+    assert names[-2] == "also_target"
+    assert names[-3] == "record_text"
 
 
 def test_no_default_exception_is_tagged_with_the_new_version():

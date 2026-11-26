@@ -52,6 +52,10 @@ Version 8 added the rule ``also_target``, a list of package names (empty by
 default) that a pressing crawl may also press in (see `uiprobe.also_target`).
 It is optional in every file, like ``[deny] except``, and ``uiprobe init``
 writes it as a comment, so no file needs it; an older file reads as ``[]``.
+Version 9 added the rule ``back_on_other_screens`` (a missing one reads False);
+a file written at version 9 must have it, and an older uiprobe refuses a
+version 9 file. With true, a pressing crawl presses BACK on a screen of another
+app instead of restarting the app (``Policy.back_on_other_screens``).
 
 ``[deny] except`` holds exception words (see `uiprobe.guards.word_matches`): a
 deny-word hit that lies completely inside one of them, where it stands as a
@@ -155,7 +159,7 @@ __all__ = [
 
 SETTINGS_FILE: Final = "uiprobe.toml"
 FORMAT_VERSION: Final = 1
-DEFAULTS_VERSION: Final = 8
+DEFAULTS_VERSION: Final = 9
 MAX_SETTINGS_BYTES: Final = 1024 * 1024
 
 # Every default list item with the defaults version that introduced it. Each
@@ -179,7 +183,8 @@ MAX_SETTINGS_BYTES: Final = 1024 * 1024
 # Version 7 added the state-changing deny words (forget, disconnect, ...).
 # Version 8 added the rule also_target (a list of packages; optional in every
 # file, a missing one reads as the empty list; `uiprobe init` writes it
-# commented).
+# commented). Version 9 added the rule back_on_other_screens (no list items; a
+# missing one reads False).
 _LATER_DENY: Final[dict[str, int]] = {
     "やり直": 2,
     "元に戻": 2,
@@ -190,7 +195,7 @@ _LATER_DENY: Final[dict[str, int]] = {
 # The [deny] except list has no built-in words. One added later starts at the
 # next defaults version (raise DEFAULTS_VERSION with it); before that, the
 # test that no default is tagged beyond the current version fails.
-_FIRST_EXCEPT: Final = 9
+_FIRST_EXCEPT: Final = 10
 _LATER_EXCEPT: Final[dict[str, int]] = {}
 _LATER_CONFIRM: Final[dict[str, int]] = {}
 # The [irreversible] table came with version 2, so its items start there.
@@ -244,6 +249,7 @@ _BOOL_RULES: Final = (
     "skip_navigate_up",
     "skip_sliders",
     "replay_path",
+    "back_on_other_screens",
 )
 # table -> key -> (lowest, highest) allowed value
 _INT_RANGES: Final[dict[str, dict[str, tuple[int, int]]]] = {
@@ -272,6 +278,7 @@ _LATER_RULES: Final[dict[str, int]] = {
     "skip_navigate_up": 4,
     "skip_sliders": 4,
     "replay_path": 5,
+    "back_on_other_screens": 9,
 }
 # Top-level keys a later version added, with that version (a missing one reads
 # True).
@@ -283,6 +290,7 @@ _LATER_RULE_VALUES: Final[dict[str, bool]] = {
     "skip_navigate_up": True,
     "skip_sliders": True,
     "replay_path": True,
+    "back_on_other_screens": False,
 }
 _TABLE_KEYS: Final[dict[str, frozenset[str]]] = {
     "deny": frozenset({"words", "except", "remove"}),
@@ -327,7 +335,8 @@ class Settings:
     defaults version 6, and ``runs_dir`` (default None, an
     optional key that needed no new defaults version), follow it for the same
     reason. ``also_target`` (default ``()``), added with defaults version 8,
-    comes last for the same reason.
+    comes after it for the same reason, and ``back_on_other_screens`` (default
+    False), added with defaults version 9, last.
     """
 
     source: Path
@@ -371,6 +380,9 @@ class Settings:
     # Added with defaults version 8: the packages (besides the target app)
     # that a pressing crawl may also press in. Empty by default.
     also_target: tuple[str, ...] = ()
+    # Added with defaults version 9: press BACK on a screen of another app
+    # instead of restarting the app (``Policy.back_on_other_screens``).
+    back_on_other_screens: bool = False
 
 
 def _separators() -> str:
@@ -467,6 +479,7 @@ def policy_from_settings(
         skip_sliders=settings.skip_sliders,
         replay_path=settings.replay_path,
         also_target=settings.also_target,
+        back_on_other_screens=settings.back_on_other_screens,
         refuse_dialog_confirm=settings.refuse_dialog_confirm,
         edges=(
             settings.edge_top_px,
@@ -594,6 +607,12 @@ def render_default_settings() -> str:
         '# "do not press the same row twice when only a badge changed" behaviour',
         "# to the earlier behaviour.",
         "replay_path = true",
+        "# With true, a pressing crawl presses BACK on another app's screen (up to",
+        "# twice before it restarts the app) instead of restarting at once; that",
+        "# BACK reaches whichever window has the input focus, not necessarily the",
+        "# app being crawled. --back-on-other-screens and --no-back-on-other-screens",
+        "# override it for one run.",
+        "back_on_other_screens = false",
         '# also_target = ["com.example.helper"]   # apps the crawl may also press in; system UI and the home app are refused, permission screens are never pressed',  # noqa: E501
         f"min_visible_px = {MIN_VISIBLE_PX}",
         f"edge_top_px = {API36_TOP_PX}",
@@ -1318,6 +1337,7 @@ def load_settings(path: str | os.PathLike[str]) -> Settings:
         skip_sliders=flags["skip_sliders"],
         replay_path=flags["replay_path"],
         also_target=also_target,
+        back_on_other_screens=flags["back_on_other_screens"],
         min_visible_px=sizes["min_visible_px"],
         edge_top_px=sizes["edge_top_px"],
         edge_bottom_px=sizes["edge_bottom_px"],

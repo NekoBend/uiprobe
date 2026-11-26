@@ -51,6 +51,7 @@ def _press_only(args: argparse.Namespace) -> list[tuple[str, bool]]:
         ("--screenshots", args.screenshots),
         ("--allow-real-device", args.allow_real_device),
         ("--back-on-other-screens", args.back_on_other_screens),
+        ("--no-back-on-other-screens", args.no_back_on_other_screens),
         ("--no-tap-window-check", args.no_tap_window_check),
         ("--no-restart", args.no_restart),
         ("--no-record-text", args.no_record_text),
@@ -612,8 +613,17 @@ def _add_press_options(crawl: argparse.ArgumentParser) -> None:
         "--back-on-other-screens",
         action="store_true",
         help=(
-            "when pressing: press BACK on a screen of another app (by default the"
-            " app is restarted instead and nothing goes to the other app)"
+            "when pressing: press BACK on a screen of another app for this run,"
+            " whatever the settings file says (by default the app is restarted"
+            " instead and nothing goes to the other app)"
+        ),
+    )
+    crawl.add_argument(
+        "--no-back-on-other-screens",
+        action="store_true",
+        help=(
+            "when pressing: restart the app on a screen of another app for this"
+            " run, whatever the settings file says"
         ),
     )
     crawl.add_argument(
