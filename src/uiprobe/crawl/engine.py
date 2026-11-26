@@ -54,6 +54,7 @@ from uiprobe.guards import (
     container_key,
     is_dialog,
     judge,
+    lists_key,
     scroll_container,
     scroll_target,
 )
@@ -120,8 +121,10 @@ class _ScrollPlan:
     content: tuple[tuple[object, ...], ...]
     activity: str | None
     pre: Screen | None = None
-    # The family of the screen id it was planned on (see `_canon`).
+    # The family of the screen id it was planned on (see `_canon`), and the
+    # name of the screen by its lists (see `uiprobe.guards.lists_key`).
     family: str = ""
+    lists: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -209,6 +212,7 @@ class _State:
     approved_bounds: tuple[int, ...] | None
     scrolls: dict[str, int]
     family_scrolls: dict[str, int]
+    lists_scrolls: dict[str, int]
     scrolled_end: set[str]
     family: dict[str, str]
     seen_prints: dict[str, set[str]]
@@ -363,6 +367,7 @@ class CrawlEngine:
         # (another container key) does not give the screen a new count.
         self._scrolls: dict[str, int] = {}
         self._family_scrolls: dict[str, int] = {}
+        self._lists_scrolls: dict[str, int] = {}
         self._scrolled_end: set[str] = set()
         self._family: dict[str, str] = {}
         self._seen_prints: dict[str, set[str]] = {}
@@ -512,6 +517,7 @@ class CrawlEngine:
             approved_bounds=self._approved_bounds,
             scrolls=dict(self._scrolls),
             family_scrolls=dict(self._family_scrolls),
+            lists_scrolls=dict(self._lists_scrolls),
             scrolled_end=set(self._scrolled_end),
             family=dict(self._family),
             seen_prints={k: set(v) for k, v in self._seen_prints.items()},
@@ -562,6 +568,7 @@ class CrawlEngine:
         self._approved_bounds = state.approved_bounds
         self._scrolls = dict(state.scrolls)
         self._family_scrolls = dict(state.family_scrolls)
+        self._lists_scrolls = dict(state.lists_scrolls)
         self._scrolled_end = set(state.scrolled_end)
         self._family = dict(state.family)
         self._seen_prints = {k: set(v) for k, v in state.seen_prints.items()}
@@ -732,6 +739,9 @@ class CrawlEngine:
         self._family_scrolls[approved.family] = (
             self._family_scrolls.get(approved.family, 0) + 1
         )
+        self._lists_scrolls[approved.lists] = (
+            self._lists_scrolls.get(approved.lists, 0) + 1
+        )
         self._pending = _Pending(
             self._sent,
             "scroll",
@@ -900,11 +910,12 @@ class CrawlEngine:
     @staticmethod
     def _left_the_list(pre: Screen, screen: Screen, key: str | None) -> bool:
         """Whether the screen read after a scroll is another page of the same
-        activity: its id differs (a list that only scrolled keeps its id, or
-        gains or loses a row and changes it) and no scrollable element of it has
-        the container key of the list that was scrolled. A page of the same
+        activity: no scrollable element of it has the container key of the list
+        that was scrolled (whatever its id: a page with the same classes and
+        resource ids but no scrollable list has the same id). A page of the same
         activity that shows the same list is not told apart from the list."""
-        if key is None or screen.screen_id == pre.screen_id:
+        del pre
+        if key is None:
             return False
         return not any(
             "scrollable" in e.flags and container_key(screen, e) == key
@@ -1346,10 +1357,12 @@ class CrawlEngine:
         container, point = target
         box = next(e for e in screen.elements if e.id == container)
         key = container_key(screen, box)
+        lists = lists_key(screen)
         if (
             key in self._scroll_blocked
             or self._scrolls.get(key, 0) >= self._limits.scrolls_per_screen
             or self._family_scrolls.get(family, 0) >= self._limits.scrolls_per_screen
+            or self._lists_scrolls.get(lists, 0) >= self._limits.scrolls_per_screen
         ):
             return None
         scroll = Scroll(sid, point, self._limits.scroll_amount)
@@ -1360,6 +1373,7 @@ class CrawlEngine:
             self._screen_state(screen),
             screen.activity,
             family=family,
+            lists=lists,
         )
         return scroll
 

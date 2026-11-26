@@ -506,12 +506,16 @@ class Judgement:
     ``dialog`` says that the screen is a dialog (see ``dialog_confirm_button``)
     and ``irreversible`` that a phrase of ``Policy.irreversible_phrases`` is on
     it. Both are facts about the whole screen (even with no candidate), are
-    False for a screen too large to judge, and are not compared.
+    False for a screen too large to judge, and are not compared. ``edges`` are
+    the screen-edge rectangles that gave ``screen_edge`` to a press point on
+    this screen (empty for a screen too large to judge; not compared): the
+    crawl's wheel point must not lie in one either.
     """
 
     decisions: tuple[Decision, ...]
     dialog: bool = field(default=False, compare=False)
     irreversible: bool = field(default=False, compare=False)
+    edges: tuple[Bounds, ...] = field(default=(), compare=False)
 
     @property
     def pressable(self) -> tuple[Decision, ...]:

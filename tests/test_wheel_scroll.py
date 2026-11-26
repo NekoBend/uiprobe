@@ -122,7 +122,7 @@ def test_the_usage_is_read_with_the_bare_command(device, fake_adb):
         "The sources are:\n  mouse\nscroll <x> <y>\n",  # no axis options
         # no VSCROLL
         "The sources are:\n  mouse\nscroll <x> <y> [--axis HSCROLL,<h>]\n",
-        "scroll <x> <y> [--axis VSCROLL,<v>]\n",  # no mouse source
+        "scroll <x> <y> [--axis VSCROLL,<v>] (Default: mouse)\n",  # no mouse source
         # "mouse" only as a command's default source is not a listed source
         "The sources are:\n  touchscreen\n"
         "scroll <x> <y> [--axis VSCROLL,<v>] (Default: mouse)\n",
@@ -140,9 +140,10 @@ def test_a_usage_that_does_not_list_all_three_is_no_support(device, android, usa
     "usage",
     [
         FakeAndroid.USAGE_WHEEL,
-        "The sources are:\n      mouse\nscroll <x> <y> [--axis VSCROLL,<v>]\n",
+        "The sources are:\n      mouse\n"
+        "scroll <x> <y> [--axis VSCROLL,<v>] (Default: mouse)\n",
         "The sources are: mouse, keyboard\n"
-        "scroll <x> <y> [--axis HSCROLL,<h>,VSCROLL,<v>]\n",
+        "scroll <x> <y> [--axis HSCROLL,<h>,VSCROLL,<v>] (Default: mouse)\n",
     ],
 )
 def test_the_mouse_source_a_scroll_line_and_vscroll_are_support(device, android, usage):
@@ -166,14 +167,18 @@ MENTIONED = [
     "The sources are:\n  mouse\nscroll <x> <y> [--axis HSCROLL,<h>] VSCROLL\n",
     # VSCROLL in the list but said to be unsupported
     "The sources are:\n  mouse\n"
-    "scroll <x> <y> [--axis HSCROLL,<h>,VSCROLL unsupported]\n",
+    "scroll <x> <y> [--axis HSCROLL,<h>,VSCROLL unsupported] (Default: mouse)\n",
     # a longer word that holds it
-    "The sources are:\n  mouse\nscroll <x> <y> [--axis XVSCROLL,<v>]\n",
-    "The sources are:\n  mouse\nscroll <x> <y> [--axis VSCROLLS,<v>]\n",
-    "The sources are:\n  mouse\nscroll <x> <y> [--axis HSCROLL,<h>,NOVSCROLL,<v>]\n",
+    "The sources are:\n  mouse\n"
+    "scroll <x> <y> [--axis XVSCROLL,<v>] (Default: mouse)\n",
+    "The sources are:\n  mouse\n"
+    "scroll <x> <y> [--axis VSCROLLS,<v>] (Default: mouse)\n",
+    "The sources are:\n  mouse\n"
+    "scroll <x> <y> [--axis HSCROLL,<h>,NOVSCROLL,<v>] (Default: mouse)\n",
     # the list is not the one of the scroll line
     "The sources are:\n  mouse\n"
-    "scroll <x> <y> [--axis HSCROLL,<h>]\nfling <x> <y> [--axis VSCROLL,<v>]\n",
+    "scroll <x> <y> [--axis HSCROLL,<h>] (Default: mouse)\n"
+    "fling <x> <y> [--axis VSCROLL,<v>]\n",
 ]
 
 
@@ -185,10 +190,52 @@ def test_a_usage_that_only_mentions_vscroll_is_no_support(device, android, usage
 
 def test_vscroll_as_a_word_of_the_axis_list_is_support(device, android):
     for usage in (
-        "The sources are:\n  mouse\nscroll <x> <y> [--axis VSCROLL,<v>]\n",
-        "The sources are:\n  mouse\nscroll <x> <y> [--axis HSCROLL,<h>,VSCROLL,<v>]\n",
-        "The sources are:\n  mouse\nscroll <x> <y> [--axis VSCROLL,<v>,HSCROLL,<h>]\n",
-        "The sources are: mouse\nscroll <x> <y> [ --axis VSCROLL,<v> ]\n",
+        "The sources are:\n  mouse\n"
+        "scroll <x> <y> [--axis VSCROLL,<v>] (Default: mouse)\n",
+        "The sources are:\n  mouse\n"
+        "scroll <x> <y> [--axis HSCROLL,<h>,VSCROLL,<v>] (Default: mouse)\n",
+        "The sources are:\n  mouse\n"
+        "scroll <x> <y> [--axis VSCROLL,<v>,HSCROLL,<h>] (Default: mouse)\n",
+        "The sources are: mouse\n"
+        "scroll <x> <y> [ --axis VSCROLL,<v> ] (Default: mouse)\n",
     ):
         android.input_usage = usage
         assert device._wheel_supported() is True, usage
+
+
+# The usage is read per source: the scroll line must be the mouse source's.
+OTHER_SOURCE = [
+    # VSCROLL listed for the rotary source only
+    "The sources are:\n  mouse\n  rotary\n"
+    "scroll <x> <y> [--axis VSCROLL,<v>] (Default: rotary)\n",
+    "The sources are:\n  mouse\n  rotary\nrotary scroll <x> <y> [--axis VSCROLL,<v>]\n",
+    # a mouse line without VSCROLL next to a rotary line with it
+    "The sources are:\n  mouse\n  rotary\n"
+    "mouse scroll <x> <y> [--axis HSCROLL,<h>]\n"
+    "rotary scroll <x> <y> [--axis VSCROLL,<v>]\n",
+    # no source named for the line
+    "The sources are:\n  mouse\nscroll <x> <y> [--axis VSCROLL,<v>]\n",
+]
+
+
+@pytest.mark.parametrize("usage", OTHER_SOURCE)
+def test_vscroll_listed_for_another_source_is_no_support(device, android, usage):
+    android.input_usage = usage
+    assert device._wheel_supported() is False
+
+
+@pytest.mark.parametrize(
+    "usage",
+    [
+        "The sources are:\n  mouse\n  rotary\n"
+        "mouse scroll <x> <y> [--axis VSCROLL,<v>]\n",
+        "The sources are:\n  mouse\n  rotary\n"
+        "rotary scroll <x> <y> [--axis HSCROLL,<h>]\n"
+        "scroll <x> <y> [--axis VSCROLL,<v>] (Default: mouse)\n",
+    ],
+)
+def test_vscroll_on_the_mouse_line_is_support_whatever_other_lines_say(
+    device, android, usage
+):
+    android.input_usage = usage
+    assert device._wheel_supported() is True

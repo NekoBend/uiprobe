@@ -108,6 +108,14 @@ class _ObserveMixin(_RunState):
         if self.device.pin_epoch != epoch:
             return  # an event crossed the reads: the next read is the result
         self.scrolled = None
+        if scrolled is not None and (
+            self.engine.scroll_effect(screen, seen.observation.foreground)
+            == "navigation"
+        ):
+            # The scroll's own end line said the dump failed, and the read that
+            # worked is another page (another activity, a dialog): it is not
+            # more of the list, so no read is written under the scroll.
+            scrolled = None
         self.screens_seen.add(screen.screen_id)
         first = self.writer.write_screen(screen)
         reads = self.reads.setdefault(screen.screen_id, [])

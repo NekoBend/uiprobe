@@ -72,9 +72,20 @@ class _GateMixin(_RunState):
         point: tuple[int, int],
         focus: tuple[FocusedWindow | None, ...],
         screen: Screen | None,
+        *,
+        focused_only: bool = False,
     ) -> tuple[str, dict[str, str | int]] | None:
         """Why a tap at `point` must not go out, from the window there, or
         None when the window that takes it belongs to the app.
+
+        With `focused_only` (a wheel scroll) the window there must also be the
+        focused app window that supplied the dump, told by its title (the
+        focused window as read before and after the dump must have that title):
+        a window of the same uid that is not part of the dumped hierarchy (a
+        popup) gets the wheel otherwise, and its views are not what the dump
+        showed. When the focused window's title is not known the answer is
+        ``cover_unknown``; another title is ``covered_by_other``. A tap keeps
+        the uid test alone.
 
         `focus` is the focused window as read before and after the dump: a
         user other than 0 refuses (``target_user``), and so does an owner uid
@@ -116,7 +127,23 @@ class _GateMixin(_RunState):
             }
         if isinstance(found, str):
             return NOT_SENT_COVER_UNKNOWN, {"unreadable": found}
-        if self.app_window(found, app, package):
+        if not self.app_window(found, app, package):
+            return NOT_SENT_COVERED, {
+                "window": found.title,
+                "owner_uid": found.owner_uid,
+            }
+        return self.focused_window_only(found, focus) if focused_only else None
+
+    @staticmethod
+    def focused_window_only(
+        found: InputWindow, focus: tuple[FocusedWindow | None, ...]
+    ) -> tuple[str, dict[str, str | int]] | None:
+        """The extra test of a wheel scroll: the window at the point must be the
+        focused app window, told by its title (see `cover`)."""
+        titles = {None if f is None else f.title for f in focus}
+        if None in titles or len(titles) != 1:
+            return NOT_SENT_COVER_UNKNOWN, {"unreadable": "focus_title"}
+        if titles == {found.title}:
             return None
         return NOT_SENT_COVERED, {"window": found.title, "owner_uid": found.owner_uid}
 
@@ -241,7 +268,12 @@ class _GateMixin(_RunState):
             # app must own the focus, as for a tap), but it is this read that
             # says which window the wheel reaches, at the scroll's one point.
             cover = (
-                self.cover(action.point, (before, focus), screen)
+                self.cover(
+                    action.point,
+                    (before, focus),
+                    screen,
+                    focused_only=isinstance(action, Scroll),
+                )
                 if self.policy.check_tap_window
                 else None
             )

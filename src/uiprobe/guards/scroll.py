@@ -34,6 +34,7 @@ if TYPE_CHECKING:
 _SCROLLABLE = "scrollable"
 _LONG_CLICKABLE = "long_clickable"
 _PASSWORD = "password"  # noqa: S105 (a flag name)
+_EDITABLE = "editable"
 # The grid of candidate points, in quarters of the container's visible width and
 # height: the center first, then the others.
 _GRID = ((2, 2), (1, 2), (3, 2), (2, 1), (2, 3), (1, 1), (3, 1), (1, 3), (3, 3))
@@ -95,6 +96,7 @@ def _allowed(element: Element, container: Element, refused_ids: frozenset[str]) 
         or _LONG_CLICKABLE in element.flags
         or _CHECKABLE in element.flags
         or _PASSWORD in element.flags
+        or _EDITABLE in element.flags
         or _is_text_field(element)
     )
 
@@ -123,7 +125,9 @@ def scroll_target(screen: Screen, judgement: Judgement) -> tuple[str, Point] | N
     topmost labelled element there is the container or inside it. The allow
     list is redundant with the checks of the flags, which are kept as an extra
     layer: scrollable (other than the container), long-clickable, checkable,
-    password and text field are refused whatever their class.
+    password, editable and text field are refused whatever their class. A point
+    in a screen-edge area of the judge (`Judgement.edges`, where a tap gets
+    ``screen_edge``) never qualifies.
     """
     if judgement.dialog or judgement.irreversible:
         return None
@@ -139,6 +143,11 @@ def scroll_target(screen: Screen, judgement: Judgement) -> tuple[str, Point] | N
             area.left + area.width * col // 4,
             area.top + area.height * row // 4,
         )
+        if any(
+            e.left <= point[0] < e.right and e.top <= point[1] < e.bottom
+            for e in judgement.edges
+        ):
+            continue  # the judge's screen_edge areas, as for a tap
         held = elements_at(screen, point)
         if not all(
             _allowed(e, container, refused) and _related(screen, e, container)
@@ -169,6 +178,29 @@ def container_key(screen: Screen, container: Element) -> str:
     return "|".join(parts)
 
 
+def lists_key(screen: Screen) -> str:
+    """A name for the screen by its lists, not by which of them is the largest
+    and not by anything else on it: the activity and, sorted, the class and
+    resource id of every scrollable element with the classes of its ancestors.
+    The per-screen scroll cap is also counted under it, so a header that changes
+    the screen id when BACK returns to the screen, together with another list
+    becoming the largest, does not give the screen a new count."""
+    by_id = {e.id: e for e in screen.elements}
+    names = []
+    for element in screen.elements:
+        if _SCROLLABLE not in element.flags:
+            continue
+        parts = [element.class_name, element.resource_id]
+        seen = {element.id}
+        parent = element.parent
+        while parent is not None and parent not in seen and parent in by_id:
+            seen.add(parent)
+            parts.append(by_id[parent].class_name)
+            parent = by_id[parent].parent
+        names.append("|".join(parts))
+    return "\n".join([screen.activity or "", *sorted(set(names))])
+
+
 def is_dialog(screen: Screen) -> bool:
     """Whether the screen is a dialog: its first top-level element is smaller
     than the display (the same test as ``dialog_confirm_button``)."""
@@ -194,10 +226,12 @@ def changed_by_wheel(before: Screen, after: Screen, key: str | None = None) -> b
     the scroll position, comparing the screen read before it with the one after.
 
     ``key`` is the `container_key` of the list that was scrolled. Two signs.
-    (1) A checkable element with the same text-inclusive identity (class,
-    resource id, text, description, hint and the ancestors' classes and resource
-    ids) on both screens whose checked states differ (the sorted states of all
-    such elements are compared per identity). (2) Outside the list: elements
+    (1) A checkable element outside the list with the same text-inclusive
+    identity (class, resource id, text, description, hint and the ancestors'
+    classes and resource ids) on both screens whose checked states differ (the
+    sorted states of all such elements are compared per identity, when there
+    are as many of them on both screens: identical rows that scrolled in or out
+    are no change). (2) Outside the list: elements
     with the same text-free identity (class, resource id and the ancestors'
     classes and resource ids), taken in document order, where the n-th text or
     description or checked state differs on the two screens (groups of another
@@ -209,17 +243,18 @@ def changed_by_wheel(before: Screen, after: Screen, key: str | None = None) -> b
     unique. A clock or a counter that changes between the reads is taken as a
     change too, which only costs a scroll.
     """
-    return _checked_changed(before, after) or _text_changed(before, after, key)
+    return _checked_changed(before, after, key) or _text_changed(before, after, key)
 
 
-def _checked_changed(before: Screen, after: Screen) -> bool:
+def _checked_changed(before: Screen, after: Screen, key: str | None = None) -> bool:
     def states(screen: Screen) -> dict[tuple[object, ...], list[bool]]:
         by_id = {e.id: e for e in screen.elements}
+        skip = _inside_list(screen, key)
         found: dict[tuple[object, ...], list[bool]] = {}
         for element in screen.elements:
-            if _CHECKABLE not in element.flags:
+            if _CHECKABLE not in element.flags or element.id in skip:
                 continue
-            key = (
+            identity = (
                 element.class_name,
                 element.resource_id,
                 element.text,
@@ -227,12 +262,18 @@ def _checked_changed(before: Screen, after: Screen) -> bool:
                 element.hint,
                 _ancestry(element, by_id),
             )
-            found.setdefault(key, []).append("checked" in element.flags)
+            found.setdefault(identity, []).append("checked" in element.flags)
         return found
 
     old, new = states(before), states(after)
+    # Groups of another size cannot be paired: rows of identical identity that
+    # scrolled in or out (two identical switch rows scrolling down to one) are
+    # no change.
     return any(
-        key in new and sorted(flags) != sorted(new[key]) for key, flags in old.items()
+        identity in new
+        and len(flags) == len(new[identity])
+        and sorted(flags) != sorted(new[identity])
+        for identity, flags in old.items()
     )
 
 

@@ -24,7 +24,7 @@ A crawl run is recorded in one new folder. The library part that writes it is `u
 | `transitions.jsonl` | one line per event | Each action that is about to be sent, and where it led. Made at the first line. |
 | `skipped.jsonl` | one line per screen id, element fingerprint and reasons | Elements that were not pressed; identical elements of one screen with the same reasons share a line, and a screen too large to judge gives one line for the whole screen. Made at the first line. |
 | `screens/<screen_id>.json` | the first time a screen id is seen | The screen, in the form of `uiprobe dump --json` (`uiprobe.screen/1`). |
-| `screens/scroll-<action_id>.json` | after a wheel scroll that was sent (only with scrolling on) | The screen read after that scroll, in the same form, whatever its id: `uiprobe tree` lists its rows under the screen that was scrolled. Written once per scroll. Absent from a run that did not scroll. |
+| `screens/scroll-<action_id>.json` | after a wheel scroll that was sent (only with scrolling on) | The screen read after that scroll, in the same form, whatever its id: `uiprobe tree` lists its rows under the screen that was scrolled. Written once per scroll, and only for a read of the same activity: after a failed dump a read of another page is not written under the scroll. Absent from a run that did not scroll. |
 | `screens/<screen_id>.png` | the first time a screenshot is given for a screen id | A PNG image. Anything that does not start with the PNG signature is refused and no file is made. |
 | `summary.txt` | at the end | Per screen, the labels of its buttons. |
 | `run.json` | at the very end | How the run ended. It is written last, after the line files are closed and `summary.txt` is written. |

@@ -77,6 +77,7 @@ _FLAG_ATTRIBUTES = (
     ("focused", "focused"),
     ("selected", "selected"),
     ("password", "password"),
+    ("editable", "editable"),
 )
 
 # Flags that appear as tags in the tree view.

@@ -3118,3 +3118,10 @@ def test_the_limits_check_the_scroll_numbers():
         Limits(scrolls_per_screen=0)
     with pytest.raises(TypeError, match="scrolls_per_screen must be an int"):
         Limits(scrolls_per_screen=True)
+
+
+def test_the_settings_docstring_names_the_version_of_the_scroll_fields():
+    doc = " ".join((settings.Settings.__doc__ or "").split())
+    assert "`DEFAULT_SCROLL_INCIDENTS`), added with defaults version 10." in doc
+    assert "scroll_lists" in doc
+    assert "defaults version 7" not in doc.split("scroll_lists")[1]

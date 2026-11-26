@@ -37,7 +37,7 @@ Keys, with their defaults:
 | `[limits] depth` | `5` | How deep a pressing crawl taps on one path, 1 to 50 (it does not end the run). `--depth` overrides it for one run. |
 | `[limits] actions` | `300` | The most actions a pressing crawl sends (the launch, taps, BACK and restarts each count), 1 to 10000. `--actions` overrides it for one run. |
 | `[limits] minutes` | `30` | The longest pressing crawl in minutes, 1 to 1440. `--minutes` overrides it for one run. |
-| `[limits] scrolls_per_screen` | `10` | The most wheel scrolls a run sends on one screen (counted per container and per family of screen ids), 1 to 100. Used only with `scroll_lists`. No option overrides it. A file written at an older defaults version reads `10`; a version 10 file must have this key. |
+| `[limits] scrolls_per_screen` | `10` | The most wheel scrolls a run sends on one screen (counted per container, per family of screen ids and per set of lists of the screen), 1 to 100. Used only with `scroll_lists`. No option overrides it. A file written at an older defaults version reads `10`; a version 10 file must have this key. |
 | `[limits] scroll_amount` | `3` | The size of one wheel scroll, 1 to 10. Used only with `scroll_lists`. A file written at an older defaults version reads `3`; a version 10 file must have this key. |
 | `[limits] scroll_incidents` | `2` | After this many scrolls that changed a value or opened another screen, the run scrolls no more, 1 to 100. Used only with `scroll_lists`. A file written at an older defaults version reads `2`; a version 10 file must have this key. |
 | `[keys] refuse` | the device-wide keys listed under [Pressing keys](commands.md#pressing-keys), without the fixed keys below | Key names `uiprobe key` refuses. |

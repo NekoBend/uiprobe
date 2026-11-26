@@ -775,3 +775,58 @@ def test_the_writer_and_the_gate_share_the_one_limit():
     from uiprobe import crawl_tree, guards
 
     assert crawl_tree._MAX_AMOUNT == guards.MAX_SCROLL_AMOUNT == 10
+
+
+def test_a_row_tapped_on_another_id_stays_pressed_when_it_is_in_the_first_read(
+    tmp_path,
+):
+    # The list gains another id after a scroll; the first tap on that id names no
+    # scroll (the writer could not tell), and its row is also in the first read.
+    folder = Folder(tmp_path)
+    first = listing(["A", "B", "C"])
+    second = listing(["A", "D"])  # another id; row A is as in the first read
+    assert first.screen_id != second.screen_id
+    for screen in (first, second, LEAF):
+        folder.screen(screen)
+    folder.start("launch")
+    folder.end(first.screen_id)
+    scroll(folder, first, second)
+    folder.tap(second, 3, LEAF.screen_id)  # A, decided on the second id
+    folder.start("back", LEAF.screen_id)
+    folder.end(second.screen_id)
+    folder.finish()
+    rows = read_tree(folder.path).screens[first.screen_id].rows
+    a = next(r for r in rows if r.name == "A")
+    assert a.pressed
+    assert a.to == {"screen_id": LEAF.screen_id}
+
+
+def test_a_read_of_another_activity_after_a_failed_dump_is_not_listed_under_the_list(
+    tmp_path,
+):
+    # The scroll's end line says the dump failed, so it has no scroll_effect; the
+    # read that worked later is a page of another activity (a folder written
+    # before the writer stopped writing such reads under the scroll).
+    folder = Folder(tmp_path)
+    first = listing(["A", "B"])
+    page = make_screen(
+        ".Detail",
+        [
+            el(1, cls="FrameLayout"),
+            el(2, 1, cls="LinearLayout", flags=CLICK),
+            el(3, 2, text="Detail row"),
+        ],
+    )
+    folder.screen(first)
+    folder.start("launch")
+    folder.end(first.screen_id)
+    folder.action += 1
+    folder.writer.write_transition_start(
+        folder.action, "scroll", first.screen_id, point=(5, 50), amount=3
+    )
+    folder.end(dump_failed=True)
+    folder.writer.write_scroll_screen(folder.action, page)
+    folder.finish()
+    rows = read_tree(folder.path).screens[first.screen_id].rows
+    assert [r.name for r in rows if r.kind == "row"] == ["A", "B"]
+    assert all(r.after_scroll is None for r in rows)

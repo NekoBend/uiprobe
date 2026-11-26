@@ -209,15 +209,17 @@ class _SendMixin(_RunState):
 
     def read_of(self, action: Action, screen: Screen | None) -> int | None:
         """The scroll whose result screen is the screen a tap was decided on
-        (the first written read of that screen id that equals it), or None: the
-        tap is of the screen's own file, or of a state nothing written holds."""
+        (the latest written read of that screen id that equals it: the first
+        read of an id that a scroll brought is both the id's own file and that
+        scroll's read, and it is the scroll's), or None: the tap is of the
+        screen's own file, or of a state nothing written holds."""
         if (
             not self.policy.scroll_lists
             or not isinstance(action, Tap)
             or screen is None
         ):
             return None
-        for scroll_id, elements in self.reads.get(action.screen_id, ()):
+        for scroll_id, elements in reversed(self.reads.get(action.screen_id, ())):
             if elements == screen.elements:
                 return scroll_id
         return None

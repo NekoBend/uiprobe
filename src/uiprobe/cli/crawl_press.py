@@ -322,10 +322,9 @@ def _cmd_crawl_press(args: argparse.Namespace, setup: _CrawlSetup) -> int:  # no
                 details={"serial": device.serial, "reason": reason},
             )
             raise _cli_not_emulator(device, refusal)
-    # The device's own `input` usage is read here, once, and only when the run
-    # asks to scroll: the plan prints this answer and the run uses the same one
-    # (`crawl_run` takes it and does not read again; run-start.json records it).
-    wheel = device._wheel_supported() if policy.scroll_lists else None  # noqa: SLF001
+    # The device's own `input` usage is read once, by the run itself, and only
+    # when the run asks to scroll; the plan is printed when the run has read it
+    # (see `show_plan` below), so the plan shows the answer the run uses.
     plan: dict[str, object] = {
         "package": args.package,
         "device": {"serial": device.serial, "emulator": emulator},
@@ -345,9 +344,9 @@ def _cmd_crawl_press(args: argparse.Namespace, setup: _CrawlSetup) -> int:  # no
         "restart": not args.no_restart,
         "record_text": record_text,
         **({"also_target": list(policy.also_target)} if policy.also_target else {}),
-        "scroll_lists": policy.scroll_lists and wheel is True,
+        "scroll_lists": False,  # set by `show_plan` from the run's own read
         "scroll_lists_source": scroll_source,
-        "scroll_input": wheel,
+        "scroll_input": None,
         "scrolls_per_screen": limits.scrolls_per_screen,
         "scroll_amount": limits.scroll_amount,
         "scroll_incidents": limits.scroll_incidents,
@@ -358,11 +357,19 @@ def _cmd_crawl_press(args: argparse.Namespace, setup: _CrawlSetup) -> int:  # no
     if plan_stream is None:  # a closed stream at start: refuse before pressing
         msg = "the plan cannot be shown: " + ("stderr" if args.json else "stdout")
         raise _UsageError(msg + " is closed, so nothing was pressed")
-    _emit(
-        _press_plan_text(plan, settings=str(setup.settings.source)),
-        stream=plan_stream,
-    )
-    _flush(plan_stream)
+
+    def show_plan(wheel: bool | None) -> None:  # noqa: FBT001 - called by the run
+        """Print the plan once the run has checked the device and read the
+        input usage (`wheel`: what it said, None when nothing was read); nothing
+        has been sent or written by then."""
+        plan["scroll_lists"] = policy.scroll_lists and wheel is True
+        plan["scroll_input"] = wheel
+        _emit(
+            _press_plan_text(plan, settings=str(setup.settings.source)),
+            stream=plan_stream,
+        )
+        _flush(plan_stream)
+
     try:
         result = crawl_run(
             device,
@@ -379,7 +386,7 @@ def _cmd_crawl_press(args: argparse.Namespace, setup: _CrawlSetup) -> int:  # no
             restart=not args.no_restart,
             record_text=record_text,
             on_progress=None if args.quiet else _ProgressPrinter(sys.stderr),
-            _wheel=wheel,
+            _on_checked=show_plan,
         )
     except KeyboardInterrupt as exc:
         # crawl_run wrote run.json with "interrupted" when it still could.

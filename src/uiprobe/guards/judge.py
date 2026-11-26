@@ -971,4 +971,5 @@ def judge(
         ),
         dialog=state.dialog,
         irreversible=state.irreversible_detail() is not None,
+        edges=state._avoid,  # noqa: SLF001 - the areas of `screen_edge`
     )

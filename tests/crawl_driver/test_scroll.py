@@ -283,6 +283,54 @@ def test_the_default_policy_reads_no_usage_and_sends_no_wheel(
     assert "scroll_lists" not in json.loads((out / "run-start.json").read_bytes())
 
 
+def test_no_caller_can_say_what_the_device_lists(tmp_path, device):
+    import inspect
+
+    assert not [
+        n for n in inspect.signature(crawl_run).parameters if "wheel" in n.lower()
+    ]
+    with pytest.raises(TypeError):
+        crawl_run(
+            device,
+            SHOP,
+            tmp_path / "run",
+            policy=ON,
+            limits=ALL,
+            _wheel=True,  # ty: ignore[unknown-argument]
+        )
+    assert not (tmp_path / "run").exists()
+
+
+def test_the_driver_reads_the_usage_once_and_says_the_answer_before_it_sends(
+    tmp_path, device, android, clock, fake_adb
+):
+    told: list[tuple[bool | None, int, int]] = []
+
+    def on_checked(wheel):
+        told.append((wheel, len(android.inputs), usage_reads(fake_adb)))
+
+    def go(name, policy):
+        crawl_run(
+            device,
+            SHOP,
+            tmp_path / name,
+            policy=policy,
+            limits=ALL,
+            settle=0.0,
+            clock=clock.monotonic,
+            sleep=clock.sleep,
+            _on_checked=on_checked,
+        )
+
+    go("a", ON)
+    assert told == [(True, 0, 1)]  # nothing sent yet, one read
+    assert usage_reads(fake_adb) == 1
+    told.clear()
+    go("b", Policy())
+    assert told[0][0] is None  # off: nothing read
+    assert usage_reads(fake_adb) == 1  # still only the first run's read
+
+
 def test_the_cap_is_the_limit_of_the_run(tmp_path, device, clock):
     out = tmp_path / "run"
     run(device, clock, out, limits=Limits(actions=200, scrolls_per_screen=1))
@@ -335,6 +383,53 @@ def test_a_window_of_another_app_over_the_point_refuses_the_scroll(
     assert result.stop_reason == "exhausted"
     assert result.not_sent == (("covered_by_other", 3),)
     assert tapped(out) == [f"Row {n:02d}" for n in range(1, 9)]
+
+
+def test_a_popup_of_the_apps_own_uid_over_the_point_refuses_the_scroll_not_the_tap(
+    tmp_path, device, android, clock
+):
+    # Same uid, visible, but no part of the dumped hierarchy: the wheel would
+    # reach its views, which the dump never showed. A tap keeps the uid test.
+    android.overlays.append(("PopupWindow:7f3a", SHOP, (140, 340, 180, 360)))
+    out = tmp_path / "run"
+    result = run(device, clock, out, limits=ALL)
+    assert wheels(android) == []
+    refused = [r for r in not_sent(out) if r["reason"] == "covered_by_other"]
+    assert len(refused) == 3
+    assert refused[0]["details"]["window"] == "PopupWindow:7f3a"
+    kinds = {r["action_id"]: r["action"]["kind"] for r in starts(out)}
+    assert {kinds[r["action_id"]] for r in refused} == {"scroll"}
+    # the rows are tapped (the popup is not over their points)
+    assert tapped(out) == [f"Row {n:02d}" for n in range(1, 9)]
+    assert result.stop_reason == "exhausted"
+
+
+def test_the_scroll_goes_when_the_window_at_the_point_is_the_focused_one(
+    tmp_path, device, android, clock
+):
+    out = tmp_path / "run"
+    run(device, clock, out, limits=ALL)
+    assert len(wheels(android)) == 3
+    assert not not_sent(out)
+
+
+def test_a_scroll_is_refused_when_the_focused_title_cannot_be_matched(
+    tmp_path, device, android, clock, monkeypatch
+):
+    from uiprobe.crawl_driver import gate
+
+    original = gate._GateMixin.focused_window_only
+
+    def other_title(found, focus):
+        return original(replace(found, title="x" + found.title), focus)
+
+    monkeypatch.setattr(
+        gate._GateMixin, "focused_window_only", staticmethod(other_title)
+    )
+    out = tmp_path / "run"
+    run(device, clock, out, limits=ALL)
+    assert wheels(android) == []
+    assert {r["reason"] for r in not_sent(out)} == {"covered_by_other"}
 
 
 def test_a_window_elsewhere_does_not_stop_the_scroll(tmp_path, device, android, clock):
@@ -772,3 +867,92 @@ def test_the_screen_after_a_scroll_is_kept_when_the_first_dump_fails(
     assert [r.name for r in rows if r.kind == "row"] == [
         f"Row {n:02d}" for n in range(1, 15)
     ]
+
+
+# -- a tap on the screen as a scroll showed it, whatever its id --------------------
+
+
+def test_a_tap_decided_on_a_new_id_that_a_scroll_brought_cites_that_scroll(
+    tmp_path, fake_adb, clock
+):
+    # One wheel step of 101 px moves the content by 303 px, so the number of rows
+    # that lie completely inside the window changes and the screen has another
+    # id after the scroll; the first read of that id is the scroll's read.
+    android = FakeAndroid(
+        fake_adb,
+        SERIAL,
+        screens(14, unit=101),
+        start="home",
+        transport_id=TRANSPORT,
+        wheel=True,
+    )
+    device = Device(adb_server=fake_adb.address)
+    out = tmp_path / "run"
+    run(device, clock, out, limits=ALL)
+    assert android.serial == SERIAL
+    first_scroll = scrolls(out)[0]["action_id"]
+    ends = {r["action_id"]: r for r in end_lines(out)}
+    after = ends[first_scroll]["to_screen_id"]
+    on_new_id = [
+        r
+        for r in starts(out)
+        if r["action"]["kind"] == "tap" and r["from_screen_id"] == after
+    ]
+    assert after != scrolls(out)[0]["from_screen_id"]
+    assert on_new_id
+    # the first tap on the new id was decided on the read after the scroll: it
+    # names that scroll (the id's own file is the same read)
+    assert on_new_id[0]["after_scroll"] == first_scroll
+    tree = read_tree(out)
+    first_id = scrolls(out)[0]["from_screen_id"]
+    row = next(
+        r
+        for r in tree.screens[first_id].rows
+        if r.name == on_new_id[0]["action"]["element"]["text"]
+    )
+    assert row.pressed
+
+
+# -- a dump that failed after a scroll, then a read of another page ----------------
+
+
+def test_a_read_of_another_page_after_a_failed_dump_is_no_read_of_the_list(
+    tmp_path, device, android, clock, monkeypatch
+):
+    from uiprobe.errors import DumpError
+
+    state = {"armed": False, "done": False}
+    wheel = Device._wheel_scroll
+    dump = Device.dump
+
+    def wheel_then_navigate(self, *args, **kwargs):
+        result = wheel(self, *args, **kwargs)
+        if not state["done"]:
+            state["armed"] = True
+            android.show("leaf")  # the wheel took the app to another activity
+        return result
+
+    def dump_failing_once(self, *args, **kwargs):
+        if state["armed"]:
+            state["armed"], state["done"] = False, True
+            raise DumpError("scripted failure")
+        return dump(self, *args, **kwargs)
+
+    monkeypatch.setattr(Device, "_wheel_scroll", wheel_then_navigate)
+    monkeypatch.setattr(Device, "dump", dump_failing_once)
+    out = tmp_path / "run"
+    run(device, clock, out, limits=ALL)
+    first = scrolls(out)[0]
+    end = next(e for e in end_lines(out) if e["action_id"] == first["action_id"])
+    assert end["dump_failed"] is True  # the end line has no screen
+    leaf_id = next(
+        p.stem
+        for p in (out / "screens").glob("s-*.json")
+        if json.loads(p.read_text("utf-8"))["app"]["activity"].endswith(".Leaf")
+    )
+    # the page that was read later is a screen of its own, and no read of the list
+    assert not (out / "screens" / f"scroll-{first['action_id']}.json").exists()
+    tree = read_tree(out)
+    rows = tree.screens[first["from_screen_id"]].rows
+    assert all(r.after_scroll is None for r in rows)
+    assert leaf_id in tree.screens

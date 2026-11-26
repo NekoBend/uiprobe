@@ -458,6 +458,7 @@ from uiprobe.guards.scroll import (
     container_key,
     elements_at,
     is_dialog,
+    lists_key,
     scroll_container,
     scroll_target,
 )
@@ -552,6 +553,7 @@ __all__ = [
     "elements_at",
     "is_dialog",
     "judge",
+    "lists_key",
     "normalize",
     "parse_deny_file",
     "scroll_container",

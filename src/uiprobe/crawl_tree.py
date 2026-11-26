@@ -1329,7 +1329,11 @@ _View = tuple[int | None, Screen]
 
 
 def _scroll_views(
-    screen: Screen, moves: _Moves, reader: _Reader, members: set[str]
+    screen: Screen,
+    moves: _Moves,
+    reader: _Reader,
+    members: set[str],
+    activity: str | None,
 ) -> list[_View]:
     """The reads of a screen: its own file (scroll id None), then the
     screen read after each sent scroll that was sent on it (or on another id of
@@ -1343,7 +1347,9 @@ def _scroll_views(
         ):
             continue
         loaded = reader.load_scroll(scroll.action_id)
-        if loaded is not None:
+        # A read of another activity (a scroll whose end line says the dump failed,
+        # then a read of another page) is not more of the list.
+        if loaded is not None and loaded[2] == activity:
             views.append((scroll.action_id, loaded[0]))
     return views
 
@@ -1518,7 +1524,7 @@ def _node(
 ) -> ScreenNode:
     screen, screen_package, activity = loaded
     members = {sid, *(a for a, first in moves.family.items() if first == sid)}
-    views = _scroll_views(screen, moves, reader, members)
+    views = _scroll_views(screen, moves, reader, members, activity)
     taps_by: dict[tuple[int | None, str], list[_Tap]] = {}
     for (from_id, element_id), taps in moves.taps.items():
         if from_id not in members:
@@ -1529,8 +1535,8 @@ def _node(
                 if len(views) > 1
                 else (False, None)
             )
-            if from_id != sid and (not found or view is None):
-                continue  # another id of this screen: only what a scroll showed
+            if from_id != sid and not found:
+                continue  # another id of this screen: only what its reads show
             taps_by.setdefault((view, element_id), []).append(tap)
     own_ids = {eid for (vid, eid) in taps_by if vid is None}
     first = _rows_of(screen, own_ids, record_text=record_text)

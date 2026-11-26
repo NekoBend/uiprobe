@@ -367,13 +367,15 @@ class Settings:
     version 3, and ``skip_navigate_up`` and ``skip_sliders`` (both default
     True), added with defaults version 4, ``replay_path`` (default True), added
     with defaults version 5, ``record_text`` (default True), added with
-    defaults version 6, ``scroll_lists`` (default `DEFAULT_SCROLL_LISTS`) and
-    ``scrolls_per_screen`` (default `DEFAULT_SCROLLS_PER_SCREEN`), added with
-    defaults version 7, and ``runs_dir`` (default None, an
+    defaults version 6, and ``runs_dir`` (default None, an
     optional key that needed no new defaults version), follow it for the same
     reason. ``also_target`` (default ``()``), added with defaults version 8,
-    comes after it for the same reason, and ``back_on_other_screens`` (default
-    False), added with defaults version 9, last.
+    comes after it for the same reason, then ``back_on_other_screens`` (default
+    False), added with defaults version 9, and last ``scroll_lists`` (default
+    `DEFAULT_SCROLL_LISTS`, False) and ``scrolls_per_screen``,
+    ``scroll_amount`` and ``scroll_incidents`` (defaults
+    `DEFAULT_SCROLLS_PER_SCREEN`, `DEFAULT_SCROLL_AMOUNT` and
+    `DEFAULT_SCROLL_INCIDENTS`), added with defaults version 10.
     """
 
     source: Path

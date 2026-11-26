@@ -135,7 +135,7 @@ def crawl(
     restart: bool = True,
     record_text: bool = True,
     on_progress: Callable[[Progress], None] | None = None,
-    _wheel: bool | None = None,
+    _on_checked: Callable[[bool | None], None] | None = None,
 ) -> CrawlResult:
     """Crawl `package` on `device`, pressing what the guards allow, into `out`.
 
@@ -279,9 +279,8 @@ def crawl(
     _check_flag("allow_real_device", allow_real_device)
     _check_flag("restart", restart)
     _check_flag("record_text", record_text)
-    if _wheel is not None and type(_wheel) is not bool:
-        msg = f"_wheel must be a bool or None, not {type(_wheel).__name__}"
-        raise TypeError(msg)
+    if _on_checked is not None:
+        _check_callable("_on_checked", _on_checked)
     if screenshots and not record_text:
         msg = (
             "screenshots cannot be combined with record_text=False: a screenshot"
@@ -332,7 +331,7 @@ def crawl(
             restart=restart,
             record_text=record_text,
             on_progress=on_progress,
-            wheel=_wheel,
+            on_checked=_on_checked,
         )
     finally:
         device.set_pin_watch(caller_watch)
@@ -355,27 +354,27 @@ def _crawl_on(
     restart: bool,
     record_text: bool,
     on_progress: Callable[[Progress], None] | None,
-    wheel: bool | None,
+    on_checked: Callable[[bool | None], None] | None,
 ) -> CrawlResult:
     """`crawl` after its arguments were checked: pin, check, run."""
     forget_displays(device)  # several displays seen count within one run
     device.pin_transport()
     _check_device(device, allow_real_device=allow_real_device)
     # Whether the device can scroll with a mouse wheel comes from its own
-    # `input` usage, read once and before anything is sent: here, or by
-    # `uiprobe crawl --press` for its plan, which hands over that same answer
-    # (`_wheel`) so that the plan and the run cannot disagree. When it cannot be
-    # read or does not list the wheel scroll, the run does not scroll (the
-    # engine gets the policy with the switch off). With the switch off nothing
-    # is read.
+    # `input` usage, which only the driver reads, once, after the device check
+    # and before anything is sent or written; no caller can say what it lists.
+    # When it cannot be read or does not list the wheel scroll, the run does not
+    # scroll (the engine gets the policy with the switch off). With the switch
+    # off nothing is read. `uiprobe crawl --press` is told the answer (or None
+    # when nothing was read) through `_on_checked` to print it in its plan.
     asked = policy.scroll_lists
+    wheel = False
     if asked:
-        if wheel is None:
-            wheel = device._wheel_supported()  # noqa: SLF001 - internal to uiprobe
+        wheel = device._wheel_supported()  # noqa: SLF001 - internal to uiprobe
         if not wheel:
             policy = replace(policy, scroll_lists=False)
-    else:
-        wheel = False
+    if on_checked is not None:
+        on_checked(wheel if asked else None)
     # The app's uid, which a tap's window must have (Policy.check_tap_window),
     # and whether other packages share it; None when it cannot be read: then
     # every tap is refused (cover_unknown) before any window is read.

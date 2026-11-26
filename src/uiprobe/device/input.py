@@ -33,21 +33,38 @@ from uiprobe.device.text import (
 from uiprobe.errors import InputFailedError, UiprobeError
 from uiprobe.model import Bounds, Element
 
-_SCROLL_LINE = re.compile(r"scroll\s+<x>\s+<y>(?P<rest>.*)")
+_SCROLL_LINE = re.compile(
+    r"(?:(?P<source>[A-Za-z_]+)\s+)?scroll\s+<x>\s+<y>(?P<rest>.*)"
+)
 _AXIS_LIST = re.compile(r"\[\s*--axis\s+(?P<axes>[^\]]*)\]")
+_DEFAULT_SOURCES = re.compile(r"\(\s*Default:\s*(?P<sources>[^)]*)\)")
 _PLACEHOLDER = re.compile(r"<[^<>\s]+>")
 
 
-def _lists_wheel(usage: str) -> bool:
-    """Whether the usage text of ``input`` lists the ``mouse`` source, a
-    ``scroll <x> <y>`` line and ``VSCROLL`` as an axis of that line.
+def _line_sources(found: re.Match[str]) -> set[str]:
+    """The sources a ``scroll <x> <y>`` line is for: the word before the
+    command, else the ``(Default: ...)`` of the line; none when it names none."""
+    if found["source"]:
+        return {found["source"].lower()}
+    default = _DEFAULT_SOURCES.search(found["rest"])
+    if default is None:
+        return set()
+    return {word.lower() for word in re.split(r"[\s,]+", default["sources"]) if word}
 
-    The axis is read from the bracketed ``[--axis ...]`` option list of the
-    scroll line only, split into comma and space separated words: ``VSCROLL``
-    must be a word of its own, followed by its value placeholder (``<v>``) or
-    by the end of the list. The word anywhere else (outside the brackets, in
-    a note such as ``VSCROLL unsupported``, inside a longer word) does not
-    count.
+
+def _lists_wheel(usage: str) -> bool:
+    """Whether the usage text of ``input`` lists the ``mouse`` source and a
+    ``scroll <x> <y>`` command of that source with ``VSCROLL`` as an axis.
+
+    Read per source: the scroll line must name the ``mouse`` source (as the
+    word before the command, or in its ``(Default: ...)``); a line for another
+    source (``rotary``, say) that lists ``VSCROLL`` is no support, and neither is
+    a line that names no source. The axis is read from the bracketed
+    ``[--axis ...]`` option list of that line only, split into comma and space
+    separated words: ``VSCROLL`` must be a word of its own, followed by its value
+    placeholder (``<v>``) or by the end of the list. The word anywhere else
+    (outside the brackets, in a note such as ``VSCROLL unsupported``, inside a
+    longer word) does not count.
     """
     listed = [line.strip() for line in _lines(usage)]
     mouse = any(
@@ -57,7 +74,9 @@ def _lists_wheel(usage: str) -> bool:
     )
     for line in listed:
         found = _SCROLL_LINE.fullmatch(line)
-        axes = _AXIS_LIST.search(found["rest"]) if found else None
+        if found is None or "mouse" not in _line_sources(found):
+            continue
+        axes = _AXIS_LIST.search(found["rest"])
         if axes is None:
             continue
         words = [w for w in re.split(r"[,\s]+", axes["axes"]) if w]
