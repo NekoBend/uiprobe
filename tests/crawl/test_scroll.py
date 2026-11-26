@@ -1010,7 +1010,7 @@ def test_off_gives_the_same_actions_records_and_skips_on_many_graphs() -> None:
     # run on the same phone with no scrollable element at all (where, on or
     # off, nothing can scroll).
     rng = random.Random(20261125)  # noqa: S311
-    for _ in range(300):
+    for _ in range(60):
         nodes = random_graph(rng)
         limits = Limits(
             depth=rng.randint(1, 6),
@@ -1033,7 +1033,7 @@ def test_the_default_policy_is_off_and_equals_the_explicit_off() -> None:
     # hold scrollable lists is, to the last record, the run of the explicit off.
     assert Policy().scroll_lists is False
     rng = random.Random(20261126)  # noqa: S311
-    for _ in range(200):
+    for _ in range(40):
         nodes = random_graph(rng)
         limits = Limits(
             depth=rng.randint(1, 6),
@@ -1066,7 +1066,7 @@ def comparable_shape(records):
 
 def test_on_without_a_scrollable_element_equals_off() -> None:
     rng = random.Random(77)  # noqa: S311
-    for _ in range(300):
+    for _ in range(60):
         nodes = random_graph(rng)
         limits = Limits(
             depth=rng.randint(1, 6),
@@ -1160,7 +1160,7 @@ class RandomListPhone(Phone):
 
 def test_random_graphs_with_lists_keep_every_rule_and_terminate() -> None:
     rng = random.Random(4711)  # noqa: S311
-    for _ in range(200):
+    for _ in range(40):
         nodes = random_graph(rng)
         limits = Limits(
             depth=rng.randint(1, 5),

@@ -316,7 +316,9 @@ def rewrite(folder: Folder, edit) -> None:
     for line in lines:
         edit(line)
     path.write_text(
-        "".join(json.dumps(line) + "\n" for line in lines), encoding="utf-8"
+        "".join(json.dumps(line) + "\n" for line in lines),
+        encoding="utf-8",
+        newline="\n",
     )
 
 
@@ -901,3 +903,14 @@ def test_a_reason_decided_on_the_first_id_still_shows(tmp_path):
     }
     assert rows["B"].reasons == ("toggle",)
     del second
+
+
+def test_rewrite_keeps_the_lines_as_the_writer_ends_them(tmp_path):
+    # On Windows a plain write_text would end them with CRLF, which the tree
+    # takes for a file not as uiprobe writes it.
+    folder, _first, _after, _number = one_scroll(tmp_path)
+    rewrite(folder, lambda _line: None)
+    data = log_of(folder).read_bytes()
+    assert b"\r" not in data
+    assert data.endswith(b"\n")
+    assert read_tree(folder.path).warnings == []

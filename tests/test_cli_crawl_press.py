@@ -14,12 +14,25 @@ from tests.crawl_driver.helpers import OTHER, SCREENS, SERIAL, SHOP, TRANSPORT
 from tests.fake_device import FakeAndroid
 from tests.helpers import no_out_message
 from uiprobe import cli
+from uiprobe.cli import crawl_press
 from uiprobe.crawl_driver import CrawlResult
 from uiprobe.device import Device
 from uiprobe.settings import SETTINGS_FILE, _shown, render_default_settings
 
 if TYPE_CHECKING:
     from tests.fake_adb_server import FakeAdbServer
+
+
+@pytest.fixture(autouse=True)
+def _no_settle_pause(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The command pauses one second after each action by default (a real sleep
+    in the driver, `--settle`); these tests do not look at the pause, so it is
+    zero unless a test gives `--settle` itself."""
+    monkeypatch.setattr(
+        crawl_press,
+        "_press_settle",
+        lambda args: 0.0 if args.settle is None else args.settle,
+    )
 
 
 @pytest.fixture
