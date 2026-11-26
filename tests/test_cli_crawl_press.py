@@ -1092,9 +1092,8 @@ def test_the_plan_says_when_the_device_does_not_list_the_wheel_scroll(
     assert begin["scroll_lists"] is True
     assert begin["scroll_input"] is False
     reads = [c for _, _, c in fake_adb.commands if c == "input"]
-    # once by the command for the plan, once by the run itself: only the run's
-    # own read decides, and it is the one run-start.json records
-    assert len(reads) == 2
+    # read once, by the command for the plan; the run takes that answer
+    assert len(reads) == 1
 
 
 @pytest.mark.usefixtures("here", "android")

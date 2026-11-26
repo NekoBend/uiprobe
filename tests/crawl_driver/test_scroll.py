@@ -269,6 +269,20 @@ def test_with_the_switch_off_nothing_is_swiped_and_nothing_is_added_to_the_recor
     assert result.actions == 1 + 8 * 2
 
 
+def test_the_default_policy_reads_no_usage_and_sends_no_wheel(
+    tmp_path, device, android, clock, fake_adb
+):
+    # Scrolling is opt-in: a policy that says nothing about it is off.
+    assert Policy().scroll_lists is False
+    out = tmp_path / "run"
+    result = run_crawl(device, clock, out, limits=ALL)
+    assert result.stop_reason == "exhausted"
+    assert tapped(out) == [f"Row {n:02d}" for n in range(1, 9)]
+    assert wheels(android) == []
+    assert not [c for _, _, c in fake_adb.commands if c == "input"]
+    assert "scroll_lists" not in json.loads((out / "run-start.json").read_bytes())
+
+
 def test_the_cap_is_the_limit_of_the_run(tmp_path, device, clock):
     out = tmp_path / "run"
     run(device, clock, out, limits=Limits(actions=200, scrolls_per_screen=1))

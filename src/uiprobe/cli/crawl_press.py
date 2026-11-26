@@ -56,6 +56,8 @@ _LimitSource = Literal["option", "file", "default"]
 # Where BACK on screens of other apps came from (the
 # "back_on_other_screens_source" values).
 _BackSource = Literal["option", "file", "default"]
+# Where scrolling lists came from (the "scroll_lists_source" values).
+_ScrollSource = Literal["option", "file", "default"]
 
 
 def _cmd_crawl(args: argparse.Namespace) -> int:
@@ -159,6 +161,23 @@ def _press_back(args: argparse.Namespace, policy: Policy) -> tuple[bool, _BackSo
     if args.no_back_on_other_screens:
         return False, "option"
     if policy.back_on_other_screens:
+        return True, "file"
+    return False, "default"
+
+
+def _press_scroll(
+    args: argparse.Namespace, policy: Policy
+) -> tuple[bool, _ScrollSource]:
+    """Whether the run asks to scroll lists with the mouse wheel, and why.
+
+    An option decides when given (the parser refuses both together), else the
+    settings file's ``scroll_lists`` (already in `policy`), else off.
+    """
+    if args.scroll:
+        return True, "option"
+    if args.no_scroll:
+        return False, "option"
+    if policy.scroll_lists:
         return True, "file"
     return False, "default"
 
@@ -269,9 +288,11 @@ def _cmd_crawl_press(args: argparse.Namespace, setup: _CrawlSetup) -> int:  # no
         )
         raise _UsageError(msg)
     back, back_source = _press_back(args, setup.policy)
+    scroll, scroll_source = _press_scroll(args, setup.policy)
     policy = replace(
         setup.policy,
         back_on_other_screens=back,
+        scroll_lists=scroll,
         check_tap_window=not args.no_tap_window_check,
     )
     assert setup.out is not None  # noqa: S101 - _crawl_policy sets it to press
@@ -301,10 +322,9 @@ def _cmd_crawl_press(args: argparse.Namespace, setup: _CrawlSetup) -> int:  # no
                 details={"serial": device.serial, "reason": reason},
             )
             raise _cli_not_emulator(device, refusal)
-    # The plan says whether the device's own `input` usage lists the wheel
-    # scroll, so it is read here for the plan; crawl_run reads it again itself
-    # and decides on its own read (run-start.json records that one). Nothing is
-    # read when the run was not asked to scroll.
+    # The device's own `input` usage is read here, once, and only when the run
+    # asks to scroll: the plan prints this answer and the run uses the same one
+    # (`crawl_run` takes it and does not read again; run-start.json records it).
     wheel = device._wheel_supported() if policy.scroll_lists else None  # noqa: SLF001
     plan: dict[str, object] = {
         "package": args.package,
@@ -326,6 +346,7 @@ def _cmd_crawl_press(args: argparse.Namespace, setup: _CrawlSetup) -> int:  # no
         "record_text": record_text,
         **({"also_target": list(policy.also_target)} if policy.also_target else {}),
         "scroll_lists": policy.scroll_lists and wheel is True,
+        "scroll_lists_source": scroll_source,
         "scroll_input": wheel,
         "scrolls_per_screen": limits.scrolls_per_screen,
         "scroll_amount": limits.scroll_amount,
@@ -358,6 +379,7 @@ def _cmd_crawl_press(args: argparse.Namespace, setup: _CrawlSetup) -> int:  # no
             restart=not args.no_restart,
             record_text=record_text,
             on_progress=None if args.quiet else _ProgressPrinter(sys.stderr),
+            _wheel=wheel,
         )
     except KeyboardInterrupt as exc:
         # crawl_run wrote run.json with "interrupted" when it still could.

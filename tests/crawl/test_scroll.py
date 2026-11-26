@@ -1014,6 +1014,27 @@ def test_off_gives_the_same_actions_records_and_skips_on_many_graphs() -> None:
         assert comparable_shape(off[1]) == comparable_shape(bare[1])
 
 
+def test_the_default_policy_is_off_and_equals_the_explicit_off() -> None:
+    # Nothing is asked for, so nothing scrolls: the run on phones whose screens
+    # hold scrollable lists is, to the last record, the run of the explicit off.
+    assert Policy().scroll_lists is False
+    rng = random.Random(20261126)  # noqa: S311
+    for _ in range(200):
+        nodes = random_graph(rng)
+        limits = Limits(
+            depth=rng.randint(1, 6),
+            actions=rng.randint(1, 80),
+            minutes=rng.choice([1, 2, 30]),
+        )
+        default = run_graph(nodes, limits, Policy(), ScrollablePhone)
+        explicit = run_graph(nodes, limits, OFF, ScrollablePhone)
+        assert default[0] == explicit[0]
+        assert default[1] == explicit[1]
+        assert default[2] == explicit[2]
+        assert not any(isinstance(a, Scroll) for a in default[0])
+        assert not any(t.kind == "scroll" for t in default[1].transitions)
+
+
 def kind_and_point(action):
     return (type(action).__name__, getattr(action, "point", None))
 
