@@ -67,7 +67,9 @@ def test_a_listed_package_is_pressed_and_named_in_the_plan_and_the_record(
 ):
     settings_with(here, f'["{HELPER}"]')
     out = here / "run"
-    code, text, err = crawl(capsys, fake_adb, "--press", *FAST, "--out", str(out))
+    code, text, err = crawl(
+        capsys, fake_adb, "--press", *FAST, "--quiet", "--out", str(out)
+    )
     assert (code, err) == (0, "")
     assert (
         f"also pressing in: {HELPER} (also_target in the settings file; system UI,"
@@ -100,7 +102,7 @@ def test_the_json_plan_has_the_list_only_when_there_is_one(fake_adb, capsys, her
 def test_an_empty_list_sends_and_reads_nothing_extra(fake_adb, capsys, here):
     settings_with(here, "[]")
     code, text, err = crawl(
-        capsys, fake_adb, "--press", *FAST, "--out", str(here / "r")
+        capsys, fake_adb, "--press", *FAST, "--quiet", "--out", str(here / "r")
     )
     assert (code, err) == (0, "")
     assert "also pressing in" not in text
@@ -266,3 +268,140 @@ def test_init_writes_the_entry_commented_and_the_file_loads(
     ) in text
     assert load_settings(out).also_target == ()
     assert fake_adb.requests == []
+
+
+# -- end to end: pressing in a listed app on the fake device --------------------------
+
+E2E_OTHER = "com.example.other"
+E2E_TREE = """\
+com.example.shop (com.example.shop)  also target: com.example.helper
+├─ Open helper
+│  ├─ Settings
+│  │  └─ Advanced
+│  │     └─ (screen with no named rows)
+│  ├─ Delete everything ·
+│  ├─ About → see: Advanced
+│  └─ Open other → com.example.other
+├─ Visit other → com.example.other
+├─ Camera → com.google.android.permissioncontroller
+└─ Notes ·
+· = not pressed, so nothing below it was looked at
+→ PACKAGE = pressing it opened that app
+→ see: X = it led to a screen already shown under X
+(screen with no named rows) = the screen it led to has no row with a name (see --json)
+left out of the tree (see --json): rows not sent: 1, texts outside rows: 4
+"""
+
+
+def e2e_screens():
+    from tests.crawl_driver.helpers import button
+    from tests.fake_device import El, Screen, permission_dialog
+
+    return (
+        Screen("home", "com.example.launcher/.Home", (El((0, 0, 320, 640)),)),
+        Screen(
+            "main",
+            f"{SHOP}/.Main",
+            (
+                El((0, 0, 320, 100), text="Shop"),
+                button(200, "Open helper", "helper"),
+                button(260, "Visit other", "ext"),
+                button(320, "Camera", "permission"),
+                button(380, "Notes", "notes"),
+            ),
+        ),
+        Screen("notes", f"{SHOP}/.Notes", (El((0, 0, 320, 100), text="Notes"),)),
+        Screen(
+            "helper",
+            f"{HELPER}/.Main",
+            (
+                El((0, 0, 320, 100), text="Helper"),
+                button(200, "Settings", "helper2"),
+                button(260, "Delete everything", "helper"),
+                button(320, "About", "helper3"),
+                button(380, "Open other", "ext"),
+            ),
+        ),
+        Screen(
+            "helper2",
+            f"{HELPER}/.Two",
+            (El((0, 0, 320, 100), text="Two"), button(200, "Advanced", "helper3")),
+        ),
+        Screen("helper3", f"{HELPER}/.Three", (El((0, 0, 320, 100), text="About"),)),
+        Screen("ext", f"{E2E_OTHER}/.One", (El((0, 0, 320, 640)),)),
+        permission_dialog(),
+    )
+
+
+def test_end_to_end_pressing_in_a_listed_app_on_the_fake_device(fake_adb, capsys, here):
+    android = FakeAndroid(
+        fake_adb, SERIAL, e2e_screens(), start="home", transport_id=TRANSPORT
+    )
+    # a window of the listed app floats over the shop's "Notes" row
+    android.overlays.append((f"{HELPER}/.Float", HELPER, (20, 380, 300, 420)))
+    settings_with(here, f'["{HELPER}"]')
+    out = here / "run"
+    code, text, _err = crawl(
+        capsys, fake_adb, "--press", *FAST, "--out", str(out), "--actions", "60"
+    )
+    assert code == 0, text
+    taps = [(i.screen, i.point) for i in android.inputs if i.kind == "tap"]
+    pressed = {s for s, _ in taps}
+    # the listed app's rows are pressed
+    assert {"helper", "helper2"} <= pressed
+    assert ("helper", (160, 220)) in taps
+    assert ("helper", (160, 340)) in taps
+    # a deny word in the listed app is refused as in the shop
+    assert ("helper", (160, 280)) not in taps
+    # the unlisted app and the permission dialog get no tap and no BACK
+    assert not [i for i in android.inputs if i.screen in {"ext", "permission"}]
+    # the listed app's window over the shop's row: refused, nothing pressed there
+    assert ("main", (160, 400)) not in taps
+    assert "notes" not in pressed
+    ends = [
+        json.loads(line)
+        for line in (out / "transitions.jsonl").read_text("utf-8").splitlines()
+    ]
+    assert any(r.get("reason") == "covered_by_other" for r in ends)
+    starts = [r for r in ends if "action" in r]
+    kinds = [r["action"]["kind"] for r in starts]
+    assert "relaunch" in kinds  # the unlisted app and the dialog: relaunch
+    named = {r["off_target"]["package"] for r in starts if "off_target" in r}
+    assert named == {E2E_OTHER, "com.google.android.permissioncontroller"}
+    # the listed app is never launched or stopped
+    assert set(android.stopped) == {SHOP}
+    assert not [r for r in fake_adb.requests if "am " in r and HELPER in r]
+    # the home app was read once, and the run folder lists the package
+    assert len(home_reads(fake_adb)) == 1
+    start = json.loads((out / "run-start.json").read_text("utf-8"))
+    assert start["also_target"] == [HELPER]
+    # the tree of the run, as the pull request shows it
+    code = cli.run(["tree", str(out)])
+    tree = capsys.readouterr().out
+    assert code == 0
+    assert tree == E2E_TREE
+
+
+def test_end_to_end_with_back_on_other_screens_the_unlisted_app_gets_back(
+    fake_adb, capsys, here
+):
+    android = FakeAndroid(
+        fake_adb, SERIAL, e2e_screens(), start="home", transport_id=TRANSPORT
+    )
+    settings_with(here, f'["{HELPER}"]')
+    out = here / "run"
+    code, _text, _err = crawl(
+        capsys,
+        fake_adb,
+        "--press",
+        *FAST,
+        "--back-on-other-screens",
+        "--out",
+        str(out),
+        "--actions",
+        "60",
+    )
+    assert code == 0
+    keys = [i for i in android.inputs if i.kind == "key"]
+    assert any(i.screen == "ext" for i in keys)  # BACK, as before the setting
+    assert not [i for i in android.inputs if i.kind == "tap" and i.screen == "ext"]
