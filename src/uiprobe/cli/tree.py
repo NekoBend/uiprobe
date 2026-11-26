@@ -34,6 +34,28 @@ from uiprobe.htmlfile import HtmlFileError, check_html_path, save_html
 from uiprobe.settings import _shown
 
 LEGEND: Final = "· = not pressed, so nothing below it was looked at"
+
+# The kinds of reason that the normal view (without `--why`) shows in brackets
+# in place of the dot, as (reason, label, legend line), in the order they are
+# written. No other reason is a kind; `--why` shows every reason as it is.
+KIND_LABELS: Final = (
+    (
+        "toggle",
+        "toggle",
+        "[toggle] = it holds a switch or checkbox, so it was not pressed",
+    ),
+    (
+        "navigate_up",
+        "back",
+        "[back] = the screen's navigate-up button, which is not pressed",
+    ),
+    (
+        "slider",
+        "slider",
+        "[slider] = it is or overlaps a slider, so it was not pressed",
+    ),
+    ("disabled", "disabled", "[disabled] = it was disabled, so it was not pressed"),
+)
 LEGEND_DESC: Final = (
     '"..." = the element has no visible text; this is its accessibility description'
 )
@@ -113,6 +135,7 @@ class _Entry:
     note: str = ""
     dot: bool = False
     reasons: str = ""
+    kinds: str = ""  # " [toggle, disabled]": shown in place of the dot
 
 
 def _heading_text(tree: RunTree, sid: str) -> str:
@@ -173,9 +196,16 @@ def _row_line(row: Row, note: str | None, *, why: bool, tally: _Tally) -> _Entry
     if note is not None and row.to is not None and "other_app" in row.to:
         tally.marks.add("arrow")
     reasons = ""
+    kinds = ""
     if not row.pressed:
-        tally.marks.add("dot")
-        line += " ·"
+        labels = [] if why else [k for k in KIND_LABELS if k[0] in row.reasons]
+        if labels:
+            kinds = " [" + ", ".join(k[1] for k in labels) + "]"
+            tally.marks.update("kind:" + k[0] for k in labels)
+            line += kinds
+        else:
+            tally.marks.add("dot")
+            line += " ·"
         if why and row.reasons:
             reasons = " [" + ", ".join(_printable(r) for r in row.reasons) + "]"
             line += reasons
@@ -187,6 +217,7 @@ def _row_line(row: Row, note: str | None, *, why: bool, tally: _Tally) -> _Entry
         note=note or "",
         dot=not row.pressed,
         reasons=reasons,
+        kinds=kinds,
     )
 
 
@@ -642,6 +673,7 @@ def _drawn(tree: RunTree, *, ids: bool, why: bool, html: bool = False) -> _Rende
 
 _LEGENDS: Final = (
     ("dot", LEGEND),
+    *((f"kind:{reason}", text) for reason, _, text in KIND_LABELS),
     ("desc", LEGEND_DESC),
     ("arrow", LEGEND_ARROW),
     ("see", LEGEND_SEE),
@@ -719,7 +751,7 @@ class _HtmlBuilder:
     def row(self, entry: _Entry) -> HRow:
         if entry.label is None:
             return HRow(entry.text)
-        return HRow(entry.label, entry.note, entry.dot, entry.reasons)
+        return HRow(entry.label, entry.note, entry.dot, entry.reasons, entry.kinds)
 
     def forest(self, section: _Section) -> list[HRow | HFold]:
         """The rows of a section, with the folds that hang on them."""
