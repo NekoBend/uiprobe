@@ -1318,8 +1318,7 @@ def _attach(
         _rename(row, best.element)
     shown = [row.to]
     row.other_attempt = any(
-        _rank(tap) != 0
-        or "same_screen" not in _ending(tap, sid, package, reader, moves)
+        _rank(tap) != 0 or "same_screen" not in _ending(tap, sid, own, reader, moves)
         for tap in taps
     )
     for tap in taps:
