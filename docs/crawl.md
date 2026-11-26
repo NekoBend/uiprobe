@@ -192,7 +192,7 @@ Exit codes: 0 when the run ended by one of its stop reasons, also when nothing c
 
 ## Seeing the result as a tree
 
-`uiprobe tree RUN_DIR` shows a finished (or interrupted) run folder as a tree of screens: every row of each screen with its name, which rows were pressed and where they led, and which rows were not pressed (marked with ` ·`, nothing below them was looked at). It reads only the run folder, so it can be run again at any time, without a device. `--why` adds the reason each unpressed row was skipped, `--ids` adds screen ids and activities, and `--json` gives the same graph as data. See [Showing a crawl run as a tree](commands.md#showing-a-crawl-run-as-a-tree).
+`uiprobe tree RUN_DIR` shows a finished (or interrupted) run folder as a tree of screens: every row of each screen with its name, which rows were pressed and where they led, and which rows were not pressed (marked with ` ·`, or with a kind such as `[toggle]`, `[back]`, `[slider]` or `[disabled]` when the skip reason is one of those; nothing below them was looked at). It reads only the run folder, so it can be run again at any time, without a device. `--why` adds the reason each unpressed row was skipped, `--ids` adds screen ids and activities, and `--json` gives the same graph as data. See [Showing a crawl run as a tree](commands.md#showing-a-crawl-run-as-a-tree).
 
 ```console
 $ uiprobe tree runs/first

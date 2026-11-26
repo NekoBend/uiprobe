@@ -23,6 +23,10 @@ if TYPE_CHECKING:
 PACKAGE = "com.example.app"
 OTHER_SCREEN = "s-aaaaaaaaaaaa"
 LEGEND = "· = not pressed, so nothing below it was looked at"
+LEGEND_TOGGLE = "[toggle] = it holds a switch or checkbox, so it was not pressed"
+LEGEND_BACK = "[back] = the screen's navigate-up button, which is not pressed"
+LEGEND_SLIDER = "[slider] = a slider, which is not pressed"
+LEGEND_DISABLED = "[disabled] = it was disabled, so it was not pressed"
 LEGEND_DESC = (
     '"..." = the element has no visible text; this is its accessibility description'
 )
@@ -210,12 +214,13 @@ FULL_TEXT = [
     "│     └─ (screen with no named rows)",
     "├─ About → see: Info",
     '├─ "Menu" ·',
-    "├─ Wi-Fi ·",
+    "├─ Wi-Fi [toggle]",
     "├─ Same",
     "├─ Other app → com.other.app",
     "├─ Broken",
     "└─ Blocked ·",
     LEGEND,
+    LEGEND_TOGGLE,
     LEGEND_DESC,
     LEGEND_ARROW,
     LEGEND_SEE,
@@ -2185,7 +2190,7 @@ def test_a_file_that_fails_still_shows_the_rows_that_were_tapped(tmp_path, capsy
     lines = out.splitlines()
     assert "├─ Network ·" in lines
     assert "├─ Same ·" in lines
-    assert "├─ Wi-Fi ·" in lines
+    assert "├─ Wi-Fi [toggle]" in lines
 
 
 def test_a_file_that_passes_shows_its_results(tmp_path, capsys):
@@ -2657,3 +2662,103 @@ def test_a_popup_screens_texts_unnamed_and_unmatched_skips_are_still_counted(
         "texts outside rows: 2, unnamed elements: 1, "
         "skip records not matched to a row: 1"
     )
+
+
+def _skip_run(tmp_path, *skips):
+    """A run whose home screen has one unpressed row named "Row" per entry of
+    `skips` (a tuple of reasons, possibly empty), in the order given."""
+    folder = Folder(tmp_path)
+    elements = [el(1, cls="FrameLayout")]
+    for i, _ in enumerate(skips):
+        elements += [
+            el(2 + 2 * i, 1, cls="LinearLayout", flags=CLICK),
+            el(3 + 2 * i, 2 + 2 * i, text=f"Row{i}"),
+        ]
+    home = make_screen(".Home", elements)
+    sid = folder.screen(home)
+    folder.start("launch")
+    folder.end(sid)
+    for i, reasons in enumerate(skips):
+        if reasons:
+            folder.skip(home, 2 + 2 * i, *reasons)
+    folder.finish()
+    return folder
+
+
+@pytest.mark.parametrize(
+    ("reason", "label", "legend"),
+    [
+        ("toggle", "toggle", LEGEND_TOGGLE),
+        ("navigate_up", "back", LEGEND_BACK),
+        ("slider", "slider", LEGEND_SLIDER),
+        ("disabled", "disabled", LEGEND_DISABLED),
+    ],
+)
+def test_each_kind_replaces_the_dot_and_has_its_legend_line(
+    tmp_path, capsys, reason, label, legend
+):
+    folder = _skip_run(tmp_path, (reason,))
+    _, out, _ = run_tree(capsys, str(folder.path))
+    assert out.splitlines() == [
+        "com.example.app (com.example.app)",
+        f"└─ Row0 [{label}]",
+        legend,
+    ]
+
+
+def test_two_kinds_share_one_bracket_in_the_fixed_order(tmp_path, capsys):
+    folder = _skip_run(tmp_path, ("disabled", "deny_word", "toggle"))
+    _, out, _ = run_tree(capsys, str(folder.path))
+    assert out.splitlines() == [
+        "com.example.app (com.example.app)",
+        "└─ Row0 [toggle, disabled]",
+        LEGEND_TOGGLE,
+        LEGEND_DISABLED,
+    ]
+
+
+def test_a_reason_that_is_not_a_kind_or_no_reason_keeps_the_dot(tmp_path, capsys):
+    folder = _skip_run(tmp_path, ("deny_word", "screen_edge"), ())
+    _, out, _ = run_tree(capsys, str(folder.path))
+    assert out.splitlines() == [
+        "com.example.app (com.example.app)",
+        "├─ Row0 ·",
+        "└─ Row1 ·",
+        LEGEND,
+    ]
+
+
+def test_the_legend_has_only_the_labels_and_the_dot_that_are_shown(tmp_path, capsys):
+    folder = _skip_run(tmp_path, ("slider",), ("confirm_button",), ("toggle",))
+    _, out, _ = run_tree(capsys, str(folder.path))
+    assert out.splitlines()[1:] == [
+        "├─ Row0 [slider]",
+        "├─ Row1 ·",
+        "└─ Row2 [toggle]",
+        LEGEND,
+        LEGEND_TOGGLE,
+        LEGEND_SLIDER,
+    ]
+
+
+def test_why_shows_every_reason_and_the_dot_not_the_labels(tmp_path, capsys):
+    folder = _skip_run(tmp_path, ("toggle", "disabled", "deny_word"))
+    _, out, _ = run_tree(capsys, str(folder.path), "--why")
+    assert out.splitlines() == [
+        "com.example.app (com.example.app)",
+        "└─ Row0 · [toggle, disabled, deny_word]",
+        LEGEND,
+    ]
+
+
+def test_a_folded_line_shows_the_kinds_of_all_its_elements(tmp_path, capsys):
+    folder = Folder(tmp_path)
+    home = _samsung_wifi()
+    sid = folder.screen(home)
+    folder.start("launch")
+    folder.end(sid)
+    folder.skip(home, 2, "disabled")
+    folder.skip(home, 4, "toggle")
+    folder.finish()
+    _, out, _ = run_tree(capsys, str(folder.path))
+    assert out.splitlines()[1] == "└─ Wi-Fi [toggle, disabled]"

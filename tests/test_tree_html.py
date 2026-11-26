@@ -12,14 +12,17 @@ from tests.test_tree import (
     LEGEND,
     LEGEND_ARROW,
     LEGEND_DESC,
+    LEGEND_DISABLED,
     LEGEND_EMPTY,
     LEGEND_SEE,
+    LEGEND_TOGGLE,
     SUMMARY,
     Folder,
     _button_screen,
     _close_writers,  # noqa: F401 (an autouse fixture of test_tree)
     _edit_start,
     _popup_run,
+    _skip_run,
     full_run,
     run_tree,
 )
@@ -186,13 +189,14 @@ def test_a_popup_row_gets_a_closed_fold_with_the_popup_rows(tmp_path, capsys):
     assert ask["open"] is True  # first level, with the fold below it
 
 
-def test_unpressed_rows_are_grey_and_keep_the_dot(tmp_path, capsys):
+def test_unpressed_rows_are_grey_and_keep_the_dot_or_label(tmp_path, capsys):
     folder = full_run(tmp_path)
     out_dir = tmp_path / "w"
     out_dir.mkdir()
     text, _ = page_of(out_dir, capsys, folder)
     assert (
-        '<span class="line unpressed"><span class="name">Wi-Fi</span> ·</span>' in text
+        '<span class="line unpressed"><span class="name">Wi-Fi</span> [toggle]</span>'
+        in text
     )
     assert (
         '<span class="line unpressed"><span class="name">&quot;Menu&quot;</span> ·'
@@ -225,6 +229,7 @@ def test_the_legend_and_the_summary_are_at_the_bottom(tmp_path, capsys):
     lines = [ln for ln in page.footer.splitlines() if ln.strip()]
     assert lines == [
         LEGEND,
+        LEGEND_TOGGLE,
         LEGEND_DESC,
         LEGEND_ARROW,
         LEGEND_SEE,
@@ -674,3 +679,20 @@ def test_a_run_folder_given_by_a_link_still_counts_as_the_same_folder(tmp_path, 
     assert code == 2
     assert "inside the run folder" in err
     assert not target.exists()
+
+
+def test_the_page_shows_kind_labels_in_place_of_the_dot_with_legend_lines(
+    tmp_path, capsys
+):
+    folder = _skip_run(tmp_path, ("disabled", "toggle"), ("deny_word",))
+    out_dir = _html_run(tmp_path)
+    text, page = page_of(out_dir, capsys, folder)
+    assert (
+        '<span class="line unpressed"><span class="name">Row0</span>'
+        " [toggle, disabled]</span>" in text
+    )
+    assert (
+        '<span class="line unpressed"><span class="name">Row1</span> ·</span>' in text
+    )
+    lines = [ln for ln in page.footer.splitlines() if ln.strip()]
+    assert lines == [LEGEND, LEGEND_TOGGLE, LEGEND_DISABLED]

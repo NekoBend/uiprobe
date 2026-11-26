@@ -54,6 +54,7 @@ class HRow:
     note: str = ""
     dot: bool = False
     reasons: str = ""
+    kinds: str = ""  # shown in place of the dot
     popup: bool = False
     see: tuple[str, str] | None = None  # (anchor id, name shown)
     anchor: str | None = None
@@ -107,7 +108,9 @@ def _line(row: HRow) -> str:
     parts = [f'<span class="name">{_esc(row.label)}</span>']
     if row.note:
         parts.append(_esc(row.note))
-    if row.dot:
+    if row.kinds:
+        parts.append(_esc(row.kinds))
+    elif row.dot:
         parts.append(" ·")
     if row.reasons:
         parts.append(_esc(row.reasons))
