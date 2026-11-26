@@ -33,7 +33,7 @@ from typing import TYPE_CHECKING, Final
 
 from uiprobe.also_target import AlsoTargetError, check_also_target
 from uiprobe.crawl import _Prints
-from uiprobe.guards import PERMISSION_PACKAGES
+from uiprobe.guards import MAX_SCROLL_AMOUNT, PERMISSION_PACKAGES
 from uiprobe.guards.tree import _is_dialog, _Tree
 from uiprobe.model import Bounds, Element, Screen
 from uiprobe.settings import SettingsError
@@ -763,8 +763,9 @@ _STAMP: Final = re.compile(
     r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:[+-]\d{2}:\d{2}(?::\d{2})?)?"
 )
 _SCROLL_EFFECTS: Final = ("changed", "navigation")
-# The largest amount of a wheel turn (`uiprobe.guards.MAX_SCROLL_AMOUNT`).
-_MAX_AMOUNT: Final = 10
+# The largest amount of a wheel turn: the one constant the writer
+# (`RunWriter.write_transition_start`) checks against too.
+_MAX_AMOUNT: Final = MAX_SCROLL_AMOUNT
 _KINDS: Final = frozenset({"launch", "tap", "scroll", "back", "relaunch"})
 _ELEMENT_STRINGS: Final = ("text", "resource_id", "content_desc", "hint", "parent")
 _HIDDEN_FIELDS: Final = ("text", "content_desc", "hint")
@@ -988,16 +989,36 @@ def _line_problem(line: dict[str, object]) -> str | None:
     return "schema"
 
 
+def _after_scroll_problem(
+    line: dict[str, object], scrolls: dict[int, str | None]
+) -> str | None:
+    """Why the ``after_scroll`` of a start line (if it has one) is not as uiprobe
+    writes it: it names no scroll sent before, or a scroll whose read is
+    another screen than the one the tap was decided on."""
+    after = line.get("after_scroll")
+    if after is None:
+        return None
+    if int(str(after)) not in scrolls:
+        return "an after_scroll that names no earlier scroll"
+    read = scrolls[int(str(after))]
+    if read is not None and read != line.get("from_screen_id"):
+        return "an after_scroll that names a scroll read of another screen"
+    return None
+
+
 def _sequence_problem(entries: list[dict[str, object]]) -> tuple[int, str] | None:
     """The first line (counted from 1) that breaks the strict alternation of
     start and end lines, ids rising: ``S1 E1 S2 E2 ...`` with a last start line
     that may have no end line. Also: a ``scroll_effect`` only on the end line of
     a scroll, and an ``after_scroll`` only naming a scroll that was sent before
-    the tap."""
+    the tap and whose read is the screen the tap was decided on (the scroll's
+    end line names that screen; when it names none, the read came on a later
+    try and nothing says otherwise)."""
     open_id: object = None
     open_kind: object = None
     last_id = 0
-    scrolls: set[int] = set()
+    # the sent scrolls, and the screen each one's end line says was read
+    scrolls: dict[int, str | None] = {}
     for number, line in enumerate(entries, 1):
         action_id = int(str(line["action_id"]))
         if line["schema"] == _START:
@@ -1007,11 +1028,11 @@ def _sequence_problem(entries: list[dict[str, object]]) -> tuple[int, str] | Non
                 return number, "an action id that does not rise"
             action = line["action"]
             kind = action["kind"] if isinstance(action, dict) else None
-            after = line.get("after_scroll")
-            if after is not None and int(str(after)) not in scrolls:
-                return number, "an after_scroll that names no earlier scroll"
+            problem = _after_scroll_problem(line, scrolls)
+            if problem is not None:
+                return number, problem
             if kind == "scroll":
-                scrolls.add(action_id)
+                scrolls[action_id] = None
             open_id = last_id = action_id
             open_kind = kind
         elif open_id != action_id:
@@ -1020,7 +1041,9 @@ def _sequence_problem(entries: list[dict[str, object]]) -> tuple[int, str] | Non
             if "scroll_effect" in line and open_kind != "scroll":
                 return number, "a scroll_effect on the end line of another action"
             if line.get("not_sent") or line.get("failed"):
-                scrolls.discard(action_id)  # a scroll that was not sent
+                scrolls.pop(action_id, None)  # a scroll that was not sent
+            elif action_id in scrolls:
+                scrolls[action_id] = _screen_id(line.get("to_screen_id"))
             open_id = None
     return None
 
@@ -1232,7 +1255,7 @@ def _family_of(scrolls: list[_Scroll]) -> dict[str, str]:
     another makes the second part of the first one's screen."""
     family: dict[str, str] = {}
     for scroll in scrolls:
-        if not _scroll_read(scroll) or scroll.end is None:
+        if not _scroll_read(scroll) or scroll.end is None or _scroll_navigated(scroll):
             continue
         target = _screen_id(scroll.end.get("to_screen_id"))
         first = family.get(scroll.from_screen_id, scroll.from_screen_id)
@@ -1313,12 +1336,24 @@ def _scroll_views(
     the same screen, ``members``), in action order."""
     views: list[_View] = [(None, screen)]
     for scroll in moves.scrolls:
-        if scroll.from_screen_id not in members or not _scroll_read(scroll):
+        if (
+            scroll.from_screen_id not in members
+            or not _scroll_read(scroll)
+            or _scroll_navigated(scroll)
+        ):
             continue
         loaded = reader.load_scroll(scroll.action_id)
         if loaded is not None:
             views.append((scroll.action_id, loaded[0]))
     return views
+
+
+def _scroll_navigated(scroll: _Scroll) -> bool:
+    """Whether the scroll ended on another page (its end line says
+    ``scroll_effect: navigation``): the screen read after it is that page, not
+    more of the list, so its rows are not listed under the screen scrolled on
+    and its id is not made part of that screen."""
+    return scroll.end is not None and scroll.end.get("scroll_effect") == "navigation"
 
 
 def _scroll_read(scroll: _Scroll) -> bool:
@@ -1392,10 +1427,12 @@ def _scrolled_rows(
     owner: list[tuple[Row, Screen]] = [(row, views[0][1]) for row in first]
     stand_in: dict[tuple[int | None, str], Row] = {}
     once = SCROLLED_REPEATS == "once" and record_text
-    # The rows listed so far by fingerprint, in order: a row of a later read is
-    # a repeat of the n-th of them when it is the n-th of its fingerprint in its
-    # own read, so two identical rows that show up together stay two.
-    listed: dict[str, list[Row]] = {}
+    # The rows listed so far by kind and fingerprint, in order: a row of a later
+    # read is a repeat of the n-th of them when it is the n-th of its kind and
+    # fingerprint in its own read, so two identical rows that show up together
+    # stay two. A label that became clickable is a row where it was a text: it
+    # is not a repeat of the text, so its press and destination are kept.
+    listed: dict[tuple[str, str], list[Row]] = {}
     if once and len(views) > 1:
         listed = _first_by_print(views[0][1], first)
     for scroll_id, screen in views[1:]:
@@ -1403,32 +1440,35 @@ def _scrolled_rows(
         later = _rows_of(screen, tapped, record_text=record_text)
         prints = _Prints(screen) if once else None
         by_id = {e.id: e for e in screen.elements}
-        here: dict[str, int] = {}
-        added: list[tuple[str, Row]] = []
+        here: dict[tuple[str, str], int] = {}
+        added: list[tuple[tuple[str, str], Row]] = []
         for row in later:
             row.after_scroll = scroll_id
             if prints is not None:
-                fingerprint = prints.of(by_id[row.element_id])
-                number = here.get(fingerprint, 0)
-                here[fingerprint] = number + 1
-                earlier = listed.get(fingerprint, [])
+                identity = (row.kind, prints.of(by_id[row.element_id]))
+                number = here.get(identity, 0)
+                here[identity] = number + 1
+                earlier = listed.get(identity, [])
                 if number < len(earlier):
                     stand_in[scroll_id, row.element_id] = earlier[number]
                     continue
-                added.append((fingerprint, row))
+                added.append((identity, row))
             rows.append(row)
             owner.append((row, screen))
-        for fingerprint, row in added:
-            listed.setdefault(fingerprint, []).append(row)
+        for identity, row in added:
+            listed.setdefault(identity, []).append(row)
     return rows, owner, stand_in
 
 
-def _first_by_print(screen: Screen, rows: list[Row]) -> dict[str, list[Row]]:
+def _first_by_print(
+    screen: Screen, rows: list[Row]
+) -> dict[tuple[str, str], list[Row]]:
     prints = _Prints(screen)
     by_id = {e.id: e for e in screen.elements}
-    found: dict[str, list[Row]] = {}
+    found: dict[tuple[str, str], list[Row]] = {}
     for row in rows:
-        found.setdefault(prints.of(by_id[row.element_id]), []).append(row)
+        identity = (row.kind, prints.of(by_id[row.element_id]))
+        found.setdefault(identity, []).append(row)
     return found
 
 

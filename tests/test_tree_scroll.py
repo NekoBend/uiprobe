@@ -574,3 +574,204 @@ def test_the_later_destination_of_a_repeated_row_is_kept(tmp_path):
     assert len(rows) == 1  # shown once
     assert rows[0].to == {"screen_id": LEAF.screen_id}
     assert rows[0].also_to == [{"screen_id": other.screen_id}]
+
+
+# -- a label that became clickable, and a scroll that ended on another page --------
+
+
+def mixed(*, clickable):
+    """A list with one clickable row (A) and a label (B) that is clickable only
+    when asked: the same ids and classes, so the same screen id."""
+    return make_screen(
+        ".List",
+        [
+            el(1, cls="FrameLayout"),
+            el(2, 1, cls="RecyclerView", flags=("scrollable",)),
+            el(3, 2, cls="LinearLayout", flags=CLICK),
+            el(4, 3, text="A"),
+            el(5, 2, text="B", flags=CLICK if clickable else ()),
+        ],
+    )
+
+
+def test_a_label_that_became_clickable_keeps_its_press_and_destination(tmp_path):
+    folder = Folder(tmp_path)
+    first, after = mixed(clickable=False), mixed(clickable=True)
+    assert first.screen_id == after.screen_id
+    folder.screen(first)
+    folder.screen(LEAF)
+    folder.start("launch")
+    folder.end(first.screen_id)
+    folder.tap(first, 3, LEAF.screen_id)  # A
+    folder.start("back", LEAF.screen_id)
+    folder.end(first.screen_id)
+    number = scroll(folder, first, after)
+    tap_after(folder, after, 5, LEAF.screen_id, number)  # B, now a button
+    folder.start("back", LEAF.screen_id)
+    folder.end(first.screen_id)
+    folder.finish()
+    tree = read_tree(folder.path)
+    assert tree.warnings == []
+    rows = [r for r in tree.screens[first.screen_id].rows if r.name == "B"]
+    # the label of the first read stays a text, and the button is its own row
+    assert sorted(r.kind for r in rows) == ["row", "text"]
+    button = next(r for r in rows if r.kind == "row")
+    assert button.after_scroll == number
+    assert button.pressed
+    assert button.to == {"screen_id": LEAF.screen_id}
+    assert button.action_id is not None
+    text = next(r for r in rows if r.kind == "text")
+    assert not text.pressed
+    assert text.to is None
+
+
+def test_a_label_that_stayed_a_label_is_still_shown_once(tmp_path):
+    folder = Folder(tmp_path)
+    first = mixed(clickable=False)
+    folder.screen(first)
+    folder.start("launch")
+    folder.end(first.screen_id)
+    scroll(folder, first, mixed(clickable=False))
+    folder.finish()
+    rows = read_tree(folder.path).screens[first.screen_id].rows
+    assert [r.name for r in rows].count("B") == 1
+
+
+def test_a_row_of_a_scroll_that_led_to_another_page_is_not_a_row_of_the_source(
+    tmp_path,
+):
+    folder = Folder(tmp_path)
+    first = listing(["A", "B"])
+    page = make_screen(
+        ".List",
+        [
+            el(1, cls="FrameLayout"),
+            el(2, 1, cls="LinearLayout", flags=CLICK),
+            el(3, 2, text="Detail row"),
+        ],
+    )
+    assert page.screen_id != first.screen_id
+    assert page.activity == first.activity
+    folder.screen(first)
+    folder.screen(page)
+    folder.start("launch")
+    folder.end(first.screen_id)
+    folder.action += 1
+    folder.writer.write_transition_start(
+        folder.action, "scroll", first.screen_id, point=(5, 50), amount=3
+    )
+    folder.end(page.screen_id, scroll_effect="navigation")
+    folder.writer.write_scroll_screen(folder.action, page)
+    folder.finish()
+    tree = read_tree(folder.path)
+    assert tree.warnings == []
+    source = [r.name for r in tree.screens[first.screen_id].rows if r.kind == "row"]
+    assert source == ["A", "B"]  # nothing of the page, and no after_scroll row
+    assert all(r.after_scroll is None for r in tree.screens[first.screen_id].rows)
+    # the page is its own screen, not part of the source's
+    assert "Detail row" in [r.name for r in tree.screens[page.screen_id].rows]
+
+
+def test_a_scroll_that_only_scrolled_still_adds_its_rows(tmp_path):
+    # the control of the test above: the same writes with no navigation mark
+    folder = Folder(tmp_path)
+    first, after = listing(["A", "B"]), listing(["B", "C"])
+    folder.screen(first)
+    folder.start("launch")
+    folder.end(first.screen_id)
+    scroll(folder, first, after)
+    folder.finish()
+    rows = read_tree(folder.path).screens[first.screen_id].rows
+    assert [r.name for r in rows if r.kind == "row"] == ["A", "B", "C"]
+
+
+# -- the gate and the writer agree -------------------------------------------------
+
+
+def two_lists(tmp_path):
+    """Two screens, each with its own scroll: the second one's read is not the
+    first one's screen."""
+    folder = Folder(tmp_path)
+    list_a = listing(["A", "B"])
+    list_b = listing(["P", "Q"], activity=".Other")
+    assert list_a.screen_id != list_b.screen_id
+    for screen in (list_a, list_b, LEAF):
+        folder.screen(screen)
+    folder.start("launch")
+    folder.end(list_a.screen_id)
+    first = scroll(folder, list_a, listing(["B", "C"]))
+    return folder, list_a, list_b, first
+
+
+def test_a_tap_may_cite_a_scroll_read_of_its_own_screen(tmp_path):
+    folder, list_a, _list_b, first = two_lists(tmp_path)
+    tap_after(folder, listing(["B", "C"]), 3, LEAF.screen_id, first)
+    folder.finish()
+    assert read_tree(folder.path).warnings == []
+    assert list_a.screen_id == listing(["B", "C"]).screen_id
+
+
+def test_a_tap_may_not_cite_a_scroll_read_of_another_screen(tmp_path):
+    folder, _list_a, list_b, first = two_lists(tmp_path)
+    # a tap decided on the other screen names the scroll of the first one
+    tap_after(folder, list_b, 3, LEAF.screen_id, first)
+    folder.finish()
+    assert GATE_WARNING in read_tree(folder.path).warnings
+
+
+def test_a_tap_may_cite_a_scroll_whose_read_came_on_a_later_try(tmp_path):
+    # the end line of that scroll names no screen (the dump failed), so nothing
+    # says the read was another screen's
+    folder = Folder(tmp_path)
+    first = listing(["A", "B"])
+    after = listing(["B", "C"])
+    folder.screen(first)
+    folder.screen(LEAF)
+    folder.start("launch")
+    folder.end(first.screen_id)
+    folder.action += 1
+    folder.writer.write_transition_start(
+        folder.action, "scroll", first.screen_id, point=(5, 50), amount=3
+    )
+    folder.end(dump_failed=True)
+    folder.writer.write_scroll_screen(folder.action, after)
+    number = folder.action
+    tap_after(folder, after, 3, LEAF.screen_id, number)
+    folder.finish()
+    assert read_tree(folder.path).warnings == []
+
+
+@pytest.mark.parametrize("amount", [0, 11, -1, 100])
+def test_the_writer_refuses_the_amounts_the_gate_refuses(tmp_path, amount):
+    folder = Folder(tmp_path)
+    with pytest.raises(ValueError, match="amount must"):
+        folder.writer.write_transition_start(
+            1, "scroll", None, point=(1, 9), amount=amount
+        )
+    assert not (folder.path / "transitions.jsonl").exists() or not [
+        line
+        for line in (folder.path / "transitions.jsonl").read_text("utf-8").splitlines()
+        if '"scroll"' in line
+    ]
+
+
+@pytest.mark.parametrize("amount", [1, 2, 10])
+def test_the_amounts_the_gate_accepts_are_written(tmp_path, amount):
+    folder = Folder(tmp_path)
+    first = listing(["A"])
+    folder.screen(first)
+    folder.start("launch")
+    folder.end(first.screen_id)
+    folder.action += 1
+    folder.writer.write_transition_start(
+        folder.action, "scroll", first.screen_id, point=(5, 50), amount=amount
+    )
+    folder.end(first.screen_id)
+    folder.finish()
+    assert read_tree(folder.path).warnings == []
+
+
+def test_the_writer_and_the_gate_share_the_one_limit():
+    from uiprobe import crawl_tree, guards
+
+    assert crawl_tree._MAX_AMOUNT == guards.MAX_SCROLL_AMOUNT == 10

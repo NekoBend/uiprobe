@@ -82,10 +82,13 @@ def _allowed(element: Element, container: Element, refused_ids: frozenset[str]) 
     """Whether an element at the point leaves the point qualified.
 
     It must be the container or have exactly one of `SCROLL_POINT_CLASSES`, and
-    not be long-clickable, checkable, a password field, a text field or refused
-    by judge. A plain clickable row is allowed.
+    not be scrollable (other than the container itself), long-clickable,
+    checkable, a password field, a text field or refused by judge. A plain
+    clickable row is allowed.
     """
-    if element.id != container.id and element.class_name not in SCROLL_POINT_CLASSES:
+    if element.id != container.id and (
+        element.class_name not in SCROLL_POINT_CLASSES or _SCROLLABLE in element.flags
+    ):
         return False
     return not (
         element.id in refused_ids
@@ -93,6 +96,16 @@ def _allowed(element: Element, container: Element, refused_ids: frozenset[str]) 
         or _CHECKABLE in element.flags
         or _PASSWORD in element.flags
         or _is_text_field(element)
+    )
+
+
+def _related(screen: Screen, element: Element, container: Element) -> bool:
+    """Whether the element is the container, inside it, or one of the elements
+    that hold it (its ancestors): the only things that may lie at the point. An
+    element beside it in the tree (a sibling drawn over or under the list, with
+    or without a label) is none of these."""
+    return screen._is_within(element, container) or screen._is_within(  # noqa: SLF001
+        container, element
     )
 
 
@@ -104,10 +117,13 @@ def scroll_target(screen: Screen, judgement: Judgement) -> tuple[str, Point] | N
     container (`scroll_container`), or when no candidate point qualifies. The
     candidates are the container's visible center and then the other points of a
     3 by 3 grid (quarters of its visible part), in that order. A point qualifies
-    when every element that holds it passes `_allowed` and the topmost labelled
-    element there is the container or inside it. Redundant with the allow list
-    but kept as an extra layer: long-clickable, checkable, password and text
-    field are refused whatever their class.
+    when EVERY element whose part on the display holds it (labelled or not,
+    clickable or not, whatever its size, siblings of the list included) passes
+    `_allowed` and is the container, inside it or one of its ancestors, and the
+    topmost labelled element there is the container or inside it. The allow
+    list is redundant with the checks of the flags, which are kept as an extra
+    layer: scrollable (other than the container), long-clickable, checkable,
+    password and text field are refused whatever their class.
     """
     if judgement.dialog or judgement.irreversible:
         return None
@@ -123,7 +139,11 @@ def scroll_target(screen: Screen, judgement: Judgement) -> tuple[str, Point] | N
             area.left + area.width * col // 4,
             area.top + area.height * row // 4,
         )
-        if not all(_allowed(e, container, refused) for e in elements_at(screen, point)):
+        held = elements_at(screen, point)
+        if not all(
+            _allowed(e, container, refused) and _related(screen, e, container)
+            for e in held
+        ):
             continue
         top = screen.hit_target(point)
         if top is None or screen._is_within(top, container):  # noqa: SLF001
@@ -169,22 +189,27 @@ def _ancestry(
     return tuple(chain)
 
 
-def changed_by_wheel(before: Screen, after: Screen) -> bool:
+def changed_by_wheel(before: Screen, after: Screen, key: str | None = None) -> bool:
     """Whether the screen shows that a wheel turn changed something other than
     the scroll position, comparing the screen read before it with the one after.
 
-    Two signs. (1) A checkable element with the same text-inclusive identity
-    (class, resource id, text, description, hint and the ancestors' classes and
-    resource ids) on both screens whose checked states differ (the sorted states
-    of all such elements are compared per identity). (2) An element whose
-    text-free identity (class, resource id and the ancestors' classes and
-    resource ids) is unique on both screens and whose text or description
-    differs, or whose checked state differs. Rows of a list that merely scrolled
-    are told apart from these by their identity not being unique; a clock or a
-    counter that changes between the reads is taken as a change too, which only
-    costs a scroll.
+    ``key`` is the `container_key` of the list that was scrolled. Two signs.
+    (1) A checkable element with the same text-inclusive identity (class,
+    resource id, text, description, hint and the ancestors' classes and resource
+    ids) on both screens whose checked states differ (the sorted states of all
+    such elements are compared per identity). (2) Outside the list: elements
+    with the same text-free identity (class, resource id and the ancestors'
+    classes and resource ids), taken in document order, where the n-th text or
+    description or checked state differs on the two screens (groups of another
+    size on the two screens cannot be paired and are not compared). What is
+    inside the scrolled list is not compared by text, because its rows move and
+    change as it scrolls: a sole row replaced by another is no change. Without
+    ``key`` the list is not known, and only elements whose identity is unique on
+    both screens are compared, as rows are told apart by their identity not being
+    unique. A clock or a counter that changes between the reads is taken as a
+    change too, which only costs a scroll.
     """
-    return _checked_changed(before, after) or _unique_changed(before, after)
+    return _checked_changed(before, after) or _text_changed(before, after, key)
 
 
 def _checked_changed(before: Screen, after: Screen) -> bool:
@@ -211,24 +236,55 @@ def _checked_changed(before: Screen, after: Screen) -> bool:
     )
 
 
-def _unique_changed(before: Screen, after: Screen) -> bool:
+def _inside_list(screen: Screen, key: str | None) -> frozenset[str]:
+    """The ids of the elements below a scrollable element with this container
+    key (the list and its rows); empty without a key."""
+    if key is None:
+        return frozenset()
+    children: dict[str, list[str]] = {}
+    for element in screen.elements:
+        if element.parent is not None:
+            children.setdefault(element.parent, []).append(element.id)
+    found: set[str] = set()
+    stack = [
+        e.id
+        for e in screen.elements
+        if _SCROLLABLE in e.flags and container_key(screen, e) == key
+    ]
+    while stack:
+        for child in children.get(stack.pop(), ()):
+            if child not in found:
+                found.add(child)
+                stack.append(child)
+    return frozenset(found)
+
+
+def _text_changed(before: Screen, after: Screen, key: str | None) -> bool:
     def identities(screen: Screen) -> dict[tuple[object, ...], list[Element]]:
         by_id = {e.id: e for e in screen.elements}
+        skip = _inside_list(screen, key)
         found: dict[tuple[object, ...], list[Element]] = {}
         for element in screen.elements:
-            key = (element.class_name, element.resource_id, _ancestry(element, by_id))
-            found.setdefault(key, []).append(element)
+            if element.id in skip:
+                continue
+            identity = (
+                element.class_name,
+                element.resource_id,
+                _ancestry(element, by_id),
+            )
+            found.setdefault(identity, []).append(element)
         return found
 
     old, new = identities(before), identities(after)
-    for key, elements in old.items():
-        if len(elements) != 1 or len(new.get(key, ())) != 1:
+    for identity, elements in old.items():
+        now = new.get(identity, [])
+        if len(elements) != len(now) or (key is None and len(elements) != 1):
             continue
-        was, now = elements[0], new[key][0]
-        if (
-            was.text != now.text
-            or was.content_desc != now.content_desc
-            or ("checked" in was.flags) != ("checked" in now.flags)
-        ):
-            return True
+        for was, here in zip(elements, now, strict=True):
+            if (
+                was.text != here.text
+                or was.content_desc != here.content_desc
+                or ("checked" in was.flags) != ("checked" in here.flags)
+            ):
+                return True
     return False

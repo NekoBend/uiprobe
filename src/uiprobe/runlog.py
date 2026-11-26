@@ -50,7 +50,7 @@ from typing import IO, TYPE_CHECKING, Any, Final
 from uiprobe._json import dumps
 from uiprobe.crawl import Limits
 from uiprobe.errors import UiprobeError
-from uiprobe.guards import _WORD_REASONS
+from uiprobe.guards import _WORD_REASONS, MAX_SCROLL_AMOUNT
 from uiprobe.model import Element, Screen, _name, _quote
 from uiprobe.pngfile import check_new_path, depends_on_a_drive_folder
 
@@ -287,11 +287,18 @@ def _check_point(point: Sequence[int] | None) -> list[int] | None:
 
 def _amount_field(kind: object, amount: int | None) -> dict[str, object]:
     """The ``amount`` key of a scroll's action (the size of the wheel turn),
-    given for the kind ``scroll`` and only for it."""
+    given for the kind ``scroll`` and only for it, from 1 to
+    `MAX_SCROLL_AMOUNT` (the range `uiprobe tree` accepts on a start line)."""
     if (amount is not None) != (kind == "scroll"):
         msg = "amount goes with the kind scroll, and only with it"
         raise ValueError(msg)
-    return {} if amount is None else {"amount": _check_number("amount", amount)}
+    if amount is None:
+        return {}
+    number = _check_number("amount", amount)
+    if not 1 <= number <= MAX_SCROLL_AMOUNT:
+        msg = f"amount must be from 1 to {MAX_SCROLL_AMOUNT}, got {number}"
+        raise ValueError(msg)
+    return {"amount": number}
 
 
 def _after_scroll_field(kind: object, after_scroll: int | None) -> dict[str, object]:

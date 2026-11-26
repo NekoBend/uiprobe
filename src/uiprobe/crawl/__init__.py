@@ -108,16 +108,21 @@ where screen ids change are listed under the stated limits below.
   `uiprobe.guards.scroll_target` finds a point on it (none on a dialog, a screen
   judged irreversible, one whose largest scrollable element is not of one of the
   four allowed container classes, or when every candidate point has an element
-  of another than the allowed plain layout and label classes, a long-clickable,
-  checkable, password or text field element, or an element judge refuses, at
-  it), fewer than
-  ``scrolls_per_screen`` were *sent* for the screen (a proposal that is refused
-  does not count), the screen has not been scrolled to its end or marked by a
+  of another than the allowed plain layout and label classes, a scrollable
+  other than the container, a long-clickable, checkable, password or text field
+  element, an element judge refuses, or an element that is neither the
+  container, inside it nor one of its ancestors (a sibling over or under the
+  list, labelled or not), at it), fewer than
+  ``scrolls_per_screen`` were *sent* both for the container and for the
+  screen's family of ids (a proposal that is refused does not count; the
+  second count keeps the cap when another list becomes the largest), the screen
+  has not been scrolled to its end or marked by a
   scroll that changed something, fewer than ``scroll_incidents`` such scrolls
   happened in the run, and refusals are not piling up. It goes through
   `CrawlEngine.recheck` (the same screen, no keyboard, before the deadline,
   exactly the planned container and point, and the whole screen identical to
-  the planned one) and
+  the planned one: every element's id, parent, class, package, texts, flags and
+  bounds) and
   `CrawlEngine.scroll_sent` like a tap, and is released, withdrawn and counted
   like one. The screen read after a scroll is judged as any other: rows whose
   fingerprint was not seen on the screen's family of ids are tried as usual, and
@@ -125,9 +130,13 @@ where screen ids change are listed under the stated limits below.
   scroll that only scrolls never pushes the path; another id of the same
   activity joins the family of the screen scrolled on (shared tried marks,
   scroll count and fingerprints, same depth). A scroll after which a checked
-  state or text of a same element changed (``changed``), or another activity, a
-  dialog or another app is in front (``navigation``; pushed like a tapped
-  screen), is an incident: that screen is never scrolled again, and the engine
+  state of a same element changed, or a text outside the list of an element of
+  the same identity (compared by position among those of one identity; the rows
+  of the scrolled list are not compared by text) (``changed``), or another
+  activity, a dialog, another app (a listed ``also_target`` app counts as the
+  target's own, another package does not), or another page of the same activity
+  that has no list of the scrolled one's key (``navigation``; pushed like a
+  tapped screen), is an incident: that screen is never scrolled again, and the engine
   stops scrolling after ``scroll_incidents`` of them (`CrawlEngine.scroll_effect`
   says it, for the driver's end line). With the switch off none of this state is
   used.

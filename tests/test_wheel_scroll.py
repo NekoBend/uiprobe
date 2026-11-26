@@ -155,3 +155,40 @@ def test_the_public_swipe_and_scroll_are_not_changed():
 
     assert "_send_by" not in inspect.signature(Device.swipe).parameters
     assert "_epoch" not in inspect.signature(Device.scroll).parameters
+
+
+# The axis option list is read exactly: VSCROLL counts only as a word of the
+# bracketed ``[--axis ...]`` list of the scroll line, with its value placeholder.
+MENTIONED = [
+    # VSCROLL named outside the option list
+    "The sources are:\n  mouse\n"
+    "scroll <x> <y> [--axis HSCROLL,<h>] (VSCROLL unsupported)\n",
+    "The sources are:\n  mouse\nscroll <x> <y> [--axis HSCROLL,<h>] VSCROLL\n",
+    # VSCROLL in the list but said to be unsupported
+    "The sources are:\n  mouse\n"
+    "scroll <x> <y> [--axis HSCROLL,<h>,VSCROLL unsupported]\n",
+    # a longer word that holds it
+    "The sources are:\n  mouse\nscroll <x> <y> [--axis XVSCROLL,<v>]\n",
+    "The sources are:\n  mouse\nscroll <x> <y> [--axis VSCROLLS,<v>]\n",
+    "The sources are:\n  mouse\nscroll <x> <y> [--axis HSCROLL,<h>,NOVSCROLL,<v>]\n",
+    # the list is not the one of the scroll line
+    "The sources are:\n  mouse\n"
+    "scroll <x> <y> [--axis HSCROLL,<h>]\nfling <x> <y> [--axis VSCROLL,<v>]\n",
+]
+
+
+@pytest.mark.parametrize("usage", MENTIONED)
+def test_a_usage_that_only_mentions_vscroll_is_no_support(device, android, usage):
+    android.input_usage = usage
+    assert device._wheel_supported() is False
+
+
+def test_vscroll_as_a_word_of_the_axis_list_is_support(device, android):
+    for usage in (
+        "The sources are:\n  mouse\nscroll <x> <y> [--axis VSCROLL,<v>]\n",
+        "The sources are:\n  mouse\nscroll <x> <y> [--axis HSCROLL,<h>,VSCROLL,<v>]\n",
+        "The sources are:\n  mouse\nscroll <x> <y> [--axis VSCROLL,<v>,HSCROLL,<h>]\n",
+        "The sources are: mouse\nscroll <x> <y> [ --axis VSCROLL,<v> ]\n",
+    ):
+        android.input_usage = usage
+        assert device._wheel_supported() is True, usage
