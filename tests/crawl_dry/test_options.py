@@ -31,6 +31,7 @@ from tests.crawl_dry.helpers import (
     pop_ending,
     skipped_by_text,
 )
+from tests.helpers import no_out_message
 
 # --- CLI: options ---
 
@@ -95,15 +96,12 @@ def crawl_usage_error(
     return usage_error(capsys, fake_adb, "crawl", "--json", *argv)
 
 
-PRESS_MESSAGE = "--press needs --out DIR, the new folder to record the run into"
+def press_message(path: str) -> str:
+    return no_out_message(path, press_in_file=False)
 
 
 def file_press_message(path: str) -> str:
-    return (
-        f"the settings file {path} says press = true, so this crawl presses and"
-        " needs --out DIR, the new folder to record the run into; add --dry-run"
-        " to preview instead"
-    )
+    return no_out_message(path, press_in_file=True)
 
 
 DEFAULT_LAST = "nothing was pressed: this was a preview (the default)"
@@ -148,10 +146,13 @@ def test_press_is_refused_before_any_contact(
     if as_json:
         assert err == ""
         error = json.loads(out)["error"]
-        assert (error["code"], error["message"]) == ("usage_error", PRESS_MESSAGE)
+        assert (error["code"], error["message"]) == (
+            "usage_error",
+            press_message(SETTINGS_FILE),
+        )
     else:
         assert out == ""
-        assert err == f"uiprobe: error: {PRESS_MESSAGE}\n"
+        assert err == f"uiprobe: error: {press_message(SETTINGS_FILE)}\n"
     assert fake_adb.requests == []
     assert connections == []
     assert android.inputs == []
@@ -175,7 +176,7 @@ def test_press_in_the_file_with_press_names_the_file_and_dry_run(
     set_press(settings_dir)
     code, out, err = invoke(capsys, fake_adb, "crawl", SHOP, "--press")
     assert (code, out) == (2, "")
-    assert err == f"uiprobe: error: {PRESS_MESSAGE}\n"  # before the file is read
+    assert err == f"uiprobe: error: {press_message(SETTINGS_FILE)}\n"
     assert fake_adb.requests == []
     assert connections == []
     assert android.inputs == []
@@ -216,9 +217,11 @@ def test_press_refusals_show_an_unambiguous_path(
     )
     assert (code, out) == (2, "")
     assert "\u202e" not in err
-    assert err.count("\n") == 1
+    # 3 lines for --press, 4 for press = true: a newline in the path must not
+    # add a line.
+    assert err.count("\n") == (3 if switch else 4)
     shown = _shown(str(other))
-    expected = PRESS_MESSAGE if switch else file_press_message(shown)
+    expected = press_message(shown) if switch else file_press_message(shown)
     assert err == f"uiprobe: error: {expected}\n"
     assert fake_adb.requests == []
     assert connections == []

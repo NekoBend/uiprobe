@@ -11,6 +11,31 @@ if TYPE_CHECKING:
 
 ADB_DEFAULT_PORT = 5037
 
+
+def no_out_message(file: str, *, press_in_file: bool) -> str:
+    """The usage error of a pressing crawl with no --out and no runs_dir.
+
+    `file` is the settings file as the message shows it; the text is written
+    out in full so that a change of wording shows in the tests.
+    """
+    first = "a pressing crawl needs a folder to record the run into, and none was given"
+    if press_in_file:
+        first += f" (the settings file {file} says press = true)"
+    lines = [
+        first,
+        "give one now:      add --out DIR to the same command (DIR must not exist yet)",
+        f'or set it once:    runs_dir = "uiprobe-runs" in {file} (a real folder'
+        " that exists, counted from the settings file's folder; each run gets a new"
+        " folder inside it)",
+    ]
+    if press_in_file:
+        lines.append(
+            "or preview:        add --dry-run and remove press-only options"
+            " such as --depth (a preview presses nothing)"
+        )
+    return "\n".join(lines)
+
+
 # The only loopback ports a test may connect to: those of a fake adb server and
 # of ports reserved by `unused_port`. The network guard in conftest reads it.
 _allowed_ports: set[int] = set()

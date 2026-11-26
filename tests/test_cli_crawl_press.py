@@ -12,6 +12,7 @@ import pytest
 
 from tests.crawl_driver.helpers import OTHER, SCREENS, SERIAL, SHOP, TRANSPORT
 from tests.fake_device import FakeAndroid
+from tests.helpers import no_out_message
 from uiprobe import cli
 from uiprobe.crawl_driver import CrawlResult
 from uiprobe.device import Device
@@ -170,7 +171,7 @@ def test_a_real_device_runs_with_the_option(fake_adb, android, capsys, tmp_path)
             ["--dry-run", "--no-record-text"],
             f"--no-record-text {DRY_RUN_PRESS_ONLY}",
         ),
-        (["--press"], "--press needs --out DIR, the new folder to record the run into"),
+        (["--press"], no_out_message(SETTINGS_FILE, press_in_file=False)),
         (
             ["--press", "--out", "x", "--actions", "0"],
             "--actions must be from 1 to 10000, got 0",
@@ -290,11 +291,8 @@ def test_press_true_without_out_names_out_and_the_file(fake_adb, android, capsys
     (here / SETTINGS_FILE).write_text(text, encoding="utf-8")
     code, out, err = press(capsys, fake_adb)
     assert (code, out) == (2, "")
-    assert err == (
-        f"uiprobe: error: the settings file {SETTINGS_FILE} says press = true,"
-        " so this crawl presses and needs --out DIR, the new folder to record"
-        " the run into; add --dry-run to preview instead\n"
-    )
+    message = no_out_message(SETTINGS_FILE, press_in_file=True)
+    assert err == f"uiprobe: error: {message}\n"
     assert fake_adb.requests == []
     assert android.inputs == []
 

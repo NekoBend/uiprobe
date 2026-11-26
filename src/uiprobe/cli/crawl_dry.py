@@ -216,7 +216,7 @@ def _file_press_out(
     mkdir (a folder that appears there before that ends the run unshared).
 
     Raises:
-        _UsageError: No --out and no runs_dir.
+        _GuidedUsageError: No --out and no runs_dir.
         RunFolderError: The runs_dir folder is missing, not a folder or a
             link, or every name up to ``-99`` is taken.
     """
@@ -224,15 +224,26 @@ def _file_press_out(
         return args.out, "option"
     shown_file = _shown(str(settings.source))
     if settings.runs_dir is None:
-        if press_source == "option":
-            msg = "--press needs --out DIR, the new folder to record the run into"
-        else:
-            msg = (
-                f"the settings file {shown_file} says press = true, so this"
-                " crawl presses and needs --out DIR, the new folder to record"
-                " the run into; add --dry-run to preview instead"
+        first = (
+            "a pressing crawl needs a folder to record the run into, and none was given"
+        )
+        if press_source != "option":
+            first += f" (the settings file {shown_file} says press = true)"
+        lines = [
+            first,
+            "give one now:      add --out DIR to the same command"
+            " (DIR must not exist yet)",
+            f'or set it once:    runs_dir = "uiprobe-runs" in {shown_file}'
+            " (a real folder that exists, counted from the settings file's folder;"
+            " each run gets a new folder inside it)",
+        ]
+        if press_source != "option":
+            lines.append(
+                "or preview:        add --dry-run and remove press-only options"
+                " such as --depth (a preview presses nothing)"
             )
-        raise _UsageError(msg)
+        # The text goes out line by line; JSON keeps one message string.
+        raise _GuidedUsageError(lines, {})
     parent = _runs_dir_parent(args, settings.runs_dir, shown_file)
     base = f"{args.package}-{_run_stamp()}"  # a plain str: see _crawl_policy
     for number in range(1, _MAX_RUN_NAME + 1):

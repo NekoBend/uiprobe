@@ -15,6 +15,7 @@ import pytest
 
 from tests.crawl_driver.helpers import SCREENS, SERIAL, SHOP, TRANSPORT
 from tests.fake_device import FakeAndroid
+from tests.helpers import no_out_message
 from tests.test_cli_crawl_settings_press import (
     FAST,
     device_writes,
@@ -39,7 +40,7 @@ if TYPE_CHECKING:
 STAMP = "20261125-101500"
 MOUNT_POINT = 0xA0000003  # IO_REPARSE_TAG_MOUNT_POINT: a junction
 NAME = f"{SHOP}-{STAMP}"
-PRESS_NEEDS_OUT = "--press needs --out DIR, the new folder to record the run into"
+PRESS_NEEDS_OUT = no_out_message(SETTINGS_FILE, press_in_file=False)
 
 
 @pytest.fixture
@@ -142,9 +143,7 @@ def test_out_wins_over_runs_dir(fake_adb, capsys, here, switch):
         (
             True,
             [],
-            f"the settings file {SETTINGS_FILE} says press = true, so this crawl"
-            " presses and needs --out DIR, the new folder to record the run into;"
-            " add --dry-run to preview instead",
+            no_out_message(SETTINGS_FILE, press_in_file=True),
         ),
         (False, ["--press"], PRESS_NEEDS_OUT),
     ],
