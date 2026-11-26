@@ -914,3 +914,137 @@ def test_rewrite_keeps_the_lines_as_the_writer_ends_them(tmp_path):
     assert b"\r" not in data
     assert data.endswith(b"\n")
     assert read_tree(folder.path).warnings == []
+
+
+# -- an id the list got as it scrolled is no screen of its own ---------------------
+
+
+def scrolled_with_own_file(tmp_path):
+    """List A, scrolled into layout B (another id, with its own file because a BACK
+    ended on it later), a row of the leaf, and a BACK from B."""
+    folder = Folder(tmp_path)
+    first = listing(["A", "B", "C"])
+    second = listing(["C", "D"])
+    other = make_screen(".Other", [el(1, cls="FrameLayout"), el(2, 1, text="Other")])
+    assert first.screen_id != second.screen_id
+    for screen in (first, second, LEAF, other):
+        folder.screen(screen)
+    folder.start("launch")
+    folder.end(first.screen_id)
+    number = scroll(folder, first, second)
+    tap_after(folder, second, 5, LEAF.screen_id, number)  # D, on layout B
+    folder.start("back", LEAF.screen_id)
+    folder.end(second.screen_id)  # a BACK ended on B: B has its file
+    folder.tap(second, 3, other.screen_id)  # C, pressed on B
+    folder.start("back", other.screen_id)
+    folder.end(second.screen_id)
+    folder.finish()
+    return folder, first, second, other
+
+
+def test_a_joined_id_with_its_own_file_has_no_node_and_no_warning(tmp_path):
+    folder, first, second, other = scrolled_with_own_file(tmp_path)
+    tree = read_tree(folder.path)
+    assert tree.warnings == []
+    assert second.screen_id not in tree.screens
+    assert first.screen_id in tree.screens
+    assert second.screen_id not in tree.unreached
+    assert set(tree.screens) == {first.screen_id, LEAF.screen_id, other.screen_id}
+    rows = {r.name: r for r in tree.screens[first.screen_id].rows if r.kind == "row"}
+    assert rows["D"].pressed
+    assert rows["D"].to == {"screen_id": LEAF.screen_id}
+    assert rows["C"].to == {"screen_id": other.screen_id}
+
+
+def test_the_text_tree_draws_a_joined_id_once(tmp_path, capsys):
+    folder, _first, _second, _other = scrolled_with_own_file(tmp_path)
+    code, out, err = run_tree(capsys, str(folder.path))
+    assert (code, err) == (0, "")
+    assert "screen not reached" not in out
+    assert out.count("├─ A") + out.count("└─ A") == 1
+
+
+def test_the_json_has_no_joined_id_and_maps_every_target(tmp_path, capsys):
+    folder, _first, second, _other = scrolled_with_own_file(tmp_path)
+    _, out, _ = run_tree(capsys, str(folder.path), "--json")
+    data = json.loads(out)
+    assert second.screen_id not in data["screens"]
+    assert second.screen_id not in data.get("unreached", [])
+    assert data["warnings"] == []
+    text = json.dumps(data["screens"])
+    assert second.screen_id not in text  # no `to` names the joined id
+
+
+def test_a_tap_that_led_to_a_joined_id_led_to_the_first_one(tmp_path):
+    folder = Folder(tmp_path)
+    first = listing(["A", "B", "C"])
+    second = listing(["C", "D"])
+    other = make_screen(
+        ".Other", [el(1, cls="FrameLayout"), el(2, 1, text="Go", flags=CLICK)]
+    )
+    for screen in (first, second, other):
+        folder.screen(screen)
+    folder.start("launch")
+    folder.end(first.screen_id)
+    scroll(folder, first, second)
+    folder.tap(first, 3, other.screen_id)  # A opens the other screen
+    folder.tap(other, 2, second.screen_id)  # its row leads to the joined id
+    folder.finish()
+    tree = read_tree(folder.path)
+    assert tree.warnings == []
+    go = next(r for r in tree.screens[other.screen_id].rows if r.name == "Go")
+    assert go.to == {"screen_id": first.screen_id}
+    assert second.screen_id not in tree.screens
+
+
+def flat(texts):
+    """A list whose rows are clickable labels (the text on the row itself)."""
+    elements = [
+        el(1, cls="FrameLayout"),
+        el(2, 1, cls="RecyclerView", flags=("scrollable",)),
+    ]
+    for index, text in enumerate(texts):
+        elements.append(el(3 + index, 2, text=text, flags=CLICK))
+    return make_screen(".Flat", elements)
+
+
+def test_a_row_found_only_in_the_file_of_a_joined_id_is_not_lost(tmp_path):
+    # The id's own file (written first, when a BACK ended on it) shows E; the read
+    # after the scroll, with the same id, shows D. A row tapped on E is listed under
+    # the first id although no scroll read holds it.
+    folder = Folder(tmp_path)
+    first = flat(["A", "B", "C"])
+    own_file = flat(["C", "E"])
+    read_after = flat(["C", "D"])
+    assert read_after.screen_id == own_file.screen_id != first.screen_id
+    folder.screen(first)
+    folder.screen(own_file)
+    folder.screen(LEAF)
+    folder.start("launch")
+    folder.end(first.screen_id)
+    scroll(folder, first, read_after)
+    folder.tap(own_file, 4, LEAF.screen_id)  # E, decided on the joined id
+    folder.finish()
+    tree = read_tree(folder.path)
+    assert tree.warnings == []
+    rows = {r.name: r for r in tree.screens[first.screen_id].rows if r.kind == "row"}
+    assert rows["E"].pressed
+    assert rows["E"].to == {"screen_id": LEAF.screen_id}
+    assert rows["E"].after_scroll is None  # no scroll read holds it
+    assert not rows["D"].pressed
+
+
+def test_a_skip_decided_on_a_joined_id_with_its_own_file_still_shows(tmp_path):
+    folder = Folder(tmp_path)
+    first = listing(["A", "B", "C"])
+    second = listing(["C", "D"])
+    for screen in (first, second):
+        folder.screen(screen)
+    folder.start("launch")
+    folder.end(first.screen_id)
+    scroll(folder, first, second)
+    folder.skip(second, 5, "deny_word")
+    folder.finish()
+    tree = read_tree(folder.path)
+    rows = {r.name: r for r in tree.screens[first.screen_id].rows if r.kind == "row"}
+    assert rows["D"].reasons == ("deny_word",)

@@ -124,6 +124,10 @@ class Row:
     # The action id of the scroll whose result screen this row was read from;
     # None for a row of the screen's own file.
     after_scroll: int | None = None
+    # In memory only: the read the row came from (a scroll id, None for the
+    # screen's own file, a negative number for the file of another id of the
+    # same screen).
+    view_key: int | None = None
 
 
 @dataclass(slots=True)
@@ -1329,16 +1333,20 @@ _View = tuple[int | None, Screen]
 
 
 def _scroll_views(
+    sid: str,
     screen: Screen,
     moves: _Moves,
     reader: _Reader,
     members: set[str],
     activity: str | None,
+    owners: dict[int | None, str | None],
 ) -> list[_View]:
     """The reads of a screen: its own file (scroll id None), then the
     screen read after each sent scroll that was sent on it (or on another id of
-    the same screen, ``members``), in action order."""
+    the same screen, ``members``), in action order, then the files of the other
+    ids. ``owners`` is filled with the screen id each read is a read of."""
     views: list[_View] = [(None, screen)]
+    owners[None] = sid
     for scroll in moves.scrolls:
         if (
             scroll.from_screen_id not in members
@@ -1351,6 +1359,18 @@ def _scroll_views(
         # then a read of another page) is not more of the list.
         if loaded is not None and loaded[2] == activity:
             views.append((scroll.action_id, loaded[0]))
+            owners[scroll.action_id] = _screen_id(
+                (scroll.end or {}).get("to_screen_id")
+            )
+    # The files of the other ids of the screen: what a BACK or a relaunch ended
+    # on, or a crawl pressed in, under the id the list got as it scrolled. They are
+    # reads of this screen too (a negative key), so that nothing found only there
+    # is lost when no node is made for such an id.
+    for number, other in enumerate(sorted(members - {sid}), 1):
+        loaded = reader.load(other)
+        if loaded is not None and loaded[2] == activity:
+            views.append((-number, loaded[0]))
+            owners[-number] = other
     return views
 
 
@@ -1390,14 +1410,21 @@ def _same_element(
     return same
 
 
-def _view_of(tap: _Tap, views: list[_View], *, texts: bool) -> tuple[bool, int | None]:
+def _view_of(
+    tap: _Tap,
+    views: list[_View],
+    *,
+    texts: bool,
+    owners: dict[int | None, str | None],
+) -> tuple[bool, int | None]:
     """Whether a read of the screen holds the element the tap recorded, and the
     scroll id of that read (None: the screen's own file).
 
     The read the start line names (``after_scroll``) comes first. Otherwise the
     first read that has the element's id with the fields the tap recorded; for
     a row whose text sits in a child, the row itself says nothing of the text,
-    so a tap that does not name its read can then be put on the wrong read.
+    so a tap that does not name its read can then be put on the wrong read; the
+    reads of the screen id the tap was decided on are tried before the others.
     """
     for scroll_id, screen in views:
         if (
@@ -1406,7 +1433,9 @@ def _view_of(tap: _Tap, views: list[_View], *, texts: bool) -> tuple[bool, int |
             and any(e.id == tap.element_id for e in screen.elements)
         ):
             return True, scroll_id
-    for scroll_id, screen in views:
+    own = [v for v in views if owners.get(v[0]) == tap.from_screen_id]
+    rest = [v for v in views if v not in own]
+    for scroll_id, screen in (*own, *rest):
         for element in screen.elements:
             if element.id == tap.element_id and _same_element(
                 tap.element, element, texts=texts
@@ -1449,7 +1478,10 @@ def _scrolled_rows(
         here: dict[tuple[str, str], int] = {}
         added: list[tuple[tuple[str, str], Row]] = []
         for row in later:
-            row.after_scroll = scroll_id
+            row.view_key = scroll_id
+            row.after_scroll = (
+                scroll_id if scroll_id is not None and scroll_id > 0 else None
+            )
             if prints is not None:
                 identity = (row.kind, prints.of(by_id[row.element_id]))
                 number = here.get(identity, 0)
@@ -1535,14 +1567,15 @@ def _node(  # noqa: PLR0912 - one step per kind of read
 ) -> ScreenNode:
     screen, screen_package, activity = loaded
     members = {sid, *(a for a, first in moves.family.items() if first == sid)}
-    views = _scroll_views(screen, moves, reader, members, activity)
+    owners: dict[int | None, str | None] = {}
+    views = _scroll_views(sid, screen, moves, reader, members, activity, owners)
     taps_by: dict[tuple[int | None, str], list[_Tap]] = {}
     for (from_id, element_id), taps in moves.taps.items():
         if from_id not in members:
             continue
         for tap in taps:
             found, view = (
-                _view_of(tap, views, texts=record_text)
+                _view_of(tap, views, texts=record_text, owners=owners)
                 if len(views) > 1
                 else (False, None)
             )
@@ -1572,7 +1605,7 @@ def _node(  # noqa: PLR0912 - one step per kind of read
     # shown once (its repeat), so that no destination is lost.
     attached: dict[int, tuple[Row, list[_Tap]]] = {}
     for row in rows:
-        key = (row.after_scroll, row.element_id)
+        key = (row.view_key, row.element_id)
         if key in taps_by:
             attached.setdefault(id(row), (row, []))[1].extend(taps_by[key])
     for key, row in stand_in.items():
@@ -1586,7 +1619,11 @@ def _node(  # noqa: PLR0912 - one step per kind of read
         activity,
         rows,
         unmatched,
-        tuple(skips.whole_screen.get(sid, ())),
+        tuple(
+            dict.fromkeys(
+                reason for one in ids for reason in skips.whole_screen.get(one, ())
+            )
+        ),
         "too_many_elements" if unchecked else None,
         _is_dialog(_Tree(screen)),
     )
@@ -1631,17 +1668,22 @@ def read_tree(run_dir: str | Path) -> RunTree:
     )
     moves = _read_moves(base, warnings, distrust=foreign)
     screens: dict[str, ScreenNode] = {}
+    family = moves.family
     for sid in _screen_ids(reader, moves):
+        if sid in family:
+            continue  # another id of a screen listed under its first id
         loaded = reader.load(sid)
         if loaded is not None:
             screens[sid] = _node(
                 sid, loaded, moves, skips, reader, own, record_text=record_text
             )
-    root = moves.root if moves.root in screens else moves.first_from
+    first_root = family.get(moves.root, moves.root) if moves.root else None
+    root = first_root if first_root in screens else moves.first_from
+    root = family.get(root, root) if root else None
     if root not in screens:
         root = None
     for sid, element_id in moves.taps:
-        node = screens.get(sid)
+        node = screens.get(family.get(sid, sid))
         if node is None:
             warnings.append(f"a tap names the screen {sid}, which has no readable file")
         elif all(r.element_id != element_id for r in node.rows):
@@ -1650,7 +1692,7 @@ def read_tree(run_dir: str | Path) -> RunTree:
             )
     reached = _reachable(root, screens)
     led_to = {
-        target
+        family.get(target, target)  # a joined id is its first one
         for taps in moves.taps.values()
         for tap in taps
         if (target := _sent_target(tap)) is not None
@@ -1772,6 +1814,7 @@ def _led_to(
     moves: _Moves,
     action_id: int,
 ) -> Ending:
+    target = moves.family.get(target, target)  # a joined id is its first one
     if reader.load(target) is not None:
         # a file of the run's package or of a listed one (see the gate)
         return {"screen_id": target}
