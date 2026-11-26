@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import json
 import random
 from dataclasses import asdict, fields, replace
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -1937,10 +1939,9 @@ def test_a_listed_apps_element_at_the_point_is_its_own_only_when_on_target() -> 
     # the app's own element on a listed app's screen is another package there
     app = clone(own, package=PKG)
     mixed = list_screen([], package=helper, extras=(app,))
-    assert (
-        scroll_target(mixed, judge(mixed, PKG, policy, foreground=helper))[1]  # ty: ignore[not-subscriptable]
-        == NEXT
-    )
+    found = scroll_target(mixed, judge(mixed, PKG, policy, foreground=helper))
+    assert found is not None
+    assert found[1] == NEXT
 
 
 # -- an editable element at the point refuses it -----------------------------------
@@ -2467,3 +2468,163 @@ def test_the_engine_sends_no_wheel_on_a_permission_target_screen() -> None:
     screen = list_screen(["Allow"], row_flags=(), package=package)
     action = eng.next(seen(screen, fg=package))
     assert not isinstance(action, Scroll)
+
+
+# -- a list in a page: the innermost list container is the one scrolled -----------
+
+DATA = Path(__file__).parent.parent / "data"
+
+
+def settings_screen(name):
+    """A saved emulator screen of Settings (a RecyclerView in the ScrollView that
+    is the page); the dump file keeps no per-element package, so every element
+    gets the screen's, as a live dump has it."""
+    from uiprobe.crawl_tree import _parse_screen
+
+    screen, package, _activity = _parse_screen(
+        json.loads((DATA / name).read_text(encoding="utf-8"))
+    )
+    elements = tuple(replace(e, package=package) for e in screen.elements)
+    return replace(screen, elements=elements), package
+
+
+def settings_target(screen, package):
+    policy = Policy(scroll_lists=True)
+    judgement = judge(screen, package, policy, foreground=package)
+    return scroll_target(screen, judgement)
+
+
+def test_a_settings_sub_page_is_eligible_with_the_inner_list_chosen() -> None:
+    # e4 is the page (a scrollable ScrollView), e15 the list (a scrollable
+    # RecyclerView inside it): the inner one is the container
+    screen, package = settings_screen("settings_subpage_screen.json")
+    container = scroll_container(screen)
+    assert container is not None
+    assert (container.id, container.class_name.rsplit(".", 1)[-1]) == (
+        "e15",
+        "RecyclerView",
+    )
+    found = settings_target(screen, package)
+    assert found is not None
+    assert found[0] == "e15"
+    # the key (and with it the caps and the blocks) follows the inner container
+    assert container_key(screen, container).split("|")[1].endswith("RecyclerView")
+
+
+def test_the_settings_first_page_is_eligible() -> None:
+    # e4 is a ScrollView that does not scroll, e11 a ScrollView that does, and a
+    # RecyclerView that does not scroll lies inside e11: the scrollable one is
+    # the container, the view that cannot scroll is no obstacle
+    screen, package = settings_screen("settings_first_page_screen.json")
+    container = scroll_container(screen)
+    assert container is not None
+    assert container.id == "e11"
+    found = settings_target(screen, package)
+    assert found is not None
+    assert found[0] == "e11"
+    assert any(
+        e.id == "e16"
+        and e.class_name.endswith("RecyclerView")
+        and "scrollable" not in e.flags
+        for e in screen.elements
+    )
+
+
+def with_flags(screen, element_id, **changes):
+    return replace(
+        screen,
+        elements=tuple(
+            replace(e, **changes) if e.id == element_id else e for e in screen.elements
+        ),
+    )
+
+
+def test_a_scrollable_view_inside_the_chosen_list_at_the_point_is_refused() -> None:
+    screen, package = settings_screen("settings_subpage_screen.json")
+    point = settings_target(screen, package)[1]
+    inside = Element(
+        "e900",
+        "e15",
+        "android.view.View",
+        Bounds(0, 80, 320, 640),
+        package=package,
+        flags=("scrollable",),
+    )
+    nested = replace(screen, elements=(*screen.elements, inside))
+    assert settings_target(nested, package) is None
+    # not over the point it is no obstacle to another point
+    small = replace(
+        inside, bounds=Bounds(point[0] - 5, point[1] - 5, point[0] + 5, point[1] + 5)
+    )
+    near = replace(screen, elements=(*screen.elements, small))
+    other = settings_target(near, package)
+    assert other is not None
+    assert other[1] != point
+
+
+def test_a_scrollable_list_class_view_below_the_chosen_one_is_the_chosen_one() -> None:
+    screen, package = settings_screen("settings_subpage_screen.json")
+    deeper = Element(
+        "e901",
+        "e15",
+        RECYCLER,
+        Bounds(0, 80, 320, 640),
+        package=package,
+        flags=("scrollable",),
+    )
+    nested = replace(screen, elements=(*screen.elements, deeper))
+    container = scroll_container(nested)
+    assert container is not None
+    assert container.id == "e901"
+
+
+@pytest.mark.parametrize(
+    "cls",
+    [
+        "androidx.viewpager.widget.ViewPager",
+        "android.widget.HorizontalScrollView",
+        "android.widget.FrameLayout",
+    ],
+)
+def test_a_scrollable_ancestor_of_another_class_is_refused(cls) -> None:
+    screen, package = settings_screen("settings_subpage_screen.json")
+    # e3 holds the page and the list; it is flagged scrollable
+    changed = with_flags(screen, "e3", class_name=cls, flags=("scrollable",))
+    assert settings_target(changed, package) is None
+
+
+@pytest.mark.parametrize(
+    "cls",
+    ["androidx.viewpager.widget.ViewPager", "android.widget.HorizontalScrollView"],
+)
+def test_an_ancestor_of_a_class_that_is_no_list_is_refused_scrollable_or_not(cls):
+    screen, package = settings_screen("settings_subpage_screen.json")
+    changed = with_flags(screen, "e3", class_name=cls)
+    assert settings_target(changed, package) is None
+
+
+def test_an_ancestor_list_container_may_be_scrollable_or_not() -> None:
+    screen, package = settings_screen("settings_subpage_screen.json")
+    # e4 (the page) scrolls here; it does not on the first page, where the same
+    # class is an ancestor too
+    assert settings_target(screen, package) is not None
+    first, first_package = settings_screen("settings_first_page_screen.json")
+    assert settings_target(first, first_package) is not None
+    quiet = with_flags(screen, "e4", flags=())
+    assert settings_target(quiet, package) is not None
+
+
+def test_the_old_largest_rule_still_stops_a_non_list_largest() -> None:
+    screen, package = settings_screen("settings_subpage_screen.json")
+    big = Element(
+        "e902",
+        "e1",
+        "android.widget.HorizontalScrollView",
+        Bounds(0, 0, 320, 640),
+        package=package,
+        flags=("scrollable",),
+    )
+    assert (
+        settings_target(replace(screen, elements=(*screen.elements, big)), package)
+        is None
+    )

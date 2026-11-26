@@ -29,6 +29,8 @@ from uiprobe.guards.constants import (
 from uiprobe.guards.tree import _is_dialog, _is_text_field, _Tree
 
 if TYPE_CHECKING:
+    from collections.abc import Iterable
+
     from uiprobe.guards.policy import Judgement
     from uiprobe.model import Bounds, Element, Screen
 
@@ -43,13 +45,44 @@ Point = tuple[int, int]
 
 
 def scroll_container(screen: Screen) -> Element | None:
-    """The container of a wheel scroll: the scrollable element with the largest
-    visible part (the first of equals, in document order), provided its class is
-    exactly one of `SCROLL_CONTAINER_CLASSES`; None when there is no scrollable
-    element with a visible part or the largest has another class (no other
-    element is tried)."""
+    """The container of a wheel scroll: the innermost list container of the
+    largest scrollable element.
+
+    The largest scrollable element with a visible part (the first of equals, in
+    document order) must have exactly one of `SCROLL_CONTAINER_CLASSES`; None
+    when there is none or it has another class (no other element is tried). Then,
+    if scrollable elements of those classes lie inside it (a RecyclerView in the
+    ScrollView that is the page, as on the Settings screens), the container is
+    the largest of the innermost ones: the scrollable list container with no
+    scrollable list container inside it that has a visible part. Otherwise it is
+    that element itself. A scrollable element of another class inside the
+    container does not change the choice: it is refused at the point (see
+    `scroll_target`)."""
+    best = _largest_scrollable(screen, screen.elements)
+    if best is None or best.class_name not in SCROLL_CONTAINER_CLASSES:
+        return None
+    below = [
+        e
+        for e in screen.elements
+        if e.id != best.id
+        and _SCROLLABLE in e.flags
+        and e.class_name in SCROLL_CONTAINER_CLASSES
+        and screen.visible_bounds(e) is not None
+        and screen._is_within(e, best)  # noqa: SLF001
+    ]
+    innermost = [
+        e
+        for e in below
+        if not any(o.id != e.id and screen._is_within(o, e) for o in below)  # noqa: SLF001
+    ]
+    return _largest_scrollable(screen, innermost) or best
+
+
+def _largest_scrollable(screen: Screen, elements: Iterable[Element]) -> Element | None:
+    """The scrollable element with the largest visible part (the first of
+    equals), or None."""
     best: tuple[int, Element] | None = None
-    for element in screen.elements:
+    for element in elements:
         if _SCROLLABLE not in element.flags:
             continue
         part = screen.visible_bounds(element)
@@ -58,9 +91,7 @@ def scroll_container(screen: Screen) -> Element | None:
         area = part.width * part.height
         if best is None or area > best[0]:
             best = (area, element)
-    if best is None or best[1].class_name not in SCROLL_CONTAINER_CLASSES:
-        return None
-    return best[1]
+    return None if best is None else best[1]
 
 
 def elements_at(screen: Screen, point: Point) -> list[Element]:
@@ -79,17 +110,41 @@ def elements_at(screen: Screen, point: Point) -> list[Element]:
     return found
 
 
-def _allowed(element: Element, container: Element, refused_ids: frozenset[str]) -> bool:
+def _allowed(
+    screen: Screen,
+    element: Element,
+    container: Element,
+    refused_ids: frozenset[str],
+) -> bool:
     """Whether an element at the point leaves the point qualified.
 
-    It must be the container or have exactly one of `SCROLL_POINT_CLASSES`, and
-    not be scrollable (other than the container itself), long-clickable,
-    checkable, a password field, a text field or refused by judge. A plain
-    clickable row is allowed.
+    Where it stands decides its class. The container itself is fine. Inside the
+    container it must have exactly one of `SCROLL_POINT_CLASSES` (or be a list
+    container class that is not scrollable, a view that cannot scroll) and not be
+    scrollable. An ancestor of the container (the page the list lies in) may
+    have a list container class, scrollable or not, or a plain class that is not
+    scrollable: a ViewPager, a HorizontalScrollView or a plain layout flagged
+    scrollable above the list is refused. Anything that is neither the container,
+    inside it nor above it is refused. In every place the element must not be
+    long-clickable, checkable, editable, a password field, a text field or refused
+    by judge. A plain clickable row is allowed.
     """
-    if element.id != container.id and (
-        element.class_name not in SCROLL_POINT_CLASSES or _SCROLLABLE in element.flags
-    ):
+    scrollable = _SCROLLABLE in element.flags
+    if element.id == container.id:
+        pass
+    elif screen._is_within(element, container):  # noqa: SLF001
+        if scrollable or not (
+            element.class_name in SCROLL_POINT_CLASSES
+            or element.class_name in SCROLL_CONTAINER_CLASSES
+        ):
+            return False
+    elif screen._is_within(container, element):  # noqa: SLF001
+        if not (
+            element.class_name in SCROLL_CONTAINER_CLASSES
+            or (element.class_name in SCROLL_POINT_CLASSES and not scrollable)
+        ):
+            return False
+    else:
         return False
     return not (
         element.id in refused_ids
@@ -98,16 +153,6 @@ def _allowed(element: Element, container: Element, refused_ids: frozenset[str]) 
         or _PASSWORD in element.flags
         or element.editable
         or _is_text_field(element)
-    )
-
-
-def _related(screen: Screen, element: Element, container: Element) -> bool:
-    """Whether the element is the container, inside it, or one of the elements
-    that hold it (its ancestors): the only things that may lie at the point. An
-    element beside it in the tree (a sibling drawn over or under the list, with
-    or without a label) is none of these."""
-    return screen._is_within(element, container) or screen._is_within(  # noqa: SLF001
-        container, element
     )
 
 
@@ -154,10 +199,7 @@ def scroll_target(screen: Screen, judgement: Judgement) -> tuple[str, Point] | N
         ):
             continue  # the judge's screen_edge areas, as for a tap
         held = elements_at(screen, point)
-        if not all(
-            _allowed(e, container, refused) and _related(screen, e, container)
-            for e in held
-        ):
+        if not all(_allowed(screen, e, container, refused) for e in held):
             continue
         top = screen.hit_target(point)
         if top is None or screen._is_within(top, container):  # noqa: SLF001
