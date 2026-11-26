@@ -155,7 +155,7 @@ __all__ = [
 
 SETTINGS_FILE: Final = "uiprobe.toml"
 FORMAT_VERSION: Final = 1
-DEFAULTS_VERSION: Final = 8
+DEFAULTS_VERSION: Final = 9
 MAX_SETTINGS_BYTES: Final = 1024 * 1024
 
 # Every default list item with the defaults version that introduced it. Each
@@ -179,7 +179,8 @@ MAX_SETTINGS_BYTES: Final = 1024 * 1024
 # Version 7 added the state-changing deny words (forget, disconnect, ...).
 # Version 8 added the rule also_target (a list of packages; optional in every
 # file, a missing one reads as the empty list; `uiprobe init` writes it
-# commented).
+# commented). Version 9 added the confirm words turn on, enable, オンにする
+# and 有効にする (a dialog's "Turn on" button changes a device setting).
 _LATER_DENY: Final[dict[str, int]] = {
     "やり直": 2,
     "元に戻": 2,
@@ -190,9 +191,14 @@ _LATER_DENY: Final[dict[str, int]] = {
 # The [deny] except list has no built-in words. One added later starts at the
 # next defaults version (raise DEFAULTS_VERSION with it); before that, the
 # test that no default is tagged beyond the current version fails.
-_FIRST_EXCEPT: Final = 9
+_FIRST_EXCEPT: Final = 10
 _LATER_EXCEPT: Final[dict[str, int]] = {}
-_LATER_CONFIRM: Final[dict[str, int]] = {}
+_LATER_CONFIRM: Final[dict[str, int]] = {
+    "turn on": 9,
+    "enable": 9,
+    "オンにする": 9,
+    "有効にする": 9,
+}
 # The [irreversible] table came with version 2, so its items start there.
 _FIRST_IRREVERSIBLE: Final = 2
 _LATER_IRREVERSIBLE: Final[dict[str, int]] = {}
