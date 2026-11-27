@@ -130,6 +130,9 @@ class Row:
     # screen's own file, a negative number for the file of another id of the
     # same screen).
     view_key: int | None = None
+    # The group of the screen's list the row lies in (see `_assign_groups`),
+    # or None: the row is outside the list, or the screen has no separator.
+    group: int | None = None
     # In memory only: the element ids of the earlier, cut-off versions of this
     # row that it replaced (a tap that names one of them is not lost).
     merged_ids: tuple[str, ...] = ()
@@ -150,6 +153,9 @@ class ScreenNode:
     screen_reasons: tuple[str, ...] = ()
     unmatched_why: str | None = None  # why they were not matched, when not tried
     popup: bool = False  # the crawl's own dialog rule holds for the screen
+    # The text of the separator that starts each group, by group number (group
+    # 0 has none): empty when the screen has no separator in its list.
+    groups: list[str | None] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -1877,6 +1883,280 @@ def _check_folds(rows: list[Row]) -> None:
             row.folded_into = None
 
 
+def _holds_clickable(screen: Screen, index: dict[str, int]) -> list[bool]:
+    """For each element: it is clickable, or something below it is."""
+    elements = screen.elements
+    holds = ["clickable" in e.flags for e in elements]
+    for element in elements:
+        if "clickable" not in element.flags:
+            continue
+        node = index.get(element.parent) if element.parent is not None else None
+        while node is not None and not holds[node]:
+            holds[node] = True
+            parent = elements[node].parent
+            node = index.get(parent) if parent is not None else None
+    return holds
+
+
+@dataclass(slots=True)
+class _ReadList:
+    """The list of one read, split at its separators."""
+
+    identity: tuple[object, ...]  # class, resource id and ancestry of the list
+    members: dict[str, int]  # element id -> local group, for all under the list
+    seps: list[str | None]  # text of the separator that starts local group 1, 2, ...
+    keys: list[tuple[str, int]]  # (fingerprint, local group) of the unique rows
+
+
+def _list_identity(screen: Screen, index: dict[str, int], i: int) -> tuple[object, ...]:
+    elements = screen.elements
+    found: list[tuple[str, str]] = []
+    seen = {i}
+    node: int | None = i
+    while node is not None:
+        found.append((elements[node].class_name, elements[node].resource_id))
+        up = elements[node].parent
+        node = index.get(up) if up is not None else None
+        if node in seen:
+            break
+        if node is not None:
+            seen.add(node)
+    return tuple(found)
+
+
+def _pick_list(
+    screen: Screen, children: dict[str, list[int]], holds: list[bool]
+) -> int:
+    """The index of the list element, or -1: the most direct children that are
+    or hold a clickable, at least 3, the first one on a tie."""
+    best = -1
+    best_count = 2
+    for i, element in enumerate(screen.elements):
+        count = sum(1 for c in children.get(element.id, ()) if holds[c])
+        if count > best_count:
+            best, best_count = i, count
+    return best
+
+
+def _row_keys(
+    screen: Screen, kids: list[int], holds: list[bool], members: dict[str, int]
+) -> list[tuple[str, int]]:
+    """(fingerprint, local group) of each row child of the list whose fingerprint
+    is unique in the read: the rows that line a later read up with this one."""
+    prints = _Prints(screen)
+    counts: dict[str, int] = {}
+    pairs: list[tuple[str, int]] = []
+    for child in kids:
+        if holds[child]:
+            fp = prints.of(screen.elements[child])
+            counts[fp] = counts.get(fp, 0) + 1
+            pairs.append((fp, members[screen.elements[child].id]))
+    return [(fp, g) for fp, g in pairs if counts[fp] == 1]
+
+
+def _read_groups(screen: Screen, *, record_text: bool, keyed: bool) -> _ReadList | None:
+    """The groups of one read, or None when it has no list.
+
+    The list is the element with the most direct children that are or hold a
+    clickable, at least 3 (the first one on a tie). Among its children, one that
+    holds no clickable and lies between two that do is a separator; it starts a
+    new group, and the children before the first separator are group 0. The text
+    of a separator is the first non-empty text in its whole subtree, in document
+    order (separators are disjoint, so all of them together cost one pass over
+    the screen). `keyed` also fingerprints the rows, to line up later reads."""
+    index = {e.id: i for i, e in enumerate(screen.elements)}
+    children: dict[str, list[int]] = {}
+    for i, element in enumerate(screen.elements):
+        if element.parent in index:
+            children.setdefault(element.parent, []).append(i)  # type: ignore[arg-type]
+    holds = _holds_clickable(screen, index)
+    best = _pick_list(screen, children, holds)
+    if best < 0:
+        return None
+    kids = children[screen.elements[best].id]
+    marked = [n for n, c in enumerate(kids) if holds[c]]
+    first, last = marked[0], marked[-1]
+    members: dict[str, int] = {}
+    texts: list[str | None] = []
+    for n, child in enumerate(kids):
+        separator = not holds[child] and first < n < last
+        if separator:
+            texts.append(None)
+        earliest = -1  # the element of a separator's subtree with text, first
+        stack = [child]
+        while stack:
+            i = stack.pop()
+            element_id = screen.elements[i].id
+            if element_id in members:
+                continue
+            members[element_id] = len(texts)
+            if (
+                separator
+                and record_text
+                and screen.elements[i].text.strip()
+                and (earliest < 0 or i < earliest)
+            ):
+                earliest = i
+            stack.extend(children.get(element_id, ()))
+        if earliest >= 0:
+            element = screen.elements[earliest]
+            texts[-1] = (
+                _PASSWORD_NAME
+                if "password" in element.flags
+                else (element.text.strip())
+            )
+    keys = _row_keys(screen, kids, holds, members) if keyed else []
+    return _ReadList(_list_identity(screen, index, best), members, texts, keys)
+
+
+class _Chain:
+    """The groups of a screen in the order they lie in the list, as a linked
+    list of ids; ids are numbered as they are made."""
+
+    def __init__(self) -> None:
+        self.text: list[str | None] = []
+        self.next: list[int | None] = []
+        self.prev: list[int | None] = []
+        self.head = self.make(None)
+
+    def make(self, text: str | None) -> int:
+        self.text.append(text)
+        self.next.append(None)
+        self.prev.append(None)
+        return len(self.text) - 1
+
+    def insert_after(self, at: int | None, text: str | None) -> int:
+        """A new group after `at` (at the front when `at` is None)."""
+        new = self.make(text)
+        after = self.head if at is None else self.next[at]
+        self.prev[new] = at
+        self.next[new] = after
+        if at is None:
+            self.head = new
+        else:
+            self.next[at] = new
+        if after is not None:
+            self.prev[after] = new
+        return new
+
+    def numbered(self) -> dict[int, int]:
+        """The final number of each id: its place in the list."""
+        found: dict[int, int] = {}
+        node: int | None = self.head
+        while node is not None:
+            found[node] = len(found)
+            node = self.next[node]
+        return found
+
+
+def _align(chain: _Chain, read: _ReadList, known: dict[str, int]) -> dict[int, int]:
+    """Map the local groups of a later read to groups of `chain`, by the rows
+    it has in common with the reads before it (a unique fingerprint). Empty when
+    there is no common row. What comes before the first common row of a group
+    belongs to that group; a separator is matched by its place next to the
+    groups found that way (and by its text), never by its text alone."""
+    mapping: dict[int, int] = {}
+    for fingerprint, local in read.keys:
+        if fingerprint in known:
+            mapping.setdefault(local, known[fingerprint])
+    if not mapping:
+        return {}
+    for local, found in mapping.items():  # a separator seen now names its group
+        if local and chain.text[found] is None:
+            chain.text[found] = read.seps[local - 1]
+    last = len(read.seps)
+    start = min(mapping)
+    for local in range(start - 1, -1, -1):  # the groups above the first common one
+        below = mapping[local + 1]
+        above = chain.prev[below]
+        text = read.seps[local - 1] if local else None
+        same = above is not None and (
+            (chain.text[above] == text and text is not None)
+            if local
+            else chain.prev[above] is None and chain.text[above] is None
+        )
+        mapping[local] = (
+            above if same and above is not None else chain.insert_after(above, text)
+        )
+    for local in range(start + 1, last + 1):  # the groups below
+        if local in mapping:
+            continue
+        above = mapping[local - 1]
+        below = chain.next[above]
+        text = read.seps[local - 1]
+        same = below is not None and text is not None and chain.text[below] == text
+        mapping[local] = (
+            below if same and below is not None else chain.insert_after(above, text)
+        )
+    return mapping
+
+
+def _assign_groups(
+    rows: list[Row], views: list[_View], *, record_text: bool
+) -> list[str | None]:
+    """Give each row its group and return the group texts (by group number);
+    nothing is changed, and the result is empty, when the screen has no
+    separator.
+
+    Each read is grouped on its own (`_read_groups`). The first read that has a
+    list gives the groups. A later read must have the same list (class,
+    resource id and ancestry) and is lined up with the groups so far by the rows
+    it shares with them (`_align`); a read that cannot be lined up, or whose
+    list is not that one, or that has no recorded texts to tell rows apart,
+    gives its rows no group. A read before the first one with a list has no
+    list: its rows get the group of a row they share with the list, else none."""
+    keyed = record_text and len(views) > 1
+    reads = {
+        key: _read_groups(s, record_text=record_text, keyed=keyed) for key, s in views
+    }
+    seed = next((n for n, (key, _) in enumerate(views) if reads[key] is not None), None)
+    if seed is None:
+        return []
+    first = reads[views[seed][0]]
+    assert first is not None  # noqa: S101
+    chain = _Chain()
+    known: dict[str, int] = {}
+    mapped: dict[int | None, dict[int, int]] = {}
+    ids = [0]
+    for text in first.seps:
+        ids.append(chain.insert_after(ids[-1], text))
+    mapped[views[seed][0]] = dict(enumerate(ids))
+    known.update((fp, ids[local]) for fp, local in first.keys)
+    for key, _ in views[seed + 1 :]:
+        read = reads[key]
+        if read is None or read.identity != first.identity or not keyed:
+            continue
+        mapping = _align(chain, read, known)
+        if not mapping:
+            continue
+        mapped[key] = mapping
+        known.update((fp, mapping[local]) for fp, local in read.keys if fp not in known)
+    if len(chain.text) == 1:
+        return []
+    final = chain.numbered()
+    earlier_reads = (
+        {key: (_Prints(s), {e.id: e for e in s.elements}) for key, s in views[:seed]}
+        if keyed
+        else {}
+    )
+    for row in rows:
+        mapping = mapped.get(row.view_key)
+        read = reads.get(row.view_key)
+        if mapping is None or read is None:
+            earlier = earlier_reads.get(row.view_key)
+            if earlier is not None:  # a read with no list: only a shared row
+                prints, by_id = earlier
+                element = by_id.get(row.element_id)
+                found = known.get(prints.of(element)) if element is not None else None
+                row.group = None if found is None else final[found]
+            continue
+        local = read.members.get(row.element_id)
+        if local is not None:
+            row.group = final[mapping[local]]
+    order = sorted(final, key=final.__getitem__)
+    return [chain.text[g] for g in order]
+
+
 def _node(  # noqa: PLR0912 - one step per kind of read
     sid: str,
     loaded: tuple[Screen, str, str | None],
@@ -1949,6 +2229,12 @@ def _node(  # noqa: PLR0912 - one step per kind of read
     for row, taps in attached.values():
         _attach(row, taps, sid, own, reader, moves)
     _check_folds(rows)
+    groups = _assign_groups(
+        [*rows, *(old for old, _ in replaced)], views, record_text=record_text
+    )
+    for old, kept in replaced:  # a fuller row stands at the place of the cut-off one
+        if old.group is not None:
+            kept.group = old.group
     return ScreenNode(
         sid,
         screen_package,
@@ -1962,6 +2248,7 @@ def _node(  # noqa: PLR0912 - one step per kind of read
         ),
         "too_many_elements" if unchecked else None,
         _is_dialog(_Tree(screen)),
+        groups,
     )
 
 
@@ -2238,6 +2525,7 @@ def _element_dict(row: Row) -> dict[str, object]:
         data["folded_into"] = row.folded_into
     if row.after_scroll is not None:
         data["after_scroll"] = row.after_scroll
+    data["group"] = row.group
     if row.kind == "row":
         data["pressed"] = row.pressed
         data["action_id"] = row.action_id
@@ -2281,6 +2569,10 @@ def tree_to_dict(tree: RunTree) -> dict[str, object]:
             entry["screen_reasons"] = list(node.screen_reasons)
         if node.popup:
             entry["popup"] = True
+        if node.groups:
+            entry["groups"] = [
+                {"index": n, "text": text} for n, text in enumerate(node.groups)
+            ]
         screens[sid] = entry
     return {
         "schema": TREE_SCHEMA,
