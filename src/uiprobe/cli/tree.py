@@ -178,6 +178,16 @@ def _endings(row: Row) -> list[dict[str, object]]:
     return ([row.to] if row.to is not None else []) + list(row.also_to)
 
 
+def _more(row: Row) -> tuple[dict[str, object], ...]:
+    """The further endings of a row for the text tree, each once (a row made of
+    two versions can hold the same ending twice, for its two taps)."""
+    more: list[dict[str, object]] = []
+    for ending in row.also_to:
+        if ending != row.to and ending not in more:
+            more.append(ending)
+    return tuple(more)
+
+
 def _keeps_line(row: Row, *, folded: bool) -> bool:
     """Whether a row has a line in the text tree. A row that has no name there
     (or none by `DESC_ONLY_ROWS`) still has one when any of its taps reached a
@@ -235,6 +245,11 @@ def _row_line(
         if why and row.reasons:
             reasons = " [" + ", ".join(_printable(r) for r in row.reasons) + "]"
             line += reasons
+    elif why and row.reasons and row.merged_ids:
+        # a pressed row made of two versions of one row keeps the reasons of the
+        # version that was not pressed
+        reasons = " [" + ", ".join(_printable(r) for r in row.reasons) + "]"
+        line += reasons
     return _Entry(
         line,
         row.to,
@@ -277,6 +292,7 @@ def _merged(row: Row, folded: list[Row]) -> Row:
         also_to=endings[1:],
         reasons=reasons,
         other_attempt=any(r.other_attempt for r in group),
+        merged_ids=tuple(dict.fromkeys(x for r in group for x in r.merged_ids)),
     )
 
 
@@ -430,7 +446,7 @@ def _entries(
             continue
         entry = _row_line(row, note, why=why, tally=tally, no_change=no_change)
         tally.names[entry.name] = tally.names.get(entry.name, 0) + 1
-        entry.more = tuple(row.also_to)
+        entry.more = _more(row)
         previous = _mark_gap(entry, node, previous, line_row.group)
         entries.append(entry)
     return entries

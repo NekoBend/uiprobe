@@ -519,3 +519,61 @@ def test_a_separator_with_many_children_keeps_the_text_on_the_last_one(tmp_path)
     spec = [("row", "A"), ("many", "Far text"), ("row", "B"), ("row", "C")]
     tree, sid, _ = tree_of(tmp_path, spec)
     assert tree.screens[sid].groups == [None, "Far text"]
+
+
+def test_a_merged_cut_off_row_takes_the_group_of_the_version_it_stands_at(tmp_path):
+    from uiprobe.model import Bounds
+
+    bottom = 2400
+
+    def shelf(items):
+        """A list; items are ("row" | "sep", texts, top, bottom)."""
+        elements = [
+            el(1, cls="FrameLayout"),
+            el(
+                2,
+                1,
+                cls="RecyclerView",
+                flags=("scrollable",),
+                bounds=Bounds(0, 200, 1080, bottom),
+            ),
+        ]
+        number = 3
+        for kind, texts, top, end in items:
+            box = Bounds(0, top, 1080, end)
+            flags = CLICK if kind == "row" else ()
+            elements.append(el(number, 2, cls="LinearLayout", flags=flags, bounds=box))
+            for offset, text in enumerate(texts, 1):
+                elements.append(el(number + offset, number, text=text, bounds=box))
+            number += 1 + len(texts)
+        return make_screen(".Shelf", elements)
+
+    first = shelf(
+        [
+            ("row", ("A",), 200, 400),
+            ("row", ("B",), 400, 600),
+            ("sep", ("Today",), 600, 700),
+            ("row", ("C",), 700, 900),
+            ("row", ("Cut",), 2300, bottom),
+        ]
+    )
+    after = shelf(
+        [
+            ("row", ("C",), 200, 400),
+            ("row", ("Cut", "On"), 400, 700),
+            ("row", ("D",), 700, 900),
+        ]
+    )
+    folder = Folder(tmp_path)
+    folder.screen(first)
+    folder.screen(after)
+    folder.start("launch")
+    folder.end(first.screen_id)
+    scroll(folder, first, after)
+    folder.finish()
+    node = read_tree(folder.path).screens[first.screen_id]
+    cut = next(r for r in node.rows if r.name == "Cut")
+    assert cut.texts == ("Cut", "On")  # the fuller version
+    assert cut.after_scroll is not None
+    assert by_name(node) == {"A": 0, "B": 0, "Today": 1, "C": 1, "Cut": 1, "D": 1}
+    assert node.groups == [None, "Today"]
