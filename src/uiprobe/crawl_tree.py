@@ -1517,25 +1517,34 @@ def _view_of(
     return False, None
 
 
-def _list_bottom(screen: Screen, by_id: dict[str, Element], element: Element) -> int:
-    """The lowest y at which the element can be seen: the bottom of its nearest
-    scrollable ancestor, cut to the display, else the bottom of the display."""
-    bottom = screen.display[1]
+def _list_of(by_id: dict[str, Element], element: Element) -> Element | None:
+    """The list the element is in: its nearest scrollable ancestor; None when it
+    has none or the list shows nothing (no height)."""
     seen: set[str] = set()
     above = by_id.get(element.parent) if element.parent is not None else None
     while above is not None and above.id not in seen:
         seen.add(above.id)
         if "scrollable" in above.flags:
-            return min(bottom, above.bounds.bottom)
+            return above if above.bounds.height > 0 else None
         above = by_id.get(above.parent) if above.parent is not None else None
-    return bottom
+    return None
+
+
+def _list_key(by_id: dict[str, Element], element: Element) -> tuple[str, str] | None:
+    """What says two reads show the same list: its class and resource id."""
+    found = _list_of(by_id, element)
+    return None if found is None else (found.class_name, found.resource_id)
 
 
 def _cut_off(screen: Screen, by_id: dict[str, Element], row: Row) -> bool:
     """Whether the row's element touched the bottom edge of its visible list
-    area (or of the display) in its read, so it may have been shown in part."""
+    (cut to the display) in its read, so it may have been shown in part. A row
+    outside any list, or in a list with no height, is never cut off."""
     element = by_id[row.element_id]
-    return element.bounds.bottom >= _list_bottom(screen, by_id, element) - 1
+    found = _list_of(by_id, element)
+    if found is None:
+        return False
+    return element.bounds.bottom >= min(screen.display[1], found.bounds.bottom) - 1
 
 
 def _fuller(early: Row, late: Row) -> bool:
@@ -1605,6 +1614,11 @@ def _scrolled_rows(
         maps[id(screen)] = by_id
         here: dict[tuple[str, str, str], int] = {}
         added: list[tuple[tuple[str, str, str], Row]] = []
+        # a title that two rows of this read have is no sign of one row
+        titles: dict[tuple[str, str, str], int] = {}
+        for one in later:
+            if one.texts:
+                titles[_title(one)] = titles.get(_title(one), 0) + 1
         for row in later:
             row.view_key = scroll_id
             row.after_scroll = (
@@ -1619,7 +1633,11 @@ def _scrolled_rows(
                     stand_in[scroll_id, row.element_id] = earlier[number]
                     continue
                 added.append((identity, row))
-                place = _cut_off_place(rows, reads, titled, maps, screen, row)
+                place = (
+                    _cut_off_place(rows, reads, titled, maps, screen, row, stand_in)
+                    if row.texts and titles.get(_title(row)) == 1
+                    else None
+                )
                 if place is not None:
                     old = rows[place]
                     rows[place] = row
@@ -1652,7 +1670,8 @@ def _hand_over(
         if held is old:
             stand_in[key] = row
     for found in listed.values():
-        found[:] = [row if one is old else one for one in found]
+        # the cut-off version is gone: a row that looks like it is a new row
+        found[:] = [one for one in found if one is not old]
 
 
 def _title(row: Row) -> tuple[str, str, str]:
@@ -1674,12 +1693,16 @@ def _cut_off_place(
     maps: dict[int, dict[str, Element]],
     screen: Screen,
     row: Row,
+    stand_in: dict[tuple[int | None, str], Row],
 ) -> int | None:
     """The place in `rows` of the row that `row` shows whole, if an earlier read
     showed it cut off at the bottom edge: the first such row, of an earlier read
     than this one."""
     if not row.texts or row.kind != "row":
         return None
+    here = maps[id(screen)]
+    element = here[row.element_id]
+    found: list[int] = []
     for place in titled.get(_title(row), []):
         read = reads[place]
         if read is screen or not _fuller(rows[place], row):
@@ -1687,9 +1710,20 @@ def _cut_off_place(
         by_id = maps.get(id(read))
         if by_id is None:
             by_id = maps[id(read)] = {e.id: e for e in read.elements}
-        if _cut_off(read, by_id, rows[place]):
-            return place
-    return None
+        early = by_id[rows[place].element_id]
+        key = _list_key(by_id, early)
+        if (
+            early.resource_id == element.resource_id
+            and key is not None
+            and key == _list_key(here, element)
+            and _cut_off(read, by_id, rows[place])
+        ):
+            found.append(place)
+    # exactly one earlier row can be the one: with two, nothing is merged; and a
+    # row that a repeat of it already stands in for has its one later row
+    if len(found) != 1 or any(v is rows[found[0]] for v in stand_in.values()):
+        return None
+    return found[0]
 
 
 def _identity(
@@ -2041,7 +2075,8 @@ def _attach(
         for tap in taps
     )
     for tap in taps:
-        if tap is best or _rank(tap) != 0:
+        # a row made of two versions keeps the outcome of every attempt
+        if tap is best or (_rank(tap) != 0 and not row.merged_ids):
             continue
         ending = _ending(tap, sid, own, reader, moves)
         if ending not in shown:

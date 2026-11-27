@@ -1469,38 +1469,54 @@ def test_a_foreign_snapshot_that_a_scroll_names_still_fails_the_gate(tmp_path):
 TOP, BOTTOM = 200, 2400  # the list area; the display ends at BOTTOM too
 
 
-def shelf(rows):
-    """A list with explicit bounds. `rows` is (texts, top, bottom) per row; the
-    return value is the screen and the element number of each row."""
+def shelf(rows, *, scrollable=True, list_id="", list_top=TOP):
+    """A list with explicit bounds. `rows` is (texts, top, bottom[, resource id])
+    per row; the return value is the screen and the element number of each row."""
     elements = [
         el(1, cls="FrameLayout"),
         el(
             2,
             1,
             cls="RecyclerView",
-            flags=("scrollable",),
-            bounds=Bounds(0, TOP, 1080, BOTTOM),
+            flags=("scrollable",) if scrollable else (),
+            resource_id=list_id,
+            bounds=Bounds(0, list_top, 1080, BOTTOM),
         ),
     ]
     numbers = []
     number = 3
-    for texts, top, bottom in rows:
+    for texts, top, bottom, *rid in rows:
         box = Bounds(0, top, 1080, bottom)
         numbers.append(number)
-        elements.append(el(number, 2, cls="LinearLayout", flags=CLICK, bounds=box))
+        elements.append(
+            el(
+                number,
+                2,
+                cls="LinearLayout",
+                flags=CLICK,
+                bounds=box,
+                resource_id=rid[0] if rid else "",
+            )
+        )
         for offset, text in enumerate(texts, 1):
             elements.append(el(number + offset, number, text=text, bounds=box))
         number += 1 + len(texts)
     return make_screen(".Shelf", elements), numbers
 
 
-def cut_off_run(tmp_path, *, early=(("Cut",), 2300, BOTTOM)):
+def cut_off_run(
+    tmp_path,
+    *,
+    early=(("Cut",), 2300, BOTTOM),
+    late=((("Cut", "On"), 300, 500), (("D",), 600, 900)),
+    first_list=None,
+    after_list=None,
+):
     """A list whose last row is `early`; after a scroll the same row shows its
-    title and its summary, higher up in the list."""
-    late = (("Cut", "On"), 300, 500)
+    title and its summary, higher up in the list (`late` are the rows then)."""
     folder = Folder(tmp_path)
-    first, first_rows = shelf([(("A",), 200, 400), early])
-    after, after_rows = shelf([late, (("D",), 600, 900)])
+    first, first_rows = shelf([(("A",), 200, 400), early], **(first_list or {}))
+    after, after_rows = shelf(list(late), **(after_list or {}))
     assert first.screen_id != after.screen_id  # the summary is one element more
     for screen in (first, after, LEAF):
         folder.screen(screen)
@@ -1590,3 +1606,92 @@ def test_skip_reasons_of_both_versions_are_kept(tmp_path):
     assert [r.name for r in rows] == ["A", "Cut", "D"]
     assert set(rows[1].reasons) == {"toggle", "slider"}
     assert tree.screens[first.screen_id].unmatched == []
+
+
+def test_a_different_resource_id_is_another_row(tmp_path):
+    folder, first, *_ = cut_off_run(
+        tmp_path,
+        early=(("Open",), 2300, BOTTOM, "first"),
+        late=((("Open", "Summary B"), 300, 500, "second"), (("D",), 600, 900)),
+    )
+    folder.finish()
+    assert [r.name for r in shelf_rows(folder, first)] == ["A", "Open", "Open", "D"]
+
+
+def test_a_row_outside_any_scrollable_list_is_not_merged(tmp_path):
+    folder, first, *_ = cut_off_run(
+        tmp_path,
+        first_list={"scrollable": False},
+        after_list={"scrollable": False},
+    )
+    folder.finish()
+    assert [r.name for r in shelf_rows(folder, first)] == ["A", "Cut", "Cut", "D"]
+
+
+def test_a_list_with_no_height_does_not_merge(tmp_path):
+    folder, first, *_ = cut_off_run(
+        tmp_path,
+        first_list={"list_top": BOTTOM},
+        after_list={"list_top": BOTTOM},
+    )
+    folder.finish()
+    assert [r.name for r in shelf_rows(folder, first)] == ["A", "Cut", "Cut", "D"]
+
+
+def test_two_different_lists_do_not_merge(tmp_path):
+    folder, first, *_ = cut_off_run(
+        tmp_path,
+        first_list={"list_id": "list_one"},
+        after_list={"list_id": "list_two"},
+    )
+    folder.finish()
+    assert [r.name for r in shelf_rows(folder, first)] == ["A", "Cut", "Cut", "D"]
+
+
+def test_a_later_read_with_two_rows_of_the_title_merges_nothing(tmp_path):
+    folder, first, after, first_rows, after_rows, number = cut_off_run(
+        tmp_path,
+        early=(("Open",), 2300, BOTTOM),
+        late=((("Open", "Summary A"), 300, 500), (("Open",), 600, 700)),
+    )
+    folder.tap(first, first_rows[1], LEAF.screen_id)
+    tap_after(folder, after, after_rows[0], first.screen_id, number)
+    folder.finish()
+    rows = shelf_rows(folder, first)
+    assert [r.name for r in rows] == ["A", "Open", "Open"]
+    clipped, full = rows[1], rows[2]
+    assert full.texts == ("Open", "Summary A")
+    # each destination stays on its own row
+    assert clipped.to == {"screen_id": LEAF.screen_id}
+    assert clipped.also_to == []
+    assert full.to == {"same_screen": True}
+
+
+def test_the_not_sent_outcome_of_the_cut_off_version_is_kept(tmp_path):
+    folder, first, after, first_rows, after_rows, number = cut_off_run(tmp_path)
+    folder.tap(first, first_rows[1], None, not_sent="covered_by_other")
+    tap_after(folder, after, after_rows[0], LEAF.screen_id, number)
+    folder.finish()
+    tree = read_tree(folder.path)
+    rows = [
+        crawl_tree._element_dict(r)
+        for r in tree.screens[first.screen_id].rows
+        if r.kind == "row"
+    ]
+    cut = rows[1]
+    assert cut["pressed"] is True
+    assert cut["to"] == {"screen_id": LEAF.screen_id}
+    assert cut["also_to"] == [{"not_sent": "covered_by_other"}]
+
+
+def test_the_reasons_of_the_cut_off_version_show_with_why(tmp_path, capsys):
+    folder, first, after, first_rows, after_rows, number = cut_off_run(tmp_path)
+    folder.skip(first, first_rows[1], "disabled")
+    tap_after(folder, after, after_rows[0], LEAF.screen_id, number)
+    folder.finish()
+    rows = shelf_rows(folder, first)
+    assert rows[1].pressed
+    assert rows[1].reasons == ("disabled",)
+    code, out, _err = run_tree(capsys, str(folder.path), "--why")
+    assert code == 0
+    assert "Cut [disabled]" in out

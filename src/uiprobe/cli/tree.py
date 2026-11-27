@@ -232,6 +232,11 @@ def _row_line(
         if why and row.reasons:
             reasons = " [" + ", ".join(_printable(r) for r in row.reasons) + "]"
             line += reasons
+    elif why and row.reasons and row.merged_ids:
+        # a pressed row made of two versions of one row keeps the reasons of the
+        # version that was not pressed
+        reasons = " [" + ", ".join(_printable(r) for r in row.reasons) + "]"
+        line += reasons
     return _Entry(
         line,
         row.to,
