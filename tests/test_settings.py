@@ -2331,6 +2331,7 @@ def test_settings_built_with_the_earlier_fields_still_work(tmp_path):
         "scrolls_per_screen",
         "scroll_amount",
         "scroll_incidents",
+        "deny_except_phrases",
     ]
 
 
@@ -2621,7 +2622,7 @@ def test_policy_replay_path_defaults_on_and_must_be_a_bool():
 
 def test_replay_path_comes_after_runs_dir_so_positional_settings_still_work(tmp_path):
     names = [f.name for f in dataclasses.fields(settings.Settings)]
-    assert names[-9:] == [
+    assert names[-10:] == [
         "runs_dir",
         "replay_path",
         "record_text",
@@ -2631,11 +2632,12 @@ def test_replay_path_comes_after_runs_dir_so_positional_settings_still_work(tmp_
         "scrolls_per_screen",
         "scroll_amount",
         "scroll_incidents",
+        "deny_except_phrases",
     ]
     loaded = load_settings(default_file(tmp_path))
     # Built by position with every field up to runs_dir, as before version 5:
     # replay_path takes its default and runs_dir keeps its place.
-    values = [getattr(loaded, name) for name in names[:-8]]
+    values = [getattr(loaded, name) for name in names[:-9]]
     by_position = settings.Settings(*values)
     assert by_position.replay_path is True
     assert by_position.record_text is True
@@ -3201,3 +3203,96 @@ def test_the_settings_docstring_names_the_version_of_the_scroll_fields():
     assert "`DEFAULT_SCROLL_INCIDENTS`), added with defaults version 11." in doc
     assert "scroll_lists" in doc
     assert "defaults version 7" not in doc.split("scroll_lists")[1]
+
+
+# -- the exception phrases ([deny] except_phrases) -----------------------------------
+
+
+def with_phrases(tmp_path: Path, items: str) -> Path:
+    """Write the default file with `[deny] except_phrases` set to `items`."""
+    text = render_default_settings()
+    table = text.split("[deny]")[1].split("[confirm]")[0]
+    assert table.count("remove = []\n") == 1
+    return write(
+        tmp_path,
+        text.replace("remove = []\n", f"except_phrases = {items}\nremove = []\n", 1),
+    )
+
+
+def test_the_generated_file_shows_the_phrases_key_as_a_comment_only():
+    text = render_default_settings()
+    table = text.split("[deny]")[1].split("[confirm]")[0]
+    assert '# except_phrases = ["Quick Share"]' in table
+    assert "\nexcept_phrases" not in table  # no active key: older files stay readable
+    assert "except_phrases" not in tomllib.loads(text)["deny"]
+
+
+def test_a_current_file_without_the_key_has_no_phrases(tmp_path):
+    loaded = load_settings(default_file(tmp_path))
+    assert loaded.deny_except_phrases == ()
+    assert settings.policy_from_settings(loaded).except_phrases == ()
+
+
+def test_the_phrases_reach_the_policy_as_written(tmp_path):
+    loaded = load_settings(with_phrases(tmp_path, '["Quick Share", "pay later"]'))
+    assert loaded.deny_except_phrases == ("Quick Share", "pay later")
+    assert settings.policy_from_settings(loaded).except_phrases == (
+        "Quick Share",
+        "pay later",
+    )
+
+
+def test_an_empty_phrase_list_is_the_default(tmp_path):
+    loaded = load_settings(with_phrases(tmp_path, "[]"))
+    assert loaded.deny_except_phrases == ()
+
+
+def test_an_older_file_may_add_the_phrases(tmp_path):
+    text = v2_text().replace(
+        "remove = []", 'except_phrases = ["Quick Share"]\nremove = []', 1
+    )
+    assert load_settings(write(tmp_path, text)).deny_except_phrases == ("Quick Share",)
+
+
+@pytest.mark.parametrize(
+    ("items", "needle"),
+    [
+        ('[""]', "1 to 80 characters"),
+        (f'["{"x" * 81}"]', "1 to 80 characters"),
+        ('["Quick\\u200bShare"]', "invisible"),
+        ('["Quick\\tShare"]', "control"),
+        ('["Quick\\nShare"]', "control"),
+        ('["123 - 4"]', "no letter"),
+        ('["   "]', "no letter"),
+        ('["Quick Share", "quick   SHARE"]', "duplicate entry"),
+        ('"Quick Share"', "list of strings"),
+        ("[1]", "strings"),
+    ],
+)
+def test_bad_phrases_are_refused(tmp_path, items, needle):
+    refused(with_phrases(tmp_path, items), "[deny] except_phrases", needle)
+
+
+def test_a_phrase_of_eighty_characters_is_accepted(tmp_path):
+    assert load_settings(with_phrases(tmp_path, f'["{"x" * 80}"]')).deny_except_phrases
+
+
+def test_full_width_duplicates_are_refused(tmp_path):
+    refused(
+        with_phrases(tmp_path, '["Quick Share", "\\uff31uick Share"]'),
+        "duplicate entry",
+    )
+
+
+def test_remove_does_not_touch_the_phrases(tmp_path):
+    text = with_phrases(tmp_path, '["Quick Share"]').read_text(encoding="utf-8")
+    path = write(
+        tmp_path, text.replace("remove = []", 'remove = ["share"]', 1), "other.toml"
+    )
+    assert load_settings(path).deny_except_phrases == ("Quick Share",)
+
+
+def test_a_deny_option_inside_a_phrase_drops_the_phrase_for_that_run(tmp_path):
+    loaded = load_settings(with_phrases(tmp_path, '["Quick Share", "Pay Later"]'))
+    policy = settings.policy_from_settings(loaded, extra_deny=["quick share"])
+    assert policy.except_phrases == ("Pay Later",)

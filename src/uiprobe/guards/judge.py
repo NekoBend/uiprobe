@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import TYPE_CHECKING, Literal
 
 from uiprobe.guards.constants import (
@@ -32,6 +33,7 @@ from uiprobe.guards.policy import (
     api36_fallback_areas,
     edge_areas,
 )
+from uiprobe.guards.scroll import _is_decoration, elements_at
 from uiprobe.guards.tree import (
     _CONFIRM,
     _DENY,
@@ -42,6 +44,7 @@ from uiprobe.guards.tree import (
     _PERM,
     _PKG,
     _TEXT,
+    ROW_NAME_MEMBERS,
     _add_part,
     _Agg,
     _Grid,
@@ -81,6 +84,8 @@ class _Judge:
     ) -> None:
         self.screen = screen
         self.policy = policy
+        # The exception phrases by their normalized form (see `_excusing_phrase`).
+        self._phrases = {normalize(phrase): phrase for phrase in policy.except_phrases}
         self.tree = _Tree(screen)
         self.elements = screen.elements
         self.matcher = _Matcher(policy.deny_words, policy.deny_exceptions)
@@ -802,6 +807,141 @@ class _Judge:
             reasons.append("irreversible_screen")
             details.append(irreversible)
 
+    def phrase_name(self, i: int) -> tuple[str, int] | None:
+        """The cheap part of the test for a phrase: ``(phrase, name index)`` when
+        exactly one element of row `i` has any text, description or hint, that
+        is the name N, N has a text, its description and hint are empty or say
+        the same as the text, and the text equals a phrase after `normalize`.
+        Nothing is scanned: it is the test that runs before any point scan."""
+        labeled = [
+            j for j in self.tree.subtree(i) if self._has_any_text(self.elements[j])
+        ]
+        if len(labeled) != 1:
+            return None  # only the name may carry text: nothing to join with
+        name = labeled[0]
+        element = self.elements[name]
+        if not element.text.strip() or any(
+            value.strip() and normalize(value) != normalize(element.text)
+            for value in (element.content_desc, element.hint)
+        ):
+            return None
+        phrase = self._phrases.get(normalize(element.text), "")
+        return (phrase, name) if phrase else None
+
+    def phrase_geometry(self, i: int, name: int) -> bool:
+        """True when row `i`, whose name element is `name` (`phrase_name`), is
+        structurally a row an exception phrase may let through; the reasons are
+        not looked at (see `_apply_phrases`).
+
+        The row must be plain: it is not long-clickable, checkable,
+        scrollable, editable or a text or password field, none of its
+        descendants is clickable or any of those, it has at most
+        `ROW_NAME_MEMBERS` elements and no ancestor is clickable (the judge
+        joins the texts of a clickable's whole subtree, so no hit can be formed
+        with text outside the row). The center of N's full bounds is on the
+        display and inside the row's drawn part. The last element drawn at the
+        row's tap point and at that center, seen or not, is in the row (at the
+        center it is N), except Samsung's empty ``round_corner`` view, and no
+        interactive element (clickable, long-clickable, checkable, scrollable,
+        editable, a text or password field) outside the row and its ancestors
+        is drawn there.
+        """
+        members = self.tree.subtree(i)
+        if not self._plain_row(i, members):
+            return False
+        center = self.elements[name].bounds.center
+        width, height = self.screen.display
+        row_part = self.screen._clip(self.elements[i])  # noqa: SLF001
+        visible = self.visible[i]
+        if (
+            not (0 <= center[0] < width and 0 <= center[1] < height)
+            or row_part is None
+            or visible is None
+            or not _contains(row_part, center)
+        ):
+            return False
+        inside = frozenset(members)
+        return all(
+            self._only_row_at(point, i, inside, last=name if point == center else None)
+            for point in (visible.center, center)
+        )
+
+    @staticmethod
+    def _has_any_text(element: Element) -> bool:
+        return any(
+            value.strip()
+            for value in (element.text, element.content_desc, element.hint)
+        )
+
+    def _plain_row(self, i: int, members: list[int]) -> bool:
+        """The shape rules of `phrase_candidate`."""
+        tree = self.tree
+        if (
+            len(members) > ROW_NAME_MEMBERS
+            or self.visible[i] is None
+            or _interactive(self.elements[i], clickable_ok=True)
+            or any(_interactive(self.elements[j]) for j in members[1:])
+        ):
+            return False
+        up = tree.parent[i]
+        while up != -1:
+            if self.clickable[up]:
+                return False  # inside another clickable: its texts are joined
+            up = tree.parent[up]
+        return True
+
+    def _only_row_at(
+        self,
+        point: tuple[int, int],
+        i: int,
+        inside: frozenset[int],
+        *,
+        last: int | None,
+    ) -> bool:
+        """The last element in document order whose drawn part holds `point`,
+        seen or not, is in the row (is `last`, when given), and no interactive
+        element outside the row (other than its ancestors) has a drawn part
+        there."""
+        tree = self.tree
+        held = elements_at(self.screen, point)
+        # The one decoration the user allows (Samsung's `round_corner`) is
+        # drawn over the list and takes nothing: it is passed over.
+        drawn = [e for e in held if not _is_decoration(self.screen, e)]
+        if not drawn:
+            return False
+        end = tree.index[drawn[-1].id]
+        if end not in inside or (last is not None and end != last):
+            return False
+        for element in held:
+            j = tree.index[element.id]
+            if (
+                _interactive(element)
+                and j not in inside
+                and not tree.tin[j] <= tree.tin[i] < tree.tin[j] + tree.size[j]
+            ):
+                return False
+        return True
+
+    def phrase_words_agree(self, i: int, name: int) -> bool:
+        """True when the deny words found in the row `i` are exactly the ones
+        found in the name text alone (same matcher, exceptions and readings), so
+        no word is made with the rest of the row: ``Log`` + ``out`` reads
+        ``log out`` only together."""
+        members = self.tree.subtree(i)
+        elements = [self.elements[j] for j in members]
+        alone = [replace(self.elements[name], content_desc="", hint="", resource_id="")]
+        for word in self.policy.deny_words:
+            matcher = _Matcher([word], self.policy.deny_exceptions)
+            in_row = any(matcher.match(e) for e in elements) or (
+                self._joined_word(elements, matcher) is not None
+            )
+            in_name = matcher.match(alone[0]) is not None or (
+                self._joined_word(alone, matcher) is not None
+            )
+            if in_row != in_name:
+                return False
+        return True
+
     def unsafe_ids(self) -> frozenset[str]:
         """The ids of every element of the screen, clickable or not, that the tap
         rules would refuse to press for what it is or says: it is of a package
@@ -960,6 +1100,91 @@ def _contains(bounds: Bounds, point: tuple[int, int]) -> bool:
     return bounds.left <= x < bounds.right and bounds.top <= y < bounds.bottom
 
 
+# Flags (and kinds of element) that make a row or what is inside it more than a
+# plain label for `[deny] except_phrases`.
+_INTERACTIVE = frozenset(
+    {_CLICKABLE, _CHECKABLE, _PASSWORD, "long_clickable", "scrollable"}
+)
+# What replaces the name text when a phrase is tried: a label with no deny word,
+# so that the label rules (unlabeled, number_only) decide as before.
+_PLACEHOLDER = "\u00b7"
+MAX_PHRASE_CANDIDATES = 8
+MAX_PHRASE_NAMED = 16
+
+
+def _interactive(element: Element, *, clickable_ok: bool = False) -> bool:
+    """True for an element that is more than a plain label: long-clickable,
+    checkable, scrollable, editable or a text or password field, and, unless
+    `clickable_ok`, clickable."""
+    flags = _INTERACTIVE - {_CLICKABLE} if clickable_ok else _INTERACTIVE
+    return (
+        any(flag in element.flags for flag in flags)
+        or element.editable
+        or _is_text_field(element)
+    )
+
+
+def _apply_phrases(
+    state: _Judge,
+    decisions: tuple[Decision, ...],
+    target_package: str,
+    foreground: str | None,
+) -> tuple[Decision, ...]:
+    """Let through the rows that an exception phrase excuses.
+
+    Candidates are the rows whose only reason is ``deny_word`` and that
+    `_Judge.phrase_candidate` accepts (a plain row whose name equals a phrase).
+    With more than `MAX_PHRASE_CANDIDATES` of them on the screen no phrase
+    applies. Each candidate is judged once more on the same screen with only
+    its name text replaced by a neutral label: when it then has no reason at
+    all, the hits were made of the phrase's own characters and it is let
+    through, marked with the phrase. The judge's own matching decides, with its
+    exceptions and readings; any other deny word anywhere still refuses, and a
+    hit made with a neighbouring text may over-refuse.
+    """
+    found: list[tuple[int, int, str, int]] = []
+    named = 0
+    for k, decision in enumerate(decisions):
+        i = state.tree.index[decision.element.id]
+        candidate = state.phrase_name(i)
+        if candidate is None:
+            continue
+        named += 1
+        if named > MAX_PHRASE_NAMED:
+            return decisions  # too many rows to examine: no phrase on this screen
+        if state.phrase_geometry(i, candidate[1]):
+            found.append((k, i, candidate[0], candidate[1]))
+            if len(found) > MAX_PHRASE_CANDIDATES:
+                return decisions  # counted before the reasons; stop at once
+    found = [
+        item
+        for item in found
+        if decisions[item[0]].reasons == ("deny_word",)
+        and state.phrase_words_agree(item[1], item[3])
+    ]
+    if not found:
+        return decisions
+    policy = replace(state.policy, except_phrases=())
+    result = list(decisions)
+    for k, i, phrase, name in found:
+        elements = list(state.elements)
+        # A description or hint of the name is the name again (checked in
+        # `phrase_candidate`): it goes with it.
+        elements[name] = replace(
+            elements[name], text=_PLACEHOLDER, content_desc="", hint=""
+        )
+        other = _Judge(
+            replace(state.screen, elements=tuple(elements)),
+            target_package,
+            policy,
+            foreground,
+        ).decide(i)
+        if not other.reasons:
+            before = decisions[k]
+            result[k] = Decision(before.element, before.point, (), (), phrase)
+    return tuple(result)
+
+
 def judge(
     screen: Screen,
     target_package: str,
@@ -1057,6 +1282,10 @@ def judge(
       or hint, or in one field's value inside a joined text with real
       boundaries around it, does not count (see the module docstring); the
       resource id has no exceptions.
+      A plain row whose only reason is this one and whose name text equals a
+      phrase of ``policy.except_phrases`` is judged once more with only that
+      text replaced; with no reason left it is let through (see
+      `_apply_phrases` and `Policy`) and ``Decision`` has ``except_phrase``.
     * ``irreversible_screen``: the text, content description or hint of any
       element of the screen holds a phrase of ``policy.irreversible_phrases``
       (unless ``skip_irreversible`` is False). Every candidate gets it. The
@@ -1097,12 +1326,19 @@ def judge(
             )
         )
     state = _Judge(screen, target_package, policy, foreground)
+    decisions = tuple(
+        state.decide(i) for i, element in enumerate(elements) if state.clickable[i]
+    )
+    unsafe = state.unsafe_ids()
+    if policy.except_phrases:
+        decisions = _apply_phrases(state, decisions, target_package, foreground)
+        # A row an exception phrase lets through is still unsafe for the wheel:
+        # the phrase lets a tap through, nothing else.
+        unsafe |= frozenset(d.element.id for d in decisions if d.except_phrase)
     return Judgement(
-        tuple(
-            state.decide(i) for i, element in enumerate(elements) if state.clickable[i]
-        ),
+        decisions,
         dialog=state.dialog,
         irreversible=state.irreversible_detail() is not None,
         edges=state._avoid,  # noqa: SLF001 - the areas of `screen_edge`
-        unsafe=state.unsafe_ids(),
+        unsafe=unsafe,
     )

@@ -500,6 +500,14 @@ def _reasons_text(decision: Decision) -> str:
     return ", ".join(parts)
 
 
+def _let_through_text(decision: Decision) -> str:
+    """The note after a row that an ``[deny] except_phrases`` phrase lets
+    through; nothing for any other row."""
+    if not decision.except_phrase:
+        return ""
+    return f" (let through by except_phrases: {_printable(decision.except_phrase)!r})"
+
+
 def _decision_center(screen: Screen, decision: Decision) -> tuple[int, int] | None:
     """Return the ``center`` to show for a decision, without scanning the screen.
 
@@ -538,7 +546,9 @@ def _preview_text(
         f"would press ({len(pressable)}):",
     ]
     lines.extend(
-        "  " + screen._describe_line_at(d.element, _decision_center(screen, d))  # noqa: SLF001
+        "  "
+        + screen._describe_line_at(d.element, _decision_center(screen, d))  # noqa: SLF001
+        + _let_through_text(d)
         for d in pressable
     )
     lines.append(f"would not press ({len(skipped)}):")
@@ -610,10 +620,15 @@ def _preview_json(result: Preview, settings_path: str) -> dict[str, object]:
         payload["foreground"] = result.foreground
     if result.keyboard_shown is not None:
         payload["keyboard_shown"] = result.keyboard_shown
-    payload["press"] = [
-        screen._element_dict_at(d.element, _decision_center(screen, d))  # noqa: SLF001
-        for d in result.judgement.pressable
-    ]
+    pressed: list[dict[str, object]] = []
+    for decision in result.judgement.pressable:
+        entry = screen._element_dict_at(  # noqa: SLF001
+            decision.element, _decision_center(screen, decision)
+        )
+        if decision.except_phrase:
+            entry["except_phrase"] = decision.except_phrase
+        pressed.append(entry)
+    payload["press"] = pressed
     skip: list[dict[str, object]] = []
     for decision in result.judgement.skipped:
         center = _decision_center(screen, decision)

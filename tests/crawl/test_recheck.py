@@ -496,3 +496,45 @@ def test_a_singleton_unknown_path_does_not_crash_the_recovery() -> None:
     assert isinstance(eng.next(off_screen()), Back)  # off target
     action = eng.next(on_screen([], name="unknown"))  # must not raise
     assert isinstance(action, Back | Relaunch | Stop)
+
+
+def _phrase_screen():
+    root = Element(
+        "e1", None, "android.widget.FrameLayout", Bounds(0, 0, *DISPLAY), package=PKG
+    )
+    row = Element(
+        "e2",
+        "e1",
+        BUTTON,
+        Bounds(20, 60, 300, 120),
+        text="Quick Share",
+        package=PKG,
+        flags=("clickable",),
+    )
+    return Screen("s", crawl_time(), PKG, ".Main", 36, DISPLAY, (root, row))
+
+
+def crawl_time():
+    from datetime import UTC, datetime
+
+    return datetime(2026, 11, 17, tzinfo=UTC)
+
+
+def test_recheck_compares_the_fresh_marker_with_the_planned_one() -> None:
+    from dataclasses import replace
+
+    policy = Policy(except_phrases=("Quick Share",))
+    eng = started(policy=policy)
+    first = seen(_phrase_screen())
+    tap = eng.next(first)
+    assert isinstance(tap, Tap)
+    assert eng.except_phrase_of(tap) == "Quick Share"
+    # A plan whose marker differs from what the fresh judgement says is refused.
+    assert eng._planned is not None
+    eng._planned = replace(eng._planned, except_phrase="")
+    assert not eng.recheck(tap, first)
+    # The same plan with the marker the judgement gives is approved.
+    eng = started(policy=policy)
+    tap = eng.next(first)
+    assert isinstance(tap, Tap)
+    assert eng.recheck(tap, first)

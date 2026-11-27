@@ -356,6 +356,12 @@ SCROLL_POINT_CLASSES: Final = frozenset(
         "android.widget.ImageView",
     }
 )
+# The one exception beside the list: a decoration view that Samsung's apps draw
+# over a list page. It is exactly `android.view.View`, its resource id is
+# `<package>:id/<name>` with one of these names, and it has no flag, label or
+# child (see `uiprobe.guards.scroll._allowed`).
+DECORATION_CLASS: Final = "android.view.View"
+DECORATION_IDS: Final = frozenset({"round_corner"})
 _NUMBER_CATEGORIES: Final = frozenset({"Nd", "Nl", "No"})
 _ID_SEPARATOR: Final = ":id/"
 _UTF16_BOMS: Final = (b"\xff\xfe", b"\xfe\xff")
