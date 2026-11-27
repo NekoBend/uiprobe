@@ -188,6 +188,7 @@ class _ForegroundMixin(_DeviceState):
         point: tuple[int, int],
         *,
         owned: Callable[[InputWindow], bool] | None = None,
+        named: Callable[[InputWindow], bool] | None = None,
     ) -> InputWindow | str:
         """Return the window a touch at `point` would reach, or why that is
         not known.
@@ -202,9 +203,14 @@ class _ForegroundMixin(_DeviceState):
         (see `diagnose_tap_window`). `owned` tells the app's own windows,
         the only ones that may print ``samsungFlags=0x1`` (see
         `uiprobe.inputwindows.read_window_at`; without it none may). The
-        crawl always passes `owned` by keyword. An override in a subclass
-        that does not accept it raises `TypeError` on the first guarded tap;
-        one that accepts it but does not forward it makes the app's own
+        `named` tells the windows whose title names the app: with ``owned``
+        it is needed for ``samsungFlags=0x100000`` and ``0x100001`` (without
+        it those refuse). The crawl always passes `owned` by keyword, and
+        `named` when the method it calls accepts a `named` parameter or
+        ``**kwargs``. An override in a subclass that does not accept `owned`
+        raises `TypeError` on the first guarded tap; one without `named` is
+        called without it (``0x100000`` and ``0x100001`` then refuse); one
+        that accepts `owned` but does not forward it makes the app's own
         windows with ``samsungFlags=0x1`` refuse the tap (``samsung_flags``).
         ``Display: N`` sections of two or more numbers in the read count as
         several displays for `displays_seen`.
@@ -224,13 +230,14 @@ class _ForegroundMixin(_DeviceState):
         }
         if len(sections) > 1:
             self._several_seen = True
-        return read_window_at(text, point, owned=owned)
+        return read_window_at(text, point, owned=owned, named=named)
 
     def diagnose_tap_window(
         self,
         *,
         show_device_text: bool = False,
         owned: Callable[[InputWindow], bool] | None = None,
+        named: Callable[[InputWindow], bool] | None = None,
     ) -> TapWindowDiagnosis:
         """Tell whether `window_at` can read this device's window list, and if
         not which rule refused it and where, with no text of the device's
@@ -242,10 +249,12 @@ class _ForegroundMixin(_DeviceState):
         ``samsungFlags=0x1``, as for `window_at` (``uiprobe diagnose
         tap-window --package`` passes the crawl's test); without it every
         such window of display 0's list refuses (``samsung_flags``).
+        `named` adds the title test that ``samsungFlags=0x100000`` and
+        ``0x100001`` also need.
 
         Raises:
-            TypeError: `show_device_text` is not a bool, or `owned` is
-                neither None nor callable (before any request).
+            TypeError: `show_device_text` is not a bool, or `owned` or
+                `named` is neither None nor callable (before any request).
             AdbError: The adb protocol or the command failed.
             AdbServerUnavailableError: The adb server cannot be reached.
             DeviceNotFoundError: The device is gone.
@@ -258,8 +267,13 @@ class _ForegroundMixin(_DeviceState):
         if owned is not None and not callable(owned):
             msg = "owned must be None or callable"
             raise TypeError(msg)
+        if named is not None and not callable(named):
+            msg = "named must be None or callable"
+            raise TypeError(msg)
         text = self._shell("dumpsys input")
-        return diagnose_tap_window(text, show_device_text=show_device_text, owned=owned)
+        return diagnose_tap_window(
+            text, show_device_text=show_device_text, owned=owned, named=named
+        )
 
     def _trusted_component(self) -> tuple[str, str] | None:
         """Return the focused component from the trusted source, or None.

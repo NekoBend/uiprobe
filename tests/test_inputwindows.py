@@ -1857,3 +1857,235 @@ def test_the_owned_parameters_resolve_at_run_time():
     for function in (*functions, Device.window_at):
         hints = typing.get_type_hints(function)
         assert "Callable" in str(hints["owned"])
+
+
+# --- samsungFlags=0x100000 and 0x100001: the app's own window, by uid and name ---
+
+NEW_VALUES = ["0x100000", "0x100001"]
+ROUTINES = "com.example.routines"
+ROUTINES_UID = 10001  # shared with System UI (StatusBar, NavigationBar0)
+SETTINGS_APP = "com.example.settings"
+SETTINGS_UID = 1000
+DIALOG_ROW = (
+    "      9: name=abcdef8 {title}, id=230, displayId=0, inputConfig=0x0,"
+    " samsungFlags={flags}, alpha=1, frame=[0,1500][1080,2340], globalScale=1,"
+    " applicationInfo.name=ActivityRecord{{12345679 u0 {package}/.Dialog t11}},"
+    " applicationInfo.token=0x0000000000000002, touchableRegion=[0,0][1080,2340],"
+    " pTouchableRegion=<empty>, 1HXY=[0, 0, 1], ownerPid=20005,"
+    " ownerUid={uid}, dispatchingTimeout=10000ms,"
+    " token=0x0000000000000002, touchOcclusionMode=BLOCK_UNTRUSTED\n"
+    "      transform (ROT_0) (TRANSLATE)\n"
+    "          1.0000  0.0000  -0.0000\n"
+    "          0.0000  1.0000  -1500.0000\n"
+    "          0.0000  0.0000  1.0000"
+)
+
+
+def _by_uid(uid: int):
+    def owned(window: InputWindow) -> bool:
+        return window.owner_uid == uid
+
+    return owned
+
+
+def _by_package(package: str):
+    def named(window: InputWindow) -> bool:
+        return window.title == package or window.title.startswith(package + "/")
+
+    return named
+
+
+def _routines(flags: str, title: str | None = None, uid: int = ROUTINES_UID) -> str:
+    """samsung36.txt with its full-screen activity row (row 11) made a focused,
+    full-screen window of a made-up app that shares its uid with System UI
+    (shape B: ``inputConfig=0x0``, identity transform)."""
+    text = _edit(SAMSUNG36, APP_ROW, "samsungFlags=0x0", f"samsungFlags={flags}")
+    text = _edit(
+        text, APP_ROW, "inputConfig=DUPLICATE_TOUCH_TO_WALLPAPER", "inputConfig=0x0"
+    )
+    text = _edit(text, APP_ROW, "ownerUid=10002", f"ownerUid={uid}")
+    title = title or f"{ROUTINES}/{ROUTINES}.MainActivity"
+    return _edit(text, APP_ROW, APP_ROW, f"abc123 {title}")
+
+
+def _dialog(flags: str, title: str | None = None, uid: int = SETTINGS_UID) -> str:
+    """samsung36.txt with a bottom-sheet dialog (shape C) at row 9 above a
+    Dim Layer (row 10) and the activity window below it (row 11, ``0x1``,
+    same package, same uid): the dialog's touchable region is the whole
+    screen, its frame only the bottom part, and it has a TRANSLATE matrix."""
+    package = SETTINGS_APP
+    title = title or f"{package}/{package}.DialogActivity"
+    old = _line(SAMSUNG36, "Dim layer#54")
+    row = DIALOG_ROW.format(title=title, flags=flags, package=package, uid=uid)
+    text = SAMSUNG36.replace(old + "\n      transform (ROT_0) (IDENTITY)", row)
+    assert text != SAMSUNG36
+    text = _edit(
+        text, "Split Background Layer#53", "Split Background Layer#53", "Dim Layer#53"
+    )
+    text = _edit(text, APP_ROW, "samsungFlags=0x0", "samsungFlags=0x1")
+    text = _edit(text, APP_ROW, "ownerUid=10002", f"ownerUid={uid}")
+    return _edit(text, APP_ROW, APP_ROW, f"abc124 {package}/{package}.Activity")
+
+
+@pytest.mark.parametrize("flags", NEW_VALUES)
+def test_new_samsung_flags_on_a_shared_uid_app_named_for_it_are_read(flags):
+    text = _routines(flags)
+    found = read_window_at(
+        text, (540, 1170), owned=_by_uid(ROUTINES_UID), named=_by_package(ROUTINES)
+    )
+    assert isinstance(found, InputWindow), found
+    assert found.owner_uid == ROUTINES_UID
+    assert found.title.startswith(ROUTINES + "/")
+    assert found.samsung_named_only
+    assert not found.samsung_0x1
+    both = {"owned": _by_uid(ROUTINES_UID), "named": _by_package(ROUTINES)}
+    assert not isinstance(parse_input_windows(text, **both), str)
+    assert explain_input_windows(text, **both).reason is None
+
+
+@pytest.mark.parametrize("flags", NEW_VALUES)
+def test_new_samsung_flags_on_a_window_with_another_package_name_are_refused(flags):
+    # The StatusBar-like window: the same uid, another package.
+    text = _routines(flags, title="StatusBar")
+    for named in (_by_package(ROUTINES), None):
+        found = read_window_at(
+            text, (540, 1170), owned=_by_uid(ROUTINES_UID), named=named
+        )
+        assert found == LINE_FORMAT
+        assert getattr(found, "rule", None) == "samsung_flags"
+    other = _routines(flags, title=f"{SETTINGS_APP}/{SETTINGS_APP}.Main")
+    found = read_window_at(
+        other, (540, 1170), owned=_by_uid(ROUTINES_UID), named=_by_package(ROUTINES)
+    )
+    assert getattr(found, "rule", None) == "samsung_flags"
+    verdict = explain_input_windows(
+        text, owned=_by_uid(ROUTINES_UID), named=_by_package(ROUTINES)
+    )
+    assert (verdict.reason, verdict.rule) == (LINE_FORMAT, "samsung_flags")
+
+
+@pytest.mark.parametrize("flags", NEW_VALUES)
+def test_new_samsung_flags_on_a_window_of_another_uid_are_refused(flags):
+    text = _routines(flags, uid=10099)
+    found = read_window_at(
+        text, (540, 1170), owned=_by_uid(ROUTINES_UID), named=_by_package(ROUTINES)
+    )
+    assert found == LINE_FORMAT
+    assert getattr(found, "rule", None) == "samsung_flags"
+
+
+@pytest.mark.parametrize("flags", NEW_VALUES)
+def test_new_samsung_flags_without_the_name_test_are_refused(flags):
+    text = _routines(flags)
+    for found in (
+        read_window_at(text, (540, 1170), owned=_by_uid(ROUTINES_UID)),
+        read_window_at(text, (540, 1170), owned=_by_uid(ROUTINES_UID), named=None),
+        read_window_at(text, (540, 1170), named=_by_package(ROUTINES)),
+        read_window_at(text, (540, 1170)),
+        parse_input_windows(text, owned=_by_uid(ROUTINES_UID)),
+    ):
+        assert found == LINE_FORMAT
+        assert getattr(found, "rule", None) == "samsung_flags"
+    verdict = explain_input_windows(text, owned=_by_uid(ROUTINES_UID))
+    assert (verdict.reason, verdict.rule) == (LINE_FORMAT, "samsung_flags")
+
+
+@pytest.mark.parametrize("flags", NEW_VALUES)
+def test_the_dialog_with_a_matrix_is_read_where_the_dim_layer_and_activity_lie_below(
+    flags,
+):
+    text = _dialog(flags)
+    owned, named = _by_uid(SETTINGS_UID), _by_package(SETTINGS_APP)
+    found = read_window_at(text, (540, 2000), owned=owned, named=named)
+    assert isinstance(found, InputWindow), found
+    assert found.title.endswith(".DialogActivity")
+    assert found.samsung_named_only
+    # The region is the whole screen: a tap above the frame reaches it too.
+    found = read_window_at(text, (540, 600), owned=owned, named=named)
+    assert isinstance(found, InputWindow), found
+    assert found.title.endswith(".DialogActivity")
+    # The 0x1 activity window below it is read as before.
+    windows = parse_input_windows(text, owned=owned, named=named)
+    assert not isinstance(windows, str)
+    assert [w.samsung_0x1 for w in windows if w.title.endswith(".Activity")] == [True]
+
+
+@pytest.mark.parametrize("flags", NEW_VALUES)
+def test_the_dialog_with_another_packages_name_is_refused(flags):
+    text = _dialog(flags, title="com.example.other/com.example.other.Dialog")
+    found = read_window_at(
+        text, (540, 2000), owned=_by_uid(SETTINGS_UID), named=_by_package(SETTINGS_APP)
+    )
+    assert found == LINE_FORMAT
+    assert getattr(found, "rule", None) == "samsung_flags"
+
+
+@pytest.mark.parametrize("flags", NEW_VALUES)
+def test_an_unshared_app_needs_the_name_for_the_new_flags_but_not_for_0x1(flags):
+    # The crawl's own owner test: an app with a uid of its own (10000 or more,
+    # not shared) is told by its uid alone; the new values need the title too.
+    def named(window: InputWindow) -> bool:
+        return window.title.startswith(APP.split("/")[0] + "/")
+
+    elsewhere = "abc123 com.example.popup"
+    text = _edit(_app_on_samsung(flags), APP, APP, elsewhere)
+    refused = read_window_at(text, (540, 1170), owned=_is_app, named=named)
+    assert refused == LINE_FORMAT
+    assert getattr(refused, "rule", None) == "samsung_flags"
+    same = _edit(_app_on_samsung("0x1"), APP, APP, elsewhere)
+    accepted = read_window_at(same, (540, 1170), owned=_is_app, named=named)
+    assert isinstance(accepted, InputWindow), accepted
+    assert accepted.samsung_0x1
+    # With a title that names the app, the new value reads.
+    own = read_window_at(
+        _app_on_samsung(flags), (540, 1170), owned=_is_app, named=named
+    )
+    assert isinstance(own, InputWindow), own
+
+
+@pytest.mark.parametrize("flags", NEW_VALUES)
+def test_new_samsung_flags_in_another_displays_list_are_samsung_fields(flags):
+    cover = (
+        "  Display: 1\n"
+        "    logicalSize=100x100\n"
+        "        transform (ROT_0) (IDENTITY)\n"
+        "    Windows:\n"
+        + _line(_app_on_samsung(flags), APP)
+        .replace("      11: ", "      0: ")
+        .replace("displayId=0", "displayId=1")
+        + "\n      transform (ROT_0) (IDENTITY)\n"
+    )
+    text = SAMSUNG36.replace("  Display: 0\n", cover + "  Display: 0\n")
+    found = read_window_at(
+        text, (540, 1170), owned=lambda _w: True, named=lambda _w: True
+    )
+    assert found == LINE_FORMAT
+    assert getattr(found, "rule", None) == "samsung_fields"
+
+
+@pytest.mark.parametrize("flags", ["0x40000", "FORCE_TRUSTED_OVERLAY | 0x400000"])
+def test_other_unseen_values_still_refuse_with_both_tests(flags):
+    text = _routines(flags)
+    found = read_window_at(
+        text,
+        (540, 1170),
+        owned=_by_uid(ROUTINES_UID),
+        named=_by_package(ROUTINES),
+    )
+    assert found == LINE_FORMAT
+    assert getattr(found, "rule", None) == "samsung_fields"
+
+
+def test_samsung_flags_0x1_ignores_the_name_test():
+    text = _routines("0x1", title="StatusBar")
+    found = read_window_at(
+        text, (540, 1170), owned=_by_uid(ROUTINES_UID), named=lambda _w: False
+    )
+    assert isinstance(found, InputWindow), found
+
+
+def test_the_named_parameters_resolve_at_run_time():
+    functions = (read_window_at, parse_input_windows, explain_input_windows)
+    for function in (*functions, Device.window_at):
+        hints = typing.get_type_hints(function)
+        assert "Callable" in str(hints["named"])

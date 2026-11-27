@@ -687,15 +687,15 @@ def test_braces_in_the_focused_title_do_not_stop_the_tap(
 # --- samsungFlags=0x1 (the Samsung form): read only on the app's window ---
 
 
-def _samsung_rows(text: str, flagged: Callable[[str], bool]) -> str:
+def _samsung_rows(text: str, flagged: Callable[[str], bool], value: str = "0x1") -> str:
     """`text` (an API 36 form list) with the Samsung fields added to every
-    window row, ``samsungFlags=0x1`` on the rows `flagged` picks and 0x0 on
-    the others."""
+    window row, ``samsungFlags=<value>`` (0x1 unless given) on the rows
+    `flagged` picks and 0x0 on the others."""
     out = []
     for line in text.split("\n"):
         if ", inputConfig=" in line and ", ownerUid=" in line:
-            value = "0x1" if flagged(line) else "0x0"
-            line = re.sub(r"(, inputConfig=[^,]*)", rf"\1, samsungFlags={value}", line)
+            shown = value if flagged(line) else "0x0"
+            line = re.sub(r"(, inputConfig=[^,]*)", rf"\1, samsungFlags={shown}", line)
             line = re.sub(
                 r"(, touchableRegion=(?:<empty>|\[[^\]]*\]\[[^\]]*\]))",
                 r"\1, pTouchableRegion=<empty>, 1HXY=[0, 0, 0]",
@@ -751,6 +751,44 @@ def test_samsung_flags_0x1_is_read_only_on_the_apps_window(
     }
 
 
+@pytest.mark.parametrize("value", ["0x100000", "0x100001"])
+@pytest.mark.parametrize(
+    ("flagged", "tapped"),
+    [(SHOP, True), ("ChatHead", False)],
+    ids=["own_window", "another_app"],
+)
+def test_the_crawl_passes_the_name_test_for_the_new_samsung_flags(
+    tmp_path: Path, device, android, clock, monkeypatch, flagged, tapped, value
+):
+    if android.api < 33:
+        pytest.skip("the Samsung form is of API 36")
+    original = android.show
+
+    def show_then_cover(name: str) -> None:
+        original(name)
+        if name == "main" and flagged == "ChatHead":
+            android.overlays.append(("ChatHead", OVERLAY, (0, 180, 320, 260)))
+
+    monkeypatch.setattr(android, "show", show_then_cover)
+    dumped = android._dumpsys_input
+    monkeypatch.setattr(
+        android,
+        "_dumpsys_input",
+        lambda: _samsung_rows(dumped(), lambda line: f" {flagged}" in line, value),
+    )
+    out = tmp_path / "run"
+    result = run(device, clock, out, limits=Limits(actions=3))
+    if tapped:
+        assert BROWSE in _taps(android)
+        assert result.cover_unknown is None
+        return
+    assert BROWSE not in _taps(android)
+    assert _covered(out)[0]["details"] == {
+        "unreadable": "line_format",
+        "rule": "samsung_flags",
+    }
+
+
 @pytest.mark.parametrize("flagged", [True, False], ids=["0x1", "0x0"])
 @pytest.mark.parametrize("shared", [False, True], ids=["system_uid", "shared_uid"])
 def test_samsung_flags_0x1_on_an_off_point_window_of_the_apps_uid_is_refused(
@@ -788,3 +826,63 @@ def test_samsung_flags_0x1_on_an_off_point_window_of_the_apps_uid_is_refused(
         "rule": "samsung_flags",
     }
     assert (result.cover_unknown, result.cover_rule) == ("line_format", "samsung_flags")
+
+
+# --- a Device subclass that overrides window_at as before `named` existed ---
+
+
+@pytest.mark.parametrize("value", [None, "0x100000"], ids=["0x0", "0x100000"])
+def test_an_old_signature_window_at_override_works_and_refuses_the_new_values(
+    tmp_path: Path, device, android, clock, monkeypatch, value
+):
+    if android.api < 33:
+        pytest.skip("the Samsung form is of API 36")
+    original = device.window_at
+    calls: list[dict[str, object]] = []
+
+    def old(point: tuple[int, int], *, owned=None):
+        calls.append({"owned": owned})
+        return original(point, owned=owned)
+
+    monkeypatch.setattr(device, "window_at", old)
+    dumped = android._dumpsys_input
+    if value is not None:
+        monkeypatch.setattr(
+            android,
+            "_dumpsys_input",
+            lambda: _samsung_rows(dumped(), lambda line: f" {SHOP}" in line, value),
+        )
+    else:
+        monkeypatch.setattr(
+            android, "_dumpsys_input", lambda: _samsung_rows(dumped(), lambda _l: False)
+        )
+    out = tmp_path / "run"
+    result = run(device, clock, out, limits=Limits(actions=3))
+    assert calls
+    if value is None:
+        assert BROWSE in _taps(android)
+        assert result.cover_unknown is None
+        return
+    assert BROWSE not in _taps(android)
+    assert _covered(out)[0]["details"] == {
+        "unreadable": "line_format",
+        "rule": "samsung_flags",
+    }
+
+
+def test_takes_named_reads_the_signature():
+    from uiprobe.crawl_driver import _takes_named
+
+    class New:
+        def window_at(self, point, *, owned=None, named=None): ...
+
+    class Kwargs:
+        def window_at(self, point, **kwargs): ...
+
+    class Old:
+        def window_at(self, point, *, owned=None): ...
+
+    assert _takes_named(New().window_at)
+    assert _takes_named(Kwargs().window_at)
+    assert not _takes_named(Old().window_at)
+    assert _takes_named(Device.window_at)

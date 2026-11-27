@@ -50,8 +50,19 @@ display asked for that the caller says is the app's (``owned`` of
 window at the point). Any other window with it, at the point or not, taking
 touches or not, makes the list `LINE_FORMAT` (``samsung_flags``), and in
 another display's list it is ``samsung_fields`` like any value not seen.
-Other values (``FORCE_TRUSTED_OVERLAY | 0x400000``, ``0x40000``) stay
-refused.
+
+Two more values, ``0x100000`` and ``0x100001``, were printed by one Samsung
+phone (Android 17) on one day, one line each, both on the focused window of
+an app the crawl is for (an ``also_target`` app's activity window with
+``0x100001``; a bottom-sheet dialog of Settings with ``0x100000``). What they
+mean is not known either. They are read under a stricter rule: only on a
+window of the display asked for that the caller says is the app's by both
+tests, the owner uid (``owned``) and the title, which must be the package or
+begin with the package and ``/`` (``named`` of `read_window_at`); a title is
+needed even when the app has a uid of its own. On any other window they
+refuse exactly as ``0x1`` does (``samsung_flags``, and ``samsung_fields`` in
+another display's list), and without ``named`` they always refuse. Other
+values (``FORCE_TRUSTED_OVERLAY | 0x400000``, ``0x40000``) stay refused.
 
 All of them have ``displayId=``, ``touchableRegion=[l,t][r,b]`` or ``<empty>``
 and ``ownerUid=``. On API 24 to 28 there is one list of every display; on API
@@ -393,12 +404,20 @@ _PORTAL = re.compile(rf", portalToDisplayId=(?P<to>-?\d{{1,10}}){_NEXT}")
 # The Samsung fields (API 36) at their places in the fields after the name
 # (`_meta`), with only the values the phone printed (see the module's text).
 _SAMSUNG_FLAGS = re.compile(
-    r", inputConfig=[^,]*, samsungFlags=(?P<value>0x0|0x8|0x1|FORCE_TRUSTED_OVERLAY)"
-    + _NEXT
+    r", inputConfig=[^,]*, samsungFlags="
+    r"(?P<value>0x0|0x8|0x1|0x100000|0x100001|FORCE_TRUSTED_OVERLAY)" + _NEXT
 )
 # The samsungFlags value seen only on the app's own window (see the module's
 # text): accepted only on a window the caller says is the app's (``owned``).
 _SAMSUNG_OWN_ONLY: Final = "0x1"
+# The two values seen only on the app's own window that the caller also finds
+# named for the app (``owned`` and ``named`` both say yes).
+_SAMSUNG_NAMED_ONLY: Final = frozenset({"0x100000", "0x100001"})
+# Which test refused a window with one of those values (`_Refusal.why`): the
+# owner uid test (or none given), the title test, or the title test not given.
+WHY_UID: Final = "uid"
+WHY_NAME: Final = "name"
+WHY_NAME_UNTESTED: Final = "name_untested"
 _SAMSUNG_REGION = re.compile(
     rf", touchableRegion=(?:<empty>|\[{_NUMBER},{_NUMBER}\]\[{_NUMBER},{_NUMBER}\]), "
     r"pTouchableRegion=<empty>, 1HXY=\[0, 0, [01]\]" + _NEXT
@@ -449,7 +468,9 @@ class InputWindow:
     whatever its region; ``portal`` that it forwards touches to another
     display. ``samsung_0x1`` that it prints ``samsungFlags=0x1`` (the
     Samsung form), which is read only on a window of the app the check is
-    for (see `read_window_at`).
+    for (see `read_window_at`); ``samsung_named_only`` that it prints
+    ``samsungFlags=0x100000`` or ``0x100001``, read only on such a window
+    whose title also names the app.
     """
 
     title: str
@@ -459,6 +480,7 @@ class InputWindow:
     modal: bool = False
     portal: bool = False
     samsung_0x1: bool = False
+    samsung_named_only: bool = False
 
     def holds(self, point: tuple[int, int]) -> bool:
         """Whether a touch at `point` goes to this window."""
@@ -495,12 +517,15 @@ class _Refusal:
     """Why a list is not read: the public reason, the rule that refused (one
     of `RULES`), the index, in the text's lines, of the line it refused at
     (None when no one line is to blame) and the index of the ``Windows``
-    line of the list it refused in (None when it was no one list)."""
+    line of the list it refused in (None when it was no one list). ``why``
+    tells, for ``samsung_flags`` on ``0x100000`` or ``0x100001``, which test
+    failed: `WHY_UID`, `WHY_NAME` or `WHY_NAME_UNTESTED`; None otherwise."""
 
     reason: str
     rule: str
     line: int | None = None
     head: int | None = None
+    why: str | None = None
 
 
 @dataclass(slots=True)
@@ -937,6 +962,7 @@ def _window(
         modal=modal,
         portal=portal is not None and int(portal["to"]) != -1,
         samsung_0x1=samsung == _SAMSUNG_OWN_ONLY,
+        samsung_named_only=samsung in _SAMSUNG_NAMED_ONLY,
     )
 
 
@@ -1044,9 +1070,11 @@ def _parse(
     display_id: int,
     trace: _Trace | None = None,
     owned: Callable[[InputWindow], bool] | None = None,
+    named: Callable[[InputWindow], bool] | None = None,
 ) -> tuple[InputWindow, ...] | _Refusal:
     """Read the windows of `display_id` (see `parse_input_windows`), noting
-    in `trace` what it read; `owned` tells the app's own windows (`_read`)."""
+    in `trace` what it read; `owned` and `named` tell the app's own windows
+    (`_read`)."""
     found = _window_list(lines, display_id)
     if isinstance(found, _Refusal):
         return found
@@ -1070,7 +1098,7 @@ def _parse(
             }:
                 return _in(read, other)
         reading = found
-        return _in(_read(found, display_id, trace, owned=owned), found)
+        return _in(_read(found, display_id, trace, owned=owned, named=named), found)
     except _TooLongError as error:
         # Such a number could be anything, 0 or display 0 included.
         return _Refusal(ROTATION, "number_too_long", error.line, reading.head)
@@ -1090,6 +1118,7 @@ def parse_input_windows(
     display_id: int = 0,
     *,
     owned: Callable[[InputWindow], bool] | None = None,
+    named: Callable[[InputWindow], bool] | None = None,
 ) -> tuple[InputWindow, ...] | Unreadable:
     """Read the windows of `display_id` from the top down.
 
@@ -1109,8 +1138,13 @@ def parse_input_windows(
     otherwise the list is `LINE_FORMAT` (``samsung_flags``), wherever the
     window is and whether or not it takes touches. Without `owned` no window
     is the app's.
+
+    A window that prints ``samsungFlags=0x100000`` or ``0x100001`` is read
+    only when `owned` and `named` both say yes (`named`: its title names the
+    app); otherwise it refuses as ``0x1`` does. Without `named` those two
+    values always refuse.
     """
-    read = _parse(_split(text), display_id, owned=owned)
+    read = _parse(_split(text), display_id, owned=owned, named=named)
     return Unreadable(read.reason, read.rule) if isinstance(read, _Refusal) else read
 
 
@@ -1187,15 +1221,22 @@ def _own_only(
     *,
     mine: bool,
     owned: Callable[[InputWindow], bool] | None,
+    named: Callable[[InputWindow], bool] | None = None,
 ) -> InputWindow | _Refusal:
-    """`window` (read at line `at`), or why its ``samsungFlags=0x1`` refuses
-    the list (see `_read`)."""
-    if not window.samsung_0x1:
+    """`window` (read at line `at`), or why its ``samsungFlags=0x1`` (or
+    ``0x100000`` or ``0x100001``, which also need `named`) refuses the list
+    (see `_read`)."""
+    if not (window.samsung_0x1 or window.samsung_named_only):
         return window
     if not mine:
         return _Refusal(LINE_FORMAT, "samsung_fields", at)
     if owned is None or not owned(window):
-        return _Refusal(LINE_FORMAT, "samsung_flags", at)
+        why = WHY_UID if window.samsung_named_only else None
+        return _Refusal(LINE_FORMAT, "samsung_flags", at, why=why)
+    if window.samsung_named_only and named is None:
+        return _Refusal(LINE_FORMAT, "samsung_flags", at, why=WHY_NAME_UNTESTED)
+    if window.samsung_named_only and named is not None and not named(window):
+        return _Refusal(LINE_FORMAT, "samsung_flags", at, why=WHY_NAME)
     return window
 
 
@@ -1207,6 +1248,7 @@ def _read(
     checked: bool = True,
     mine: bool = True,
     owned: Callable[[InputWindow], bool] | None = None,
+    named: Callable[[InputWindow], bool] | None = None,
 ) -> tuple[InputWindow, ...] | _Refusal:
     """Read the windows of `display_id` in the list `found` (see
     `parse_input_windows`), noting in `trace` what it read. Without
@@ -1217,7 +1259,9 @@ def _read(
     display asked for (`mine`; elsewhere ``samsung_fields`` as for any value
     not seen) and only when `owned` says it is the app's (else
     ``samsung_flags``): that value was seen only on the app's own window,
-    and what it does to a touch is not known."""
+    and what it does to a touch is not known. ``0x100000`` and ``0x100001``
+    pass under the same rules and only when `named` also says yes (the title
+    names the app)."""
     _note_rows(trace, found)  # entered, also when it refuses right away
     groups = _group(found)
     if isinstance(groups, _Refusal):
@@ -1236,7 +1280,7 @@ def _read(
             return turned
         window = _row(group, index, found, display_id, checked=checked)
         if isinstance(window, InputWindow):
-            window = _own_only(window, group.at, mine=mine, owned=owned)
+            window = _own_only(window, group.at, mine=mine, owned=owned, named=named)
         if isinstance(window, _Refusal):
             return window
         if window is None:
@@ -1322,11 +1366,13 @@ def _checked(
     display_id: int,
     trace: _Trace | None = None,
     owned: Callable[[InputWindow], bool] | None = None,
+    named: Callable[[InputWindow], bool] | None = None,
 ) -> tuple[InputWindow, ...] | _Refusal:
     """The windows of `display_id` when both the list and the display's
     orientation read and the orientation is 0, else why not, noting in
-    `trace` what it read; `owned` tells the app's own windows (`_read`)."""
-    read = _parse(lines, display_id, trace, owned)
+    `trace` what it read; `owned` and `named` tell the app's own windows
+    (`_read`)."""
+    read = _parse(lines, display_id, trace, owned, named)
     if isinstance(read, _Refusal):
         return read
     turned = _orientation(lines, display_id, trace)
@@ -1399,6 +1445,7 @@ class Verdict:
     kinds: dict[int, str] = field(default_factory=dict)
     reached: tuple[bool, ...] = ()
     chosen: int | None = None
+    why: str | None = None
 
 
 def _spans(lines: list[str], start: int) -> tuple[ListSpan, ...]:
@@ -1430,14 +1477,16 @@ def explain_input_windows(
     display_id: int = 0,
     *,
     owned: Callable[[InputWindow], bool] | None = None,
+    named: Callable[[InputWindow], bool] | None = None,
 ) -> Verdict:
     """Tell whether the windows of `display_id` can be read from the whole
     text of ``dumpsys input``, and if not, which rule refused and where.
 
     It runs the same checks as `read_window_at` up to the point (the list,
     then the display's orientation) and refuses exactly what they refuse,
-    with the same `owned` (without it, a ``samsungFlags=0x1`` window
-    refuses: ``samsung_flags``).
+    with the same `owned` and `named` (without `owned`, a ``samsungFlags=0x1``
+    window refuses: ``samsung_flags``; without `named`, so do ``0x100000`` and
+    ``0x100001``).
     """
     lines = _split(text)
     start = _dispatcher_start(lines)
@@ -1445,14 +1494,14 @@ def explain_input_windows(
     lists = () if first is None else _spans(lines, first)
     end = None if first is None else _dispatcher_end(lines, first)
     trace = _Trace()
-    read = _checked(lines, display_id, trace, owned)
+    read = _checked(lines, display_id, trace, owned, named)
     chosen = [span for span in lists if span.head == trace.chosen]
     kinds = _heading_kinds(lines, first, tuple(chosen)) | trace.kinds
     reached = tuple(span.head in trace.reached for span in lists)
     found = (
-        (read.reason, read.rule, read.line, read.head)
+        (read.reason, read.rule, read.line, read.head, read.why)
         if isinstance(read, _Refusal)
-        else (None, None, None, None)
+        else (None, None, None, None, None)
     )
     return Verdict(
         *found[:3],
@@ -1465,6 +1514,7 @@ def explain_input_windows(
         kinds=kinds,
         reached=reached,
         chosen=trace.chosen,
+        why=found[4],
     )
 
 
@@ -1619,6 +1669,7 @@ def read_window_at(
     display_id: int = 0,
     *,
     owned: Callable[[InputWindow], bool] | None = None,
+    named: Callable[[InputWindow], bool] | None = None,
 ) -> InputWindow | str:
     """Return the window a touch at `point` of `display_id` reaches, read from
     the whole text of ``dumpsys input``, or why that is not known.
@@ -1634,8 +1685,13 @@ def read_window_at(
     with ``samsungFlags=0x1`` is read only when it says so, else the list is
     `LINE_FORMAT` (``samsung_flags``), whether or not that window is at the
     point (see `parse_input_windows`).
+
+    `named` tells whether a window's title names the app (the package, or
+    the package and ``/``): a window with ``samsungFlags=0x100000`` or
+    ``0x100001`` is read only when both `owned` and `named` say so, else the
+    list refuses as for ``0x1``. Without `named` those values refuse.
     """
-    windows = _checked(_split(text), display_id, owned=owned)
+    windows = _checked(_split(text), display_id, owned=owned, named=named)
     if isinstance(windows, _Refusal):
         return Unreadable(windows.reason, windows.rule)
     found = window_at(windows, point)

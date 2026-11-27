@@ -165,12 +165,14 @@ class _DeviceState:
             point: tuple[int, int],
             *,
             owned: Callable[[InputWindow], bool] | None = None,
+            named: Callable[[InputWindow], bool] | None = None,
         ) -> InputWindow | str: ...
         def diagnose_tap_window(
             self,
             *,
             show_device_text: bool = False,
             owned: Callable[[InputWindow], bool] | None = None,
+            named: Callable[[InputWindow], bool] | None = None,
         ) -> TapWindowDiagnosis: ...
         def _trusted_component(self) -> tuple[str, str] | None: ...
         def _focused_component(self, package: str) -> tuple[str, str] | None: ...

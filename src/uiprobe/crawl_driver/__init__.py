@@ -166,6 +166,7 @@ from uiprobe.crawl_driver.driver import (  # noqa: F401
 )
 from uiprobe.crawl_driver.helpers import (  # noqa: F401
     Progress,
+    _app_named,
     _app_window,
     _bounds,
     _element_of,
@@ -179,6 +180,7 @@ from uiprobe.crawl_driver.helpers import (  # noqa: F401
     _seconds,
     _Seen,
     _skipped_element,
+    _takes_named,
     _unreadable_launcher,
     _words,
 )
