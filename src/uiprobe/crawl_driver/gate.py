@@ -159,18 +159,46 @@ class _GateMixin(_RunState):
             return "target_uid"
         return None
 
+    def back_uid(
+        self, action: Action, observation: Observation | None
+    ) -> PackageUid | None:
+        """The app's uid, read now, for a BACK decided on a screen of the app
+        (None for any other action, with the tap window check off, or when it
+        cannot be read).
+
+        It is asked before the gate's reads of the foreground, focus and
+        keyboard, so the focused window is read after it and nothing slow runs
+        between that read and the decision. A read that fails is a uid that is
+        not readable: the BACK is then not sent, as with a uid that differs.
+        """
+        if (
+            not isinstance(action, Back)
+            or observation is None
+            or observation.screen is None
+            or not self.policy.check_tap_window
+            or not self.on_target(observation.screen, observation.foreground)
+        ):
+            return None
+        try:
+            return self.device.package_uid(self.tap_package(observation.screen))
+        except UiprobeError:
+            return None
+
     def back_window(
-        self, focus: FocusedWindow | None, package: str
+        self, focus: FocusedWindow | None, package: str, fresh: PackageUid | None
     ) -> dict[str, str | int] | None:
         """Why a BACK decided on a screen of the app must not go to `focus`
-        (the window that takes it, owned by `package`), or None. The details
+        (the window that takes it, owned by `package`), or None. `fresh` is the
+        app's uid read by the gate before its reads of the focus (None when it
+        could not be read; unused with the tap window check off). The details
         are those of a tap refused by `uncovered`: ``unreadable`` is
         ``target_user`` or ``target_uid``.
 
         As for a tap, the focused window must be of Android user 0, and its
         owner uid, when read, the app's. With ``Policy.check_tap_window`` on
         the app's uid must also have been read at the start and read again
-        now with the same value (the tap path's rule: fail closed). With it
+        before the gate's reads with the same value (the tap path's rule:
+        fail closed; a read that failed counts as not readable). With it
         off the app's uid is never read, as for taps, so only the user is
         checked. The owner package is compared by the caller, so the title
         rule for shared and system uids (which tells packages apart in the
@@ -186,7 +214,7 @@ class _GateMixin(_RunState):
         if (
             app is None
             or (focus.owner_uid is not None and focus.owner_uid != app.uid)
-            or self.device.package_uid(package) != app
+            or fresh != app
         ):
             return {"unreadable": "target_uid"}
         return None
@@ -241,6 +269,7 @@ class _GateMixin(_RunState):
             return NOT_SENT_STOPPED, None
         self.gate_epoch = self.device.pin_epoch
         tap = isinstance(action, Tap)
+        fresh = self.back_uid(action, observation)
         # For a tap: the focused window before and after the dump must be the
         # same window of the app, so the dump shows that window (uiautomator
         # dumps the focused window: seen on API 24, 30 and 36 with the shade).
@@ -304,7 +333,7 @@ class _GateMixin(_RunState):
             # Only the user and uid of a window the app owns are asked: any
             # other owner is refused by the package check below.
             other = (
-                self.back_window(focus, focus.owner)
+                self.back_window(focus, focus.owner, fresh)
                 if own_back
                 and not unchecked
                 and before is not None
@@ -328,7 +357,6 @@ class _GateMixin(_RunState):
                     and focus.owner != self.tap_package(before.screen),
                     NOT_SENT_FOCUS_OTHER,
                 ),
-                (other is not None, NOT_SENT_FOCUS_OTHER),
                 (back and keyboard is None, NOT_SENT_KEYBOARD_UNKNOWN),
                 (
                     before is not None
@@ -339,6 +367,8 @@ class _GateMixin(_RunState):
                     ),
                     NOT_SENT_CHANGED,
                 ),
+                # Last of the checks of this branch: every existing reason wins.
+                (other is not None, NOT_SENT_FOCUS_OTHER),
             )
         # The engine re-checks with the same time the gate took first, which was
         # before the limit, so its refusal is never about the time.

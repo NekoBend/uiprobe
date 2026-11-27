@@ -14,6 +14,7 @@ from tests.crawl_driver.helpers import (
     lines,
 )
 from uiprobe.crawl import Back
+from uiprobe.errors import AdbError
 from uiprobe.guards import Policy
 from uiprobe.packageuid import PackageUid
 
@@ -117,17 +118,93 @@ def test_a_back_is_not_sent_when_the_app_uid_was_not_read_at_the_start(
     assert _end(tmp_path)["details"] == {"unreadable": "target_uid"}
 
 
-def test_a_back_is_not_sent_when_the_app_uid_changed_since_the_start(
-    tmp_path, device, android, clock
+def test_a_back_is_not_sent_when_the_app_uid_read_now_differs(
+    tmp_path, device, android, clock, monkeypatch
 ):
+    # The cached uid and the focused window's uid are equal; only the fresh
+    # reply of the package dump differs (the app was installed again).
     driver, _, observation = _gate_run(tmp_path, device, clock)
     assert driver.app_uid is not None
-    driver.app_uid = PackageUid(driver.app_uid.uid + 1, driver.app_uid.shared)
+    changed = PackageUid(driver.app_uid.uid + 1, driver.app_uid.shared)
+    monkeypatch.setattr(device, "package_uid", lambda _package: changed)
     keys = _keys(android)
     driver.send(Back(), observation)
     assert _keys(android) == keys
     assert _not_sent_reason(tmp_path) == "focus_other"
     assert _end(tmp_path)["details"] == {"unreadable": "target_uid"}
+
+
+def test_the_uid_is_read_before_the_focused_window(
+    tmp_path, device, clock, monkeypatch
+):
+    driver, _, observation = _gate_run(tmp_path, device, clock)
+    order: list[str] = []
+    for name in ("package_uid", "foreground", "focused_window", "keyboard_shown"):
+        real = getattr(device, name)
+
+        def spy(*args, _real=real, _name=name):
+            order.append(_name)
+            return _real(*args)
+
+        monkeypatch.setattr(device, name, spy)
+    driver.send(Back(), observation)
+    assert order == ["package_uid", "foreground", "focused_window", "keyboard_shown"]
+
+
+def test_a_focus_that_moves_to_user_10_during_the_uid_read_is_not_sent_to(
+    tmp_path, device, android, clock, monkeypatch
+):
+    driver, _, observation = _gate_run(tmp_path, device, clock)
+    real = device.package_uid
+
+    def moving(package):
+        android.focus_user = 10
+        return real(package)
+
+    monkeypatch.setattr(device, "package_uid", moving)
+    keys = _keys(android)
+    driver.send(Back(), observation)
+    assert _keys(android) == keys
+    assert _not_sent_reason(tmp_path) is not None
+
+
+def test_a_uid_read_that_fails_closes_the_transition_as_not_sent(
+    tmp_path, device, android, clock, monkeypatch
+):
+    # The tap path lets such an error end the run with a start line alone;
+    # a BACK records it as not sent and the run goes on.
+    driver, _, observation = _gate_run(tmp_path, device, clock)
+
+    def fail(_package):
+        msg = "timed out"
+        raise AdbError(msg)
+
+    monkeypatch.setattr(device, "package_uid", fail)
+    keys = _keys(android)
+    driver.send(Back(), observation)
+    assert _keys(android) == keys
+    end = _end(tmp_path)
+    assert end["not_sent"] is True
+    assert end["reason"] == "focus_other"
+    assert end["details"] == {"unreadable": "target_uid"}
+
+
+def test_an_unknown_keyboard_still_wins_over_the_uid_check(
+    tmp_path, device, android, clock, monkeypatch
+):
+    driver, _, observation = _gate_run(tmp_path, device, clock)
+
+    def fail(_package):
+        msg = "timed out"
+        raise AdbError(msg)
+
+    monkeypatch.setattr(device, "package_uid", fail)
+    monkeypatch.setattr(device, "keyboard_shown", lambda: None)
+    keys = _keys(android)
+    driver.send(Back(), observation)
+    assert _keys(android) == keys
+    assert _not_sent_reason(tmp_path) == "keyboard_unknown"
+    assert "details" not in _end(tmp_path)
 
 
 def test_without_the_tap_window_check_the_uid_is_not_compared(
