@@ -65,7 +65,7 @@ from tests.helpers import is_port_allowed, reset_allowed_ports
 from tests.offline_check import offline_violation
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Generator, Iterator
 
 ENVIRONMENT_VARIABLES = (
     "ADB_SERVER_SOCKET",
@@ -629,3 +629,33 @@ def fake_adb() -> Iterator[FakeAdbServer]:
     assert not server.protocol_errors, server.protocol_errors
     assert not server.handler_errors, server.handler_errors
     assert not server.unexpected, server.unexpected
+
+
+@pytest.hookimpl(wrapper=True)
+def pytest_runtest_makereport(
+    call: pytest.CallInfo[None],
+) -> Generator[None, pytest.TestReport, pytest.TestReport]:
+    """Add the `details` of a uiprobe error to the failure report.
+
+    An error such as `AdbServerUnavailableError` keeps its cause (the socket
+    error, for example) in `details`, which pytest does not show; the report
+    then names it. Tests talk only to fakes, so no device value reaches it.
+    """
+    report = yield
+    excinfo = call.excinfo
+    if report.failed and excinfo is not None:
+        from uiprobe.errors import UiprobeError
+
+        chain: list[BaseException] = []
+        error: BaseException | None = excinfo.value
+        while error is not None and error not in chain and len(chain) < 10:
+            chain.append(error)
+            error = error.__cause__ or error.__context__
+        lines = [
+            f"{type(e).__name__}: {e.details!r}"
+            for e in chain
+            if isinstance(e, UiprobeError) and e.details
+        ]
+        if lines:
+            report.sections.append(("uiprobe error details", "\n".join(lines)))
+    return report
