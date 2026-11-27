@@ -250,6 +250,16 @@ DIALOG_ONLY_CONFIRM_WORDS: Final[tuple[str, ...]] = (
     "有効にする",
 )
 
+# Dialog-only confirm words that count only as the whole label of a button
+# (after the usual clean-up: case, full width, spaces). A word that merely
+# starts a label does not count, so "Online", "On-screen", "オンライン" and
+# "ログオン" are not touched. They are part of CONFIRM_WORDS like the other
+# dialog-only words and, like them, count on a dialog only.
+DIALOG_ONLY_EXACT_LABELS: Final[tuple[str, ...]] = (
+    "on",
+    "オン",
+)
+
 # Labels of buttons that confirm what the screen asks for.
 CONFIRM_WORDS: Final[tuple[str, ...]] = (
     "OK",
@@ -273,6 +283,7 @@ CONFIRM_WORDS: Final[tuple[str, ...]] = (
     "apply",
     "done",
     *DIALOG_ONLY_CONFIRM_WORDS,
+    *DIALOG_ONLY_EXACT_LABELS,
 )
 
 # The resource id of the positive button of a platform dialog, ``button1``

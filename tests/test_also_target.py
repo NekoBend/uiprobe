@@ -49,8 +49,8 @@ def with_also(text: str, value: str) -> str:
 
 def test_the_generated_file_is_current_and_writes_the_key_commented():
     text = settings.render_default_settings()
-    assert "format_version = 1\ndefaults_version = 11\n" in text
-    assert settings.DEFAULTS_VERSION == 11
+    assert "format_version = 1\ndefaults_version = 12\n" in text
+    assert settings.DEFAULTS_VERSION == 12
     assert text.count("also_target") == 1
     assert ENTRY + "\n" in text
     rules = text.split("[rules]\n")[1].split("[limits]")[0]
@@ -64,9 +64,9 @@ def test_the_generated_file_loads_with_an_empty_list(tmp_path):
     assert settings.policy_from_settings(loaded).also_target == ()
 
 
-@pytest.mark.parametrize("version", range(1, 12))
+@pytest.mark.parametrize("version", range(1, 13))
 def test_every_defaults_version_loads_with_an_empty_list(tmp_path, version):
-    if version <= 10:
+    if version <= 11:
         text = (DATA / f"settings_v{version}.toml").read_text(encoding="utf-8")
     else:
         text = settings.render_default_settings()

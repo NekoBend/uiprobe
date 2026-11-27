@@ -63,6 +63,10 @@ keys ``scrolls_per_screen``, ``scroll_amount`` and ``scroll_incidents`` of
 version 11 must have all four, and an older uiprobe refuses a version 11 file.
 With true, a pressing crawl may turn a mouse wheel over a list (opt-in, off by
 default; see `uiprobe.guards.scroll_target`).
+Version 12 added the confirm words ``on`` and ``オン`` (no rules or keys): a
+dialog button whose whole label is one of them is refused like the version 9
+words, but a longer label that merely starts with one is not
+(`DIALOG_ONLY_EXACT_LABELS`).
 
 ``[deny] except`` holds exception words (see `uiprobe.guards.word_matches`): a
 deny-word hit that lies completely inside one of them, where it stands as a
@@ -171,7 +175,7 @@ __all__ = [
 
 SETTINGS_FILE: Final = "uiprobe.toml"
 FORMAT_VERSION: Final = 1
-DEFAULTS_VERSION: Final = 11
+DEFAULTS_VERSION: Final = 12
 MAX_SETTINGS_BYTES: Final = 1024 * 1024
 
 # Every default list item with the defaults version that introduced it. Each
@@ -200,6 +204,8 @@ MAX_SETTINGS_BYTES: Final = 1024 * 1024
 # Version 10 added the rule back_on_other_screens (no list items; a missing one
 # reads False). Version 11 added the rule scroll_lists and the [limits] keys
 # scrolls_per_screen, scroll_amount and scroll_incidents (no list items).
+# Version 12 added the confirm words on and オン, which count only as the whole
+# label of a button on a dialog (`DIALOG_ONLY_EXACT_LABELS`).
 _LATER_DENY: Final[dict[str, int]] = {
     "やり直": 2,
     "元に戻": 2,
@@ -210,13 +216,15 @@ _LATER_DENY: Final[dict[str, int]] = {
 # The [deny] except list has no built-in words. One added later starts at the
 # next defaults version (raise DEFAULTS_VERSION with it); before that, the
 # test that no default is tagged beyond the current version fails.
-_FIRST_EXCEPT: Final = 12
+_FIRST_EXCEPT: Final = 13
 _LATER_EXCEPT: Final[dict[str, int]] = {}
 _LATER_CONFIRM: Final[dict[str, int]] = {
     "turn on": 9,
     "enable": 9,
     "オンにする": 9,
     "有効にする": 9,
+    "on": 12,
+    "オン": 12,
 }
 # The [irreversible] table came with version 2, so its items start there.
 _FIRST_IRREVERSIBLE: Final = 2

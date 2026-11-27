@@ -19,6 +19,7 @@ from uiprobe.guards.constants import (
     _UP_CLASSES,
     _UP_IDS,
     DIALOG_ONLY_CONFIRM_WORDS,
+    DIALOG_ONLY_EXACT_LABELS,
     MAX_ELEMENTS,
     PERMISSION_PACKAGES,
     Reason,
@@ -87,14 +88,20 @@ class _Judge:
         self.confirm = frozenset(_confirm_form(w) for w in policy.confirm_words)
         # The lengths of the confirm words, shortest first: only a start of a
         # label of one of these lengths can be a confirm word.
-        self._dialog_only = frozenset(
+        self._exact_only = frozenset(_confirm_form(w) for w in DIALOG_ONLY_EXACT_LABELS)
+        self._dialog_only = self._exact_only | frozenset(
             _confirm_form(w) for w in DIALOG_ONLY_CONFIRM_WORDS
         )
-        self._confirm_lengths = sorted({len(form) for form in self.confirm})
+        # An exact-label word is never the start of a longer label.
+        self._confirm_lengths = sorted(
+            {len(form) for form in self.confirm - self._exact_only}
+        )
         # A confirm word that ends in a letter of the Japanese script can be
         # followed by anything; the others need a boundary (`_is_confirm`).
         self._open_ended = frozenset(
-            form for form in self.confirm if _is_japanese_letter(form[-1])
+            form
+            for form in self.confirm - self._exact_only
+            if _is_japanese_letter(form[-1])
         )
         # A screen of a listed also_target package is judged as the target's
         # own: its package is then the target of this screen (an element of
@@ -300,7 +307,9 @@ class _Judge:
         A confirm word at the start counts when a boundary follows it: a
         character that is not a letter, or nothing. A word ending in a
         letter of the Japanese script needs no boundary. With ``wide``, the
-        dialog-only words (`DIALOG_ONLY_CONFIRM_WORDS`) do not count.
+        dialog-only words (`DIALOG_ONLY_CONFIRM_WORDS` and
+        `DIALOG_ONLY_EXACT_LABELS`) do not count. An exact-label word counts
+        only as the whole form, never as the start of a longer one.
         """
         if not form:
             return False
@@ -312,6 +321,7 @@ class _Judge:
             head = form[:end]
             if (
                 head in self.confirm
+                and head not in self._exact_only
                 and not (wide and head in self._dialog_only)
                 and (head in self._open_ended or not form[end].isalpha())
             ):
