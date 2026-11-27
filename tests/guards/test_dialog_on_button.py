@@ -11,10 +11,7 @@ import pytest
 
 from tests.guards.helpers import el, reasons, run
 from uiprobe.guards import Policy
-from uiprobe.guards.constants import (
-    CONFIRM_WORDS,
-    DIALOG_ONLY_EXACT_LABELS,
-)
+from uiprobe.guards.constants import CONFIRM_WORDS, DIALOG_ONLY_EXACT_LABELS
 
 DIALOG = (20, 200, 300, 440)
 PLAIN = (0, 0, 320, 640)
@@ -27,10 +24,10 @@ def _button(label: str, **fields):
     return el("e2", text=label, bounds=BOTTOM, **fields)
 
 
-def test_the_exact_labels_are_default_confirm_words() -> None:
+def test_the_exact_labels_are_not_confirm_words() -> None:
     assert DIALOG_ONLY_EXACT_LABELS == ("on", "オン")
     for word in DIALOG_ONLY_EXACT_LABELS:
-        assert word in CONFIRM_WORDS
+        assert word not in CONFIRM_WORDS
 
 
 @pytest.mark.parametrize(
@@ -117,12 +114,6 @@ def test_refuse_dialog_confirm_false_turns_it_off() -> None:
     assert reasons(judgement, "e2") == ()
 
 
-def test_a_policy_without_the_words_does_not_refuse() -> None:
-    words = tuple(w for w in CONFIRM_WORDS if w not in DIALOG_ONLY_EXACT_LABELS)
-    policy = replace(Policy(), confirm_words=words)
-    assert reasons(run([_button("ON")], root_bounds=DIALOG, policy=policy), "e2") == ()
-
-
 def test_the_exact_label_never_gives_the_screen_wide_reason() -> None:
     warning = el(
         "e3",
@@ -141,11 +132,8 @@ def test_the_exact_label_never_gives_the_screen_wide_reason() -> None:
 
 LAYOUT = "android.widget.LinearLayout"
 WARNING = ("e9", "Forget saved device?")
-# The policy that stands for main: the same confirm words without the two new ones.
-MAIN = replace(
-    Policy(),
-    confirm_words=tuple(w for w in CONFIRM_WORDS if w not in DIALOG_ONLY_EXACT_LABELS),
-)
+# The policy that stands for main: no dialog exact labels.
+MAIN = replace(Policy(), dialog_exact_labels=())
 
 
 def _warning():
@@ -252,31 +240,80 @@ def test_an_assembled_label_of_just_on_is_refused() -> None:
     assert reasons(run(_split_label("オ", "ン"), root_bounds=PLAIN), "e2") == ()
 
 
-# -- a word the user wrote in an older file keeps the plain matching -----------------
+# -- a confirm word "on" written by a Python caller keeps main's matching -------------
 
 
-@pytest.mark.parametrize("word", ["on", "オン"])
-def test_a_legacy_word_keeps_the_prefix_and_screen_wide_matching(word) -> None:
-    legacy = replace(Policy(), legacy_confirm_words=(word,))
-    label = "On, continue" if word == "on" else "オンライン"
-    button = _button(label)
-    for root_bounds in (PLAIN, DIALOG):
-        now = run([button, _warning()], root_bounds=root_bounds, policy=legacy)
-        assert "confirm_button" in reasons(now, "e2")
-        plain = run([button, _warning()], root_bounds=root_bounds)
-        assert "confirm_button" not in reasons(plain, "e2")
+@pytest.mark.parametrize(
+    ("word", "label"),
+    [
+        ("on", "On-screen"),
+        ("on", "On, continue"),
+        ("オン", "オンライン"),
+        ("オン", "オンにして続ける"),
+    ],
+)
+@pytest.mark.parametrize("root_bounds", [PLAIN, DIALOG])
+def test_a_confirm_word_on_in_a_python_policy_keeps_the_plain_matching(
+    word, label, root_bounds
+) -> None:
+    policy = replace(Policy(), confirm_words=(word,))
+    now = run([_button(label), _warning()], root_bounds=root_bounds, policy=policy)
+    assert "confirm_button" in reasons(now, "e2")
+    plain = run([_button(label), _warning()], root_bounds=root_bounds)
+    assert "confirm_button" not in reasons(plain, "e2")
 
 
-def test_a_legacy_word_also_gets_the_exact_dialog_refusal() -> None:
-    legacy = replace(Policy(), legacy_confirm_words=("on",))
-    assert reasons(run([_button("ON")], root_bounds=DIALOG, policy=legacy), "e2") == (
+def test_the_default_policy_does_not_hold_the_labels_as_confirm_words() -> None:
+    assert "on" not in Policy().confirm_words
+    assert "オン" not in Policy().confirm_words
+    assert Policy().dialog_exact_labels == ("on", "オン")
+
+
+def test_a_policy_without_the_labels_does_not_refuse() -> None:
+    policy = replace(Policy(), dialog_exact_labels=())
+    assert reasons(run([_button("ON")], root_bounds=DIALOG, policy=policy), "e2") == ()
+
+
+def test_the_labels_still_work_when_a_confirm_word_on_is_also_listed() -> None:
+    policy = replace(Policy(), confirm_words=(*CONFIRM_WORDS, "on"))
+    assert reasons(run([_button("ON")], root_bounds=DIALOG, policy=policy), "e2") == (
         REFUSED
     )
 
 
-def test_a_legacy_word_that_is_not_in_the_confirm_words_does_nothing() -> None:
-    words = tuple(w for w in CONFIRM_WORDS if w != "on")
-    policy = replace(Policy(), confirm_words=words, legacy_confirm_words=("on",))
-    assert (
-        reasons(run([_button("On, go")], root_bounds=DIALOG, policy=policy), "e2") == ()
-    )
+def test_an_empty_label_is_refused_by_the_policy() -> None:
+    with pytest.raises(ValueError, match="dialog exact label is empty"):
+        Policy(dialog_exact_labels=("  ",))
+
+
+# -- the same label as the confirm words -----------------------------------------------
+
+
+def test_each_own_field_is_read_like_the_confirm_words_read_it() -> None:
+    # A confirm word is found in any one of text, content_desc and hint (text
+    # "Okinawa" with description "OK" is a confirm label), so a description
+    # that is just ON counts although the text is "Online".
+    button = el("e2", text="Online", desc="ON", bounds=BOTTOM)
+    assert reasons(run([button], root_bounds=DIALOG), "e2") == REFUSED
+    ok = el("e2", text="Okinawa", desc="OK", bounds=BOTTOM)
+    assert reasons(run([ok], root_bounds=DIALOG), "e2") == REFUSED
+
+
+def test_a_label_only_in_a_child_hint_is_refused() -> None:
+    box = el("e2", cls=LAYOUT, bounds=BOTTOM)
+    child = el("e3", parent="e2", hint="ON", cls=TEXT, flags=(), bounds=BOTTOM)
+    assert reasons(run([box, child], root_bounds=DIALOG), "e2") == REFUSED
+
+
+def test_a_label_only_in_a_child_description_is_refused() -> None:
+    box = el("e2", cls=LAYOUT, bounds=BOTTOM)
+    child = el("e3", parent="e2", desc="ON", cls=TEXT, flags=(), bounds=BOTTOM)
+    assert reasons(run([box, child], root_bounds=DIALOG), "e2") == REFUSED
+
+
+def test_a_label_of_several_parts_is_judged_as_a_whole() -> None:
+    # "Online" and "ON" are two parts of one label: it is not just ON.
+    box = el("e2", cls=LAYOUT, bounds=BOTTOM)
+    first = el("e3", parent="e2", text="Online", cls=TEXT, flags=(), bounds=BOTTOM)
+    second = el("e4", parent="e2", text="ON", cls=TEXT, flags=(), bounds=BOTTOM)
+    assert reasons(run([box, first, second], root_bounds=DIALOG), "e2") == ()

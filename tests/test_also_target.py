@@ -138,7 +138,7 @@ def test_the_settings_fields_end_with_also_target():
         "scroll_amount",
         "scroll_incidents",
     ]
-    assert names[-1] == "legacy_confirm_words"
+    assert names[-1] == "dialog_exact_labels"
     assert names[-8] == "record_text"
 
 

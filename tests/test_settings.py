@@ -2339,7 +2339,7 @@ def test_settings_built_with_the_earlier_fields_still_work(tmp_path):
         "scrolls_per_screen",
         "scroll_amount",
         "scroll_incidents",
-        "legacy_confirm_words",
+        "dialog_exact_labels",
     ]
 
 
@@ -2640,7 +2640,7 @@ def test_replay_path_comes_after_runs_dir_so_positional_settings_still_work(tmp_
         "scrolls_per_screen",
         "scroll_amount",
         "scroll_incidents",
-        "legacy_confirm_words",
+        "dialog_exact_labels",
     ]
     loaded = load_settings(default_file(tmp_path))
     # Built by position with every field up to runs_dir, as before version 5:
@@ -3213,7 +3213,7 @@ def test_the_settings_docstring_names_the_version_of_the_scroll_fields():
     assert "defaults version 7" not in doc.split("scroll_lists")[1]
 
 
-# -- the confirm words on and オン (defaults version 12) ----------------------------
+# -- the dialog exact labels on and オン (defaults version 12) ------------------------
 
 
 def v11_text() -> str:
@@ -3225,15 +3225,14 @@ def v11_text() -> str:
 
 
 def test_the_version_12_defaults_are_pinned():
-    version_12 = tuple(
-        item for version, item in settings._CONFIRM_WORDS if version == 12
-    )
-    assert version_12 == V12_CONFIRM
-    assert version_12 == DIALOG_ONLY_EXACT_LABELS
+    version_12 = tuple(item for version, item in settings._EXACT_LABELS)
+    assert version_12 == V12_CONFIRM == DIALOG_ONLY_EXACT_LABELS
+    assert {version for version, _ in settings._EXACT_LABELS} == {12}
     assert settings.DEFAULTS_VERSION == 12
     for table in (
         "_DENY_WORDS",
         "_DENY_EXCEPTIONS",
+        "_CONFIRM_WORDS",
         "_IRREVERSIBLE_PHRASES",
         "_REFUSE_KEYS",
         "_REFUSE_PREFIXES",
@@ -3244,6 +3243,14 @@ def test_the_version_12_defaults_are_pinned():
     assert settings._FIRST_EXCEPT == 13
 
 
+def test_the_default_policy_has_the_labels_but_not_as_confirm_words():
+    policy = guards.Policy()
+    assert policy.dialog_exact_labels == ("on", "オン")
+    assert "on" not in policy.confirm_words
+    assert "オン" not in policy.confirm_words
+    assert "on" not in CONFIRM_WORDS
+
+
 def test_the_generated_file_lists_the_version_12_words(tmp_path):
     text = render_default_settings()
     assert "defaults_version = 12\n" in text
@@ -3251,30 +3258,47 @@ def test_the_generated_file_lists_the_version_12_words(tmp_path):
     assert '    "オン",\n' in text
     loaded = load_settings(write(tmp_path, text))
     assert loaded.defaults_version == 12
-    for word in V12_CONFIRM:
-        assert word in loaded.confirm_words
+    assert loaded.dialog_exact_labels == V12_CONFIRM
+    assert loaded.confirm_words == CONFIRM_WORDS
+    policy = settings.policy_from_settings(loaded)
+    assert policy.dialog_exact_labels == V12_CONFIRM
+    assert policy.confirm_words == CONFIRM_WORDS
 
 
 @pytest.mark.parametrize("version", range(1, 12))
-def test_an_older_file_gets_the_version_12_words_only_through_the_map(
-    tmp_path, version
-):
+def test_an_older_file_gets_the_version_12_labels_through_the_map(tmp_path, version):
     # The fixture of every version from 1 to 11 does not list the two words;
-    # loading it adds them as defaults newer than the file, like the version 9
-    # words, and `[confirm] remove` keeps one out.
+    # loading it adds them as labels newer than the file, and
+    # `[confirm] remove` keeps one out.
     text = version_text(version)
     assert '    "on",\n' not in text
     assert '    "オン",\n' not in text
     loaded = load_settings(write(tmp_path, text))
     assert loaded.defaults_version == version
     assert loaded.warnings == ()
-    for word in V12_CONFIRM:
-        assert word in loaded.confirm_words
+    assert loaded.dialog_exact_labels == V12_CONFIRM
+    assert loaded.confirm_words == CONFIRM_WORDS
     head, confirm = text.split("[confirm]")
     removed = head + "[confirm]" + confirm.replace("remove = []", 'remove = ["ON"]', 1)
     kept = load_settings(write(tmp_path, removed))
-    assert "on" not in kept.confirm_words
-    assert "オン" in kept.confirm_words
+    assert kept.dialog_exact_labels == ("オン",)
+
+
+def test_a_version_12_file_removes_a_label_with_remove(tmp_path):
+    text = render_default_settings()
+    head, confirm = text.split("[confirm]")
+    removed = (
+        head + "[confirm]" + confirm.replace("remove = []", 'remove = ["オン"]', 1)
+    )
+    loaded = load_settings(write(tmp_path, removed))
+    assert loaded.dialog_exact_labels == ("on",)
+    assert "オン" not in loaded.confirm_words
+
+
+def test_a_version_12_file_without_a_label_does_not_get_it_back(tmp_path):
+    text = render_default_settings().replace('    "on",\n', "", 1)
+    loaded = load_settings(write(tmp_path, text))
+    assert loaded.dialog_exact_labels == ("オン",)
 
 
 def test_the_version_11_file_loads_as_the_current_defaults(tmp_path):
@@ -3287,43 +3311,30 @@ def test_the_version_11_file_loads_as_the_current_defaults(tmp_path):
         dataclasses.replace(loaded, source=current.source, defaults_version=CURRENT)
         == current
     )
-    assert settings.policy_from_settings(loaded).confirm_words == (
-        settings.policy_from_settings(current).confirm_words
-    )
 
 
 def _with_confirm_word(text: str, word: str) -> str:
     head, confirm = text.split("[confirm]")
-    return (
-        head
-        + "[confirm]"
-        + confirm.replace("words = [\n", f'words = [\n    "{word}",\n', 1)
-    )
+    listed = confirm.replace("words = [\n", f'words = [\n    "{word}",\n', 1)
+    return head + "[confirm]" + listed
 
 
 @pytest.mark.parametrize("version", range(1, 12))
 @pytest.mark.parametrize("word", ["on", "ON", "オン"])
-def test_an_older_file_that_lists_a_version_12_word_keeps_the_plain_matching(
+def test_an_older_file_keeps_a_hand_written_word_as_a_confirm_word(
     tmp_path, version, word
 ):
     text = _with_confirm_word(version_text(version), word)
     loaded = load_settings(write(tmp_path, text))
-    assert loaded.legacy_confirm_words == (word,)
+    assert word in loaded.confirm_words
+    assert loaded.dialog_exact_labels == V12_CONFIRM
     policy = settings.policy_from_settings(loaded)
-    assert policy.legacy_confirm_words == (word,)
-    assert policy.with_deny_words(["zzz"]).legacy_confirm_words == (word,)
+    assert word in policy.confirm_words
+    assert policy.with_deny_words(["zzz"]).dialog_exact_labels == V12_CONFIRM
 
 
-@pytest.mark.parametrize("version", range(1, 12))
-def test_an_older_file_that_does_not_list_them_has_no_legacy_words(tmp_path, version):
-    loaded = load_settings(write(tmp_path, version_text(version)))
-    assert loaded.legacy_confirm_words == ()
-    assert settings.policy_from_settings(loaded).legacy_confirm_words == ()
-
-
-def test_a_version_12_file_has_no_legacy_words(tmp_path):
-    text = render_default_settings()
-    assert '    "on",\n' in text
-    loaded = load_settings(write(tmp_path, text))
-    assert loaded.legacy_confirm_words == ()
-    assert settings.policy_from_settings(loaded).legacy_confirm_words == ()
+@pytest.mark.parametrize("word", ["on", "オン"])
+def test_a_version_12_file_listing_a_label_makes_it_a_label_only(tmp_path, word):
+    loaded = load_settings(write(tmp_path, render_default_settings()))
+    assert word in loaded.dialog_exact_labels
+    assert word not in loaded.confirm_words

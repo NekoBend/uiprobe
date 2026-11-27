@@ -137,9 +137,7 @@ def _plain_policy(policy: Policy) -> Policy:
         skip_sliders=_flag("skip_sliders", policy.skip_sliders),
         replay_path=_flag("replay_path", policy.replay_path),
         also_target=_words("also_target", policy.also_target),
-        legacy_confirm_words=_words(
-            "legacy_confirm_words", policy.legacy_confirm_words
-        ),
+        dialog_exact_labels=_words("dialog_exact_labels", policy.dialog_exact_labels),
         scroll_lists=_flag("scroll_lists", policy.scroll_lists),
     )
 

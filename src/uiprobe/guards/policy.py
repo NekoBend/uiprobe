@@ -18,6 +18,7 @@ from uiprobe.guards.constants import (
     DEFAULT_DENY_EXCEPTIONS,
     DEFAULT_DENY_WORDS,
     DEFAULT_SCROLL_LISTS,
+    DIALOG_ONLY_EXACT_LABELS,
     IRREVERSIBLE_PHRASES,
     Reason,
 )
@@ -237,15 +238,14 @@ class Policy:
     stays refused (``outside_target_app``). With the empty default nothing
     differs from a policy without the field.
 
-    ``legacy_confirm_words`` (default ``()``) names confirm words that were
-    written by hand in a settings file older than defaults version 12 and that
-    equal one of `DIALOG_ONLY_EXACT_LABELS` (``on``, ``オン``). Such a word
-    keeps the matching of every other confirm word (a start of a label, and the
-    screen-wide ``confirm_button``). Without it, ``on`` and ``オン`` in
-    ``confirm_words`` are the built-in exact-only words: they never match as
-    the start of a label and never give ``confirm_button``; on a dialog they
-    give ``dialog_confirm_button`` when the whole label is the word. A legacy
-    word gets that dialog refusal too.
+    ``dialog_exact_labels`` (default `DIALOG_ONLY_EXACT_LABELS`, ``on`` and
+    ``オン``) are labels that are refused on a dialog (``dialog_confirm_button``,
+    unless ``refuse_dialog_confirm`` is False) when the label of a button is
+    exactly one of them, ignoring case, full-width letters and spaces. The
+    label is the one the confirm words are matched against. They are not
+    confirm words: a longer label that starts with one is not touched, and
+    they never give ``confirm_button``. ``confirm_words`` keeps its meaning for
+    every entry, ``on`` and ``オン`` included.
 
     ``scroll_lists`` (default `DEFAULT_SCROLL_LISTS`, False) is read by the
     pressing crawl only, not by `judge`. True lets the crawl turn a mouse wheel
@@ -300,7 +300,7 @@ class Policy:
     replay_path: bool = True
     also_target: tuple[str, ...] = ()
     scroll_lists: bool = DEFAULT_SCROLL_LISTS
-    legacy_confirm_words: tuple[str, ...] = ()
+    dialog_exact_labels: tuple[str, ...] = DIALOG_ONLY_EXACT_LABELS
 
     def __post_init__(self) -> None:
         if type(self.back_on_other_screens) is not bool:
@@ -338,10 +338,14 @@ class Policy:
         if type(self.min_visible_px) is not int or self.min_visible_px < 1:
             msg = "min_visible_px must be an integer of at least 1"
             raise ValueError(msg)
-        for word in self.confirm_words:
-            if not _confirm_form(word):
-                msg = f"confirm word is empty after cleaning: {word!r}"
-                raise ValueError(msg)
+        for kind, words in (
+            ("confirm word", self.confirm_words),
+            ("dialog exact label", self.dialog_exact_labels),
+        ):
+            for word in words:
+                if not _confirm_form(word):
+                    msg = f"{kind} is empty after cleaning: {word!r}"
+                    raise ValueError(msg)
 
     def with_deny_words(self, extra: Iterable[str]) -> Policy:
         """Return a copy with `extra` words (for example ``--deny``) added.
@@ -385,7 +389,7 @@ class Policy:
             skip_sliders=self.skip_sliders,
             replay_path=self.replay_path,
             also_target=self.also_target,
-            legacy_confirm_words=self.legacy_confirm_words,
+            dialog_exact_labels=self.dialog_exact_labels,
             scroll_lists=self.scroll_lists,
         )
 
