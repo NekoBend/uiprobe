@@ -1469,23 +1469,33 @@ def test_a_foreign_snapshot_that_a_scroll_names_still_fails_the_gate(tmp_path):
 TOP, BOTTOM = 200, 2400  # the list area; the display ends at BOTTOM too
 
 
-def shelf(rows, *, scrollable=True, list_id="", list_top=TOP):
-    """A list with explicit bounds. `rows` is (texts, top, bottom[, resource id])
-    per row; the return value is the screen and the element number of each row."""
+def shelf(
+    rows,
+    *,
+    scrollable=True,
+    list_id="",
+    list_top=TOP,
+    list_left=0,
+    list_right=1080,
+    root_id="",
+):
+    """A list with explicit bounds. `rows` is (texts, top, bottom[, resource id
+    [, description]]) per row; the return value is the screen and the element
+    number of each row."""
     elements = [
-        el(1, cls="FrameLayout"),
+        el(1, cls="FrameLayout", resource_id=root_id),
         el(
             2,
             1,
             cls="RecyclerView",
             flags=("scrollable",) if scrollable else (),
             resource_id=list_id,
-            bounds=Bounds(0, list_top, 1080, BOTTOM),
+            bounds=Bounds(list_left, list_top, list_right, BOTTOM),
         ),
     ]
     numbers = []
     number = 3
-    for texts, top, bottom, *rid in rows:
+    for texts, top, bottom, *more in rows:
         box = Bounds(0, top, 1080, bottom)
         numbers.append(number)
         elements.append(
@@ -1495,7 +1505,8 @@ def shelf(rows, *, scrollable=True, list_id="", list_top=TOP):
                 cls="LinearLayout",
                 flags=CLICK,
                 bounds=box,
-                resource_id=rid[0] if rid else "",
+                resource_id=more[0] if more else "",
+                desc=more[1] if len(more) > 1 else "",
             )
         )
         for offset, text in enumerate(texts, 1):
@@ -1695,3 +1706,139 @@ def test_the_reasons_of_the_cut_off_version_show_with_why(tmp_path, capsys):
     code, out, _err = run_tree(capsys, str(folder.path), "--why")
     assert code == 0
     assert "Cut [disabled]" in out
+
+
+def test_two_panes_that_reuse_one_layout_do_not_merge(tmp_path):
+    folder, first, *_ = cut_off_run(
+        tmp_path,
+        first_list={"list_right": 540},
+        after_list={"list_left": 540},
+    )
+    folder.finish()
+    assert [r.name for r in shelf_rows(folder, first)] == ["A", "Cut", "Cut", "D"]
+
+
+def test_a_list_under_another_container_does_not_merge(tmp_path):
+    folder, first, *_ = cut_off_run(
+        tmp_path,
+        first_list={"root_id": "pane_left"},
+        after_list={"root_id": "pane_right"},
+    )
+    folder.finish()
+    assert [r.name for r in shelf_rows(folder, first)] == ["A", "Cut", "Cut", "D"]
+
+
+def test_a_repeat_of_the_cut_off_version_does_not_shift_the_rows(tmp_path):
+    # [A cut off, B] then [A whole] then [A cut off, B] again: the last tap on A
+    # is A's, and B stays unpressed
+    folder = Folder(tmp_path)
+    one, _ = shelf([(("Open",), 2300, BOTTOM), (("Open",), 2000, 2200)])
+    two, _ = shelf([(("Open", "On"), 300, 500)])
+    assert one.screen_id != two.screen_id
+    for screen in (one, two, LEAF):
+        folder.screen(screen)
+    folder.start("launch")
+    folder.end(one.screen_id)
+    scroll(folder, one, two)
+    third, third_rows = shelf([(("Open",), 2300, BOTTOM), (("Open",), 2000, 2200)])
+    assert third.screen_id == one.screen_id
+    number = scroll(folder, two, third)
+    tap_after(folder, third, third_rows[0], LEAF.screen_id, number)  # A
+    folder.finish()
+    rows = shelf_rows(folder, one)
+    assert [r.texts for r in rows] == [("Open", "On"), ("Open",)]
+    assert rows[0].pressed
+    assert not rows[1].pressed
+
+
+def test_two_cut_off_rows_with_other_descriptions_do_not_merge(tmp_path):
+    folder, first, *_ = cut_off_run(
+        tmp_path,
+        early=(("Open",), 2300, BOTTOM, "", "Account 1"),
+        late=((("Open", "Detail"), 300, 500, "", "Account 2"),),
+    )
+    folder.finish()
+    assert [r.name for r in shelf_rows(folder, first)] == ["A", "Open", "Open"]
+
+
+def test_a_later_row_that_is_cut_off_too_does_not_merge(tmp_path):
+    folder, first, *_ = cut_off_run(tmp_path, late=((("Cut", "On"), 2300, BOTTOM),))
+    folder.finish()
+    assert [r.name for r in shelf_rows(folder, first)] == ["A", "Cut", "Cut"]
+
+
+def test_a_later_row_with_the_same_texts_does_not_merge(tmp_path):
+    folder, first, *_ = cut_off_run(tmp_path, late=((("Cut",), 300, 500),))
+    folder.finish()
+    # one row: the later read shows the identical row (a plain repeat)
+    assert [r.name for r in shelf_rows(folder, first)] == ["A", "Cut"]
+
+
+def folded_run(tmp_path):
+    """A clickable parent holding a clickable child row: cut off in the first
+    read, whole in the second (the parent has another resource id there)."""
+
+    def pane(parent_id, texts, top, bottom, *, lead=0):
+        # `lead` text elements first shift the ids, so that the outer row has an
+        # element id of its own among the rows of both reads (its fold stays)
+        box = Bounds(0, top, 1080, bottom)
+        elements = [
+            el(1, cls="FrameLayout"),
+            el(
+                2,
+                1,
+                cls="RecyclerView",
+                flags=("scrollable",),
+                bounds=Bounds(0, TOP, 1080, BOTTOM),
+            ),
+        ]
+        elements += [el(3 + i, 2, text=f"Lead {i}") for i in range(lead)]
+        outer = 3 + lead
+        elements += [
+            el(
+                outer,
+                2,
+                cls="FrameLayout",
+                flags=CLICK,
+                bounds=box,
+                resource_id=parent_id,
+            ),
+            el(outer + 1, outer, cls="LinearLayout", flags=CLICK, bounds=box),
+        ]
+        for offset, text in enumerate(texts, outer + 2):
+            elements.append(el(offset, outer + 1, text=text, bounds=box))
+        return make_screen(".Folded", elements)
+
+    folder = Folder(tmp_path)
+    one = pane("p_one", ("Open",), 2300, BOTTOM)
+    two = pane("p_two", ("Open", "On"), 300, 500, lead=1)
+    for screen in (one, two, LEAF):
+        folder.screen(screen)
+    folder.start("launch")
+    folder.end(one.screen_id)
+    number = scroll(folder, one, two)
+    return folder, one, two, number
+
+
+def test_a_reason_of_a_folded_cut_off_row_shows_on_the_parents_line(tmp_path, capsys):
+    folder, one, two, number = folded_run(tmp_path)
+    folder.skip(one, 4, "disabled")  # the cut-off child
+    tap_after(folder, two, 5, LEAF.screen_id, number)  # its whole version
+    folder.finish()
+    code, out, _err = run_tree(capsys, str(folder.path), "--why")
+    assert code == 0
+    assert "[disabled]" in out
+
+
+def test_taps_on_both_versions_with_the_same_destination_keep_both_ids(tmp_path):
+    folder, first, after, first_rows, after_rows, number = cut_off_run(tmp_path)
+    folder.tap(first, first_rows[1], LEAF.screen_id)
+    early_id = folder.action
+    tap_after(folder, after, after_rows[0], LEAF.screen_id, number)
+    late_id = folder.action
+    folder.finish()
+    cut = shelf_rows(folder, first)[1]
+    data = crawl_tree._element_dict(cut)
+    assert sorted(cut.action_ids) == [early_id, late_id]
+    assert data["action_ids"] == cut.action_ids
+    assert data["also_to"] == [{"screen_id": LEAF.screen_id}]

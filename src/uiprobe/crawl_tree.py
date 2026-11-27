@@ -133,6 +133,9 @@ class Row:
     # In memory only: the element ids of the earlier, cut-off versions of this
     # row that it replaced (a tap that names one of them is not lost).
     merged_ids: tuple[str, ...] = ()
+    # In memory and in the JSON (``action_ids``): for a row made of two versions
+    # with more than one tap, the action id of each tap, the main one first.
+    action_ids: list[int] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -1530,10 +1533,40 @@ def _list_of(by_id: dict[str, Element], element: Element) -> Element | None:
     return None
 
 
-def _list_key(by_id: dict[str, Element], element: Element) -> tuple[str, str] | None:
-    """What says two reads show the same list: its class and resource id."""
+def _list_key(
+    by_id: dict[str, Element], element: Element
+) -> tuple[tuple[tuple[str, str], ...], int, int] | None:
+    """What says two reads show the same list: the class and resource id of the
+    list and of every ancestor up to the root, and its left and right edges (two
+    panes that reuse one layout differ in the last)."""
     found = _list_of(by_id, element)
-    return None if found is None else (found.class_name, found.resource_id)
+    if found is None:
+        return None
+    chain: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    here: Element | None = found
+    while here is not None and here.id not in seen:
+        seen.add(here.id)
+        chain.append((here.class_name, here.resource_id))
+        here = by_id.get(here.parent) if here.parent is not None else None
+    return tuple(chain), found.bounds.left, found.bounds.right
+
+
+def _labels(by_id: dict[str, Element], element: Element) -> set[str]:
+    """The texts and descriptions of the element and of what is below it."""
+    found: set[str] = set()
+    for one in by_id.values():
+        here: Element | None = one
+        seen: set[str] = set()
+        while here is not None and here.id not in seen:
+            if here.id == element.id:
+                found.update(
+                    x for x in (one.text.strip(), one.content_desc.strip()) if x
+                )
+                break
+            seen.add(here.id)
+            here = by_id.get(here.parent) if here.parent is not None else None
+    return found
 
 
 def _cut_off(screen: Screen, by_id: dict[str, Element], row: Row) -> bool:
@@ -1550,14 +1583,14 @@ def _cut_off(screen: Screen, by_id: dict[str, Element], row: Row) -> bool:
 def _fuller(early: Row, late: Row) -> bool:
     """Whether `late` is the whole of a row that `early` showed in part: the same
     kind and class, the same title (first text), and the texts of `early` among
-    those of `late`."""
+    those of `late`, and `late` has more."""
     return (
         bool(early.texts)
         and bool(late.texts)
         and early.kind == late.kind
         and early.class_name == late.class_name
         and early.texts[0] == late.texts[0]
-        and set(early.texts) <= set(late.texts)
+        and set(early.texts) < set(late.texts)
     )
 
 
@@ -1670,8 +1703,8 @@ def _hand_over(
         if held is old:
             stand_in[key] = row
     for found in listed.values():
-        # the cut-off version is gone: a row that looks like it is a new row
-        found[:] = [one for one in found if one is not old]
+        # the slot of the cut-off version stays: a later read of it is the row
+        found[:] = [row if one is old else one for one in found]
 
 
 def _title(row: Row) -> tuple[str, str, str]:
@@ -1717,6 +1750,8 @@ def _cut_off_place(
             and key is not None
             and key == _list_key(here, element)
             and _cut_off(read, by_id, rows[place])
+            and not _cut_off(screen, here, row)
+            and _labels(by_id, early) - {rows[place].texts[0]} <= _labels(here, element)
         ):
             found.append(place)
     # exactly one earlier row can be the one: with two, nothing is merged; and a
@@ -2070,16 +2105,21 @@ def _attach(
     if row.pressed:
         _rename(row, best.element)
     shown = [row.to]
+    # a row made of two versions keeps every tap: its action ids, and one ending
+    # for each, also when two taps led to the same screen
+    merged = bool(row.merged_ids)
+    if merged and len(taps) > 1:
+        row.action_ids = [best.action_id] + [t.action_id for t in taps if t is not best]
     row.other_attempt = any(
         _rank(tap) != 0 or "same_screen" not in _ending(tap, sid, own, reader, moves)
         for tap in taps
     )
     for tap in taps:
         # a row made of two versions keeps the outcome of every attempt
-        if tap is best or (_rank(tap) != 0 and not row.merged_ids):
+        if tap is best or (_rank(tap) != 0 and not merged):
             continue
         ending = _ending(tap, sid, own, reader, moves)
-        if ending not in shown:
+        if merged or ending not in shown:
             shown.append(ending)
             row.also_to.append(ending)
 
@@ -2197,6 +2237,8 @@ def _element_dict(row: Row) -> dict[str, object]:
             data["to"] = dict(row.to)
         if row.also_to:
             data["also_to"] = [dict(e) for e in row.also_to]
+        if row.action_ids:
+            data["action_ids"] = list(row.action_ids)
         data["reasons"] = list(row.reasons)
     return data
 
