@@ -344,6 +344,11 @@ def _cmd_crawl_press(args: argparse.Namespace, setup: _CrawlSetup) -> int:  # no
         "restart": not args.no_restart,
         "record_text": record_text,
         **({"also_target": list(policy.also_target)} if policy.also_target else {}),
+        **(
+            {"deny_except_phrases": list(policy.except_phrases)}
+            if policy.except_phrases
+            else {}
+        ),
         "scroll_lists": False,  # set by `show_plan` from the run's own read
         "scroll_lists_source": scroll_source,
         "scroll_input": None,
@@ -534,6 +539,7 @@ def _press_plan_text(plan: dict[str, object], *, settings: str) -> str:
             + ("yes" if plan["check_tap_window"] else "no"),
             _RESTART_PLAN[bool(plan["restart"])],
             *_also_target_plan(plan),
+            *_except_phrases_plan(plan),
             *_press_scroll_text(plan),
             *(
                 []
@@ -558,6 +564,20 @@ def _also_target_plan(plan: dict[str, object]) -> list[str]:
         f"also pressing in: {names} (also_target in the settings file; system UI"
         " and the home app are refused; the controls of permission screens are"
         " never tapped, and they get BACK when BACK on other screens is on)"
+    ]
+
+
+def _except_phrases_plan(plan: dict[str, object]) -> list[str]:
+    """The plan line that names the exception phrases; none with an empty list."""
+    listed = plan.get("deny_except_phrases")
+    if not listed:
+        return []
+    assert isinstance(listed, list)  # noqa: S101 - built in _cmd_crawl_press
+    names = ", ".join(repr(_printable(str(name))) for name in listed)
+    return [
+        f"letting rows named exactly {names} through for the deny words inside the"
+        " name (except_phrases in the settings file; any other deny word still"
+        " refuses the row)"
     ]
 
 

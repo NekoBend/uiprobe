@@ -139,6 +139,7 @@ def _plain_policy(policy: Policy) -> Policy:
         also_target=_words("also_target", policy.also_target),
         dialog_exact_labels=_words("dialog_exact_labels", policy.dialog_exact_labels),
         scroll_lists=_flag("scroll_lists", policy.scroll_lists),
+        except_phrases=_words("except_phrases", policy.except_phrases),
     )
 
 

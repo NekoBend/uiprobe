@@ -22,6 +22,9 @@ from typing import TYPE_CHECKING
 
 from uiprobe.guards.constants import (
     _CHECKABLE,
+    _ID_SEPARATOR,
+    DECORATION_CLASS,
+    DECORATION_IDS,
     PERMISSION_PACKAGES,
     SCROLL_CONTAINER_CLASSES,
     SCROLL_POINT_CLASSES,
@@ -108,6 +111,42 @@ def elements_at(screen: Screen, point: Point) -> list[Element]:
         ):
             found.append(element)
     return found
+
+
+def _is_package_name(owner: str) -> bool:
+    """Whether `owner` is exactly ``android`` or an Android package name: two or
+    more segments joined by dots, each an ASCII letter followed by ASCII
+    letters, digits or underscores."""
+    if owner == "android":
+        return True
+    segments = owner.split(".")
+    return len(segments) >= 2 and all(
+        segment[:1].isascii()
+        and segment[:1].isalpha()
+        and all(char.isascii() and (char.isalnum() or char == "_") for char in segment)
+        for segment in segments
+    )
+
+
+def _is_decoration(screen: Screen, element: Element) -> bool:
+    """Whether the element is the one decoration allowed beside the list:
+    exactly `DECORATION_CLASS`, a resource id of the form ``<package>:id/<name>``
+    (`<package>` is ``android`` or a package name, `_is_package_name`)
+    with a name in `DECORATION_IDS`, no flag at all, no text, description or
+    hint, not editable and no child element in the dump. (The checks of
+    `_allowed` for package, judge and deny words apply to it as to any element.)
+    """
+    owner, separator, name = element.resource_id.partition(_ID_SEPARATOR)
+    return (
+        element.class_name == DECORATION_CLASS
+        and _is_package_name(owner)
+        and bool(separator)
+        and name in DECORATION_IDS
+        and not element.flags
+        and not (element.text or element.content_desc or element.hint)
+        and not element.editable
+        and not any(e.parent == element.id for e in screen.elements)
+    )
 
 
 def _allowed(
