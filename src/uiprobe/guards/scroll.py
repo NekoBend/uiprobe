@@ -122,9 +122,10 @@ def _is_decoration(screen: Screen, element: Element) -> bool:
     hint, not editable and no child element in the dump. (The checks of
     `_allowed` for package, judge and deny words apply to it as to any element.)
     """
-    _, separator, name = element.resource_id.partition(_ID_SEPARATOR)
+    owner, separator, name = element.resource_id.partition(_ID_SEPARATOR)
     return (
         element.class_name == DECORATION_CLASS
+        and bool(owner)
         and bool(separator)
         and name in DECORATION_IDS
         and not element.flags
