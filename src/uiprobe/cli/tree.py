@@ -140,8 +140,7 @@ class _Entry:
     kinds: str = ""  # " [toggle, disabled]": shown in place of the dot
     # For the HTML page: the row starts a new group of the screen's list, and
     # the text between the rows there (already made safe for display).
-    gap: bool = False
-    gap_text: str = ""
+    gap: tuple[str, ...] | None = None
 
 
 def _heading_text(tree: RunTree, sid: str) -> str:
@@ -352,16 +351,16 @@ def _left_out(row: Row, *, kept: bool) -> list[str]:
     return [*lines, *_left_out_lines(row, shown, kept=kept)]
 
 
-def _gap_text(node: ScreenNode, before: int, group: int) -> str:
-    """The text between the rows of group `before` and group `group`: the text
-    of the last separator on the way (a group between them may have no line of
-    its own), shortened and escaped as a label; empty when there is none."""
-    low, high = sorted((before, group))
-    for number in range(high, low, -1):
-        text = node.groups[number]
-        if text is not None:
-            return _label(text)
-    return ""
+def _gap_texts(node: ScreenNode, before: int, group: int) -> tuple[str, ...]:
+    """The texts between the rows of group `before` and group `group`: one for
+    each separator on the way down the list that has text, in order, each
+    shortened and escaped as a label. Going back up the list, the text of the
+    separator that starts `group` only."""
+    if group > before:
+        texts = node.groups[before + 1 : group + 1]
+    else:
+        texts = node.groups[group : group + 1]
+    return tuple(_label(t) for t in texts if t is not None)
 
 
 def _mark_gap(
@@ -372,8 +371,7 @@ def _mark_gap(
     if group is None:
         return previous
     if previous is not None and group != previous:
-        entry.gap = True
-        entry.gap_text = _gap_text(node, previous, group)
+        entry.gap = _gap_texts(node, previous, group)
     return group
 
 
@@ -821,7 +819,6 @@ class _HtmlBuilder:
             entry.reasons,
             entry.kinds,
             gap=entry.gap,
-            gap_text=entry.gap_text,
         )
 
     def forest(self, section: _Section) -> list[HRow | HFold]:

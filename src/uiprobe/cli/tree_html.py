@@ -62,10 +62,10 @@ class HRow:
     see: tuple[str, str] | None = None  # (anchor id, name shown)
     anchor: str | None = None
     children: list[HRow | HFold] = field(default_factory=list)
-    # The row starts a new group of its screen's list: a gap is left above it,
-    # with `gap_text` (the text between the rows) in small type when not empty.
-    gap: bool = False
-    gap_text: str = ""
+    # None, or the row starts a new group of its screen's list: a gap is left
+    # above it, with one small line for each text between the rows (none when
+    # the separators have no text).
+    gap: tuple[str, ...] | None = None
 
 
 @dataclass(slots=True)
@@ -146,8 +146,10 @@ def _items(children: Sequence[HRow | HFold | str], out: list[str]) -> None:
         if isinstance(child, str):
             out.append(f'<li class="item">{_esc(child)}</li>')
             continue
-        if isinstance(child, HRow) and child.gap:
-            out.append(f'<li class="between">{_esc(child.gap_text)}</li>')
+        if isinstance(child, HRow) and child.gap is not None:
+            out.extend(
+                f'<li class="between">{_esc(t)}</li>' for t in child.gap or ("",)
+            )
         if isinstance(child, HFold):
             summary = f'<span class="head">{_esc(child.label)}</span>'
             item, kind, opened, nested = "<li>", ' class="fold"', "", level

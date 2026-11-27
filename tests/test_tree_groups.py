@@ -22,7 +22,7 @@ from tests.test_tree_scroll import LEAF, scroll
 from uiprobe.crawl_tree import read_tree
 
 
-def listing(spec, *, toolbar=False, footer=False, activity=".Groups"):
+def listing(spec, *, toolbar=False, footer=False, buttons=0, activity=".Groups"):
     """A screen whose list is one container with a child per item of `spec`:
     ("row", text), ("hold", text) (a plain container with a clickable in it),
     ("sep", text) (a plain container with a text), ("flat", text) (a plain text),
@@ -38,6 +38,8 @@ def listing(spec, *, toolbar=False, footer=False, activity=".Groups"):
 
     if toolbar:
         add(1, cls="ImageButton", desc="Up", flags=CLICK)
+    for tool in range(buttons):
+        add(1, cls="ImageButton", desc=f"Tool {tool}", flags=CLICK)
     holder = add(1, cls="RecyclerView", flags=("scrollable",))
     for item in spec:
         kind, text = item[0], item[1]
@@ -57,6 +59,11 @@ def listing(spec, *, toolbar=False, footer=False, activity=".Groups"):
             one = add(holder, cls="LinearLayout")
             two = add(one, cls="FrameLayout")
             add(two, text=text)
+        elif kind == "many":  # 500 empty children, the text on the last one
+            box = add(holder, cls="LinearLayout")
+            for _ in range(499):
+                add(box, cls="View")
+            add(box, text=text)
         elif kind == "two":
             box = add(holder, cls="LinearLayout")
             add(box, text=text)
@@ -394,3 +401,121 @@ def test_a_scroll_read_without_a_list_leaves_its_rows_outside_any_group(
     later = [r for r in node.rows if r.after_scroll is not None]
     assert later
     assert {r.group for r in later} == {None}
+
+
+def scrolled(tmp_path, first_spec, second_spec, **kwargs):
+    """A run with one scroll from the first read to the second; the tree of it."""
+    folder = Folder(tmp_path, record_text=kwargs.pop("record_text", None))
+    first = listing(first_spec)
+    second = listing(second_spec, **kwargs)
+    folder.screen(first)
+    folder.screen(second)
+    folder.start("launch")
+    folder.end(first.screen_id)
+    scroll(folder, first, second)
+    folder.finish()
+    return read_tree(folder.path).screens[first.screen_id]
+
+
+def by_name(node):
+    return {r.name: r.group for r in node.rows}
+
+
+def test_rows_above_the_first_common_row_keep_the_group_before_a_matched_separator(
+    tmp_path,
+):
+    first = [
+        ("row", "A"),
+        ("sep", "X"),
+        ("row", "B"),
+        ("row", "C"),
+        ("sep", "Y"),
+        ("row", "D"),
+        ("row", "E"),
+    ]
+    second = [("row", "P"), ("sep", "X"), ("row", "B"), ("row", "C")]
+    node = scrolled(tmp_path, first, second)
+    assert node.groups == [None, "X", "Y"]
+    assert by_name(node)["P"] == 0  # not the group of Y
+    assert by_name(node)["A"] == 0
+    assert by_name(node)["D"] == 2
+
+
+def test_a_second_separator_after_a_scroll_stays_a_second_group(tmp_path):
+    first = [("row", "A"), ("sep", "Today"), ("row", "B"), ("row", "C")]
+    second = [
+        ("row", "C"),
+        ("row", "D"),
+        ("sep", "Yesterday"),
+        ("row", "E"),
+        ("row", "F"),
+    ]
+    node = scrolled(tmp_path, first, second)
+    assert node.groups == [None, "Today", "Yesterday"]
+    named = by_name(node)
+    assert (named["B"], named["C"], named["D"]) == (1, 1, 1)
+    assert (named["E"], named["F"]) == (2, 2)
+
+
+def test_a_read_that_shares_no_row_with_the_earlier_ones_has_no_groups(tmp_path):
+    first = [("row", "A"), ("sep", "X"), ("row", "B"), ("row", "C")]
+    second = [("row", "P"), ("row", "Q"), ("sep", "Z"), ("row", "R")]
+    node = scrolled(tmp_path, first, second)
+    assert node.groups == [None, "X"]
+    named = by_name(node)
+    assert (named["P"], named["Q"], named["R"], named["Z"]) == (None,) * 4
+
+
+def test_without_recorded_texts_a_later_read_cannot_be_lined_up(tmp_path):
+    node = scrolled(
+        tmp_path, ROWS, [("row", "C"), ("row", "D"), ("row", "E")], record_text=False
+    )
+    later = [r for r in node.rows if r.after_scroll is not None]
+    assert later
+    assert {r.group for r in later} == {None}
+    assert [r.group for r in node.rows if r.view_key is None] == [0, 0, 1, 1]
+
+
+def test_a_read_whose_list_is_another_element_gives_no_groups(tmp_path):
+    # the list shrinks to two rows, so four toolbar buttons are the biggest group
+    first = [("row", n) for n in "AB"] + [("sep", "X")] + [("row", n) for n in "CDE"]
+    second = [("row", "D"), ("row", "E")]
+    node = scrolled(tmp_path, first, second, buttons=4)
+    later = [r for r in node.rows if r.after_scroll is not None]
+    assert {r.name for r in later} >= {"Tool 0", "Tool 3"}
+    assert {r.group for r in later} == {None}
+    assert node.groups == [None, "X"]
+
+
+def test_many_separators_in_a_later_read_are_matched_in_one_pass(tmp_path):
+    count = 1500
+    first = [("row", "a0"), ("row", "a1")]
+    second = [("row", "a1")]
+    for n in range(count):
+        first += [("sep", f"s{n}"), ("row", f"r{n}")]
+        second += [("sep", f"s{n}"), ("row", f"r{n}")]
+    node = scrolled(tmp_path, first, second)
+    assert len(node.groups) == count + 1
+    assert node.groups[1:] == [f"s{n}" for n in range(count)]
+    named = by_name(node)
+    assert (named["r0"], named[f"r{count - 1}"]) == (1, count)
+
+
+def test_the_html_has_one_gap_line_for_each_separator_in_order(tmp_path, capsys):
+    spec = [
+        ("row", "A"),
+        ("sep", "First"),
+        ("sep", "Second"),
+        ("row", "B"),
+        ("row", "C"),
+    ]
+    page = html_of(tmp_path, capsys, run_of(tmp_path / "r", listing(spec)))
+    assert re.findall(r'<li class="between">([^<]*)</li>', page) == ["First", "Second"]
+    name_b = page.index('<span class="name">B</span>')
+    assert page.index(">Second</li>") < name_b
+
+
+def test_a_separator_with_many_children_keeps_the_text_on_the_last_one(tmp_path):
+    spec = [("row", "A"), ("many", "Far text"), ("row", "B"), ("row", "C")]
+    tree, sid, _ = tree_of(tmp_path, spec)
+    assert tree.screens[sid].groups == [None, "Far text"]
