@@ -205,6 +205,9 @@ class _SendMixin(_RunState):
             replay=isinstance(action, Tap) and self.engine.is_replay(action),
             amount=amount,
             after_scroll=self.read_of(action, screen),
+            except_phrase=(
+                self.engine.except_phrase_of(action) if isinstance(action, Tap) else ""
+            ),
         )
 
     def read_of(self, action: Action, screen: Screen | None) -> int | None:

@@ -2162,3 +2162,37 @@ def test_a_replay_needs_the_tap_kind_and_a_bool(tmp_path):
     with pytest.raises(TypeError, match="replay must be a bool"):
         writer.write_transition_start(1, "tap", "s-0123456789ab", replay=1)  # ty: ignore[invalid-argument-type]
     assert not (writer.path / "transitions.jsonl").exists()
+
+
+def test_run_start_records_the_except_phrases_only_when_there_are_some(tmp_path):
+    plain = make(tmp_path, "plain")
+    assert "deny_except_phrases" not in json.loads(
+        (plain.path / "run-start.json").read_text()
+    )
+    empty = make(tmp_path, "empty", deny_except_phrases=())
+    assert "deny_except_phrases" not in (empty.path / "run-start.json").read_text()
+    given = make(tmp_path, "given", deny_except_phrases=["Quick Share", "Pay Later"])
+    start = json.loads((given.path / "run-start.json").read_text())
+    assert start["deny_except_phrases"] == ["Quick Share", "Pay Later"]
+
+
+def test_a_tap_start_line_may_carry_the_except_phrase(tmp_path):
+    writer = make(tmp_path)
+    writer.write_transition_start(
+        1, "tap", "s-0123456789ab", except_phrase="Quick Share"
+    )
+    writer.write_transition_start(2, "tap", "s-0123456789ab")
+    writer.write_transition_start(3, "tap", "s-0123456789ab", except_phrase="")
+    first, second, third = lines_of(writer.path / "transitions.jsonl")
+    assert first["except_phrase"] == "Quick Share"
+    assert "except_phrase" not in second
+    assert "except_phrase" not in third
+
+
+def test_the_except_phrase_needs_the_tap_kind_and_a_str(tmp_path):
+    writer = make(tmp_path)
+    with pytest.raises(ValueError, match="except_phrase needs the kind tap"):
+        writer.write_transition_start(1, "back", "s-0123456789ab", except_phrase="x")
+    with pytest.raises(TypeError, match="except_phrase must be a str"):
+        writer.write_transition_start(1, "tap", "s-0123456789ab", except_phrase=1)  # ty: ignore[invalid-argument-type]
+    assert not (writer.path / "transitions.jsonl").exists()

@@ -494,6 +494,7 @@ from uiprobe.guards.words import (  # noqa: F401
     _clean,
     _confirm_form,
     _deny_forms,
+    _except_phrase_key,
     _exception_conflict,
     _exception_key,
     _exception_keys,

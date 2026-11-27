@@ -17,6 +17,8 @@ from uiprobe.guards.words import _is_japanese_letter, _strip_invisible
 from uiprobe.model import Bounds  # noqa: TC001 (a runtime import in the former guards.py)
 
 if TYPE_CHECKING:
+    from collections.abc import Callable, Iterable, Sequence
+
     from uiprobe.model import Element, Screen
 
 
@@ -82,6 +84,46 @@ class _Tree:
     def subtree(self, i: int) -> list[int]:
         """Return the element and its descendants in document order."""
         return self.pre[self.tin[i] : self.tin[i] + self.size[i]]
+
+
+# The most elements of a row whose texts name it (the tree's rule too).
+ROW_NAME_MEMBERS: Final = 500
+
+
+def row_members(i: int, children: Callable[[int], Iterable[int]]) -> list[int]:
+    """Return the element `i` and what is below it, in document order, at most
+    `ROW_NAME_MEMBERS` of them (a parent cycle cannot loop either).
+
+    `children` gives the indexes of the children of an index, in element
+    order. This is the walk `uiprobe tree` makes to name a row, and the judge's
+    `[deny] except_phrases` rule uses the same one.
+    """
+    found = [i]
+    seen = {i}
+    stack = [i]
+    while stack and len(found) < ROW_NAME_MEMBERS:
+        for child in children(stack.pop()):
+            if child not in seen:
+                seen.add(child)
+                found.append(child)
+                stack.append(child)
+    return sorted(found)[:ROW_NAME_MEMBERS]
+
+
+def row_name(elements: Sequence[Element], members: Iterable[int]) -> str:
+    """Return the name of a row: the first text (stripped) that is not empty
+    among its `members` in document order, else the first content description
+    (stripped) that is not empty, else ``""``. This is the name `uiprobe tree`
+    shows, apart from its placeholders for a password row and for a run that
+    recorded no text."""
+    found = list(members)
+    for j in found:
+        if text := elements[j].text.strip():
+            return text
+    for j in found:
+        if desc := elements[j].content_desc.strip():
+            return desc
+    return ""
 
 
 def _is_slider(element: Element) -> bool:

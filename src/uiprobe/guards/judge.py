@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import TYPE_CHECKING, Literal
 
 from uiprobe.guards.constants import (
@@ -51,10 +52,14 @@ from uiprobe.guards.tree import (
     _is_text_field,
     _merge,
     _Tree,
+    row_members,
+    row_name,
 )
 from uiprobe.guards.words import (
     _clean,
     _confirm_form,
+    _forms,
+    _forms_match,
     _has_content,
     _is_japanese_letter,
     _is_mark,
@@ -81,6 +86,11 @@ class _Judge:
     ) -> None:
         self.screen = screen
         self.policy = policy
+        self._target_package = target_package
+        self._foreground = foreground
+        # The exception phrases by their normalized form (see `_excusing_phrase`).
+        self._phrases = {normalize(phrase): phrase for phrase in policy.except_phrases}
+        self._reduced: dict[frozenset[str], _Judge] = {}
         self.tree = _Tree(screen)
         self.elements = screen.elements
         self.matcher = _Matcher(policy.deny_words, policy.deny_exceptions)
@@ -701,13 +711,13 @@ class _Judge:
         if not self.policy.tap_unlabeled and not self.sub_labeled[i]:
             reasons.append("unlabeled")
         self._crawl_rules(i, point, reasons, details)
-        self._word_rules(found, reasons, details)
+        phrase = self._word_rules(i, found, reasons, details)
         if found[_CONFIRM] != _NONE:
             self._confirm_reasons(i, own, found, reasons, details)
         self._positive_button_reason(i, point, reasons, details)
         if point is not None and any(_contains(area, point) for area in self._avoid):
             reasons.append("screen_edge")
-        return Decision(element, point, tuple(reasons), tuple(details))
+        return Decision(element, point, tuple(reasons), tuple(details), phrase)
 
     def _crawl_rules(
         self,
@@ -790,17 +800,93 @@ class _Judge:
         return ""
 
     def _word_rules(
-        self, found: _Agg, reasons: list[Reason], details: list[Detail]
-    ) -> None:
-        """Add the ``deny_word`` and ``irreversible_screen`` reasons."""
+        self, i: int, found: _Agg, reasons: list[Reason], details: list[Detail]
+    ) -> str:
+        """Add the ``deny_word`` and ``irreversible_screen`` reasons; return the
+        exception phrase that let the candidate through a deny word, or ``""``."""
+        phrase = ""
         deny = self._deny_detail(found)
         if deny:
-            reasons.append("deny_word")
-            details.append(deny)
+            phrase, refusing = self._excusing_phrase(i)
+            if not phrase:
+                reasons.append("deny_word")
+                details.append(refusing or deny)
         irreversible = self.irreversible_detail()
         if irreversible is not None:
             reasons.append("irreversible_screen")
             details.append(irreversible)
+        return phrase
+
+    def _deny_detail_at(self, i: int) -> Detail | None:
+        """The deny-word detail of candidate `i` (what ``deny_word`` would carry)."""
+        visible = self.visible[i]
+        own = self.contribution(i)
+        if visible is None:
+            return self._deny_detail(own)
+        return self._deny_detail(_merge(own, self.point_aggregate(visible.center)))
+
+    def _excusing_phrase(self, i: int) -> tuple[str, Detail | None]:
+        """Return the exception phrase that lets candidate `i` through its deny
+        words, or ``""`` (the common case, and always without phrases), with
+        the detail of the deny word that still refuses it when a phrase was
+        tried and did not suffice.
+
+        The candidate's name (`row_name` of its subtree, the row the tree
+        names) must equal a phrase after `normalize`. The phrase excuses the
+        deny words that occur inside it (their forms match in the phrase's),
+        for hits anywhere in the candidate and its descendants. It excuses
+        nothing else: the candidate is let through only when no other deny
+        word is found in the deny scope (checked on a judge without the
+        excused words), and no excused word is found there outside the
+        candidate's own subtree (checked on a judge whose subtree has no
+        text, description, hint or id).
+        """
+        if not self._phrases:
+            return "", None
+        tree = self.tree
+        members = row_members(i, lambda j: tree.children[j])
+        phrase = self._phrases.get(normalize(row_name(self.elements, members)), "")
+        if not phrase:
+            return "", None
+        phrase_forms = _forms(phrase)
+        excused = frozenset(
+            word
+            for word in self.policy.deny_words
+            if _forms_match(_forms(word), phrase_forms)
+        )
+        if not excused:
+            return "", None
+        reduced = self._reduced.get(excused)
+        if reduced is None:
+            reduced = self._reduced[excused] = self._variant(
+                self.screen,
+                tuple(w for w in self.policy.deny_words if w not in excused),
+            )
+        other = reduced._deny_detail_at(i)  # noqa: SLF001
+        if other is not None:
+            return "", other
+        blanked = {
+            j: replace(
+                self.elements[j], text="", content_desc="", hint="", resource_id=""
+            )
+            for j in members
+        }
+        outside = self._variant(
+            replace(
+                self.screen,
+                elements=tuple(blanked.get(j, e) for j, e in enumerate(self.elements)),
+            ),
+            self.policy.deny_words,
+        )
+        elsewhere = outside._deny_detail_at(i)  # noqa: SLF001
+        if elsewhere is not None:
+            return "", elsewhere
+        return phrase, None
+
+    def _variant(self, screen: Screen, deny_words: tuple[str, ...]) -> _Judge:
+        """A judge of `screen` with `deny_words` and no exception phrases."""
+        policy = replace(self.policy, deny_words=deny_words, except_phrases=())
+        return _Judge(screen, self._target_package, policy, self._foreground)
 
     def unsafe_ids(self) -> frozenset[str]:
         """The ids of every element of the screen, clickable or not, that the tap
@@ -1057,6 +1143,11 @@ def judge(
       or hint, or in one field's value inside a joined text with real
       boundaries around it, does not count (see the module docstring); the
       resource id has no exceptions.
+      A candidate whose name equals a phrase of ``policy.except_phrases`` (see
+      `Policy`) is not refused for the deny words inside that phrase when
+      they are found in the candidate or its descendants only; ``Decision``
+      then has ``except_phrase``. Any other deny word, or an excused word
+      found elsewhere in the scope, still gives ``deny_word``.
     * ``irreversible_screen``: the text, content description or hint of any
       element of the screen holds a phrase of ``policy.irreversible_phrases``
       (unless ``skip_irreversible`` is False). Every candidate gets it. The
@@ -1097,12 +1188,18 @@ def judge(
             )
         )
     state = _Judge(screen, target_package, policy, foreground)
+    decisions = tuple(
+        state.decide(i) for i, element in enumerate(elements) if state.clickable[i]
+    )
+    unsafe = state.unsafe_ids()
+    if policy.except_phrases:
+        # An element an exception phrase lets through is still unsafe for the
+        # wheel: the phrase lets a tap through, nothing else.
+        unsafe |= frozenset(d.element.id for d in decisions if d.except_phrase)
     return Judgement(
-        tuple(
-            state.decide(i) for i, element in enumerate(elements) if state.clickable[i]
-        ),
+        decisions,
         dialog=state.dialog,
         irreversible=state.irreversible_detail() is not None,
         edges=state._avoid,  # noqa: SLF001 - the areas of `screen_edge`
-        unsafe=state.unsafe_ids(),
+        unsafe=unsafe,
     )

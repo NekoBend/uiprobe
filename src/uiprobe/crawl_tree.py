@@ -34,7 +34,7 @@ from typing import TYPE_CHECKING, Final
 from uiprobe.also_target import AlsoTargetError, check_also_target
 from uiprobe.crawl import _Prints
 from uiprobe.guards import MAX_SCROLL_AMOUNT, PERMISSION_PACKAGES
-from uiprobe.guards.tree import _is_dialog, _Tree
+from uiprobe.guards.tree import ROW_NAME_MEMBERS, _is_dialog, _Tree, row_members
 from uiprobe.model import Bounds, Element, Screen
 from uiprobe.settings import SettingsError
 from uiprobe.settings import _read_bytes as _read_capped
@@ -71,7 +71,7 @@ MAX_WARNINGS: Final = 20
 # At most this many texts are kept for a row, and this many elements are looked
 # at below it, so nested clickables cannot multiply the work.
 MAX_ROW_TEXTS: Final = 50
-_MAX_MEMBERS: Final = 500
+_MAX_MEMBERS: Final = ROW_NAME_MEMBERS
 _MAX_FINGERPRINTED: Final = 2000
 _READ_CHUNK: Final = 65536
 _EPOCH: Final = datetime(1970, 1, 1, tzinfo=UTC)
@@ -581,17 +581,9 @@ def _rows_of(
 
 def _subtree(i: int, children: dict[str, list[int]], screen: Screen) -> list[int]:
     """The element and what is below it, in document order, at most
-    `_MAX_MEMBERS` of them (a parent cycle cannot loop either)."""
-    found = [i]
-    seen = {i}
-    stack = [i]
-    while stack and len(found) < _MAX_MEMBERS:
-        for child in children.get(screen.elements[stack.pop()].id, []):
-            if child not in seen:
-                seen.add(child)
-                found.append(child)
-                stack.append(child)
-    return sorted(found)[:_MAX_MEMBERS]
+    `_MAX_MEMBERS` of them (a parent cycle cannot loop either); the walk
+    the judge's `[deny] except_phrases` rule shares (`row_members`)."""
+    return row_members(i, lambda j: children.get(screen.elements[j].id, []))
 
 
 def _row(
@@ -901,6 +893,15 @@ def _action_ok(line: dict[str, object]) -> str | None:
             "replay",
         ),
         (
+            "except_phrase" in line
+            and not (
+                kind == "tap"
+                and _is_text(line["except_phrase"])
+                and bool(line["except_phrase"])
+            ),
+            "except_phrase",
+        ),
+        (
             "after_scroll" in line
             and not (
                 kind == "tap"
@@ -933,7 +934,14 @@ def _start_problem(line: dict[str, object]) -> str | None:
     if not _keys_ok(
         line,
         {"schema", "recorded_at", "action_id", "action"},
-        {"from_screen_id", "off_target", "restart", "replay", "after_scroll"},
+        {
+            "from_screen_id",
+            "off_target",
+            "restart",
+            "replay",
+            "after_scroll",
+            "except_phrase",
+        },
     ):
         return "start line keys"
     if not _stamped(line, _START):

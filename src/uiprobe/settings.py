@@ -76,6 +76,16 @@ added in a later version would come with a new defaults version, tagged in
 `_LATER_EXCEPT` from `_FIRST_EXCEPT` on. ``[deny] remove`` takes words out of
 both ``words`` and ``except``.
 
+``[deny] except_phrases`` holds exception phrases (`Policy.except_phrases`),
+optional like ``except`` and empty by default, so it needed no defaults
+version either: an element whose name (its first text, else its description,
+as ``uiprobe tree`` names a row) equals a phrase after `normalize` is let
+through for the deny words that occur inside the phrase, in that element and
+its descendants. Each phrase is 1 to 80 characters, has no control or
+invisible character and at least one letter, and two phrases that are equal
+after `normalize` are refused. ``uiprobe init`` writes the key as a comment
+(like ``also_target``), so a file it wrote still loads in an older uiprobe.
+
 An exception word must be one word of letters and digits without invisible
 characters. One that equals a deny word in use (any form of it, see
 `uiprobe.guards._forms`) would excuse that word wherever it stands alone, so
@@ -145,6 +155,7 @@ from uiprobe.guards import (
     _check_word,
     _confirm_form,
     _deny_forms,
+    _except_phrase_key,
     _exception_conflict,
     _exception_key,
     _phrase_key,
@@ -334,7 +345,7 @@ _LATER_RULE_VALUES: Final[dict[str, bool]] = {
     "scroll_lists": DEFAULT_SCROLL_LISTS,
 }
 _TABLE_KEYS: Final[dict[str, frozenset[str]]] = {
-    "deny": frozenset({"words", "except", "remove"}),
+    "deny": frozenset({"words", "except", "except_phrases", "remove"}),
     "confirm": frozenset({"words", "remove"}),
     "irreversible": frozenset({"phrases", "remove"}),
     "rules": frozenset(_BOOL_RULES) | frozenset(_INT_RANGES["rules"]) | {"also_target"},
@@ -435,6 +446,9 @@ class Settings:
     scrolls_per_screen: int = DEFAULT_SCROLLS_PER_SCREEN
     scroll_amount: int = DEFAULT_SCROLL_AMOUNT
     scroll_incidents: int = DEFAULT_SCROLL_INCIDENTS
+    # The optional key ``[deny] except_phrases`` (no new defaults version):
+    # row names that are let through for the deny words inside them.
+    deny_except_phrases: tuple[str, ...] = ()
 
 
 def _separators() -> str:
@@ -533,6 +547,7 @@ def policy_from_settings(
         also_target=settings.also_target,
         back_on_other_screens=settings.back_on_other_screens,
         scroll_lists=settings.scroll_lists,
+        except_phrases=settings.deny_except_phrases,
         refuse_dialog_confirm=settings.refuse_dialog_confirm,
         edges=(
             settings.edge_top_px,
@@ -621,6 +636,14 @@ def render_default_settings() -> str:
         '# add. Any other word that holds a deny word is still refused. "remove"',
         "# also takes words out of this list.",
         *_toml_list("except", _current(_DENY_EXCEPTIONS)),
+        "# Exception phrases, none by default (1 to 80 characters, at least one",
+        "# letter). An element whose name (its first text, else its description)",
+        "# equals a phrase, ignoring case and spacing, is pressed although the",
+        '# deny words inside the phrase occur in it: with "Quick Share" here,',
+        '# "Quick Share" is pressed while "Share" and "Quick Share settings" stay',
+        "# refused. Any other deny word in that element still refuses it. A run",
+        "# marks such a press as except_phrase in transitions.jsonl.",
+        '# except_phrases = ["Quick Share"]',
         "remove = []",
         "",
         "[confirm]",
@@ -963,6 +986,12 @@ def _exception_identity(word: str) -> str:
     return identity
 
 
+def _except_phrase_identity(phrase: str) -> str:
+    """Check an ``[deny] except_phrases`` entry as `Policy` does; return what
+    makes two phrases equal (`normalize`)."""
+    return _except_phrase_key(phrase)
+
+
 def _confirm_identity(word: str) -> str:
     """Check a confirm word; return the form the confirm matching compares."""
     _word_identity(word)
@@ -1294,6 +1323,13 @@ def load_settings(path: str | os.PathLike[str]) -> Settings:
         _exception_identity,
         optional=True,
     )
+    except_phrases = reader.strings(
+        deny,
+        "deny",
+        "except_phrases",
+        _except_phrase_identity,
+        optional=True,
+    )
     deny_removed = reader.strings(deny, "deny", "remove", _word_identity, optional=True)
     deny_words = _merge(
         deny_listed, deny_removed, _DENY_WORDS, defaults_version, normalize
@@ -1401,6 +1437,7 @@ def load_settings(path: str | os.PathLike[str]) -> Settings:
         record_text=record_text,
         deny_words=deny_words,
         deny_exceptions=deny_exceptions,
+        deny_except_phrases=except_phrases,
         confirm_words=_merge(
             confirm_listed,
             confirm_removed,
