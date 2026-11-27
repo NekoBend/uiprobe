@@ -2724,6 +2724,10 @@ def test_a_round_corner_view_with_a_child_refuses_the_point() -> None:
         "round_corner",
         f"{PKG}:round_corner",
         ":id/round_corner",
+        "bad owner:id/round_corner",
+        "com:id/round_corner",
+        "com.1x:id/round_corner",
+        "com.x-y:id/round_corner",
         "",
     ],
 )
