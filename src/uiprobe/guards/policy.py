@@ -213,7 +213,8 @@ class Policy:
     file's ``[deny] except_phrases``). A plain clickable row (not
     long-clickable, checkable, scrollable, editable or a text or password
     field; nothing inside it clickable or any of those; at most 500 elements;
-    its tap point held by it or something inside it) whose only reason is
+    not inside another clickable; its tap point held by it or something
+    inside it) whose only reason is
     ``deny_word`` and whose name element (its first text with some area on the
     display, with nothing covering its middle) equals a phrase after
     `normalize` is judged once more with only that text replaced; with no

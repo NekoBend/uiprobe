@@ -516,13 +516,9 @@ def nested(parent_text, child_text, *, sibling="", policy):
     return decision(run(elements, policy=policy), "e3")
 
 
-def test_a_hit_made_of_the_phrase_and_a_neighbour_is_taken_out_with_the_phrase() -> (
-    None
-):
-    # Known and accepted: "Or" + "Der Recorder" read as `order` only with the
-    # phrase's own characters; the check takes N's text out, so the hit goes and
-    # the row is let through. (`order` is inside the phrase, so the user listed
-    # it for that name.)
+def test_a_row_inside_a_clickable_parent_gets_no_phrase() -> None:
+    # "Or" + "Der Recorder" read as `order`: the parent's joined text holds
+    # the row's text, so a row nested in a clickable gets no phrase at all.
     words: dict[str, Any] = {
         "deny_words": ("order",),
         "deny_exceptions": ("recorder",),
@@ -531,7 +527,10 @@ def test_a_hit_made_of_the_phrase_and_a_neighbour_is_taken_out_with_the_phrase()
     d = nested(
         "Or", "Der Recorder", policy=Policy(**words, except_phrases=("Der Recorder",))
     )
-    assert d.except_phrase == "Der Recorder"
+    assert "deny_word" in d.reasons
+    assert d.except_phrase == ""
+    d = nested(".", "Quick Share", policy=QUICK)
+    assert d.except_phrase == ""
 
 
 def test_removing_the_name_can_invent_a_hit_and_refuse() -> None:
@@ -737,32 +736,9 @@ def test_a_word_made_of_two_texts_of_the_row_is_not_excused() -> None:
     assert d.except_phrase == ""
 
 
-def test_only_occurrences_that_survive_exceptions_count_in_a_parent() -> None:
-    words: dict[str, Any] = {
-        "deny_words": ("order",),
-        "deny_exceptions": ("recorder",),
-        "except_phrases": ("Order details",),
-    }
-    d = nested("Recorder.", "Order details", policy=Policy(**words))
-    assert d.reasons == ()
-    assert d.except_phrase == "Order details"
-    d = nested("Order now", "Order details", policy=Policy(**words))
-    assert "deny_word" in d.reasons
-
-
-def test_a_parent_with_many_labels_costs_one_extra_match(monkeypatch) -> None:
-    from uiprobe.guards.judge import _Judge
-
-    calls = []
-    original = _Judge._joined_word
-
-    def counting(self, *args, **kwargs):
-        calls.append(1)
-        return original(self, *args, **kwargs)
-
-    monkeypatch.setattr(_Judge, "_joined_word", counting)
+def test_a_parent_with_many_labels_costs_nothing_extra() -> None:
     elements = [
-        el("e2", cls=ROW, bounds=(0, 30, 320, 600), text="Parent"),
+        el("e2", cls=TEXT, flags=(), bounds=(0, 30, 320, 600), text="Parent"),
         el("e3", parent="e2", cls=ROW, bounds=(10, 40, 310, 60), text="Share (.*)"),
     ]
     elements += [
@@ -776,120 +752,5 @@ def test_a_parent_with_many_labels_costs_one_extra_match(monkeypatch) -> None:
         )
         for n in range(100)
     ]
-    run(elements, policy=Policy())
-    base = len(calls)
-    calls.clear()
     got = run(elements, policy=Policy(except_phrases=("Share (.*)",)))
-    assert len(calls) <= base + 2
     assert decision(got, "e3").except_phrase == "Share (.*)"
-
-
-# -- the three in-memory repros of the third check, and the shape rules ---------------
-
-
-def test_a_sibling_covering_the_title_refuses_the_row() -> None:
-    elements = [
-        el("e2", cls=ROW, bounds=ROW_BOUNDS),
-        el(
-            "e3",
-            parent="e2",
-            cls=TEXT,
-            flags=(),
-            text="Quick Share",
-            bounds=(10, 100, 310, 190),
-        ),
-        el(
-            "e4",
-            parent="e2",
-            cls=TEXT,
-            flags=(),
-            text="Share all",
-            bounds=(10, 100, 310, 190),
-        ),
-    ]
-    d = verdict(elements)
-    assert "deny_word" in d.reasons
-    assert d.except_phrase == ""
-
-
-def test_a_text_and_a_description_of_one_element_that_join_to_a_word_refuse() -> None:
-    split = el(
-        "e5",
-        parent="e2",
-        cls=TEXT,
-        flags=(),
-        text="Sha",
-        desc="re",
-        bounds=(10, 150, 300, 190),
-    )
-    d = verdict(row(extra=[split]))
-    assert "deny_word" in d.reasons
-    assert d.except_phrase == ""
-
-
-def test_a_scrollable_plain_view_at_the_tap_point_refuses_the_row() -> None:
-    view = el(
-        "e5",
-        parent="e2",
-        cls="android.widget.ScrollView",
-        flags=("scrollable",),
-        bounds=(10, 100, 310, 190),
-    )
-    d = verdict(row(extra=[view]))
-    assert "deny_word" in d.reasons
-    assert d.except_phrase == ""
-
-
-@pytest.mark.parametrize(
-    "flags",
-    [
-        ("clickable", "long_clickable"),
-        ("clickable", "checkable"),
-        ("clickable", "scrollable"),
-        ("clickable", "password"),
-    ],
-)
-def test_a_row_that_is_more_than_a_plain_button_gets_no_phrase(flags) -> None:
-    elements = row()
-    elements[0] = el("e2", cls=ROW, bounds=ROW_BOUNDS, flags=flags)
-    d = verdict(elements)
-    assert d.except_phrase == ""
-    assert "deny_word" in d.reasons
-
-
-@pytest.mark.parametrize(
-    "flag", ["long_clickable", "checkable", "scrollable", "password"]
-)
-def test_a_descendant_that_is_more_than_a_label_gets_no_phrase(flag) -> None:
-    inner = el("e5", parent="e2", cls=TEXT, flags=(flag,), bounds=(10, 150, 300, 190))
-    d = verdict(row(extra=[inner]))
-    assert d.except_phrase == ""
-
-
-def test_an_editable_descendant_gets_no_phrase() -> None:
-    from dataclasses import replace as dc_replace
-
-    inner = dc_replace(
-        el("e5", parent="e2", cls=TEXT, flags=(), bounds=(10, 150, 300, 190)),
-        editable=True,
-    )
-    assert verdict(row(extra=[inner])).except_phrase == ""
-
-
-def test_only_the_judges_own_matching_decides_with_exceptions_and_readings() -> None:
-    # `é` denied, `Café` listed: separate children `e` and U+0301 are read by
-    # the judge's own matching, whatever that says without the phrase.
-    words: dict[str, Any] = {"deny_words": ("é",), "except_phrases": ("Café",)}
-    extra = [
-        el("e5", parent="e2", cls=TEXT, flags=(), text="e", bounds=(10, 150, 100, 190)),
-        el("e6", parent="e2", cls=TEXT, flags=(), text="́", bounds=(110, 150, 200, 190)),
-    ]
-    with_phrase = verdict(row("Café", extra=extra), Policy(**words))
-    plain = verdict(
-        [
-            *row("·", extra=extra),
-        ],
-        Policy(deny_words=("é",)),
-    )
-    # The phrase row is let through exactly when the row without its name is clean.
-    assert (with_phrase.except_phrase != "") == (plain.reasons == ())

@@ -814,7 +814,9 @@ class _Judge:
         scrollable, editable or a text or password field, none of its
         descendants is clickable or any of those, and it has at most
         `ROW_NAME_MEMBERS` elements. The element on top of its tap point is the
-        row or one of its descendants. Its name element N is the first element
+        row or one of its descendants, and no ancestor is clickable (the judge
+        joins the texts of a clickable's whole subtree, so no hit can be formed
+        with text outside the row). Its name element N is the first element
         in document order with a text and some area on the display (not
         `min_visible_px`); N's text must equal a phrase after `normalize`, and
         N itself must be the topmost meaningful element at N's center.
@@ -832,6 +834,11 @@ class _Judge:
         top = self.topmost(visible.center)
         if not tree.tin[i] <= tree.tin[top] < tree.tin[i] + tree.size[i]:
             return None
+        up = tree.parent[i]
+        while up != -1:
+            if self.clickable[up]:
+                return None  # inside another clickable: its texts are joined
+            up = tree.parent[up]
         for j in members:
             text = self.elements[j].text
             part = self.screen._clip(self.elements[j])  # noqa: SLF001
