@@ -148,7 +148,27 @@ def test_the_uid_is_read_before_the_focused_window(
 
         monkeypatch.setattr(device, name, spy)
     driver.send(Back(), observation)
-    assert order == ["package_uid", "foreground", "focused_window", "keyboard_shown"]
+    assert order == ["package_uid", "foreground", "keyboard_shown", "focused_window"]
+
+
+@pytest.mark.parametrize("keyboard", [False, True], ids=["navigation", "keyboard"])
+def test_a_focus_that_moves_to_user_10_during_the_keyboard_read_is_not_sent_to(
+    tmp_path, device, android, clock, monkeypatch, keyboard
+):
+    if keyboard:
+        monkeypatch.setattr(device, "keyboard_shown", lambda: True)
+    driver, _, observation = _gate_run(tmp_path, device, clock)
+    real = device.keyboard_shown
+
+    def moving():
+        android.focus_user = 10
+        return real()
+
+    monkeypatch.setattr(device, "keyboard_shown", moving)
+    keys = _keys(android)
+    driver.send(Back(), observation)
+    assert _keys(android) == keys
+    assert _not_sent_reason(tmp_path) in {"focus_other", "changed_before_send"}
 
 
 def test_a_focus_that_moves_to_user_10_during_the_uid_read_is_not_sent_to(

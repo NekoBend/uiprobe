@@ -159,6 +159,21 @@ class _GateMixin(_RunState):
             return "target_uid"
         return None
 
+    def read_state(
+        self, action: Action
+    ) -> tuple[str | None, FocusedWindow | None, bool | None]:
+        """Read the foreground app, the focused window and the keyboard.
+
+        A tap reads them in this order (the keyboard last); a BACK goes to
+        the focused window, so for it the focus is the last read.
+        """
+        foreground = self.device.foreground()
+        if isinstance(action, Back):
+            keyboard = self.device.keyboard_shown()
+            return foreground, self.device.focused_window(), keyboard
+        focus = self.device.focused_window()
+        return foreground, focus, self.device.keyboard_shown()
+
     def back_uid(
         self, action: Action, observation: Observation | None
     ) -> PackageUid | None:
@@ -252,9 +267,11 @@ class _GateMixin(_RunState):
         checked device (an error if not), then `stop` again (the pin check can
         wait for the device), then a fresh read: for a tap the dump
         first and then foreground, focused window and keyboard, so the reads
-        nearest the press come last. Anything that cannot be read, or that
-        differs from what the action was chosen on, is a refusal. After the
-        decision nothing else runs before the input is sent.
+        nearest the press come last; for a BACK the foreground, the keyboard
+        and last the focused window (the window that takes the key). Anything
+        that cannot be read, or that differs from what the action was chosen
+        on, is a refusal. After the decision nothing else runs before the
+        input is sent.
         """
         now = self.now()  # the one time taken, before any read
         reason = self.halt(now)
@@ -275,9 +292,7 @@ class _GateMixin(_RunState):
         # dumps the focused window: seen on API 24, 30 and 36 with the shade).
         before = self.device.focused_window() if tap else None
         screen = self.dump() if tap else None
-        foreground = self.device.foreground()
-        focus = self.device.focused_window()
-        keyboard = self.device.keyboard_shown()
+        foreground, focus, keyboard = self.read_state(action)
         self.gate_details = None
         self.gate_focus_details = None
         # With several displays the focus reading is best effort against
