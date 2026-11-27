@@ -6,6 +6,7 @@ import json
 import re
 from dataclasses import fields
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
@@ -456,7 +457,7 @@ def test_the_policy_copy_keeps_every_field():
     # One value per Policy field, none of them the default: a field added to
     # Policy fails here until it is listed, and a field the crawl's copy
     # leaves out comes back as its default and fails below.
-    values = {
+    values: dict[str, Any] = {
         "deny_words": ("zap",),
         "confirm_words": ("yes please",),
         "tap_unlabeled": True,
@@ -477,6 +478,7 @@ def test_the_policy_copy_keeps_every_field():
         "skip_sliders": False,
         "replay_path": False,
         "also_target": ("com.example.helper",),
+        "scroll_lists": True,
     }
     assert set(values) == {f.name for f in fields(Policy)}
     default = Policy()

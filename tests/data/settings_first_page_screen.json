@@ -1,0 +1,705 @@
+{
+  "schema": "uiprobe.screen/1",
+  "captured_at": "2026-11-25T19:04:41+09:00",
+  "device": {
+    "serial": "emulator-5554",
+    "api_level": 37
+  },
+  "app": {
+    "package": "com.android.settings",
+    "activity": ".Settings"
+  },
+  "screen_id": "s-53cf8e01e29a",
+  "display": {
+    "width": 320,
+    "height": 640
+  },
+  "elements": [
+    {
+      "id": "e1",
+      "class": "android.widget.FrameLayout",
+      "bounds": [
+        0,
+        0,
+        320,
+        640
+      ]
+    },
+    {
+      "id": "e2",
+      "parent": "e1",
+      "class": "android.widget.LinearLayout",
+      "bounds": [
+        0,
+        0,
+        320,
+        640
+      ]
+    },
+    {
+      "id": "e3",
+      "parent": "e2",
+      "class": "android.widget.FrameLayout",
+      "resource_id": "android:id/content",
+      "bounds": [
+        0,
+        0,
+        320,
+        640
+      ]
+    },
+    {
+      "id": "e4",
+      "parent": "e3",
+      "class": "android.widget.ScrollView",
+      "resource_id": "com.android.settings:id/settings_homepage_container",
+      "bounds": [
+        0,
+        0,
+        320,
+        640
+      ]
+    },
+    {
+      "id": "e5",
+      "parent": "e4",
+      "class": "android.widget.LinearLayout",
+      "resource_id": "com.android.settings:id/app_bar",
+      "bounds": [
+        0,
+        0,
+        320,
+        112
+      ]
+    },
+    {
+      "id": "e6",
+      "parent": "e5",
+      "class": "android.widget.LinearLayout",
+      "resource_id": "com.android.settings:id/app_bar_container",
+      "bounds": [
+        0,
+        0,
+        320,
+        112
+      ]
+    },
+    {
+      "id": "e7",
+      "parent": "e6",
+      "class": "androidx.cardview.widget.CardView",
+      "bounds": [
+        16,
+        32,
+        304,
+        104
+      ]
+    },
+    {
+      "id": "e8",
+      "parent": "e7",
+      "class": "android.widget.LinearLayout",
+      "resource_id": "com.android.settings:id/search_action_bar",
+      "bounds": [
+        16,
+        32,
+        304,
+        104
+      ],
+      "flags": [
+        "clickable",
+        "focusable"
+      ]
+    },
+    {
+      "id": "e9",
+      "parent": "e8",
+      "class": "android.widget.ImageView",
+      "resource_id": "com.android.settings:id/imageView",
+      "bounds": [
+        40,
+        56,
+        64,
+        80
+      ]
+    },
+    {
+      "id": "e10",
+      "parent": "e8",
+      "class": "android.widget.TextView",
+      "text": "Search Settings",
+      "resource_id": "com.android.settings:id/search_bar_title",
+      "bounds": [
+        72,
+        54,
+        221,
+        82
+      ]
+    },
+    {
+      "id": "e11",
+      "parent": "e4",
+      "class": "android.widget.ScrollView",
+      "resource_id": "com.android.settings:id/main_content_scrollable_container",
+      "bounds": [
+        0,
+        112,
+        320,
+        640
+      ],
+      "flags": [
+        "scrollable",
+        "focusable"
+      ]
+    },
+    {
+      "id": "e12",
+      "parent": "e11",
+      "class": "android.widget.LinearLayout",
+      "resource_id": "com.android.settings:id/homepage_container",
+      "bounds": [
+        0,
+        112,
+        320,
+        640
+      ]
+    },
+    {
+      "id": "e13",
+      "parent": "e12",
+      "class": "android.widget.FrameLayout",
+      "resource_id": "com.android.settings:id/main_content",
+      "bounds": [
+        0,
+        112,
+        320,
+        640
+      ]
+    },
+    {
+      "id": "e14",
+      "parent": "e13",
+      "class": "android.widget.LinearLayout",
+      "resource_id": "com.android.settings:id/container_material",
+      "bounds": [
+        0,
+        112,
+        320,
+        640
+      ]
+    },
+    {
+      "id": "e15",
+      "parent": "e14",
+      "class": "android.widget.FrameLayout",
+      "resource_id": "android:id/list_container",
+      "bounds": [
+        0,
+        112,
+        320,
+        640
+      ]
+    },
+    {
+      "id": "e16",
+      "parent": "e15",
+      "class": "androidx.recyclerview.widget.RecyclerView",
+      "resource_id": "com.android.settings:id/recycler_view",
+      "bounds": [
+        0,
+        112,
+        320,
+        640
+      ]
+    },
+    {
+      "id": "e17",
+      "parent": "e16",
+      "class": "android.widget.LinearLayout",
+      "bounds": [
+        0,
+        118,
+        320,
+        191
+      ],
+      "flags": [
+        "clickable",
+        "focusable"
+      ]
+    },
+    {
+      "id": "e18",
+      "parent": "e17",
+      "class": "android.widget.LinearLayout",
+      "resource_id": "com.android.settings:id/icon_frame",
+      "bounds": [
+        16,
+        134,
+        72,
+        174
+      ]
+    },
+    {
+      "id": "e19",
+      "parent": "e18",
+      "class": "android.widget.ImageView",
+      "resource_id": "android:id/icon",
+      "bounds": [
+        32,
+        134,
+        72,
+        174
+      ]
+    },
+    {
+      "id": "e20",
+      "parent": "e17",
+      "class": "android.widget.RelativeLayout",
+      "resource_id": "com.android.settings:id/text_frame",
+      "bounds": [
+        72,
+        118,
+        304,
+        191
+      ]
+    },
+    {
+      "id": "e21",
+      "parent": "e20",
+      "class": "android.widget.TextView",
+      "text": "Google",
+      "resource_id": "android:id/title",
+      "bounds": [
+        84,
+        134,
+        134,
+        156
+      ]
+    },
+    {
+      "id": "e22",
+      "parent": "e20",
+      "class": "android.widget.TextView",
+      "text": "Services & preferences",
+      "resource_id": "android:id/summary",
+      "bounds": [
+        84,
+        156,
+        223,
+        175
+      ]
+    },
+    {
+      "id": "e23",
+      "parent": "e16",
+      "class": "android.widget.LinearLayout",
+      "bounds": [
+        0,
+        207,
+        320,
+        280
+      ],
+      "flags": [
+        "clickable",
+        "focusable"
+      ]
+    },
+    {
+      "id": "e24",
+      "parent": "e23",
+      "class": "android.widget.LinearLayout",
+      "resource_id": "com.android.settings:id/icon_frame",
+      "bounds": [
+        16,
+        223,
+        72,
+        263
+      ]
+    },
+    {
+      "id": "e25",
+      "parent": "e24",
+      "class": "android.widget.ImageView",
+      "resource_id": "android:id/icon",
+      "bounds": [
+        32,
+        223,
+        72,
+        263
+      ]
+    },
+    {
+      "id": "e26",
+      "parent": "e23",
+      "class": "android.widget.RelativeLayout",
+      "resource_id": "com.android.settings:id/text_frame",
+      "bounds": [
+        72,
+        207,
+        304,
+        280
+      ]
+    },
+    {
+      "id": "e27",
+      "parent": "e26",
+      "class": "android.widget.TextView",
+      "text": "Network & internet",
+      "resource_id": "android:id/title",
+      "bounds": [
+        84,
+        223,
+        213,
+        245
+      ]
+    },
+    {
+      "id": "e28",
+      "parent": "e26",
+      "class": "android.widget.TextView",
+      "text": "Mobile, Wi‑Fi, hotspot",
+      "resource_id": "android:id/summary",
+      "bounds": [
+        84,
+        245,
+        216,
+        264
+      ]
+    },
+    {
+      "id": "e29",
+      "parent": "e16",
+      "class": "android.widget.LinearLayout",
+      "bounds": [
+        0,
+        282,
+        320,
+        355
+      ],
+      "flags": [
+        "clickable",
+        "focusable"
+      ]
+    },
+    {
+      "id": "e30",
+      "parent": "e29",
+      "class": "android.widget.LinearLayout",
+      "resource_id": "com.android.settings:id/icon_frame",
+      "bounds": [
+        16,
+        298,
+        72,
+        338
+      ]
+    },
+    {
+      "id": "e31",
+      "parent": "e30",
+      "class": "android.widget.ImageView",
+      "resource_id": "android:id/icon",
+      "bounds": [
+        32,
+        298,
+        72,
+        338
+      ]
+    },
+    {
+      "id": "e32",
+      "parent": "e29",
+      "class": "android.widget.RelativeLayout",
+      "resource_id": "com.android.settings:id/text_frame",
+      "bounds": [
+        72,
+        282,
+        304,
+        355
+      ]
+    },
+    {
+      "id": "e33",
+      "parent": "e32",
+      "class": "android.widget.TextView",
+      "text": "Connected devices",
+      "resource_id": "android:id/title",
+      "bounds": [
+        84,
+        298,
+        216,
+        320
+      ]
+    },
+    {
+      "id": "e34",
+      "parent": "e32",
+      "class": "android.widget.TextView",
+      "text": "Bluetooth, pairing",
+      "resource_id": "android:id/summary",
+      "bounds": [
+        84,
+        320,
+        194,
+        339
+      ]
+    },
+    {
+      "id": "e35",
+      "parent": "e16",
+      "class": "android.widget.LinearLayout",
+      "bounds": [
+        0,
+        371,
+        320,
+        460
+      ],
+      "flags": [
+        "clickable",
+        "focusable"
+      ]
+    },
+    {
+      "id": "e36",
+      "parent": "e35",
+      "class": "android.widget.LinearLayout",
+      "resource_id": "com.android.settings:id/icon_frame",
+      "bounds": [
+        16,
+        395,
+        72,
+        435
+      ]
+    },
+    {
+      "id": "e37",
+      "parent": "e36",
+      "class": "android.widget.ImageView",
+      "resource_id": "android:id/icon",
+      "bounds": [
+        32,
+        395,
+        72,
+        435
+      ]
+    },
+    {
+      "id": "e38",
+      "parent": "e35",
+      "class": "android.widget.RelativeLayout",
+      "resource_id": "com.android.settings:id/text_frame",
+      "bounds": [
+        72,
+        371,
+        304,
+        460
+      ]
+    },
+    {
+      "id": "e39",
+      "parent": "e38",
+      "class": "android.widget.TextView",
+      "text": "Apps",
+      "resource_id": "android:id/title",
+      "bounds": [
+        84,
+        387,
+        120,
+        409
+      ]
+    },
+    {
+      "id": "e40",
+      "parent": "e38",
+      "class": "android.widget.TextView",
+      "text": "Assistant, recent apps, default apps",
+      "resource_id": "android:id/summary",
+      "bounds": [
+        84,
+        409,
+        288,
+        444
+      ]
+    },
+    {
+      "id": "e41",
+      "parent": "e16",
+      "class": "android.widget.LinearLayout",
+      "bounds": [
+        0,
+        462,
+        320,
+        551
+      ],
+      "flags": [
+        "clickable",
+        "focusable"
+      ]
+    },
+    {
+      "id": "e42",
+      "parent": "e41",
+      "class": "android.widget.LinearLayout",
+      "resource_id": "com.android.settings:id/icon_frame",
+      "bounds": [
+        16,
+        486,
+        72,
+        526
+      ]
+    },
+    {
+      "id": "e43",
+      "parent": "e42",
+      "class": "android.widget.ImageView",
+      "resource_id": "android:id/icon",
+      "bounds": [
+        32,
+        486,
+        72,
+        526
+      ]
+    },
+    {
+      "id": "e44",
+      "parent": "e41",
+      "class": "android.widget.RelativeLayout",
+      "resource_id": "com.android.settings:id/text_frame",
+      "bounds": [
+        72,
+        462,
+        304,
+        551
+      ]
+    },
+    {
+      "id": "e45",
+      "parent": "e44",
+      "class": "android.widget.TextView",
+      "text": "Notifications",
+      "resource_id": "android:id/title",
+      "bounds": [
+        84,
+        478,
+        174,
+        500
+      ]
+    },
+    {
+      "id": "e46",
+      "parent": "e44",
+      "class": "android.widget.TextView",
+      "text": "Notification history, conversations",
+      "resource_id": "android:id/summary",
+      "bounds": [
+        84,
+        500,
+        288,
+        535
+      ]
+    },
+    {
+      "id": "e47",
+      "parent": "e16",
+      "class": "android.widget.LinearLayout",
+      "bounds": [
+        0,
+        553,
+        320,
+        626
+      ],
+      "flags": [
+        "clickable",
+        "focusable"
+      ]
+    },
+    {
+      "id": "e48",
+      "parent": "e47",
+      "class": "android.widget.LinearLayout",
+      "resource_id": "com.android.settings:id/icon_frame",
+      "bounds": [
+        16,
+        569,
+        72,
+        609
+      ]
+    },
+    {
+      "id": "e49",
+      "parent": "e48",
+      "class": "android.widget.ImageView",
+      "resource_id": "android:id/icon",
+      "bounds": [
+        32,
+        569,
+        72,
+        609
+      ]
+    },
+    {
+      "id": "e50",
+      "parent": "e47",
+      "class": "android.widget.RelativeLayout",
+      "resource_id": "com.android.settings:id/text_frame",
+      "bounds": [
+        72,
+        553,
+        304,
+        626
+      ]
+    },
+    {
+      "id": "e51",
+      "parent": "e50",
+      "class": "android.widget.TextView",
+      "text": "Sound & vibration",
+      "resource_id": "android:id/title",
+      "bounds": [
+        84,
+        569,
+        210,
+        591
+      ]
+    },
+    {
+      "id": "e52",
+      "parent": "e50",
+      "class": "android.widget.TextView",
+      "text": "Volume and haptics",
+      "resource_id": "android:id/summary",
+      "bounds": [
+        84,
+        591,
+        207,
+        610
+      ]
+    },
+    {
+      "id": "e53",
+      "parent": "e16",
+      "class": "android.widget.LinearLayout",
+      "bounds": [
+        0,
+        628,
+        320,
+        640
+      ],
+      "flags": [
+        "clickable",
+        "focusable"
+      ]
+    },
+    {
+      "id": "e54",
+      "parent": "e53",
+      "class": "android.widget.RelativeLayout",
+      "resource_id": "com.android.settings:id/text_frame",
+      "bounds": [
+        72,
+        628,
+        304,
+        640
+      ]
+    }
+  ]
+}

@@ -301,6 +301,9 @@ V8_FILE = DATA / "settings_v8.toml"
 V9_FILE = DATA / "settings_v9.toml"
 # The version 9 items: the confirm words that turn a setting on.
 V9_CONFIRM = ("turn on", "enable", "オンにする", "有効にする")
+# The file that `uiprobe init` wrote at defaults version 10 (rendered at
+# revision 70bf78e, before version 11 existed), unchanged.
+V10_FILE = DATA / "settings_v10.toml"
 # The version 7 items, pinned like version 1 and 2: the state-changing words.
 V7_DENY = (
     "切断",
@@ -349,7 +352,7 @@ def test_the_defaults_round_trip(tmp_path):
     loaded = load_settings(default_file(tmp_path))
     assert loaded.source == tmp_path / SETTINGS_FILE
     assert loaded.format_version == 1
-    assert loaded.defaults_version == CURRENT == 10
+    assert loaded.defaults_version == CURRENT == 11
     assert loaded.press is False
     assert loaded.deny_words == DEFAULT_DENY_WORDS
     assert loaded.deny_exceptions == DEFAULT_DENY_EXCEPTIONS
@@ -379,7 +382,7 @@ def test_the_rendered_file_layout():
     assert text.startswith("# uiprobe settings")
     assert text.endswith("\n")
     assert "\r" not in text
-    assert "format_version = 1\ndefaults_version = 10\n" in text
+    assert "format_version = 1\ndefaults_version = 11\n" in text
     assert "press = false\n" in text
     for table in (
         "[deny]",
@@ -1055,8 +1058,8 @@ def test_numbers_at_the_limits_are_accepted(tmp_path, old, new):
     [
         ("format_version = 1", "format_version = 2", "format_version"),
         ("format_version = 1", "format_version = 0", "format_version"),
-        ("defaults_version = 10", "defaults_version = 0", "defaults_version"),
-        ("defaults_version = 10", "defaults_version = 11", "defaults_version"),
+        ("defaults_version = 11", "defaults_version = 0", "defaults_version"),
+        ("defaults_version = 11", "defaults_version = 12", "defaults_version"),
     ],
 )
 def test_versions_out_of_range_are_refused(tmp_path, old, new, key):
@@ -1854,7 +1857,7 @@ def _digit_limit() -> Iterator[None]:
 def _huge_cases() -> list[tuple[str, str, str]]:
     cases = [
         ("format_version = 1", f"format_version = {HUGE}", "format_version"),
-        ("defaults_version = 10", f"defaults_version = {HUGE}", "defaults_version"),
+        ("defaults_version = 11", f"defaults_version = {HUGE}", "defaults_version"),
     ]
     for old, key in [
         ("min_visible_px = 8", "min_visible_px"),
@@ -2145,11 +2148,16 @@ def test_the_generated_file_holds_the_version_2_values_plus_the_later_keys():
     # version 3, the two row rules and, with version 4, the up-button and
     # slider rules and, with version 5, the replay rule and, with version 6, the
     # record_text key and, with version 7, the state-changing deny words and,
-    # with version 9, the back_on_other_screens rule.
+    # with version 10, the back_on_other_screens rule and, with version 11, the
+    # scroll rule and its three limits.
     current = tomllib.loads(render_default_settings())
     assert current["deny"].pop("except") == []
-    assert current.pop("defaults_version") == 10
+    assert current.pop("defaults_version") == 11
     assert current["rules"].pop("back_on_other_screens") is False
+    assert current["rules"].pop("scroll_lists") is False
+    assert current["limits"].pop("scrolls_per_screen") == 10
+    assert current["limits"].pop("scroll_amount") == 3
+    assert current["limits"].pop("scroll_incidents") == 2
     assert current.pop("record_text") is True
     assert current["rules"].pop("replay_path") is True
     assert current["rules"].pop("skip_two_target_rows") is True
@@ -2319,6 +2327,10 @@ def test_settings_built_with_the_earlier_fields_still_work(tmp_path):
         "record_text",
         "also_target",
         "back_on_other_screens",
+        "scroll_lists",
+        "scrolls_per_screen",
+        "scroll_amount",
+        "scroll_incidents",
     ]
 
 
@@ -2358,7 +2370,7 @@ def test_a_current_file_gives_the_row_rules_as_written(tmp_path):
         .replace("skip_rows_with_buttons = false", "skip_rows_with_buttons = true")
     )
     loaded = load_settings(write(tmp_path, text))
-    assert loaded.defaults_version == 10
+    assert loaded.defaults_version == CURRENT
     assert (loaded.skip_two_target_rows, loaded.skip_rows_with_buttons) == (False, True)
     policy = settings.policy_from_settings(loaded)
     assert (policy.skip_two_target_rows, policy.skip_rows_with_buttons) == (False, True)
@@ -2375,7 +2387,7 @@ def test_a_current_file_needs_the_row_rules(tmp_path, key):
 
 def test_the_generated_file_writes_both_row_rules():
     text = render_default_settings()
-    assert "defaults_version = 10\n" in text
+    assert "defaults_version = 11\n" in text
     rules = text.split("[rules]\n")[1].split("[limits]")[0]
     assert "skip_two_target_rows = true\n" in rules
     assert "skip_rows_with_buttons = false\n" in rules
@@ -2386,9 +2398,9 @@ def test_a_newer_defaults_version_is_refused_with_its_number(tmp_path):
     # What an older uiprobe says about a file that `uiprobe init` writes now
     # (the message of the defaults_version range check names both numbers).
     text = render_default_settings().replace(
-        "defaults_version = 10", "defaults_version = 11"
+        "defaults_version = 11", "defaults_version = 12"
     )
-    refused(write(tmp_path, text), "defaults_version", "must be from 1 to 10, not 11")
+    refused(write(tmp_path, text), "defaults_version", "must be from 1 to 11, not 12")
 
 
 def test_version_3_added_no_list_defaults():
@@ -2428,7 +2440,7 @@ def test_the_version_3_file_loads_as_the_current_defaults(tmp_path):
     (tmp_path / "now").mkdir()
     current = load_settings(default_file(tmp_path / "now"))
     assert (
-        dataclasses.replace(loaded, source=current.source, defaults_version=10)
+        dataclasses.replace(loaded, source=current.source, defaults_version=CURRENT)
         == current
     )
 
@@ -2523,7 +2535,7 @@ def test_the_version_4_file_loads_as_the_current_defaults(tmp_path):
     (tmp_path / "now").mkdir()
     current = load_settings(default_file(tmp_path / "now"))
     assert (
-        dataclasses.replace(loaded, source=current.source, defaults_version=10)
+        dataclasses.replace(loaded, source=current.source, defaults_version=CURRENT)
         == current
     )
 
@@ -2609,20 +2621,26 @@ def test_policy_replay_path_defaults_on_and_must_be_a_bool():
 
 def test_replay_path_comes_after_runs_dir_so_positional_settings_still_work(tmp_path):
     names = [f.name for f in dataclasses.fields(settings.Settings)]
-    assert names[-5:] == [
+    assert names[-9:] == [
         "runs_dir",
         "replay_path",
         "record_text",
         "also_target",
         "back_on_other_screens",
+        "scroll_lists",
+        "scrolls_per_screen",
+        "scroll_amount",
+        "scroll_incidents",
     ]
     loaded = load_settings(default_file(tmp_path))
     # Built by position with every field up to runs_dir, as before version 5:
     # replay_path takes its default and runs_dir keeps its place.
-    values = [getattr(loaded, name) for name in names[:-4]]
+    values = [getattr(loaded, name) for name in names[:-8]]
     by_position = settings.Settings(*values)
     assert by_position.replay_path is True
     assert by_position.record_text is True
+    assert by_position.scroll_lists is False
+    assert by_position.scrolls_per_screen == 10
     assert by_position.runs_dir == loaded.runs_dir
     assert by_position == loaded
     off = dataclasses.replace(loaded, replay_path=False)
@@ -2651,7 +2669,7 @@ def test_the_version_5_file_loads_as_the_current_defaults(tmp_path):
     (tmp_path / "now").mkdir()
     current = load_settings(default_file(tmp_path / "now"))
     assert (
-        dataclasses.replace(loaded, source=current.source, defaults_version=10)
+        dataclasses.replace(loaded, source=current.source, defaults_version=CURRENT)
         == current
     )
 
@@ -2673,8 +2691,8 @@ def test_an_older_file_may_turn_record_text_off(tmp_path, version):
 
 def test_the_generated_file_is_the_current_version_and_writes_record_text_on_top():
     text = render_default_settings()
-    assert settings.DEFAULTS_VERSION == 10
-    assert "defaults_version = 10\n" in text
+    assert settings.DEFAULTS_VERSION == 11
+    assert "defaults_version = 11\n" in text
     top = text.split("[deny]")[0]
     assert "record_text = true\n" in top
     assert tomllib.loads(text)["record_text"] is True
@@ -2696,7 +2714,7 @@ def test_a_version_6_file_gives_record_text_as_written(tmp_path):
     )
     loaded = load_settings(write(tmp_path, text))
     assert loaded.record_text is False
-    assert loaded.defaults_version == 10
+    assert loaded.defaults_version == CURRENT
 
 
 @pytest.mark.parametrize("value", ["1", '"false"', "0", "[]"])
@@ -2727,7 +2745,7 @@ def test_version_6_added_no_list_defaults():
             item for version, item in getattr(settings, table) if version == 6
         ] == []
     assert settings._LATER_TOP == {"record_text": 6}
-    assert settings._FIRST_EXCEPT == 11
+    assert settings._FIRST_EXCEPT == 12
 
 
 def test_record_text_is_not_a_policy_field():
@@ -2758,12 +2776,12 @@ def test_the_version_7_defaults_are_pinned():
         assert [
             item for version, item in getattr(settings, table) if version == 7
         ] == []
-    assert settings._FIRST_EXCEPT == 11
+    assert settings._FIRST_EXCEPT == 12
 
 
 def test_the_generated_file_lists_the_version_7_words(tmp_path):
     loaded = load_settings(default_file(tmp_path))
-    assert loaded.defaults_version == 10
+    assert loaded.defaults_version == CURRENT
     for word in V7_DENY:
         assert word in loaded.deny_words
 
@@ -2778,7 +2796,7 @@ def test_a_version_6_file_gets_the_version_7_words(tmp_path):
     (tmp_path / "now").mkdir()
     current = load_settings(default_file(tmp_path / "now"))
     assert (
-        dataclasses.replace(loaded, source=current.source, defaults_version=10)
+        dataclasses.replace(loaded, source=current.source, defaults_version=CURRENT)
         == current
     )
     policy = settings.policy_from_settings(loaded)
@@ -2843,7 +2861,7 @@ def v8_text() -> str:
 def test_the_version_9_defaults_are_pinned():
     version_9 = tuple(item for version, item in settings._CONFIRM_WORDS if version == 9)
     assert version_9 == V9_CONFIRM
-    assert settings.DEFAULTS_VERSION == 10
+    assert settings.DEFAULTS_VERSION == 11
     for table in (
         "_DENY_WORDS",
         "_DENY_EXCEPTIONS",
@@ -2854,12 +2872,12 @@ def test_the_version_9_defaults_are_pinned():
         assert [
             item for version, item in getattr(settings, table) if version == 9
         ] == []
-    assert settings._FIRST_EXCEPT == 11
+    assert settings._FIRST_EXCEPT == 12
 
 
 def test_the_generated_file_lists_the_version_9_words(tmp_path):
     loaded = load_settings(default_file(tmp_path))
-    assert loaded.defaults_version == 10
+    assert loaded.defaults_version == 11
     for word in V9_CONFIRM:
         assert word in loaded.confirm_words
 
@@ -2874,7 +2892,7 @@ def test_a_version_8_file_gets_the_version_9_words(tmp_path):
     (tmp_path / "now").mkdir()
     current = load_settings(default_file(tmp_path / "now"))
     assert (
-        dataclasses.replace(loaded, source=current.source, defaults_version=10)
+        dataclasses.replace(loaded, source=current.source, defaults_version=CURRENT)
         == current
     )
     policy = settings.policy_from_settings(loaded)
@@ -2916,11 +2934,12 @@ def version_text(version: int) -> str:
         return render_default_settings()
     text = (DATA / f"settings_v{version}.toml").read_text(encoding="utf-8")
     assert f"defaults_version = {version}\n" in text
-    assert "back_on_other_screens" not in text
+    if version < 9:
+        assert "back_on_other_screens" not in text
     return text
 
 
-@pytest.mark.parametrize("version", range(1, 11))
+@pytest.mark.parametrize("version", range(1, 12))
 def test_every_defaults_version_reads_back_on_other_screens_off(tmp_path, version):
     loaded = load_settings(write(tmp_path, version_text(version)))
     assert loaded.defaults_version == version
@@ -2929,11 +2948,11 @@ def test_every_defaults_version_reads_back_on_other_screens_off(tmp_path, versio
     assert settings.policy_from_settings(loaded).back_on_other_screens is False
 
 
-@pytest.mark.parametrize("version", range(1, 11))
+@pytest.mark.parametrize("version", range(1, 12))
 def test_every_defaults_version_may_turn_it_on(tmp_path, version):
     text = version_text(version)
     on = "back_on_other_screens = true\n"
-    if version == CURRENT:
+    if version >= 10:
         text = text.replace("back_on_other_screens = false\n", on)
     else:
         text = text.replace("[rules]\n", "[rules]\n" + on, 1)
@@ -2979,3 +2998,206 @@ def test_version_10_added_no_list_defaults():
         ] == []
     assert settings._LATER_RULES["back_on_other_screens"] == 10
     assert settings._LATER_RULE_VALUES["back_on_other_screens"] is False
+
+
+# -- the scroll rule and its limits (defaults version 10) ---------------------------
+
+SCROLL_COMMENT = (
+    "# With true, a pressing crawl turns a mouse wheel over a list (content\n"
+    "# further down comes up) on a screen with nothing left to press, to reach\n"
+    "# the rows below the fold; at most scrolls_per_screen times per screen\n"
+    "# (see the limits below), and only when the device lists the wheel scroll.\n"
+    "# The wheel goes only to a ListView, ScrollView, RecyclerView or\n"
+    "# NestedScrollView at a point where everything is a plain layout or label.\n"
+    "# An app's own view of such a class can still react to the wheel (see\n"
+    "# docs/safety.md). --scroll and --no-scroll override it for one run.\n"
+    "scroll_lists = false\n"
+)
+
+
+def test_the_generated_file_writes_scroll_lists_off_and_its_limits():
+    text = render_default_settings()
+    parsed = tomllib.loads(text)
+    assert parsed["rules"]["scroll_lists"] is False
+    assert parsed["limits"]["scrolls_per_screen"] == 10
+    assert parsed["limits"]["scroll_amount"] == 3
+    assert parsed["limits"]["scroll_incidents"] == 2
+    assert SCROLL_COMMENT in text.split("[rules]\n")[1].split("[limits]")[0]
+    limits = text.split("[limits]\n")[1].split("[keys]")[0]
+    assert "scrolls_per_screen = 10\n" in limits
+    assert "scroll_amount = 3\n" in limits
+    assert "scroll_incidents = 2\n" in limits
+
+
+def test_every_default_of_scrolling_is_one_constant(monkeypatch):
+    # The policy, the settings, the limits and the generated file all read the
+    # constants of uiprobe.guards; the file's text follows them.
+    from uiprobe.crawl import Limits
+
+    assert guards.DEFAULT_SCROLL_LISTS is False
+    assert guards.Policy().scroll_lists is guards.DEFAULT_SCROLL_LISTS
+    fields = settings.Settings.__dataclass_fields__
+    assert fields["scroll_lists"].default is guards.DEFAULT_SCROLL_LISTS
+    assert settings._LATER_RULE_VALUES["scroll_lists"] is guards.DEFAULT_SCROLL_LISTS
+    for name, constant in (
+        ("scrolls_per_screen", guards.DEFAULT_SCROLLS_PER_SCREEN),
+        ("scroll_amount", guards.DEFAULT_SCROLL_AMOUNT),
+        ("scroll_incidents", guards.DEFAULT_SCROLL_INCIDENTS),
+    ):
+        assert fields[name].default == constant
+        assert settings._LATER_LIMIT_VALUES[name] == constant
+        assert getattr(Limits(), name) == constant
+    assert (
+        guards.DEFAULT_SCROLLS_PER_SCREEN,
+        guards.DEFAULT_SCROLL_AMOUNT,
+        guards.DEFAULT_SCROLL_INCIDENTS,
+    ) == (10, 3, 2)
+    monkeypatch.setattr(settings, "DEFAULT_SCROLL_LISTS", True)
+    assert "scroll_lists = true\n" in render_default_settings()
+
+
+@pytest.mark.parametrize("version", range(1, 11))
+def test_an_older_file_loads_scrolling_off_with_its_defaults(tmp_path, version):
+    loaded = load_settings(write(tmp_path, version_text(version)))
+    assert loaded.defaults_version == version
+    assert loaded.scroll_lists is False
+    assert (loaded.scrolls_per_screen, loaded.scroll_amount) == (10, 3)
+    assert loaded.scroll_incidents == 2
+    assert loaded.warnings == ()
+    assert settings.policy_from_settings(loaded).scroll_lists is False
+
+
+@pytest.mark.parametrize("version", range(1, 11))
+def test_an_older_file_may_turn_scrolling_on_and_set_its_limits(tmp_path, version):
+    text = version_text(version)
+    text = text.replace("[rules]\n", "[rules]\nscroll_lists = true\n", 1)
+    text = text.replace(
+        "[limits]\n",
+        "[limits]\nscrolls_per_screen = 3\nscroll_amount = 2\nscroll_incidents = 1\n",
+        1,
+    )
+    loaded = load_settings(write(tmp_path, text))
+    assert loaded.scroll_lists is True
+    assert (loaded.scrolls_per_screen, loaded.scroll_amount) == (3, 2)
+    assert loaded.scroll_incidents == 1
+    assert settings.policy_from_settings(loaded).scroll_lists is True
+
+
+def test_the_version_10_file_loads_as_the_current_defaults(tmp_path):
+    text = V10_FILE.read_text(encoding="utf-8")
+    assert "defaults_version = 10\n" in text
+    assert "scroll_lists" not in text
+    assert "scrolls_per_screen" not in text
+    loaded = load_settings(write(tmp_path, text))
+    assert loaded.defaults_version == 10
+    assert loaded.warnings == ()
+    (tmp_path / "now").mkdir()
+    current = load_settings(default_file(tmp_path / "now"))
+    assert (
+        dataclasses.replace(loaded, source=current.source, defaults_version=CURRENT)
+        == current
+    )
+
+
+@pytest.mark.parametrize(
+    ("key", "table"),
+    [
+        ("scroll_lists", "rules"),
+        ("scrolls_per_screen", "limits"),
+        ("scroll_amount", "limits"),
+        ("scroll_incidents", "limits"),
+    ],
+)
+def test_a_current_file_needs_the_scroll_keys(tmp_path, key, table):
+    text = render_default_settings()
+    line = next(
+        line for line in text.splitlines(keepends=True) if line.startswith(f"{key} =")
+    )
+    refused(write(tmp_path, text.replace(line, "")), f"[{table}] {key}", "is missing")
+
+
+@pytest.mark.parametrize("value", ["1", '"true"', "0", "[]"])
+def test_scroll_lists_must_be_a_bool(tmp_path, value):
+    text = render_default_settings().replace(
+        "scroll_lists = false", f"scroll_lists = {value}"
+    )
+    refused(write(tmp_path, text), "[rules] scroll_lists", "must be true or false")
+
+
+@pytest.mark.parametrize(
+    ("key", "default", "high"),
+    [
+        ("scrolls_per_screen", 10, 100),
+        ("scroll_amount", 3, 10),
+        ("scroll_incidents", 2, 100),
+    ],
+)
+def test_the_scroll_limits_are_whole_numbers_with_their_range(
+    tmp_path, key, default, high
+):
+    base = render_default_settings()
+    for value in ("0", "-1", str(high + 1), "true", '"3"', "2.5"):
+        text = base.replace(f"{key} = {default}", f"{key} = {value}")
+        refused(write(tmp_path, text), f"[limits] {key}")
+    for value in (1, high):
+        text = base.replace(f"{key} = {default}", f"{key} = {value}")
+        assert getattr(load_settings(write(tmp_path, text)), key) == value
+
+
+def test_scroll_lists_is_not_a_limits_key_nor_a_limit_a_rules_key(tmp_path):
+    text = render_default_settings()
+    refused(
+        write(tmp_path, text.replace("[limits]\n", "[limits]\nscroll_lists = true\n")),
+        "limits",
+    )
+    refused(
+        write(
+            tmp_path,
+            text.replace("[rules]\n", "[rules]\nscrolls_per_screen = 3\n", 1),
+        ),
+        "rules",
+    )
+
+
+def test_version_11_added_no_list_defaults():
+    for table in (
+        "_DENY_WORDS",
+        "_DENY_EXCEPTIONS",
+        "_CONFIRM_WORDS",
+        "_IRREVERSIBLE_PHRASES",
+        "_REFUSE_KEYS",
+        "_REFUSE_PREFIXES",
+    ):
+        assert [
+            item for version, item in getattr(settings, table) if version == 11
+        ] == []
+    assert settings._LATER_RULES["scroll_lists"] == 11
+    assert settings._LATER_LIMITS == {
+        "scrolls_per_screen": 11,
+        "scroll_amount": 11,
+        "scroll_incidents": 11,
+    }
+
+
+def test_the_policy_carries_scroll_lists_off_by_default():
+    assert guards.Policy().scroll_lists is False
+    assert guards.Policy(scroll_lists=True).with_deny_words(["zzz"]).scroll_lists
+    assert guards.Policy().with_deny_words(["zzz"]).scroll_lists is False
+    with pytest.raises(TypeError, match="scroll_lists must be a bool"):
+        guards.Policy(scroll_lists=1)  # ty: ignore[invalid-argument-type]
+
+
+def test_the_limits_check_the_scroll_numbers():
+    from uiprobe.crawl import Limits
+
+    with pytest.raises(ValueError, match="scrolls_per_screen must be at least 1"):
+        Limits(scrolls_per_screen=0)
+    with pytest.raises(TypeError, match="scrolls_per_screen must be an int"):
+        Limits(scrolls_per_screen=True)
+
+
+def test_the_settings_docstring_names_the_version_of_the_scroll_fields():
+    doc = " ".join((settings.Settings.__doc__ or "").split())
+    assert "`DEFAULT_SCROLL_INCIDENTS`), added with defaults version 11." in doc
+    assert "scroll_lists" in doc
+    assert "defaults version 7" not in doc.split("scroll_lists")[1]

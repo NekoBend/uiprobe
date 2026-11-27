@@ -56,6 +56,13 @@ Version 10 added the rule ``back_on_other_screens`` (a missing one reads False);
 a file written at version 10 must have it, and an older uiprobe refuses a
 version 10 file. With true, a pressing crawl presses BACK on a screen of another
 app instead of restarting the app (``Policy.back_on_other_screens``).
+Version 11 added the rule ``scroll_lists`` (a missing one reads False) and the
+keys ``scrolls_per_screen``, ``scroll_amount`` and ``scroll_incidents`` of
+``[limits]`` (a missing one reads its default, `DEFAULT_SCROLLS_PER_SCREEN`,
+`DEFAULT_SCROLL_AMOUNT`, `DEFAULT_SCROLL_INCIDENTS`); a file written at
+version 11 must have all four, and an older uiprobe refuses a version 11 file.
+With true, a pressing crawl may turn a mouse wheel over a list (opt-in, off by
+default; see `uiprobe.guards.scroll_target`).
 
 ``[deny] except`` holds exception words (see `uiprobe.guards.word_matches`): a
 deny-word hit that lies completely inside one of them, where it stands as a
@@ -128,7 +135,12 @@ from uiprobe.guards import (
     CONFIRM_WORDS,
     DEFAULT_DENY_EXCEPTIONS,
     DEFAULT_DENY_WORDS,
+    DEFAULT_SCROLL_AMOUNT,
+    DEFAULT_SCROLL_INCIDENTS,
+    DEFAULT_SCROLL_LISTS,
+    DEFAULT_SCROLLS_PER_SCREEN,
     IRREVERSIBLE_PHRASES,
+    MAX_SCROLL_AMOUNT,
     Policy,
     _check_word,
     _confirm_form,
@@ -159,7 +171,7 @@ __all__ = [
 
 SETTINGS_FILE: Final = "uiprobe.toml"
 FORMAT_VERSION: Final = 1
-DEFAULTS_VERSION: Final = 10
+DEFAULTS_VERSION: Final = 11
 MAX_SETTINGS_BYTES: Final = 1024 * 1024
 
 # Every default list item with the defaults version that introduced it. Each
@@ -186,7 +198,8 @@ MAX_SETTINGS_BYTES: Final = 1024 * 1024
 # commented). Version 9 added the confirm words turn on, enable, オンにする
 # and 有効にする (a dialog's "Turn on" button changes a device setting).
 # Version 10 added the rule back_on_other_screens (no list items; a missing one
-# reads False).
+# reads False). Version 11 added the rule scroll_lists and the [limits] keys
+# scrolls_per_screen, scroll_amount and scroll_incidents (no list items).
 _LATER_DENY: Final[dict[str, int]] = {
     "やり直": 2,
     "元に戻": 2,
@@ -197,7 +210,7 @@ _LATER_DENY: Final[dict[str, int]] = {
 # The [deny] except list has no built-in words. One added later starts at the
 # next defaults version (raise DEFAULTS_VERSION with it); before that, the
 # test that no default is tagged beyond the current version fails.
-_FIRST_EXCEPT: Final = 11
+_FIRST_EXCEPT: Final = 12
 _LATER_EXCEPT: Final[dict[str, int]] = {}
 _LATER_CONFIRM: Final[dict[str, int]] = {
     "turn on": 9,
@@ -237,6 +250,9 @@ _REFUSE_PREFIXES: Final[tuple[tuple[int, str], ...]] = tuple(
 _DEFAULT_DEPTH: Final = 5
 _DEFAULT_ACTIONS: Final = 300
 _DEFAULT_MINUTES: Final = 30
+_DEFAULT_SCROLLS_PER_SCREEN: Final = DEFAULT_SCROLLS_PER_SCREEN
+_DEFAULT_SCROLL_AMOUNT: Final = DEFAULT_SCROLL_AMOUNT
+_DEFAULT_SCROLL_INCIDENTS: Final = DEFAULT_SCROLL_INCIDENTS
 
 _KEY_NAME: Final = re.compile(r"KEYCODE_[A-Z0-9_]{1,40}")
 _UTF8_BOM: Final = b"\xef\xbb\xbf"
@@ -257,6 +273,7 @@ _BOOL_RULES: Final = (
     "skip_sliders",
     "replay_path",
     "back_on_other_screens",
+    "scroll_lists",
 )
 # table -> key -> (lowest, highest) allowed value
 _INT_RANGES: Final[dict[str, dict[str, tuple[int, int]]]] = {
@@ -270,6 +287,9 @@ _INT_RANGES: Final[dict[str, dict[str, tuple[int, int]]]] = {
         "depth": (1, 50),
         "actions": (1, 10000),
         "minutes": (1, 1440),
+        "scrolls_per_screen": (1, 100),
+        "scroll_amount": (1, MAX_SCROLL_AMOUNT),
+        "scroll_incidents": (1, 100),
     },
 }
 # Tables and keys that a later defaults version added, with that version. A
@@ -286,6 +306,19 @@ _LATER_RULES: Final[dict[str, int]] = {
     "skip_sliders": 4,
     "replay_path": 5,
     "back_on_other_screens": 10,
+    "scroll_lists": 11,
+}
+# Keys of [limits] that a later version added, with that version (a missing one
+# takes its default).
+_LATER_LIMITS: Final[dict[str, int]] = {
+    "scrolls_per_screen": 11,
+    "scroll_amount": 11,
+    "scroll_incidents": 11,
+}
+_LATER_LIMIT_VALUES: Final[dict[str, int]] = {
+    "scrolls_per_screen": _DEFAULT_SCROLLS_PER_SCREEN,
+    "scroll_amount": _DEFAULT_SCROLL_AMOUNT,
+    "scroll_incidents": _DEFAULT_SCROLL_INCIDENTS,
 }
 # Top-level keys a later version added, with that version (a missing one reads
 # True).
@@ -298,6 +331,7 @@ _LATER_RULE_VALUES: Final[dict[str, bool]] = {
     "skip_sliders": True,
     "replay_path": True,
     "back_on_other_screens": False,
+    "scroll_lists": DEFAULT_SCROLL_LISTS,
 }
 _TABLE_KEYS: Final[dict[str, frozenset[str]]] = {
     "deny": frozenset({"words", "except", "remove"}),
@@ -342,8 +376,12 @@ class Settings:
     defaults version 6, and ``runs_dir`` (default None, an
     optional key that needed no new defaults version), follow it for the same
     reason. ``also_target`` (default ``()``), added with defaults version 8,
-    comes after it for the same reason, and ``back_on_other_screens`` (default
-    False), added with defaults version 10, last.
+    comes after it for the same reason, then ``back_on_other_screens`` (default
+    False), added with defaults version 10, and last ``scroll_lists`` (default
+    `DEFAULT_SCROLL_LISTS`, False) and ``scrolls_per_screen``,
+    ``scroll_amount`` and ``scroll_incidents`` (defaults
+    `DEFAULT_SCROLLS_PER_SCREEN`, `DEFAULT_SCROLL_AMOUNT` and
+    `DEFAULT_SCROLL_INCIDENTS`), added with defaults version 11.
     """
 
     source: Path
@@ -390,6 +428,13 @@ class Settings:
     # Added with defaults version 10: press BACK on a screen of another app
     # instead of restarting the app (``Policy.back_on_other_screens``).
     back_on_other_screens: bool = False
+    # Added with defaults version 11: ``[rules] scroll_lists`` (off by default)
+    # and the ``[limits]`` keys ``scrolls_per_screen``, ``scroll_amount`` and
+    # ``scroll_incidents``.
+    scroll_lists: bool = DEFAULT_SCROLL_LISTS
+    scrolls_per_screen: int = DEFAULT_SCROLLS_PER_SCREEN
+    scroll_amount: int = DEFAULT_SCROLL_AMOUNT
+    scroll_incidents: int = DEFAULT_SCROLL_INCIDENTS
 
 
 def _separators() -> str:
@@ -487,6 +532,7 @@ def policy_from_settings(
         replay_path=settings.replay_path,
         also_target=settings.also_target,
         back_on_other_screens=settings.back_on_other_screens,
+        scroll_lists=settings.scroll_lists,
         refuse_dialog_confirm=settings.refuse_dialog_confirm,
         edges=(
             settings.edge_top_px,
@@ -500,6 +546,10 @@ def policy_from_settings(
 
 
 # -- the generator -------------------------------------------------------------
+
+
+def _toml_bool(value: bool) -> str:  # noqa: FBT001
+    return "true" if value else "false"
 
 
 def _toml_string(value: str) -> str:
@@ -620,6 +670,15 @@ def render_default_settings() -> str:
         "# app being crawled. --back-on-other-screens and --no-back-on-other-screens",
         "# override it for one run.",
         "back_on_other_screens = false",
+        "# With true, a pressing crawl turns a mouse wheel over a list (content",
+        "# further down comes up) on a screen with nothing left to press, to reach",
+        "# the rows below the fold; at most scrolls_per_screen times per screen",
+        "# (see the limits below), and only when the device lists the wheel scroll.",
+        "# The wheel goes only to a ListView, ScrollView, RecyclerView or",
+        "# NestedScrollView at a point where everything is a plain layout or label.",
+        "# An app's own view of such a class can still react to the wheel (see",
+        "# docs/safety.md). --scroll and --no-scroll override it for one run.",
+        f"scroll_lists = {_toml_bool(DEFAULT_SCROLL_LISTS)}",
         '# also_target = ["com.example.helper"]   # apps the crawl may also press in; system UI and the home app are refused, the controls of permission screens are never tapped (they get BACK when back_on_other_screens is true)',  # noqa: E501
         f"min_visible_px = {MIN_VISIBLE_PX}",
         f"edge_top_px = {API36_TOP_PX}",
@@ -632,6 +691,13 @@ def render_default_settings() -> str:
         f"depth = {_DEFAULT_DEPTH}",
         f"actions = {_DEFAULT_ACTIONS}",
         f"minutes = {_DEFAULT_MINUTES}",
+        "# The most wheel scrolls sent on one screen (with scroll_lists).",
+        f"scrolls_per_screen = {_DEFAULT_SCROLLS_PER_SCREEN}",
+        "# The size of one wheel scroll, 1 to 10.",
+        f"scroll_amount = {_DEFAULT_SCROLL_AMOUNT}",
+        "# After this many scrolls that changed something or opened another",
+        "# screen, the run stops scrolling.",
+        f"scroll_incidents = {_DEFAULT_SCROLL_INCIDENTS}",
         "",
         "[keys]",
         "# Keys that act on the whole device; `uiprobe key` refuses them.",
@@ -815,11 +881,19 @@ class _Reader:
         return value
 
     def integer(
-        self, table: Mapping[str, object], name: str, key: str, low: int, high: int
+        self,
+        table: Mapping[str, object],
+        name: str,
+        key: str,
+        low: int,
+        high: int,
+        default: int | None = None,
     ) -> int:
         value = table.get(key)
         where = self._where(name, key)
         if key not in table:
+            if default is not None:
+                return default
             raise self.fail(where, "is missing")
         if type(value) is not int:
             raise self.fail(where, "must be an integer")
@@ -1280,7 +1354,15 @@ def load_settings(path: str | os.PathLike[str]) -> Settings:
     }
     limits_table = reader.table(parsed, "limits", _TABLE_KEYS["limits"])
     limits = {
-        key: reader.integer(limits_table, "limits", key, *bounds)
+        key: reader.integer(
+            limits_table,
+            "limits",
+            key,
+            *bounds,
+            default=_LATER_LIMIT_VALUES[key]
+            if defaults_version < _LATER_LIMITS.get(key, 1)
+            else None,
+        )
         for key, bounds in _INT_RANGES["limits"].items()
     }
 
@@ -1345,6 +1427,10 @@ def load_settings(path: str | os.PathLike[str]) -> Settings:
         replay_path=flags["replay_path"],
         also_target=also_target,
         back_on_other_screens=flags["back_on_other_screens"],
+        scroll_lists=flags["scroll_lists"],
+        scrolls_per_screen=limits["scrolls_per_screen"],
+        scroll_amount=limits["scroll_amount"],
+        scroll_incidents=limits["scroll_incidents"],
         min_visible_px=sizes["min_visible_px"],
         edge_top_px=sizes["edge_top_px"],
         edge_bottom_px=sizes["edge_bottom_px"],

@@ -6,7 +6,7 @@ import re
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from uiprobe.crawl import Back, Launch, Observation, Relaunch, Tap, _Prints
+from uiprobe.crawl import Back, Launch, Observation, Relaunch, Scroll, Tap, _Prints
 from uiprobe.crawl_driver.constants import _FIRST_APP_UID, _MAX_SECONDS, INTERRUPTED
 from uiprobe.errors import DeviceNotFoundError, LaunchFailedError, UiprobeError
 from uiprobe.guards import Policy, judge
@@ -137,6 +137,7 @@ def _plain_policy(policy: Policy) -> Policy:
         skip_sliders=_flag("skip_sliders", policy.skip_sliders),
         replay_path=_flag("replay_path", policy.replay_path),
         also_target=_words("also_target", policy.also_target),
+        scroll_lists=_flag("scroll_lists", policy.scroll_lists),
     )
 
 
@@ -212,6 +213,8 @@ def _kind(action: Action) -> str:
         return "relaunch"
     if isinstance(action, Back):
         return "back"
+    if isinstance(action, Scroll):
+        return "scroll"
     return "tap"
 
 

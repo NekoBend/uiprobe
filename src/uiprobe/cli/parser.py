@@ -52,6 +52,8 @@ def _press_only(args: argparse.Namespace) -> list[tuple[str, bool]]:
         ("--allow-real-device", args.allow_real_device),
         ("--back-on-other-screens", args.back_on_other_screens),
         ("--no-back-on-other-screens", args.no_back_on_other_screens),
+        ("--scroll", args.scroll),
+        ("--no-scroll", args.no_scroll),
         ("--no-tap-window-check", args.no_tap_window_check),
         ("--no-restart", args.no_restart),
         ("--no-record-text", args.no_record_text),
@@ -624,6 +626,24 @@ def _add_press_options(crawl: argparse.ArgumentParser) -> None:
         help=(
             "when pressing: restart the app on a screen of another app for this"
             " run, whatever the settings file says"
+        ),
+    )
+    crawl.add_argument(
+        "--scroll",
+        action="store_true",
+        help=(
+            "when pressing: turn a mouse wheel over lists to reach the rows below"
+            " the fold for this run, whatever the settings file says (off by"
+            " default: an app's own view can react to the wheel, see"
+            " docs/safety.md)"
+        ),
+    )
+    crawl.add_argument(
+        "--no-scroll",
+        action="store_true",
+        help=(
+            "when pressing: send no mouse wheel input for this run, whatever the"
+            " settings file says"
         ),
     )
     crawl.add_argument(

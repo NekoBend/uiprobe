@@ -36,7 +36,9 @@ the ``launch`` path runs with it, so each of them checks that force-stop and
 start as well, and the ``first-force-stop`` row checks that they are the
 first two sends. The rows of the ``launch`` path (``launch`` and
 ``launch-two-displays``) run with ``restart=False``, whose first launch is a
-start alone.
+start alone. The ``scroll`` row runs on a fake app with a long list (and a
+device that lists the wheel scroll): its taps are checked as well, and its
+wheel turns go out only on a decision of the ``scroll`` path.
 Meta-tests show that the test fails, for every row, when a clock call is
 inserted into the production `_Run.final_check` right after its comparison
 or into `_Run.epoch_is` right after the equality, and when the row of a path
@@ -55,7 +57,8 @@ from typing import TYPE_CHECKING, NamedTuple
 import pytest
 
 from tests.crawl_driver.helpers import SCREENS, SERIAL, SHOP, TRANSPORT, Clock
-from tests.fake_device import FakeAndroid
+from tests.crawl_driver.scroll_screens import screens as scroll_screens
+from tests.fake_device import FakeAndroid, Screen
 from uiprobe import crawl_driver
 from uiprobe.crawl import Limits, Relaunch, Tap
 from uiprobe.crawl_driver import crawl
@@ -74,6 +77,7 @@ Event = tuple[str, str]
 # The command family each sending path sends.
 FAMILY = {
     "tap": "input swipe",
+    "scroll": "input mouse",
     "back": "input keyevent",
     "force-stop": "am force-stop",
     "launch": "am start",
@@ -115,6 +119,12 @@ def cover_after_browse(device: Device, android: FakeAndroid, monkeypatch) -> Non
 
 def plain(device: Device, android: FakeAndroid, monkeypatch) -> None:
     """The small app as it is: launch, taps and BACK."""
+    del device, android, monkeypatch
+
+
+def scrolling(device: Device, android: FakeAndroid, monkeypatch) -> None:
+    """The app with a long list (the row's own screens): taps, BACK and the
+    mouse wheel turns that bring its lower rows."""
     del device, android, monkeypatch
 
 
@@ -165,11 +175,22 @@ class Row(NamedTuple):
     scenario: Callable[..., None]
     options: dict[str, bool]
     restart: bool = True
+    # The screens of the fake device (None: the small app of the other rows),
+    # and whether it lists and admits the wheel scroll.
+    screens: tuple[Screen, ...] | None = None
+    wheel: bool = False
 
 
 # The rows: every sending path has at least one.
 ROWS: dict[str, Row] = {
     "tap": Row("tap", plain, {}),
+    "scroll": Row(
+        "scroll",
+        scrolling,
+        {"scroll_lists": True},
+        screens=scroll_screens(),
+        wheel=True,
+    ),
     "back": Row("back", plain, {}),
     "back-off-target": Row("back", off_target_back, {"back_on_other_screens": True}),
     "launch": Row("launch", plain, {}, restart=False),
@@ -305,7 +326,12 @@ def instrumented_run(
     """Run a crawl with caller code, decisions and sends logged in order."""
     log = _Log()
     android = FakeAndroid(
-        fake_adb, SERIAL, SCREENS, start="home", transport_id=TRANSPORT
+        fake_adb,
+        SERIAL,
+        SCREENS if row.screens is None else row.screens,
+        start="home",
+        transport_id=TRANSPORT,
+        wheel=row.wheel,
     )
     device = Device(adb_server=fake_adb.address)
     row.scenario(device, android, monkeypatch)
@@ -386,7 +412,7 @@ def check_rule(events: list[Event]) -> dict[str, int]:
     Every send must follow its own decision directly (no other decision or
     send between), of the path whose command family it is, and no caller
     event may lie between the decision and the send, whatever the path. A
-    tap and BACK must also have a screen read before their decision.
+    tap, scroll and BACK must also have a screen read before their decision.
     """
     sends: dict[str, int] = {}
     last: tuple[int, str] | None = None  # the open decision: index, path
@@ -402,7 +428,7 @@ def check_rule(events: list[Event]) -> dict[str, int]:
             window = events[decided_at + 1 : index]
             callers = [w for k, w in window if k == "caller"]
             assert callers == [], f"{path}: {callers} ran before {what!r}"
-            if path in {"tap", "back"}:
+            if path in {"tap", "scroll", "back"}:
                 reads = [i for i in range(decided_at) if events[i][0] == "read"]
                 assert reads, f"{path}: no screen read before {what!r}"
             sends[path] = sends.get(path, 0) + 1
@@ -621,5 +647,11 @@ def test_the_completeness_test_fails_without_the_first_force_stop_row():
 
 def test_the_completeness_test_fails_without_the_relaunch_start_row():
     rows = {name: row for name, row in ROWS.items() if row.path != "start"}
+    with pytest.raises(AssertionError, match="rows"):
+        check_complete(rows)
+
+
+def test_the_completeness_test_fails_without_the_scroll_row():
+    rows = {name: row for name, row in ROWS.items() if row.path != "scroll"}
     with pytest.raises(AssertionError, match="rows"):
         check_complete(rows)

@@ -7,24 +7,28 @@ clock or file), and the writer imports it, so the driver sits above both.
 
 ``uiprobe crawl --press`` runs it from the command line; the function is alpha.
 
-What is sent. Only what the engine returned, and for a tap only what
-`CrawlEngine.recheck` allowed for that very `Tap` object, in the gate right
-before it is sent: the first launch (by default ``force-stop`` then
+What is sent. Only what the engine returned, and for a tap or a scroll only
+what `CrawlEngine.recheck` allowed for that very `Tap` or `Scroll` object, in
+the gate right before it is sent: the first launch (by default ``force-stop`` then
 start of the launcher activity, whose screen is up to the app; with
 ``restart=False`` only the start), a relaunch
 (``force-stop`` then start; a launch is ``am start -W`` of the launcher
 activity, read right before each start, never ``monkey``), a tap at the
-point judge gave, and the BACK key. Text, long presses, swipes and other
-keys are never sent. By default the engine never
-returns BACK for a screen of another app (it relaunches instead);
+point judge gave, with ``Policy.scroll_lists`` one turn of a mouse wheel at the
+point `uiprobe.guards.scroll_target` gave (a scroll; the wheel event goes to the
+window under the pointer, not to the focused window), and the BACK key. Text,
+long presses, swipes and other keys are never sent. By
+default the engine never returns BACK for a screen of another app (it
+relaunches instead);
 ``Policy.back_on_other_screens`` allows it. A BACK or
 relaunch decided on such a screen names its package (and the foreground) as
 ``off_target`` in the start line. A package of ``Policy.also_target`` is not
 another app in this sense: its screens are the target's own (the window at a tap
 must belong to that package's uid), and it is never started or stopped. Every
 action is sent once and never retried. A tap is reported to the engine with
-`CrawlEngine.tap_sent` only after it was sent without an error; a refused tap,
-or one whose send raised, is never reported, and the engine releases it on the
+`CrawlEngine.tap_sent` (a scroll with `CrawlEngine.scroll_sent`) only after it
+was sent without an error; a refused tap, or one whose send raised, is never
+reported, and the engine releases it on the
 next `CrawlEngine.next` with a ``tap_not_sent`` skip row.
 
 The loop (the protocol of the `CrawlEngine` docstring)::

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import json
 import os
 import re
@@ -23,6 +24,7 @@ from uiprobe.settings import (
     SETTINGS_FILE,
     SettingsError,
     load_settings,
+    policy_from_settings,
     render_default_settings,
 )
 
@@ -424,6 +426,78 @@ def test_init_writes_the_no_flag_defaults(tmp_path, capsys):
     assert from_file == no_flag
     # The Python default of crawl_run() agrees too.
     assert Limits() == no_flag
+
+
+def test_init_writes_the_scroll_settings_a_run_uses(tmp_path, capsys):
+    target = tmp_path / SETTINGS_FILE
+    assert cli.run(["init", str(target)]) == 0
+    capsys.readouterr()
+    written = load_settings(target)
+    assert written.scroll_lists is False
+    assert written.scrolls_per_screen == 10
+    assert (written.scroll_amount, written.scroll_incidents) == (3, 2)
+    assert policy_from_settings(written).scroll_lists is False
+    no_flag, _sources = cli._press_limits(_args(), None)
+    from_file, _sources = cli._press_limits(_args(), written)
+    assert no_flag.scrolls_per_screen == from_file.scrolls_per_screen == 10
+    assert Limits().scrolls_per_screen == 10
+    # a file's value is the run's, with no option to override it
+    other = dataclasses.replace(written, scrolls_per_screen=3)
+    assert cli._press_limits(_args(), other)[0].scrolls_per_screen == 3
+
+
+def test_the_plan_says_whether_lists_are_scrolled():
+    plan: dict[str, object] = {
+        "device": {"serial": "emulator-5554", "emulator": True},
+        "package": SHOP,
+        "press_source": "option",
+        "limits": {"depth": 5, "actions": 300, "minutes": 30},
+        "limits_source": {"depth": "file", "actions": "file", "minutes": "file"},
+        "out": "run",
+        "out_source": "option",
+        "back_on_other_screens": False,
+        "back_on_other_screens_source": "default",
+        "check_tap_window": True,
+        "restart": True,
+        "scrolls_per_screen": 4,
+        "scroll_amount": 2,
+    }
+    line = "scroll lists with the mouse wheel: "
+    tail = (
+        "; an app's own view, or a window that appears just before the wheel, can"
+        " react to it (see docs/safety.md)"
+    )
+
+    def text(**more):
+        return cli._press_plan_text({**plan, **more}, settings=SETTINGS_FILE)
+
+    assert (
+        f"{line}yes (--scroll), at most 4 per screen, wheel amount 2{tail}"
+        in text(
+            scroll_lists=True, scroll_lists_source="option", scroll_input=True
+        ).splitlines()
+    )
+    assert (
+        f"{line}yes (settings file), at most 4 per screen, wheel amount 2{tail}"
+        in text(
+            scroll_lists=True, scroll_lists_source="file", scroll_input=True
+        ).splitlines()
+    )
+    for source in ("default", "file", "option"):
+        assert (
+            f"{line}no"
+            in text(
+                scroll_lists=False, scroll_lists_source=source, scroll_input=None
+            ).splitlines()
+        )
+    assert (
+        f"{line}no (this device's input does not list the wheel scroll)"
+        in text(
+            scroll_lists=False, scroll_lists_source="option", scroll_input=False
+        ).splitlines()
+    )
+    # a plan without the key has no such line
+    assert not [x for x in text().splitlines() if x.startswith("scroll lists with")]
 
 
 def test_the_help_states_the_defaults(capsys):

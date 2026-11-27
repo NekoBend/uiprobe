@@ -13,7 +13,8 @@ that judge put in ``pressable`` for that exact observation, at judge's point,
 on a target screen; `CrawlEngine.recheck` refuses any change of that element
 or its descendants (listed under Re-check), of its screen id or of judge's
 result for it, a shown keyboard and the deadline; no input
-other than tap, BACK, launch and relaunch exists; by default nothing but a
+other than tap, scroll (one mouse wheel turn, see Scrolling), BACK, launch and
+relaunch exists; by default nothing but a
 relaunch is sent while a screen of another app is in front (BACK there only
 with ``Policy.back_on_other_screens``); the action and time limits
 hold; there is no 4th relaunch without a tap the driver reported as sent
@@ -100,14 +101,55 @@ where screen ids change are listed under the stated limits below.
   what is below them (inside the row too), so a row tried with a badge is not
   pressed again without it; a screen that is not judged has no such key. The
   relaunch limit is unchanged.
+* Scrolling (``Policy.scroll_lists``, ``Limits.scrolls_per_screen``,
+  ``scroll_amount``, ``scroll_incidents``). A target screen with no untried
+  pressable row left, or at the depth limit (there it is scrolled and never
+  pressed), gets one `Scroll` (a mouse wheel turn at one point) when
+  `uiprobe.guards.scroll_target` finds a point on it (none on a dialog, a screen
+  judged irreversible, one whose largest scrollable element is not of one of the
+  four allowed container classes, or when every candidate point has an element
+  of another than the allowed plain layout and label classes, a scrollable
+  other than the container, a long-clickable, checkable, password or text field
+  element, an element judge refuses, or an element that is neither the
+  container, inside it nor one of its ancestors (a sibling over or under the
+  list, labelled or not), at it), fewer than
+  ``scrolls_per_screen`` were *sent* for the container, for the
+  screen's family of ids, for its set of lists and in its activity (a proposal
+  that is refused does not count; the other counts keep the cap when another
+  list becomes the largest or is added), the screen
+  has not been scrolled to its end or marked by a
+  scroll that changed something, fewer than ``scroll_incidents`` such scrolls
+  happened in the run, and refusals are not piling up. It goes through
+  `CrawlEngine.recheck` (the same screen, no keyboard, before the deadline,
+  exactly the planned container and point, and the whole screen identical to
+  the planned one: every element's id, parent, class, package, texts, flags and
+  bounds) and
+  `CrawlEngine.scroll_sent` like a tap, and is released, withdrawn and counted
+  like one. The screen read after a scroll is judged as any other: rows whose
+  fingerprint was not seen on the screen's family of ids are tried as usual, and
+  when no candidate row is new the screen is marked scrolled to the end. A
+  scroll that only scrolls never pushes the path; another id of the same
+  activity joins the family of the screen scrolled on (shared tried marks,
+  scroll count and fingerprints, same depth). A scroll after which a checked
+  state of a same element changed, or a text outside the list of an element of
+  the same identity (compared by position among those of one identity; the rows
+  of the scrolled list are not compared by text) (``changed``), or another
+  activity, a dialog, another app (a listed ``also_target`` app counts as the
+  target's own, another package does not), or another page of the same activity
+  that has no list of the scrolled one's key (``navigation``; pushed like a
+  tapped screen), is an incident: that screen is never scrolled again, and the engine
+  stops scrolling after ``scroll_incidents`` of them (`CrawlEngine.scroll_effect`
+  says it, for the driver's end line). With the switch off none of this state is
+  used.
 * Pressing. The engine presses only an element that
   `uiprobe.guards.judge` put in ``pressable`` for that exact observation, at
   the point judge gave; judge runs on every target observation where the
   engine considers a tap (a shown keyboard gets BACK first, a due relaunch is
   sent first, and when no tap is allowed the root stops with ``exhausted``),
   and again in the re-check. The only
-  actions are `Launch`, `Tap`, `Back`, `Relaunch`, `Reread` and `Stop`: no text
-  input, long press, other key or swipe can be built from them.
+  actions are `Launch`, `Tap`, `Scroll`, `Back`, `Relaunch`, `Reread` and `Stop`: no
+  text input, long press, other key or any swipe can be built from them; a
+  `Scroll` is a wheel turn at one point.
 * Keyboard. When the keyboard is shown on a target screen, press BACK once and
   read again; if it is still shown, stop with ``keyboard_stuck``. An unknown
   keyboard state (None) counts as not shown (judge already refuses text
@@ -332,6 +374,7 @@ from uiprobe.crawl.actions import (  # noqa: F401
     Records,
     Relaunch,
     Reread,
+    Scroll,
     SkippedElement,
     Stop,
     StopReason,
@@ -384,6 +427,7 @@ __all__ = [
     "Records",
     "Relaunch",
     "Reread",
+    "Scroll",
     "SkippedElement",
     "Stop",
     "StopReason",

@@ -320,6 +320,42 @@ _UP_IDS: Final = (":id/home", ":id/up")
 _NAVIGATE_UP: Final = "Navigate up"
 # The class name endings of adjustable controls (see the ``slider`` rule).
 _SLIDER_CLASSES: Final = ("SeekBar", "RatingBar", "Slider")
+# The crawl's scrolling (see `Policy.scroll_lists`). Every default lives here
+# and nowhere else: the policy, the limits, the settings file and `uiprobe init`
+# read them.
+DEFAULT_SCROLL_LISTS: Final = False
+DEFAULT_SCROLLS_PER_SCREEN: Final = 10
+# The size of one wheel event (``VSCROLL,-N``) and how many screens may show
+# that the wheel changed something before scrolling stops for the run.
+DEFAULT_SCROLL_AMOUNT: Final = 3
+MAX_SCROLL_AMOUNT: Final = 10
+DEFAULT_SCROLL_INCIDENTS: Final = 2
+# The wheel scroll works from allow lists, fixed here and not settings, so that a
+# settings file cannot extend them. The container (the scrollable element) must
+# have exactly one of these classes (exact names, no substrings):
+SCROLL_CONTAINER_CLASSES: Final = frozenset(
+    {
+        "android.widget.ListView",
+        "android.widget.ScrollView",
+        "androidx.recyclerview.widget.RecyclerView",
+        "androidx.core.widget.NestedScrollView",
+    }
+)
+# and every element whose part on the display holds the point must be the
+# container itself or have exactly one of these classes (plain layouts and
+# labels, which do nothing with a wheel event):
+SCROLL_POINT_CLASSES: Final = frozenset(
+    {
+        "android.widget.LinearLayout",
+        "android.widget.FrameLayout",
+        "android.widget.RelativeLayout",
+        "androidx.constraintlayout.widget.ConstraintLayout",
+        "android.view.View",
+        "android.view.ViewGroup",
+        "android.widget.TextView",
+        "android.widget.ImageView",
+    }
+)
 _NUMBER_CATEGORIES: Final = frozenset({"Nd", "Nl", "No"})
 _ID_SEPARATOR: Final = ":id/"
 _UTF16_BOMS: Final = (b"\xff\xfe", b"\xfe\xff")

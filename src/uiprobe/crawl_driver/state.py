@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from uiprobe.crawl import CrawlEngine, Tap  # noqa: TC001
+from uiprobe.crawl import CrawlEngine, Scroll, Tap  # noqa: TC001
 from uiprobe.device import _monotonic
 from uiprobe.guards import PERMISSION_PACKAGES, Policy
 from uiprobe.runlog import RunWriter  # noqa: TC001
@@ -16,7 +16,7 @@ if TYPE_CHECKING:
     from uiprobe.crawl_driver.helpers import Progress, _Seen
     from uiprobe.device import Device, FocusedWindow
     from uiprobe.inputwindows import InputWindow
-    from uiprobe.model import Screen
+    from uiprobe.model import Element, Screen
     from uiprobe.packageuid import PackageUid
 
 
@@ -96,7 +96,7 @@ class _RunState:
         self.unsent: int | None = None
         # A refused tap and the screen it was chosen on, until the engine
         # releases it (see `run`).
-        self.held: tuple[Tap, Screen | None] | None = None
+        self.held: tuple[Tap | None, Screen | None] | None = None
         self.withdrawn = False  # the last action was taken back by the engine
         # Device.pin_epoch when the current observation began its reads, and
         # after the gate's own pin check: an input goes out only when nothing
@@ -122,6 +122,14 @@ class _RunState:
         # Why a wait for the device was stopped (a not_sent reason), once known.
         self.wait_stop: str | None = None
         self._skips_written = 0
+        # The action id of a scroll that was sent and whose result screen has
+        # not been read yet (the screen read after it is also written to
+        # ``screens/scroll-<id>.json``).
+        self.scrolled: int | None = None
+        # What was written of each screen id: its own file (scroll id None) and
+        # the reads after scrolls, with the elements, in the order written. A
+        # tap decided on a screen that equals one of them says which.
+        self.reads: dict[str, list[tuple[int | None, tuple[Element, ...]]]] = {}
 
     if TYPE_CHECKING:
         # What the other mixins define, for the type checker only (these
@@ -146,7 +154,7 @@ class _RunState:
             package: str | None = None,
         ) -> str | None: ...
         def refused_tap(
-            self, tap: Tap, screen: Screen | None, seen: _Seen
+            self, action: Tap | Scroll, screen: Screen | None, seen: _Seen
         ) -> Observation | None: ...
         def gate(
             self, action: Action, observation: Observation | None
@@ -161,6 +169,14 @@ class _RunState:
         def write_start(
             self, action_id: int, action: Action, observation: Observation | None
         ) -> None: ...
+        def sent(
+            self,
+            action: Action,
+            action_id: int,
+            screen: Screen | None,
+            seen: _Seen | None,
+        ) -> None: ...
+        def read_of(self, action: Action, screen: Screen | None) -> int | None: ...
         def close_unsent(self, reason: str) -> None: ...
         def launch(self) -> None: ...
         def relaunch(self, action_id: int, action: Launch | Relaunch) -> str | None: ...
@@ -175,6 +191,7 @@ class _RunState:
             self, screen: Screen | None, foreground: str | None
         ) -> None: ...
         def record(self, seen: _Seen, epoch: int) -> None: ...
+        def take_screenshot(self, screen: Screen, epoch: int) -> None: ...
         def on_target(self, screen: Screen, foreground: str | None) -> bool: ...
         def write_skips(
             self, *screens: Screen | None, tap: Tap | None = None
