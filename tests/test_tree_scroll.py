@@ -18,6 +18,7 @@ from tests.test_tree import (
 )
 from uiprobe import crawl_tree
 from uiprobe.crawl_tree import GATE_WARNING, read_tree
+from uiprobe.model import Bounds
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -27,7 +28,14 @@ def listing(texts, *, activity=".List"):
     """A list: a scrollable container with one clickable row per text."""
     elements = [
         el(1, cls="FrameLayout"),
-        el(2, 1, cls="RecyclerView", flags=("scrollable",)),
+        # as tall as the display: no row of the fixtures touches its bottom edge
+        el(
+            2,
+            1,
+            cls="RecyclerView",
+            flags=("scrollable",),
+            bounds=Bounds(0, 0, 1080, 2400),
+        ),
     ]
     for index, text in enumerate(texts):
         row = 3 + 2 * index
@@ -1454,3 +1462,131 @@ def test_a_foreign_snapshot_that_a_scroll_names_still_fails_the_gate(tmp_path):
     scroll(folder, first, foreign)
     folder.finish()
     assert GATE_WARNING in read_tree(folder.path).warnings
+
+
+# -- a row cut off at the bottom of the list, whole after a scroll ----------------
+
+TOP, BOTTOM = 200, 2400  # the list area; the display ends at BOTTOM too
+
+
+def shelf(rows):
+    """A list with explicit bounds. `rows` is (texts, top, bottom) per row; the
+    return value is the screen and the element number of each row."""
+    elements = [
+        el(1, cls="FrameLayout"),
+        el(
+            2,
+            1,
+            cls="RecyclerView",
+            flags=("scrollable",),
+            bounds=Bounds(0, TOP, 1080, BOTTOM),
+        ),
+    ]
+    numbers = []
+    number = 3
+    for texts, top, bottom in rows:
+        box = Bounds(0, top, 1080, bottom)
+        numbers.append(number)
+        elements.append(el(number, 2, cls="LinearLayout", flags=CLICK, bounds=box))
+        for offset, text in enumerate(texts, 1):
+            elements.append(el(number + offset, number, text=text, bounds=box))
+        number += 1 + len(texts)
+    return make_screen(".Shelf", elements), numbers
+
+
+def cut_off_run(tmp_path, *, early=(("Cut",), 2300, BOTTOM)):
+    """A list whose last row is `early`; after a scroll the same row shows its
+    title and its summary, higher up in the list."""
+    late = (("Cut", "On"), 300, 500)
+    folder = Folder(tmp_path)
+    first, first_rows = shelf([(("A",), 200, 400), early])
+    after, after_rows = shelf([late, (("D",), 600, 900)])
+    assert first.screen_id != after.screen_id  # the summary is one element more
+    for screen in (first, after, LEAF):
+        folder.screen(screen)
+    folder.start("launch")
+    folder.end(first.screen_id)
+    number = scroll(folder, first, after)
+    return folder, first, after, first_rows, after_rows, number
+
+
+def shelf_rows(folder, first):
+    return [
+        r
+        for r in read_tree(folder.path).screens[first.screen_id].rows
+        if r.kind == "row"
+    ]
+
+
+def test_a_row_cut_off_at_the_bottom_is_shown_once_after_a_scroll(tmp_path):
+    folder, first, _after, _fr, _ar, number = cut_off_run(tmp_path)
+    folder.finish()
+    tree = read_tree(folder.path)
+    assert tree.warnings == []
+    rows = shelf_rows(folder, first)
+    assert [r.name for r in rows] == ["A", "Cut", "D"]
+    cut = rows[1]
+    assert cut.texts == ("Cut", "On")  # the fuller row, at the earlier one's place
+    assert cut.after_scroll == number
+
+
+def test_the_same_title_not_at_the_edge_stays_two_rows(tmp_path):
+    folder, first, *_ = cut_off_run(tmp_path, early=(("Cut",), 1000, 1100))
+    folder.finish()
+    assert [r.name for r in shelf_rows(folder, first)] == ["A", "Cut", "Cut", "D"]
+
+
+def test_an_edge_row_whose_texts_are_not_a_subset_stays_two_rows(tmp_path):
+    folder, first, *_ = cut_off_run(tmp_path, early=(("Cut", "Other"), 2300, BOTTOM))
+    folder.finish()
+    assert [r.name for r in shelf_rows(folder, first)] == ["A", "Cut", "Cut", "D"]
+
+
+def test_a_tap_on_the_cut_off_version_lands_on_the_one_row(tmp_path):
+    folder, first, _after, first_rows, _ar, _n = cut_off_run(tmp_path)
+    folder.tap(first, first_rows[1], LEAF.screen_id)
+    folder.finish()
+    tree = read_tree(folder.path)
+    rows = shelf_rows(folder, first)
+    assert [r.name for r in rows] == ["A", "Cut", "D"]
+    assert tree.warnings == []
+    assert rows[1].pressed
+    assert rows[1].to == {"screen_id": LEAF.screen_id}
+    assert not rows[0].pressed
+
+
+def test_a_tap_on_the_full_version_lands_on_the_one_row(tmp_path):
+    folder, first, after, _fr, after_rows, number = cut_off_run(tmp_path)
+    tap_after(folder, after, after_rows[0], LEAF.screen_id, number)
+    folder.finish()
+    rows = shelf_rows(folder, first)
+    assert [r.name for r in rows] == ["A", "Cut", "D"]
+    assert rows[1].pressed
+    assert rows[1].to == {"screen_id": LEAF.screen_id}
+    assert not rows[2].pressed
+
+
+def test_taps_on_both_versions_land_on_the_one_row(tmp_path):
+    folder, first, after, first_rows, after_rows, number = cut_off_run(tmp_path)
+    folder.tap(first, first_rows[1], LEAF.screen_id)
+    tap_after(folder, after, after_rows[0], first.screen_id, number)
+    folder.finish()
+    rows = shelf_rows(folder, first)
+    assert [r.name for r in rows] == ["A", "Cut", "D"]
+    cut = rows[1]
+    assert cut.pressed
+    endings = [cut.to, *cut.also_to]
+    assert {"screen_id": LEAF.screen_id} in endings
+    assert {"same_screen": True} in endings
+
+
+def test_skip_reasons_of_both_versions_are_kept(tmp_path):
+    folder, first, after, first_rows, after_rows, _n = cut_off_run(tmp_path)
+    folder.skip(first, first_rows[1], "toggle")  # the cut-off version
+    folder.skip(after, after_rows[0], "slider")  # the full version
+    folder.finish()
+    tree = read_tree(folder.path)
+    rows = shelf_rows(folder, first)
+    assert [r.name for r in rows] == ["A", "Cut", "D"]
+    assert set(rows[1].reasons) == {"toggle", "slider"}
+    assert tree.screens[first.screen_id].unmatched == []
