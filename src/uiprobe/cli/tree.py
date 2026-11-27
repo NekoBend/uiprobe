@@ -367,27 +367,69 @@ def _left_out(row: Row, *, kept: bool) -> list[str]:
     return [*lines, *_left_out_lines(row, shown, kept=kept)]
 
 
-def _gap_texts(node: ScreenNode, before: int, group: int) -> tuple[str, ...]:
+class _Written:
+    """The separators of one screen the HTML page has written a line for, so
+    that each is written once: a set of groups with a skip pointer to the next
+    group not written yet, so that finding it is not a scan."""
+
+    def __init__(self) -> None:
+        self.skip: dict[int, int] = {}
+
+    def free(self, group: int) -> int:
+        """The first group at or after `group` that is not written yet."""
+        path = []
+        while group in self.skip:
+            path.append(group)
+            group = self.skip[group]
+        for seen in path:
+            self.skip[seen] = group
+        return group
+
+    def take(self, group: int) -> bool:
+        """Write `group` now: False when it was written before."""
+        if group in self.skip:
+            return False
+        self.skip[group] = group + 1
+        return True
+
+
+def _gap_texts(
+    node: ScreenNode, before: int, group: int, written: _Written
+) -> tuple[str, ...] | None:
     """The texts between the rows of group `before` and group `group`: one for
-    each separator on the way down the list that has text, in order, each
-    shortened and escaped as a label. Going back up the list, the text of the
-    separator that starts `group` only."""
+    each separator on the way down the list that has text and has no line yet,
+    in order, each shortened and escaped as a label. Going back up the list, the
+    text of the separator that starts `group`, if it has no line yet. Every
+    separator gets at most one line on the page, so None (no gap) when every
+    separator on the way has one already."""
     if group > before:
-        texts = node.groups[before + 1 : group + 1]
+        found = []
+        at = written.free(before + 1)
+        while at <= group:
+            written.take(at)
+            found.append(node.groups[at])
+            at = written.free(at + 1)
     else:
-        texts = node.groups[group : group + 1]
-    return tuple(_label(t) for t in texts if t is not None)
+        found = [node.groups[group]] if written.take(group) else []
+    if not found:
+        return None
+    return tuple(_label(t) for t in found if t is not None)
 
 
 def _mark_gap(
-    entry: _Entry, node: ScreenNode, previous: int | None, group: int | None
+    entry: _Entry,
+    node: ScreenNode,
+    previous: int | None,
+    group: int | None,
+    written: _Written | None,
 ) -> int | None:
-    """Note on `entry` that it starts a new group of the list when the line
-    drawn before it was in another group; return the group to remember."""
+    """Note on `entry` (HTML only: `written` is not None) that it starts a new
+    group of the list when the line drawn before it was in another group;
+    return the group to remember."""
     if group is None:
         return previous
-    if previous is not None and group != previous:
-        entry.gap = _gap_texts(node, previous, group)
+    if written is not None and previous is not None and group != previous:
+        entry.gap = _gap_texts(node, previous, group, written)
     return group
 
 
@@ -410,6 +452,7 @@ def _entries(
     extra = _NO_OTHERS if others is None else others
     extra.unmatched(node)
     previous: int | None = None  # the group of the last line drawn
+    written = None if others is None or isinstance(others, _NoOthers) else _Written()
     folds: dict[str, list[Row]] = {}
     for row in node.rows:
         if row.folded_into is not None:
@@ -447,7 +490,7 @@ def _entries(
         entry = _row_line(row, note, why=why, tally=tally, no_change=no_change)
         tally.names[entry.name] = tally.names.get(entry.name, 0) + 1
         entry.more = _more(row)
-        previous = _mark_gap(entry, node, previous, line_row.group)
+        previous = _mark_gap(entry, node, previous, line_row.group, written)
         entries.append(entry)
     return entries
 

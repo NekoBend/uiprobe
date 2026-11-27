@@ -2053,6 +2053,9 @@ def _align(chain: _Chain, read: _ReadList, known: dict[str, int]) -> dict[int, i
             mapping.setdefault(local, known[fingerprint])
     if not mapping:
         return {}
+    for local, found in mapping.items():  # a separator seen now names its group
+        if local and chain.text[found] is None:
+            chain.text[found] = read.seps[local - 1]
     last = len(read.seps)
     start = min(mapping)
     for local in range(start - 1, -1, -1):  # the groups above the first common one
@@ -2087,28 +2090,31 @@ def _assign_groups(
     nothing is changed, and the result is empty, when the screen has no
     separator.
 
-    Each read is grouped on its own (`_read_groups`). The first read gives the
-    groups. A later read must have the same list (class, resource id and
-    ancestry) and is lined up with the groups so far by the rows it shares with
-    them (`_align`); a read that cannot be lined up, or whose list is not that
-    one, or that has no recorded texts to tell rows apart, gives its rows no
-    group."""
+    Each read is grouped on its own (`_read_groups`). The first read that has a
+    list gives the groups. A later read must have the same list (class,
+    resource id and ancestry) and is lined up with the groups so far by the rows
+    it shares with them (`_align`); a read that cannot be lined up, or whose
+    list is not that one, or that has no recorded texts to tell rows apart,
+    gives its rows no group. A read before the first one with a list has no
+    list: its rows get the group of a row they share with the list, else none."""
     keyed = record_text and len(views) > 1
     reads = {
         key: _read_groups(s, record_text=record_text, keyed=keyed) for key, s in views
     }
-    first = reads[views[0][0]]
-    if first is None:
+    seed = next((n for n, (key, _) in enumerate(views) if reads[key] is not None), None)
+    if seed is None:
         return []
+    first = reads[views[seed][0]]
+    assert first is not None  # noqa: S101
     chain = _Chain()
     known: dict[str, int] = {}
     mapped: dict[int | None, dict[int, int]] = {}
     ids = [0]
     for text in first.seps:
         ids.append(chain.insert_after(ids[-1], text))
-    mapped[views[0][0]] = dict(enumerate(ids))
+    mapped[views[seed][0]] = dict(enumerate(ids))
     known.update((fp, ids[local]) for fp, local in first.keys)
-    for key, _ in views[1:]:
+    for key, _ in views[seed + 1 :]:
         read = reads[key]
         if read is None or read.identity != first.identity or not keyed:
             continue
@@ -2120,10 +2126,21 @@ def _assign_groups(
     if len(chain.text) == 1:
         return []
     final = chain.numbered()
+    earlier_reads = (
+        {key: (_Prints(s), {e.id: e for e in s.elements}) for key, s in views[:seed]}
+        if keyed
+        else {}
+    )
     for row in rows:
         mapping = mapped.get(row.view_key)
         read = reads.get(row.view_key)
         if mapping is None or read is None:
+            earlier = earlier_reads.get(row.view_key)
+            if earlier is not None:  # a read with no list: only a shared row
+                prints, by_id = earlier
+                element = by_id.get(row.element_id)
+                found = known.get(prints.of(element)) if element is not None else None
+                row.group = None if found is None else final[found]
             continue
         local = read.members.get(row.element_id)
         if local is not None:

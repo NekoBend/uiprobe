@@ -577,3 +577,74 @@ def test_a_merged_cut_off_row_takes_the_group_of_the_version_it_stands_at(tmp_pa
     assert cut.after_scroll is not None
     assert by_name(node) == {"A": 0, "B": 0, "Today": 1, "C": 1, "Cut": 1, "D": 1}
     assert node.groups == [None, "Today"]
+
+
+def test_an_anchored_group_takes_a_separator_text_seen_later(tmp_path):
+    node = scrolled(
+        tmp_path,
+        [("row", "B"), ("row", "C"), ("row", "D")],
+        [("row", "P"), ("sep", "X"), ("row", "B"), ("row", "C")],
+    )
+    assert node.groups == [None, "X"]
+    assert by_name(node) == {"B": 1, "C": 1, "D": 1, "P": 0, "X": 1}
+
+
+def test_a_short_first_read_does_not_disable_grouping(tmp_path):
+    node = scrolled(
+        tmp_path,
+        [("row", "A"), ("row", "B")],
+        [("row", "B"), ("sep", "X"), ("row", "C"), ("row", "D")],
+    )
+    assert node.groups == [None, "X"]
+    named = by_name(node)
+    assert named["A"] is None  # shares no row with the list
+    assert (named["B"], named["C"], named["D"]) == (0, 1, 1)
+
+
+def _long_screen(count):
+    from uiprobe.crawl_tree import Row, RunTree, ScreenNode
+
+    rows = [
+        Row(
+            element_id=f"e{n}",
+            kind="row",
+            class_name="x.Row",
+            name=f"r{n}",
+            texts=(f"r{n}",),
+            hidden=False,
+            name_from="text",
+            group=0 if n % 2 == 0 else count - 1,
+        )
+        for n in range(2 * count)
+    ]
+    node = ScreenNode(
+        "s-0", "p", None, rows, groups=[None, *[f"s{n}" for n in range(count - 1)]]
+    )
+    return RunTree(
+        package="p",
+        label=None,
+        started_at=None,
+        ended_at=None,
+        stop_reason=None,
+        actions=0,
+        finished=True,
+        record_text=True,
+        root="s-0",
+        screens={"s-0": node},
+        unreached=[],
+        warnings=[],
+    )
+
+
+def test_each_separator_gets_one_gap_line_and_only_the_html_makes_them():
+    from uiprobe.cli.tree import _NO_OTHERS, _entries, _Others, _Tally
+
+    tree = _long_screen(400)
+    html = _entries(tree, "s-0", ids=False, why=False, tally=_Tally(), others=_Others())
+    lines = sum(len(e.gap) for e in html if e.gap is not None)
+    assert 0 < lines <= 399  # at most one per separator, not one per crossing
+    for others in (None, _NO_OTHERS):
+        plain = _entries(
+            tree, "s-0", ids=False, why=False, tally=_Tally(), others=others
+        )
+        assert all(e.gap is None for e in plain)
