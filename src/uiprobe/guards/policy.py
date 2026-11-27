@@ -210,18 +210,19 @@ class Policy:
     equal a deny word (any of its forms).
 
     ``except_phrases`` (default ``()``) are exception phrases (the settings
-    file's ``[deny] except_phrases``): a clickable element whose name (the
-    first text of the element and its descendants, else the first content
-    description; see `uiprobe.guards.tree.row_name`) equals one of them after
-    `normalize` is let through for the deny words that occur inside that
-    phrase, wherever they hit in the element and its descendants (not in an
-    ancestor or another element). The other deny words, and every other
-    reason, still refuse it; its decision carries the phrase as written in
-    ``except_phrase``. The wheel scroll never turns over such an element
-    (`Judgement.unsafe`). Each phrase is 1 to 80 characters, with no control
-    or invisible character and at least one letter, and phrases must differ
-    after `normalize`. `with_deny_words` drops a phrase that holds an added
-    word.
+    file's ``[deny] except_phrases``). A clickable element with no clickable
+    descendant (and at most 500 elements), whose tap point is held by it or by
+    a descendant that is not clickable, and whose name equals one of them
+    after `normalize`, is let through for the deny words that occur inside
+    that phrase, in single texts of the element and its descendants. The name
+    is the first text (never a description) with some area on the display that
+    no element outside the row covers. Any other deny word, any hit involving
+    an element outside the row and every other reason still refuse it; its
+    decision carries the phrase as written in ``except_phrase``. The wheel
+    scroll never turns over such an element (`Judgement.unsafe`). Each phrase
+    is 1 to 80 characters, with no control or invisible character and at least
+    one letter, and phrases must differ after `normalize`. `with_deny_words`
+    drops a phrase that holds an added word.
 
     ``back_on_other_screens`` (default False) is read by the pressing crawl
     only, not by `judge`. True lets the crawl press BACK while a screen of

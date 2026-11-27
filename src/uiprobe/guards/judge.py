@@ -23,7 +23,7 @@ from uiprobe.guards.constants import (
     PERMISSION_PACKAGES,
     Reason,
 )
-from uiprobe.guards.matching import _Matcher, _PhraseMatcher, hit_owners
+from uiprobe.guards.matching import _Matcher, _PhraseMatcher
 from uiprobe.guards.policy import (
     Decision,
     Detail,
@@ -52,7 +52,6 @@ from uiprobe.guards.tree import (
     _is_text_field,
     _merge,
     _Tree,
-    row_name,
 )
 from uiprobe.guards.words import (
     _clean,
@@ -91,6 +90,8 @@ class _Judge:
         self._phrases = {normalize(phrase): phrase for phrase in policy.except_phrases}
         self._reduced: dict[frozenset[str], _Matcher] = {}
         self._word_matchers: dict[str, _Matcher] = {}
+        self._reduced_joined_cache: dict[tuple[int, frozenset[str]], str | None] = {}
+        self._owners_cache: dict[tuple[int, str], list[frozenset[int]] | None] = {}
         self.tree = _Tree(screen)
         self.elements = screen.elements
         self.matcher = _Matcher(policy.deny_words, policy.deny_exceptions)
@@ -840,33 +841,53 @@ class _Judge:
             )
         return matcher
 
+    def _phrase_name(self, members: list[int]) -> str:
+        """The name a phrase is compared with: the first text (stripped) in the
+        row, in document order, that is on the display (any non-empty part, not
+        `min_visible_px`) and not covered (the element on top of its center is
+        inside the row). Descriptions never name a row for a phrase."""
+        inside = frozenset(members)
+        for j in members:
+            text = self.elements[j].text.strip()
+            if not text:
+                continue
+            part = self.screen._clip(self.elements[j])  # noqa: SLF001
+            if part is not None and self.topmost(part.center) in inside:
+                return text
+        return ""
+
     def _excusing_phrase(self, i: int) -> tuple[str, Detail | None]:
         """Return the exception phrase that lets candidate `i` through its deny
         words, or ``""`` (the common case, and always without phrases), with
         the detail of the deny hit that still refuses it when a phrase was
         tried and did not suffice.
 
-        The name is the first text with a part on the display (else the first
-        such description) in full document order over the candidate and all
-        its descendants; a row of more than `ROW_NAME_MEMBERS` elements gets no
-        phrase. It must equal a phrase after `normalize`. The deny words that
-        occur inside the phrase are the excused ones. Nothing is judged again:
-        the hits of the original match data in the candidate's deny scope are
-        walked, and the candidate is let through only when every hit is
-        excused, that is, it is a hit of an excused word and every element it
-        comes from is inside the row. A hit in the own fields of an element
-        outside the row, a hit of another word anywhere, and a joined hit of a
-        subtree that is not inside the row count (for a joined text of an
-        ancestor, the hit is traced to the texts it is made of; one that
-        cannot be traced counts).
+        A phrase applies only to a row with no clickable descendant, of at most
+        `ROW_NAME_MEMBERS` elements, whose tap point is held by the row itself
+        or a descendant that is not clickable, and whose name (`_phrase_name`)
+        equals the phrase after `normalize`. The deny words occurring inside
+        the phrase are excused, and only in the own fields of the elements
+        inside the row, one element at a time. Nothing is judged again: the hits
+        of the original match data in the deny scope are walked, and any hit
+        that involves an element outside the row, any hit of another word, and
+        any joined hit that is not made of one text of the row (or cannot be
+        traced) refuses the row, as without the phrase.
         """
         if not self._phrases:
             return "", None
         members = self.tree.subtree(i)
-        if len(members) > ROW_NAME_MEMBERS:
+        visible = self.visible[i]
+        if (
+            len(members) > ROW_NAME_MEMBERS
+            or visible is None
+            or any(self.clickable[j] for j in members[1:])
+        ):
             return "", None
-        name = row_name(self.elements, members, lambda j: self.visible[j] is not None)
-        phrase = self._phrases.get(normalize(name), "")
+        inside = frozenset(members)
+        top = self.topmost(visible.center)
+        if top != i and (top not in inside or self.clickable[top]):
+            return "", None
+        phrase = self._phrases.get(normalize(self._phrase_name(members)), "")
         phrase_forms = _forms(phrase)
         excused = frozenset(
             word
@@ -875,20 +896,16 @@ class _Judge:
         )
         if not excused:
             return "", None
-        inside = frozenset(members)
         reduced = self._reduced.get(excused)
         if reduced is None:
             reduced = self._reduced[excused] = _Matcher(
                 [w for w in self.policy.deny_words if w not in excused],
                 self.policy.deny_exceptions,
             )
-        visible = self.visible[i]
-        targets = {i}
-        if visible is not None:
-            targets.update(self._hit_targets(visible.center))
+        targets = {i, *self._hit_targets(visible.center)}
         refusing = self._own_refusal(targets, inside, reduced)
         if refusing is None:
-            refusing = self._joined_refusals(targets, i, inside, excused, reduced)
+            refusing = self._joined_refusals(targets, inside, excused, reduced)
         return ("", refusing) if refusing is not None else (phrase, None)
 
     def _own_refusal(
@@ -921,7 +938,6 @@ class _Judge:
     def _joined_refusals(
         self,
         targets: set[int],
-        i: int,
         inside: frozenset[int],
         excused: frozenset[str],
         reduced: _Matcher,
@@ -941,57 +957,67 @@ class _Judge:
         for c in sorted(candidates):
             if self.joined_hit(c) is None:
                 continue
-            if c in inside:
-                # Every text of it is the row's: only a word that is not
-                # excused can still refuse.
-                texts = [self.elements[j] for j in tree.subtree(c)]
-                word = self._joined_word(texts, reduced)
-                refusing = None if word is None else self._joined_detail(word, c)
-            else:
-                refusing = self._joined_refusal(c, i, inside, excused)
-            if refusing is not None:
-                return refusing
+            word = self._reduced_joined(c, excused, reduced)
+            if word is None:
+                for excused_word in sorted(excused):
+                    owners = self._joined_owners(c, excused_word)
+                    if owners is None or any(
+                        len(owned) != 1 or not owned <= inside for owned in owners
+                    ):
+                        word = excused_word
+                        break
+            if word is not None:
+                return Detail(
+                    "deny_word",
+                    word=word,
+                    field="joined",
+                    element_id=self.elements[c].id,
+                )
         return None
 
-    def _joined_refusal(
-        self, c: int, i: int, inside: frozenset[int], excused: frozenset[str]
-    ) -> Detail | None:
-        """The detail of a joined hit of the clickable `c` (outside the row, with
-        a hit in its joined subtree text) that is not excused, or None."""
-        tree = self.tree
-        members = tree.subtree(c)
-        elements = [self.elements[j] for j in members]
-        contains_row = tree.tin[c] <= tree.tin[i] < tree.tin[c] + tree.size[c]
-        for word in self.policy.deny_words:
-            if self._joined_word(elements, self._word_matcher(word)) is None:
-                continue
-            if word not in excused or not contains_row:
-                return self._joined_detail(word, c)
+    def _reduced_joined(
+        self, c: int, excused: frozenset[str], reduced: _Matcher
+    ) -> str | None:
+        """The word that is not excused found in the joined text of the subtree
+        of `c` (computed once per subtree and phrase)."""
+        key = (c, excused)
+        if key not in self._reduced_joined_cache:
+            elements = [self.elements[j] for j in self.tree.subtree(c)]
+            self._reduced_joined_cache[key] = self._joined_word(elements, reduced)
+        return self._reduced_joined_cache[key]
+
+    def _joined_owners(self, c: int, word: str) -> list[frozenset[int]] | None:
+        """The owners of every occurrence of `word` that counts in the joined
+        texts of the subtree of `c` (None: not traceable); computed once."""
+        key = (c, word)
+        if key not in self._owners_cache:
             lists: tuple[tuple[list[str], list[int]], ...] = (
                 ([], []),
                 ([], []),
                 ([], []),
             )
-            for j in members:
+            for j in self.tree.subtree(c):
                 element = self.elements[j]
-                for kind, value in ((0, element.text), (1, element.content_desc)):
-                    if not value:
-                        continue
-                    for index in (0, 1) if kind == 0 else (0, 2):
-                        lists[index][0].append(value)
-                        lists[index][1].append(j)
+                for value, indexes in (
+                    (element.text, (0, 1)),
+                    (element.content_desc, (0, 2)),
+                ):
+                    if value:
+                        for index in indexes:
+                            lists[index][0].append(value)
+                            lists[index][1].append(j)
+            matcher = self._word_matcher(word)
+            found: list[frozenset[int]] | None = []
             for strings, owners in lists:
                 if not strings:
                     continue
-                traced = hit_owners(strings, owners, word)
-                if traced is None or any(not owned <= inside for owned in traced):
-                    return self._joined_detail(word, c)
-        return None
-
-    def _joined_detail(self, word: str, c: int) -> Detail:
-        return Detail(
-            "deny_word", word=word, field="joined", element_id=self.elements[c].id
-        )
+                traced = matcher.surviving_owners(strings, owners, word)
+                if traced is None or found is None:
+                    found = None
+                    break
+                found.extend(traced)
+            self._owners_cache[key] = found
+        return self._owners_cache[key]
 
     def unsafe_ids(self) -> frozenset[str]:
         """The ids of every element of the screen, clickable or not, that the tap
@@ -1248,11 +1274,13 @@ def judge(
       or hint, or in one field's value inside a joined text with real
       boundaries around it, does not count (see the module docstring); the
       resource id has no exceptions.
-      A candidate whose name equals a phrase of ``policy.except_phrases`` (see
-      `Policy`) is not refused for the deny words inside that phrase when
-      they are found in the candidate or its descendants only; ``Decision``
-      then has ``except_phrase``. Any other deny word, or an excused word
-      found elsewhere in the scope, still gives ``deny_word``.
+      A candidate that is a plain row (no clickable descendant, at most 500
+      elements, its tap point held by it or by a non-clickable descendant)
+      whose first visible, uncovered text equals a phrase of
+      ``policy.except_phrases`` (see `Policy`) is not refused for the deny
+      words inside that phrase when every hit of them is in single texts of the
+      row; ``Decision`` then has ``except_phrase``. Any other deny word, or a
+      hit involving an element outside the row, still gives ``deny_word``.
     * ``irreversible_screen``: the text, content description or hint of any
       element of the screen holds a phrase of ``policy.irreversible_phrases``
       (unless ``skip_irreversible`` is False). Every candidate gets it. The

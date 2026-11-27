@@ -7,7 +7,7 @@ from typing import Any
 
 import pytest
 
-from tests.guards.helpers import PKG, decision, el, make_screen, root, run
+from tests.guards.helpers import BUTTON, PKG, decision, el, make_screen, root, run
 from uiprobe.crawl_tree import _rows_of
 from uiprobe.guards import PERMISSION_PACKAGES, Policy, judge, scroll_target
 from uiprobe.model import Bounds
@@ -98,11 +98,11 @@ def test_the_phrase_only_inside_the_summary_does_not_count() -> None:
     assert d.except_phrase == ""
 
 
-def test_a_name_from_the_description_counts_when_there_is_no_text() -> None:
+def test_a_description_never_names_a_row() -> None:
     elements = [el("e2", cls=ROW, bounds=ROW_BOUNDS, desc="Quick Share")]
     d = verdict(elements)
-    assert d.reasons == ()
-    assert d.except_phrase == "Quick Share"
+    assert "deny_word" in d.reasons
+    assert d.except_phrase == ""
 
 
 def test_a_visible_text_wins_over_the_description() -> None:
@@ -262,8 +262,12 @@ def test_the_screen_edge_stays() -> None:
 
 
 def test_a_covered_row_stays_covered() -> None:
-    cover = el("e9", parent="e1", cls=TEXT, flags=(), text="Hello", bounds=ROW_BOUNDS)
-    assert "covered" in reasons_of([cover])
+    cover = el(
+        "e9", parent="e1", cls=TEXT, flags=(), text="Hello", bounds=(150, 145, 170, 155)
+    )
+    d = verdict(row(extra=[cover]))
+    assert "covered" in d.reasons
+    assert d.except_phrase == ""  # the tap's recipient is not the row: no phrase
 
 
 def test_a_permission_screen_stays_refused() -> None:
@@ -391,7 +395,6 @@ def test_the_tree_names_the_row_as_the_judge_does() -> None:
     cases = [
         row("Quick Share", "Summary"),
         row("", "Second"),
-        row("  ", "", desc="By description"),
         row("Settings", "x", desc="Other"),
     ]
     words = ("share", "second", "description", "settings")
@@ -400,7 +403,7 @@ def test_the_tree_names_the_row_as_the_judge_does() -> None:
         (tree_row,) = (
             r for r in _rows_of(screen, set(), record_text=True) if r.kind == "row"
         )
-        assert tree_row.name_from in ("text", "content_desc")
+        assert tree_row.name_from == "text"
         policy = Policy(deny_words=words, except_phrases=(tree_row.name,))
         got = judge(screen, PKG, policy, foreground=PKG)
         assert decision(got, "e2").except_phrase == tree_row.name, tree_row.name
@@ -568,3 +571,188 @@ def test_judging_a_screen_with_many_phrase_rows_is_one_summary(monkeypatch) -> N
         "deny_word" not in d.reasons and d.except_phrase == "Share (.*)"
         for d in got.decisions
     )
+
+
+# -- the narrow rule: no buttons inside, a visible uncovered text names the row -------
+
+
+def test_a_row_with_a_clickable_descendant_gets_no_phrase() -> None:
+    # A centred clickable child labelled by a confirm word keeps its own
+    # refusal; the parent must not be approved for a tap that lands on it.
+    child = el("e5", parent="e2", cls=BUTTON, bounds=(100, 120, 220, 180), text="確認")
+    d = verdict(row("Quick Share", extra=[child]))
+    assert "deny_word" in d.reasons
+    assert d.except_phrase == ""
+
+
+def test_the_tap_recipient_must_be_the_row_or_a_plain_descendant() -> None:
+    d = verdict(row())
+    assert d.except_phrase == "Quick Share"  # the name text holds the point
+    over = el(
+        "e9", parent="e1", cls=TEXT, flags=(), text="x", bounds=(150, 145, 170, 155)
+    )
+    assert verdict(row(extra=[over])).except_phrase == ""
+
+
+def test_a_small_title_still_names_the_row_but_a_description_does_not() -> None:
+    policy = Policy(min_visible_px=32, except_phrases=("Quick Share",))
+    elements = [
+        el("e2", cls=ROW, bounds=ROW_BOUNDS, desc="Quick Share"),
+        el(
+            "e3",
+            parent="e2",
+            cls=TEXT,
+            flags=(),
+            text="Share all",
+            bounds=(10, 100, 310, 124),
+        ),
+    ]
+    d = verdict(elements, policy)
+    assert "deny_word" in d.reasons
+    assert d.except_phrase == ""
+
+
+def test_a_covered_title_does_not_name_the_row() -> None:
+    elements = [
+        el("e2", cls=ROW, bounds=ROW_BOUNDS),
+        el(
+            "e3",
+            parent="e2",
+            cls=TEXT,
+            flags=(),
+            text="Quick Share",
+            bounds=(10, 100, 310, 140),
+        ),
+        el(
+            "e4",
+            parent="e2",
+            cls=TEXT,
+            flags=(),
+            text="Share all",
+            bounds=(10, 150, 310, 190),
+        ),
+        el(
+            "e9",
+            parent="e1",
+            cls=TEXT,
+            flags=(),
+            text="Cover",
+            bounds=(0, 100, 320, 145),
+        ),
+    ]
+    d = verdict(elements)
+    assert "deny_word" in d.reasons
+    assert d.except_phrase == ""
+
+
+def test_a_text_with_no_area_does_not_name_the_row() -> None:
+    elements = [
+        el("e2", cls=ROW, bounds=ROW_BOUNDS),
+        el(
+            "e3",
+            parent="e2",
+            cls=TEXT,
+            flags=(),
+            text="Quick Share",
+            bounds=(10, 100, 10, 140),
+        ),
+        el(
+            "e4",
+            parent="e2",
+            cls=TEXT,
+            flags=(),
+            text="Share all",
+            bounds=(10, 150, 310, 190),
+        ),
+    ]
+    assert "deny_word" in verdict(elements).reasons
+
+
+def test_a_thin_but_drawn_title_names_the_row() -> None:
+    elements = [
+        el("e2", cls=ROW, bounds=ROW_BOUNDS),
+        el(
+            "e3",
+            parent="e2",
+            cls=TEXT,
+            flags=(),
+            text="Quick Share",
+            bounds=(10, 100, 310, 104),
+        ),
+    ]
+    assert verdict(elements).except_phrase == "Quick Share"
+
+
+def test_a_word_made_of_two_texts_of_the_row_is_not_excused() -> None:
+    d = verdict(
+        row(
+            "Quick Share",
+            extra=[
+                el(
+                    "e5",
+                    parent="e2",
+                    cls=TEXT,
+                    flags=(),
+                    text="Sha",
+                    bounds=(10, 150, 100, 170),
+                ),
+                el(
+                    "e6",
+                    parent="e2",
+                    cls=TEXT,
+                    flags=(),
+                    text="re",
+                    bounds=(110, 150, 200, 170),
+                ),
+            ],
+        )
+    )
+    assert "deny_word" in d.reasons
+    assert d.except_phrase == ""
+
+
+def test_only_occurrences_that_survive_exceptions_count_in_a_parent() -> None:
+    words: dict[str, Any] = {
+        "deny_words": ("order",),
+        "deny_exceptions": ("recorder",),
+        "except_phrases": ("Order details",),
+    }
+    d = nested("Recorder.", "Order details", policy=Policy(**words))
+    assert d.reasons == ()
+    assert d.except_phrase == "Order details"
+    d = nested("Order now", "Order details", policy=Policy(**words))
+    assert "deny_word" in d.reasons
+
+
+def test_a_parent_with_many_labels_costs_one_extra_match(monkeypatch) -> None:
+    from uiprobe.guards.judge import _Judge
+
+    calls = []
+    original = _Judge._joined_word
+
+    def counting(self, *args, **kwargs):
+        calls.append(1)
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(_Judge, "_joined_word", counting)
+    elements = [
+        el("e2", cls=ROW, bounds=(0, 30, 320, 600), text="Parent"),
+        el("e3", parent="e2", cls=ROW, bounds=(10, 40, 310, 60), text="Share (.*)"),
+    ]
+    elements += [
+        el(
+            f"l{n}",
+            parent="e2",
+            cls=TEXT,
+            flags=(),
+            text=f"Label {n}",
+            bounds=(10, 70 + n * 5, 310, 74 + n * 5),
+        )
+        for n in range(100)
+    ]
+    run(elements, policy=Policy())
+    base = len(calls)
+    calls.clear()
+    got = run(elements, policy=Policy(except_phrases=("Share (.*)",)))
+    assert len(calls) <= base + 2
+    assert decision(got, "e3").except_phrase == "Share (.*)"

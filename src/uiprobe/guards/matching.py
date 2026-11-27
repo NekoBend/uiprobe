@@ -378,42 +378,6 @@ def _part_at(starts: Sequence[int], index: int) -> int:
     return max(sum(1 for start in starts if start <= index) - 1, 0)
 
 
-def hit_owners(
-    parts: Sequence[str], owners: Sequence[int], word: str
-) -> list[frozenset[int]] | None:
-    """Return, for every occurrence of the deny `word` in the joined text of
-    the field values `parts` (both readings of `_Joined`, no exception word
-    applied), the set of owners (`owners[k]` owns `parts[k]`) of the values it
-    touches; None when an occurrence cannot be traced, so the caller must
-    count it as touching everything."""
-    word_forms = _forms(word)
-    found: list[frozenset[int]] = []
-    seen: set[str] = set()
-    for separators in ([" "] * len(parts), _tight_separators(parts)):
-        separators[0] = ""
-        text, starts = _join(parts, separators)
-        if text in seen:
-            continue
-        seen.add(text)
-        traced = _original_forms(text)
-        if traced is None:
-            if _forms_match(word_forms, _forms(text)):
-                return None
-            continue
-        for form, sources in traced:
-            for word_form in word_forms:
-                if not word_form:
-                    continue
-                at = form.find(word_form)
-                while at != -1:
-                    span = sources[at : at + len(word_form)]
-                    first = _part_at(starts, min(span))
-                    last = _part_at(starts, max(span))
-                    found.append(frozenset(owners[max(first, 0) : last + 1]))
-                    at = form.find(word_form, at + 1)
-    return found
-
-
 def _id_name(resource_id: str) -> str:
     """Return the part of a resource id after ``:id/`` (all of it if none)."""
     _, separator, name = resource_id.partition(_ID_SEPARATOR)
@@ -444,6 +408,44 @@ class _Matcher:
     def excuses(self) -> bool:
         """True when there are exception words."""
         return bool(self._excuser.keys)
+
+    def surviving_owners(
+        self, parts: Sequence[str], owners: Sequence[int], word: str
+    ) -> list[frozenset[int]] | None:
+        """Return, for every occurrence of the deny `word` in the joined text of
+        `parts` that is not excused by an exception word (the occurrences that
+        count, see `_Joined`), the owners (`owners[k]` owns `parts[k]`) of the
+        values it touches; None when an occurrence cannot be traced, so the
+        caller must count it as touching everything."""
+        word_forms = _forms(word)
+        builtin = _is_builtin_word(word)
+        joined = _Joined(parts, self._excuser)
+        spans = joined._exception_spans() if self._excuser.keys else []  # noqa: SLF001
+        found: list[frozenset[int]] = []
+        for text, field_forms, starts in joined._readings:  # noqa: SLF001
+            if not _forms_match(word_forms, field_forms):
+                continue
+            usable = [
+                (starts[i] + a, starts[i] + b)
+                for i, a, b, own in spans
+                if builtin or not own
+            ]
+            traced = _original_forms(text)
+            if traced is None:
+                return None
+            for form, sources in traced:
+                for word_form in word_forms:
+                    if not word_form:
+                        continue
+                    at = form.find(word_form)
+                    while at != -1:
+                        span = sources[at : at + len(word_form)]
+                        low, high = min(span), max(span)
+                        if not any(a <= low and high < b for a, b in usable):
+                            first, last = _part_at(starts, low), _part_at(starts, high)
+                            found.append(frozenset(owners[first : last + 1]))
+                        at = form.find(word_form, at + 1)
+        return found
 
     def match_joined(self, parts: Sequence[str]) -> str | None:
         """Return the first deny word that counts in the joined text of the

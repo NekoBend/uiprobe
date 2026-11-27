@@ -17,7 +17,7 @@ from uiprobe.guards.words import _is_japanese_letter, _strip_invisible
 from uiprobe.model import Bounds  # noqa: TC001 (a runtime import in the former guards.py)
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterable, Sequence
+    from collections.abc import Callable, Iterable
 
     from uiprobe.model import Element, Screen
 
@@ -108,27 +108,6 @@ def row_members(i: int, children: Callable[[int], Iterable[int]]) -> list[int]:
                 found.append(child)
                 stack.append(child)
     return sorted(found)[:ROW_NAME_MEMBERS]
-
-
-def row_name(
-    elements: Sequence[Element],
-    members: Iterable[int],
-    shown: Callable[[int], bool] | None = None,
-) -> str:
-    """Return the name of a row: the first text (stripped) that is not empty
-    among its `members` in the order given, else the first content description
-    (stripped) that is not empty, else ``""``. With `shown`, only members for
-    which it is True are read (the judge passes "has a part on the display").
-    Without it this is the name `uiprobe tree` shows, apart from its
-    placeholders for a password row and for a run that recorded no text."""
-    found = [j for j in members if shown is None or shown(j)]
-    for j in found:
-        if text := elements[j].text.strip():
-            return text
-    for j in found:
-        if desc := elements[j].content_desc.strip():
-            return desc
-    return ""
 
 
 def _is_slider(element: Element) -> bool:

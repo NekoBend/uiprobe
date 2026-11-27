@@ -78,12 +78,12 @@ both ``words`` and ``except``.
 
 ``[deny] except_phrases`` holds exception phrases (`Policy.except_phrases`),
 optional like ``except`` and empty by default, so it needed no defaults
-version either: an element whose name (its first text, else its description,
-as ``uiprobe tree`` names a row) equals a phrase after `normalize` is let
-through for the deny words that occur inside the phrase, in that element and
-its descendants. Each phrase is 1 to 80 characters, has no control or
-invisible character and at least one letter, and two phrases that are equal
-after `normalize` are refused. ``uiprobe init`` writes the key as a comment
+version either: a plain row (no other button inside it) whose name (its first
+visible, uncovered text) equals a phrase after `normalize` is let through for
+the deny words that occur inside the phrase, in single texts of the row.
+Each phrase is 1 to 80 characters, has no control or invisible character and
+at least one letter, and two phrases that are equal after `normalize` are
+refused. ``uiprobe init`` writes the key as a comment
 (like ``also_target``), so a file it wrote still loads in an older uiprobe.
 
 An exception word must be one word of letters and digits without invisible
