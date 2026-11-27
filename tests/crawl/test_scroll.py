@@ -2628,3 +2628,140 @@ def test_the_old_largest_rule_still_stops_a_non_list_largest() -> None:
         settings_target(replace(screen, elements=(*screen.elements, big)), package)
         is None
     )
+
+
+# -- the one decoration allowed beside the list: an empty `round_corner` View ---------
+
+VIEW = "android.view.View"
+ROUND = f"{PKG}:id/round_corner"
+PAGE_SIDES = (10, 0, 310, 640)  # full height, a little narrower than the display
+
+
+def decoration(
+    *,
+    ident="e9",
+    cls=VIEW,
+    resource_id=ROUND,
+    bounds=PAGE_SIDES,
+    flags=(),
+    text="",
+    desc="",
+    hint="",
+    package=PKG,
+    parent="e1",
+    editable=False,
+):
+    return Element(
+        ident,
+        parent,
+        cls,
+        Bounds(*bounds),
+        text=text,
+        content_desc=desc,
+        hint=hint,
+        resource_id=resource_id,
+        package=package,
+        flags=tuple(flags),
+        editable=editable,
+    )
+
+
+def samsung_page(*extras, rows=("Row",)):
+    """A page container (the root) holding the list, with the decorations drawn
+    after the list, so on top of it."""
+    return list_screen(list(rows), row_flags=(), extras=extras)
+
+
+def test_a_round_corner_view_as_the_last_child_leaves_the_point() -> None:
+    screen = samsung_page(decoration())
+    assert any(e.id == "e9" for e in elements_at(screen, POINT))
+    container = scroll_container(screen)
+    assert container is not None
+    assert container.id == "e2"
+    assert target_of(screen) == ("e2", POINT)
+
+
+def test_a_full_screen_round_corner_copy_leaves_the_point() -> None:
+    copy = decoration(ident="e10", bounds=(0, 0, *DISPLAY))
+    screen = samsung_page(decoration(), copy)
+    assert target_of(screen) == ("e2", POINT)
+    assert target_of(samsung_page(copy)) == ("e2", POINT)
+
+
+def test_the_package_part_of_the_round_corner_id_is_flexible() -> None:
+    screen = samsung_page(decoration(resource_id="android:id/round_corner"))
+    assert target_of(screen) == ("e2", POINT)
+
+
+@pytest.mark.parametrize(
+    "flag", ["clickable", "focusable", "long_clickable", "scrollable", "checkable"]
+)
+def test_a_round_corner_view_with_a_flag_refuses_the_point(flag) -> None:
+    assert target_of(samsung_page(decoration(flags=(flag,)))) is None
+
+
+@pytest.mark.parametrize("field", ["text", "desc", "hint"])
+def test_a_round_corner_view_with_a_label_refuses_the_point(field) -> None:
+    assert target_of(samsung_page(decoration(**{field: "x"}))) is None
+
+
+def test_an_editable_round_corner_view_refuses_the_point() -> None:
+    assert target_of(samsung_page(decoration(editable=True))) is None
+
+
+def test_a_round_corner_view_with_a_child_refuses_the_point() -> None:
+    child = extra("e10", VIEW, (0, 0, 1, 1), parent="e9")
+    assert target_of(samsung_page(decoration(), child)) is None
+
+
+@pytest.mark.parametrize(
+    "resource_id",
+    [
+        f"{PKG}:id/round_corner2",
+        f"{PKG}:id/floating_toolbar_item_background_start_first",
+        f"{PKG}:id/Round_corner",
+        f"{PKG}:id/",
+        "round_corner",
+        f"{PKG}:round_corner",
+        "",
+    ],
+)
+def test_another_id_refuses_the_point(resource_id) -> None:
+    screen = samsung_page(decoration(resource_id=resource_id))
+    assert target_of(screen) is None
+
+
+@pytest.mark.parametrize(
+    "cls", ["android.widget.FrameLayout", "android.view.ViewGroup", "com.x.View"]
+)
+def test_another_class_refuses_a_round_corner_id(cls) -> None:
+    assert target_of(samsung_page(decoration(cls=cls))) is None
+
+
+def test_a_round_corner_view_of_another_package_refuses_the_point() -> None:
+    assert target_of(samsung_page(decoration(package=OTHER))) is None
+
+
+def test_a_round_corner_view_the_judge_refused_refuses_the_point() -> None:
+    from uiprobe.guards.scroll import _allowed
+
+    screen = samsung_page(decoration())
+    container = scroll_container(screen)
+    assert container is not None
+    view = next(e for e in screen.elements if e.id == "e9")
+    assert _allowed(screen, view, container, frozenset())
+    assert not _allowed(screen, view, container, frozenset({"e9"}))
+
+
+def test_a_deny_word_on_a_round_corner_view_refuses_the_point() -> None:
+    assert target_of(samsung_page(decoration(text="Delete"))) is None
+    assert target_of(samsung_page(decoration(desc="Delete all"))) is None
+
+
+def test_a_label_over_the_round_corner_view_still_has_to_be_in_the_list() -> None:
+    # the decoration is not labelled, so hit_target looks through it; a label
+    # drawn after it that is not inside the list still refuses the point
+    label = extra("e10", "android.widget.TextView", PAGE_SIDES, text="Title")
+    assert target_of(samsung_page(decoration(), label)) is None
+    inside = list_screen(["Row"], row_flags=(), extras=(decoration(),))
+    assert target_of(inside) == ("e2", POINT)

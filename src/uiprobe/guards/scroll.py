@@ -14,6 +14,8 @@ label classes. Anything else at the point (a spinner, a custom view, a second
 scrollable, a pager, a web view) disqualifies the point. A class an app derives
 from a plain layout and makes react to the wheel cannot be told from the plain
 one in the dump; that is the limit of this check.
+One decoration beside the list is let through by choice: Samsung's empty
+`round_corner` View (`_is_decoration`).
 """
 
 from __future__ import annotations
@@ -22,6 +24,9 @@ from typing import TYPE_CHECKING
 
 from uiprobe.guards.constants import (
     _CHECKABLE,
+    _ID_SEPARATOR,
+    DECORATION_CLASS,
+    DECORATION_IDS,
     PERMISSION_PACKAGES,
     SCROLL_CONTAINER_CLASSES,
     SCROLL_POINT_CLASSES,
@@ -110,6 +115,25 @@ def elements_at(screen: Screen, point: Point) -> list[Element]:
     return found
 
 
+def _is_decoration(screen: Screen, element: Element) -> bool:
+    """Whether the element is the one decoration allowed beside the list:
+    exactly `DECORATION_CLASS`, a resource id of the form ``<package>:id/<name>``
+    with a name in `DECORATION_IDS`, no flag at all, no text, description or
+    hint, not editable and no child element in the dump. (The checks of
+    `_allowed` for package, judge and deny words apply to it as to any element.)
+    """
+    _, separator, name = element.resource_id.partition(_ID_SEPARATOR)
+    return (
+        element.class_name == DECORATION_CLASS
+        and bool(separator)
+        and name in DECORATION_IDS
+        and not element.flags
+        and not (element.text or element.content_desc or element.hint)
+        and not element.editable
+        and not any(e.parent == element.id for e in screen.elements)
+    )
+
+
 def _allowed(
     screen: Screen,
     element: Element,
@@ -125,7 +149,8 @@ def _allowed(
     have a list container class, scrollable or not, or a plain class that is not
     scrollable: a ViewPager, a HorizontalScrollView or a plain layout flagged
     scrollable above the list is refused. Anything that is neither the container,
-    inside it nor above it is refused. In every place the element must not be
+    inside it nor above it is refused, with one exception: an empty decoration
+    view (`_is_decoration`). In every place the element must not be
     long-clickable, checkable, editable, a password field, a text field or refused
     by judge. A plain clickable row is allowed.
     """
@@ -144,7 +169,7 @@ def _allowed(
             or (element.class_name in SCROLL_POINT_CLASSES and not scrollable)
         ):
             return False
-    else:
+    elif not _is_decoration(screen, element):
         return False
     return not (
         element.id in refused_ids
