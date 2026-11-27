@@ -210,19 +210,20 @@ class Policy:
     equal a deny word (any of its forms).
 
     ``except_phrases`` (default ``()``) are exception phrases (the settings
-    file's ``[deny] except_phrases``). A clickable element with no clickable
-    descendant (and at most 500 elements), whose tap point is held by it or by
-    a descendant that is not clickable, and whose name equals one of them
-    after `normalize`, is let through for the deny words that occur inside
-    that phrase, in single texts of the element and its descendants. The name
-    is the first text (never a description) with some area on the display that
-    no element outside the row covers. Any other deny word, any hit involving
-    an element outside the row and every other reason still refuse it; its
-    decision carries the phrase as written in ``except_phrase``. The wheel
-    scroll never turns over such an element (`Judgement.unsafe`). Each phrase
-    is 1 to 80 characters, with no control or invisible character and at least
-    one letter, and phrases must differ after `normalize`. `with_deny_words`
-    drops a phrase that holds an added word.
+    file's ``[deny] except_phrases``). A plain clickable row (not
+    long-clickable, checkable, scrollable, editable or a text or password
+    field; nothing inside it clickable or any of those; at most 500 elements;
+    its tap point held by it or something inside it) whose only reason is
+    ``deny_word`` and whose name element (its first text with some area on the
+    display, with nothing covering its middle) equals a phrase after
+    `normalize` is judged once more with only that text replaced; with no
+    reason left it is let through, and its decision carries the phrase as
+    written in ``except_phrase``. With more than 8 such rows on a screen no
+    phrase applies. The wheel scroll never turns over such an element
+    (`Judgement.unsafe`). Each phrase is 1 to 80 characters, with no control
+    or invisible character and at least one letter, and phrases must differ
+    after `normalize`. `with_deny_words` drops a phrase that holds an added
+    word.
 
     ``back_on_other_screens`` (default False) is read by the pressing crawl
     only, not by `judge`. True lets the crawl press BACK while a screen of

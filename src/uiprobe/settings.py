@@ -79,8 +79,8 @@ both ``words`` and ``except``.
 ``[deny] except_phrases`` holds exception phrases (`Policy.except_phrases`),
 optional like ``except`` and empty by default, so it needed no defaults
 version either: a plain row (no other button inside it) whose name (its first
-visible, uncovered text) equals a phrase after `normalize` is let through for
-the deny words that occur inside the phrase, in single texts of the row.
+text) equals a phrase after `normalize`, and whose only reason is a deny word,
+is let through when it has no reason left with that name text taken out.
 Each phrase is 1 to 80 characters, has no control or invisible character and
 at least one letter, and two phrases that are equal after `normalize` are
 refused. ``uiprobe init`` writes the key as a comment

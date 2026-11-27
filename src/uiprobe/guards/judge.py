@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import TYPE_CHECKING, Literal
 
 from uiprobe.guards.constants import (
@@ -56,8 +57,6 @@ from uiprobe.guards.tree import (
 from uiprobe.guards.words import (
     _clean,
     _confirm_form,
-    _forms,
-    _forms_match,
     _has_content,
     _is_japanese_letter,
     _is_mark,
@@ -84,14 +83,8 @@ class _Judge:
     ) -> None:
         self.screen = screen
         self.policy = policy
-        self._target_package = target_package
-        self._foreground = foreground
         # The exception phrases by their normalized form (see `_excusing_phrase`).
         self._phrases = {normalize(phrase): phrase for phrase in policy.except_phrases}
-        self._reduced: dict[frozenset[str], _Matcher] = {}
-        self._word_matchers: dict[str, _Matcher] = {}
-        self._reduced_joined_cache: dict[tuple[int, frozenset[str]], str | None] = {}
-        self._owners_cache: dict[tuple[int, str], list[frozenset[int]] | None] = {}
         self.tree = _Tree(screen)
         self.elements = screen.elements
         self.matcher = _Matcher(policy.deny_words, policy.deny_exceptions)
@@ -712,13 +705,13 @@ class _Judge:
         if not self.policy.tap_unlabeled and not self.sub_labeled[i]:
             reasons.append("unlabeled")
         self._crawl_rules(i, point, reasons, details)
-        phrase = self._word_rules(i, found, reasons, details)
+        self._word_rules(found, reasons, details)
         if found[_CONFIRM] != _NONE:
             self._confirm_reasons(i, own, found, reasons, details)
         self._positive_button_reason(i, point, reasons, details)
         if point is not None and any(_contains(area, point) for area in self._avoid):
             reasons.append("screen_edge")
-        return Decision(element, point, tuple(reasons), tuple(details), phrase)
+        return Decision(element, point, tuple(reasons), tuple(details))
 
     def _crawl_rules(
         self,
@@ -801,223 +794,54 @@ class _Judge:
         return ""
 
     def _word_rules(
-        self, i: int, found: _Agg, reasons: list[Reason], details: list[Detail]
-    ) -> str:
-        """Add the ``deny_word`` and ``irreversible_screen`` reasons; return the
-        exception phrase that let the candidate through a deny word, or ``""``."""
-        phrase = ""
+        self, found: _Agg, reasons: list[Reason], details: list[Detail]
+    ) -> None:
+        """Add the ``deny_word`` and ``irreversible_screen`` reasons."""
         deny = self._deny_detail(found)
         if deny:
-            phrase, refusing = self._excusing_phrase(i)
-            if not phrase:
-                reasons.append("deny_word")
-                details.append(refusing or deny)
+            reasons.append("deny_word")
+            details.append(deny)
         irreversible = self.irreversible_detail()
         if irreversible is not None:
             reasons.append("irreversible_screen")
             details.append(irreversible)
-        return phrase
 
-    def _hit_targets(self, point: tuple[int, int]) -> list[int]:
-        """The elements whose visible part holds the point (as `point_aggregate`)."""
-        grid = self.grid
-        key = grid.cell(point)
-        x, y = point
-        return [
-            *grid.everywhere,
-            *grid.full.get(key, ()),
-            *(
-                i
-                for i, rect in grid.partial.get(key, ())
-                if rect.left <= x < rect.right and rect.top <= y < rect.bottom
-            ),
-        ]
+    def phrase_candidate(self, i: int) -> tuple[str, int] | None:
+        """Return ``(phrase, name index)`` when candidate `i` is a row an
+        exception phrase may let through (see `_apply_phrases`), else None.
 
-    def _word_matcher(self, word: str) -> _Matcher:
-        matcher = self._word_matchers.get(word)
-        if matcher is None:
-            matcher = self._word_matchers[word] = _Matcher(
-                [word], self.policy.deny_exceptions
-            )
-        return matcher
-
-    def _phrase_name(self, members: list[int]) -> str:
-        """The name a phrase is compared with: the first text (stripped) in the
-        row, in document order, that is on the display (any non-empty part, not
-        `min_visible_px`) and not covered (the element on top of its center is
-        inside the row). Descriptions never name a row for a phrase."""
-        inside = frozenset(members)
-        for j in members:
-            text = self.elements[j].text.strip()
-            if not text:
-                continue
-            part = self.screen._clip(self.elements[j])  # noqa: SLF001
-            if part is not None and self.topmost(part.center) in inside:
-                return text
-        return ""
-
-    def _excusing_phrase(self, i: int) -> tuple[str, Detail | None]:
-        """Return the exception phrase that lets candidate `i` through its deny
-        words, or ``""`` (the common case, and always without phrases), with
-        the detail of the deny hit that still refuses it when a phrase was
-        tried and did not suffice.
-
-        A phrase applies only to a row with no clickable descendant, of at most
-        `ROW_NAME_MEMBERS` elements, whose tap point is held by the row itself
-        or a descendant that is not clickable, and whose name (`_phrase_name`)
-        equals the phrase after `normalize`. The deny words occurring inside
-        the phrase are excused, and only in the own fields of the elements
-        inside the row, one element at a time. Nothing is judged again: the hits
-        of the original match data in the deny scope are walked, and any hit
-        that involves an element outside the row, any hit of another word, and
-        any joined hit that is not made of one text of the row (or cannot be
-        traced) refuses the row, as without the phrase.
+        The row must be plain: it is not long-clickable, checkable,
+        scrollable, editable or a text or password field, none of its
+        descendants is clickable or any of those, and it has at most
+        `ROW_NAME_MEMBERS` elements. The element on top of its tap point is the
+        row or one of its descendants. Its name element N is the first element
+        in document order with a text and some area on the display (not
+        `min_visible_px`); N's text must equal a phrase after `normalize`, and
+        N itself must be the topmost meaningful element at N's center.
         """
-        if not self._phrases:
-            return "", None
-        members = self.tree.subtree(i)
+        tree = self.tree
+        members = tree.subtree(i)
         visible = self.visible[i]
         if (
             len(members) > ROW_NAME_MEMBERS
             or visible is None
-            or any(self.clickable[j] for j in members[1:])
+            or _interactive(self.elements[i], clickable_ok=True)
+            or any(_interactive(self.elements[j]) for j in members[1:])
         ):
-            return "", None
-        inside = frozenset(members)
+            return None
         top = self.topmost(visible.center)
-        if top != i and (top not in inside or self.clickable[top]):
-            return "", None
-        phrase = self._phrases.get(normalize(self._phrase_name(members)), "")
-        phrase_forms = _forms(phrase)
-        excused = frozenset(
-            word
-            for word in self.policy.deny_words
-            if phrase and _forms_match(_forms(word), phrase_forms)
-        )
-        if not excused:
-            return "", None
-        reduced = self._reduced.get(excused)
-        if reduced is None:
-            reduced = self._reduced[excused] = _Matcher(
-                [w for w in self.policy.deny_words if w not in excused],
-                self.policy.deny_exceptions,
-            )
-        targets = {i, *self._hit_targets(visible.center)}
-        refusing = self._own_refusal(targets, inside, reduced)
-        if refusing is None:
-            refusing = self._joined_refusals(targets, inside, excused, reduced)
-        return ("", refusing) if refusing is not None else (phrase, None)
-
-    def _own_refusal(
-        self, targets: set[int], inside: frozenset[int], reduced: _Matcher
-    ) -> Detail | None:
-        """A hit in the own fields of the deny scope that is not excused: of an
-        element outside the row, or of a word that is not excused."""
-        tree = self.tree
-        scope: set[int] = set()
-        for t in targets:
-            scope.add(t)
-            if self.clickable[t]:
-                scope.update(tree.subtree(t))
-            up = tree.parent[t]
-            while up != -1:
-                if self.clickable[up]:
-                    scope.update(tree.subtree(up))
-                up = tree.parent[up]
-        for e in sorted(scope):
-            hit = reduced.match(self.elements[e]) if e in inside else self.own_hit[e]
-            if hit:
-                return Detail(
-                    "deny_word",
-                    word=hit[0],
-                    field=hit[1],
-                    element_id=self.elements[e].id,
-                )
-        return None
-
-    def _joined_refusals(
-        self,
-        targets: set[int],
-        inside: frozenset[int],
-        excused: frozenset[str],
-        reduced: _Matcher,
-    ) -> Detail | None:
-        """A joined-text hit of the deny scope that is not excused."""
-        tree = self.tree
-        candidates: set[int] = set()
-        for t in targets:
-            root = self.top[t]
-            if root == -1:
+        if not tree.tin[i] <= tree.tin[top] < tree.tin[i] + tree.size[i]:
+            return None
+        for j in members:
+            text = self.elements[j].text
+            part = self.screen._clip(self.elements[j])  # noqa: SLF001
+            if not text.strip() or part is None:
                 continue
-            candidates.add(root)
-            if self.matcher.excuses:
-                candidates.update(
-                    j for j in tree.subtree(root)[1:] if self.clickable[j]
-                )
-        for c in sorted(candidates):
-            if self.joined_hit(c) is None:
-                continue
-            word = self._reduced_joined(c, excused, reduced)
-            if word is None:
-                for excused_word in sorted(excused):
-                    owners = self._joined_owners(c, excused_word)
-                    if owners is None or any(
-                        len(owned) != 1 or not owned <= inside for owned in owners
-                    ):
-                        word = excused_word
-                        break
-            if word is not None:
-                return Detail(
-                    "deny_word",
-                    word=word,
-                    field="joined",
-                    element_id=self.elements[c].id,
-                )
+            phrase = self._phrases.get(normalize(text), "")
+            if phrase and self.topmost(part.center) == j:
+                return phrase, j
+            return None
         return None
-
-    def _reduced_joined(
-        self, c: int, excused: frozenset[str], reduced: _Matcher
-    ) -> str | None:
-        """The word that is not excused found in the joined text of the subtree
-        of `c` (computed once per subtree and phrase)."""
-        key = (c, excused)
-        if key not in self._reduced_joined_cache:
-            elements = [self.elements[j] for j in self.tree.subtree(c)]
-            self._reduced_joined_cache[key] = self._joined_word(elements, reduced)
-        return self._reduced_joined_cache[key]
-
-    def _joined_owners(self, c: int, word: str) -> list[frozenset[int]] | None:
-        """The owners of every occurrence of `word` that counts in the joined
-        texts of the subtree of `c` (None: not traceable); computed once."""
-        key = (c, word)
-        if key not in self._owners_cache:
-            lists: tuple[tuple[list[str], list[int]], ...] = (
-                ([], []),
-                ([], []),
-                ([], []),
-            )
-            for j in self.tree.subtree(c):
-                element = self.elements[j]
-                for value, indexes in (
-                    (element.text, (0, 1)),
-                    (element.content_desc, (0, 2)),
-                ):
-                    if value:
-                        for index in indexes:
-                            lists[index][0].append(value)
-                            lists[index][1].append(j)
-            matcher = self._word_matcher(word)
-            found: list[frozenset[int]] | None = []
-            for strings, owners in lists:
-                if not strings:
-                    continue
-                traced = matcher.surviving_owners(strings, owners, word)
-                if traced is None or found is None:
-                    found = None
-                    break
-                found.extend(traced)
-            self._owners_cache[key] = found
-        return self._owners_cache[key]
 
     def unsafe_ids(self) -> frozenset[str]:
         """The ids of every element of the screen, clickable or not, that the tap
@@ -1177,6 +1001,74 @@ def _contains(bounds: Bounds, point: tuple[int, int]) -> bool:
     return bounds.left <= x < bounds.right and bounds.top <= y < bounds.bottom
 
 
+# Flags (and kinds of element) that make a row or what is inside it more than a
+# plain label for `[deny] except_phrases`.
+_INTERACTIVE = frozenset(
+    {_CLICKABLE, _CHECKABLE, _PASSWORD, "long_clickable", "scrollable"}
+)
+# What replaces the name text when a phrase is tried: a label with no deny word,
+# so that the label rules (unlabeled, number_only) decide as before.
+_PLACEHOLDER = "\u00b7"
+MAX_PHRASE_CANDIDATES = 8
+
+
+def _interactive(element: Element, *, clickable_ok: bool = False) -> bool:
+    """True for an element that is more than a plain label: long-clickable,
+    checkable, scrollable, editable or a text or password field, and, unless
+    `clickable_ok`, clickable."""
+    flags = _INTERACTIVE - {_CLICKABLE} if clickable_ok else _INTERACTIVE
+    return (
+        any(flag in element.flags for flag in flags)
+        or element.editable
+        or _is_text_field(element)
+    )
+
+
+def _apply_phrases(
+    state: _Judge,
+    decisions: tuple[Decision, ...],
+    target_package: str,
+    foreground: str | None,
+) -> tuple[Decision, ...]:
+    """Let through the rows that an exception phrase excuses.
+
+    Candidates are the rows whose only reason is ``deny_word`` and that
+    `_Judge.phrase_candidate` accepts (a plain row whose name equals a phrase).
+    With more than `MAX_PHRASE_CANDIDATES` of them on the screen no phrase
+    applies. Each candidate is judged once more on the same screen with only
+    its name text replaced by a neutral label: when it then has no reason at
+    all, the hits were made of the phrase's own characters and it is let
+    through, marked with the phrase. The judge's own matching decides, with its
+    exceptions and readings; any other deny word anywhere still refuses, and a
+    hit made with a neighbouring text may over-refuse.
+    """
+    found: list[tuple[int, int, str, int]] = []
+    for k, decision in enumerate(decisions):
+        if decision.reasons != ("deny_word",):
+            continue
+        i = state.tree.index[decision.element.id]
+        candidate = state.phrase_candidate(i)
+        if candidate is not None:
+            found.append((k, i, candidate[0], candidate[1]))
+    if not found or len(found) > MAX_PHRASE_CANDIDATES:
+        return decisions
+    policy = replace(state.policy, except_phrases=())
+    result = list(decisions)
+    for k, i, phrase, name in found:
+        elements = list(state.elements)
+        elements[name] = replace(elements[name], text=_PLACEHOLDER)
+        other = _Judge(
+            replace(state.screen, elements=tuple(elements)),
+            target_package,
+            policy,
+            foreground,
+        ).decide(i)
+        if not other.reasons:
+            before = decisions[k]
+            result[k] = Decision(before.element, before.point, (), (), phrase)
+    return tuple(result)
+
+
 def judge(
     screen: Screen,
     target_package: str,
@@ -1274,13 +1166,10 @@ def judge(
       or hint, or in one field's value inside a joined text with real
       boundaries around it, does not count (see the module docstring); the
       resource id has no exceptions.
-      A candidate that is a plain row (no clickable descendant, at most 500
-      elements, its tap point held by it or by a non-clickable descendant)
-      whose first visible, uncovered text equals a phrase of
-      ``policy.except_phrases`` (see `Policy`) is not refused for the deny
-      words inside that phrase when every hit of them is in single texts of the
-      row; ``Decision`` then has ``except_phrase``. Any other deny word, or a
-      hit involving an element outside the row, still gives ``deny_word``.
+      A plain row whose only reason is this one and whose name text equals a
+      phrase of ``policy.except_phrases`` is judged once more with only that
+      text replaced; with no reason left it is let through (see
+      `_apply_phrases` and `Policy`) and ``Decision`` has ``except_phrase``.
     * ``irreversible_screen``: the text, content description or hint of any
       element of the screen holds a phrase of ``policy.irreversible_phrases``
       (unless ``skip_irreversible`` is False). Every candidate gets it. The
@@ -1326,8 +1215,9 @@ def judge(
     )
     unsafe = state.unsafe_ids()
     if policy.except_phrases:
-        # An element an exception phrase lets through is still unsafe for the
-        # wheel: the phrase lets a tap through, nothing else.
+        decisions = _apply_phrases(state, decisions, target_package, foreground)
+        # A row an exception phrase lets through is still unsafe for the wheel:
+        # the phrase lets a tap through, nothing else.
         unsafe |= frozenset(d.element.id for d in decisions if d.except_phrase)
     return Judgement(
         decisions,
