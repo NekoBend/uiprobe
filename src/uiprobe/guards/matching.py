@@ -373,6 +373,47 @@ def _original_forms(value: str) -> list[tuple[str, list[int]]] | None:
     return [(form, [origin[i] for i in sources]) for form, sources in forms]
 
 
+def _part_at(starts: Sequence[int], index: int) -> int:
+    """The index of the last part that starts at or before `index`."""
+    return max(sum(1 for start in starts if start <= index) - 1, 0)
+
+
+def hit_owners(
+    parts: Sequence[str], owners: Sequence[int], word: str
+) -> list[frozenset[int]] | None:
+    """Return, for every occurrence of the deny `word` in the joined text of
+    the field values `parts` (both readings of `_Joined`, no exception word
+    applied), the set of owners (`owners[k]` owns `parts[k]`) of the values it
+    touches; None when an occurrence cannot be traced, so the caller must
+    count it as touching everything."""
+    word_forms = _forms(word)
+    found: list[frozenset[int]] = []
+    seen: set[str] = set()
+    for separators in ([" "] * len(parts), _tight_separators(parts)):
+        separators[0] = ""
+        text, starts = _join(parts, separators)
+        if text in seen:
+            continue
+        seen.add(text)
+        traced = _original_forms(text)
+        if traced is None:
+            if _forms_match(word_forms, _forms(text)):
+                return None
+            continue
+        for form, sources in traced:
+            for word_form in word_forms:
+                if not word_form:
+                    continue
+                at = form.find(word_form)
+                while at != -1:
+                    span = sources[at : at + len(word_form)]
+                    first = _part_at(starts, min(span))
+                    last = _part_at(starts, max(span))
+                    found.append(frozenset(owners[max(first, 0) : last + 1]))
+                    at = form.find(word_form, at + 1)
+    return found
+
+
 def _id_name(resource_id: str) -> str:
     """Return the part of a resource id after ``:id/`` (all of it if none)."""
     _, separator, name = resource_id.partition(_ID_SEPARATOR)

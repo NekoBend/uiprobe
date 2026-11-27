@@ -1795,6 +1795,7 @@ class CrawlEngine:
             prints = _Prints(screen)
             return (
                 decision.point == tap.point
+                and decision.except_phrase == plan.except_phrase
                 and fresh == plan.element
                 and prints.descendants(fresh) == plan.below
                 and prints.of(fresh) == tap.fingerprint

@@ -496,3 +496,55 @@ def test_a_singleton_unknown_path_does_not_crash_the_recovery() -> None:
     assert isinstance(eng.next(off_screen()), Back)  # off target
     action = eng.next(on_screen([], name="unknown"))  # must not raise
     assert isinstance(action, Back | Relaunch | Stop)
+
+
+def _phrase_screen(parent_text):
+    """A clickable parent holding a clickable child "Recorder": with `order` a
+    deny word and `recorder` an exception word, the child is excused as a whole
+    word only while the parent's text leaves it one."""
+    root = Element(
+        "e1", None, "android.widget.FrameLayout", Bounds(0, 0, *DISPLAY), package=PKG
+    )
+    parent = Element(
+        "e2",
+        "e1",
+        BUTTON,
+        Bounds(20, 60, 300, 400),
+        text=parent_text,
+        package=PKG,
+        flags=("clickable", "disabled"),
+    )
+    child = Element(
+        "e3",
+        "e2",
+        BUTTON,
+        Bounds(30, 200, 290, 260),
+        text="Recorder",
+        package=PKG,
+        flags=("clickable",),
+    )
+    return Screen("s", crawl_time(), PKG, ".Main", 36, DISPLAY, (root, parent, child))
+
+
+def crawl_time():
+    from datetime import UTC, datetime
+
+    return datetime(2026, 11, 17, tzinfo=UTC)
+
+
+def test_recheck_compares_the_fresh_marker_with_the_planned_one() -> None:
+    policy = Policy(
+        deny_words=("order",),
+        deny_exceptions=("recorder",),
+        except_phrases=("Recorder",),
+    )
+    eng = started(policy=policy)
+    first = seen(_phrase_screen("."))
+    tap = eng.next(first)
+    assert isinstance(tap, Tap)
+    assert tap.element_id == "e3"
+    fresh = judge(_phrase_screen("X"), PKG, policy, foreground=PKG)
+    child = next(d for d in fresh.decisions if d.element.id == "e3")
+    assert child.pressable
+    assert child.except_phrase == "Recorder"  # the planned tap had none
+    assert not eng.recheck(tap, seen(_phrase_screen("X")))

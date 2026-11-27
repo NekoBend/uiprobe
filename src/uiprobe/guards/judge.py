@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from dataclasses import replace
 from typing import TYPE_CHECKING, Literal
 
 from uiprobe.guards.constants import (
@@ -24,7 +23,7 @@ from uiprobe.guards.constants import (
     PERMISSION_PACKAGES,
     Reason,
 )
-from uiprobe.guards.matching import _Matcher, _PhraseMatcher
+from uiprobe.guards.matching import _Matcher, _PhraseMatcher, hit_owners
 from uiprobe.guards.policy import (
     Decision,
     Detail,
@@ -43,6 +42,7 @@ from uiprobe.guards.tree import (
     _PERM,
     _PKG,
     _TEXT,
+    ROW_NAME_MEMBERS,
     _add_part,
     _Agg,
     _Grid,
@@ -52,7 +52,6 @@ from uiprobe.guards.tree import (
     _is_text_field,
     _merge,
     _Tree,
-    row_members,
     row_name,
 )
 from uiprobe.guards.words import (
@@ -90,7 +89,8 @@ class _Judge:
         self._foreground = foreground
         # The exception phrases by their normalized form (see `_excusing_phrase`).
         self._phrases = {normalize(phrase): phrase for phrase in policy.except_phrases}
-        self._reduced: dict[frozenset[str], _Judge] = {}
+        self._reduced: dict[frozenset[str], _Matcher] = {}
+        self._word_matchers: dict[str, _Matcher] = {}
         self.tree = _Tree(screen)
         self.elements = screen.elements
         self.matcher = _Matcher(policy.deny_words, policy.deny_exceptions)
@@ -817,76 +817,181 @@ class _Judge:
             details.append(irreversible)
         return phrase
 
-    def _deny_detail_at(self, i: int) -> Detail | None:
-        """The deny-word detail of candidate `i` (what ``deny_word`` would carry)."""
-        visible = self.visible[i]
-        own = self.contribution(i)
-        if visible is None:
-            return self._deny_detail(own)
-        return self._deny_detail(_merge(own, self.point_aggregate(visible.center)))
+    def _hit_targets(self, point: tuple[int, int]) -> list[int]:
+        """The elements whose visible part holds the point (as `point_aggregate`)."""
+        grid = self.grid
+        key = grid.cell(point)
+        x, y = point
+        return [
+            *grid.everywhere,
+            *grid.full.get(key, ()),
+            *(
+                i
+                for i, rect in grid.partial.get(key, ())
+                if rect.left <= x < rect.right and rect.top <= y < rect.bottom
+            ),
+        ]
+
+    def _word_matcher(self, word: str) -> _Matcher:
+        matcher = self._word_matchers.get(word)
+        if matcher is None:
+            matcher = self._word_matchers[word] = _Matcher(
+                [word], self.policy.deny_exceptions
+            )
+        return matcher
 
     def _excusing_phrase(self, i: int) -> tuple[str, Detail | None]:
         """Return the exception phrase that lets candidate `i` through its deny
         words, or ``""`` (the common case, and always without phrases), with
-        the detail of the deny word that still refuses it when a phrase was
+        the detail of the deny hit that still refuses it when a phrase was
         tried and did not suffice.
 
-        The candidate's name (`row_name` of its subtree, the row the tree
-        names) must equal a phrase after `normalize`. The phrase excuses the
-        deny words that occur inside it (their forms match in the phrase's),
-        for hits anywhere in the candidate and its descendants. It excuses
-        nothing else: the candidate is let through only when no other deny
-        word is found in the deny scope (checked on a judge without the
-        excused words), and no excused word is found there outside the
-        candidate's own subtree (checked on a judge whose subtree has no
-        text, description, hint or id).
+        The name is the first text with a part on the display (else the first
+        such description) in full document order over the candidate and all
+        its descendants; a row of more than `ROW_NAME_MEMBERS` elements gets no
+        phrase. It must equal a phrase after `normalize`. The deny words that
+        occur inside the phrase are the excused ones. Nothing is judged again:
+        the hits of the original match data in the candidate's deny scope are
+        walked, and the candidate is let through only when every hit is
+        excused, that is, it is a hit of an excused word and every element it
+        comes from is inside the row. A hit in the own fields of an element
+        outside the row, a hit of another word anywhere, and a joined hit of a
+        subtree that is not inside the row count (for a joined text of an
+        ancestor, the hit is traced to the texts it is made of; one that
+        cannot be traced counts).
         """
         if not self._phrases:
             return "", None
-        tree = self.tree
-        members = row_members(i, lambda j: tree.children[j])
-        phrase = self._phrases.get(normalize(row_name(self.elements, members)), "")
-        if not phrase:
+        members = self.tree.subtree(i)
+        if len(members) > ROW_NAME_MEMBERS:
             return "", None
+        name = row_name(self.elements, members, lambda j: self.visible[j] is not None)
+        phrase = self._phrases.get(normalize(name), "")
         phrase_forms = _forms(phrase)
         excused = frozenset(
             word
             for word in self.policy.deny_words
-            if _forms_match(_forms(word), phrase_forms)
+            if phrase and _forms_match(_forms(word), phrase_forms)
         )
         if not excused:
             return "", None
+        inside = frozenset(members)
         reduced = self._reduced.get(excused)
         if reduced is None:
-            reduced = self._reduced[excused] = self._variant(
-                self.screen,
-                tuple(w for w in self.policy.deny_words if w not in excused),
+            reduced = self._reduced[excused] = _Matcher(
+                [w for w in self.policy.deny_words if w not in excused],
+                self.policy.deny_exceptions,
             )
-        other = reduced._deny_detail_at(i)  # noqa: SLF001
-        if other is not None:
-            return "", other
-        blanked = {
-            j: replace(
-                self.elements[j], text="", content_desc="", hint="", resource_id=""
-            )
-            for j in members
-        }
-        outside = self._variant(
-            replace(
-                self.screen,
-                elements=tuple(blanked.get(j, e) for j, e in enumerate(self.elements)),
-            ),
-            self.policy.deny_words,
-        )
-        elsewhere = outside._deny_detail_at(i)  # noqa: SLF001
-        if elsewhere is not None:
-            return "", elsewhere
-        return phrase, None
+        visible = self.visible[i]
+        targets = {i}
+        if visible is not None:
+            targets.update(self._hit_targets(visible.center))
+        refusing = self._own_refusal(targets, inside, reduced)
+        if refusing is None:
+            refusing = self._joined_refusals(targets, i, inside, excused, reduced)
+        return ("", refusing) if refusing is not None else (phrase, None)
 
-    def _variant(self, screen: Screen, deny_words: tuple[str, ...]) -> _Judge:
-        """A judge of `screen` with `deny_words` and no exception phrases."""
-        policy = replace(self.policy, deny_words=deny_words, except_phrases=())
-        return _Judge(screen, self._target_package, policy, self._foreground)
+    def _own_refusal(
+        self, targets: set[int], inside: frozenset[int], reduced: _Matcher
+    ) -> Detail | None:
+        """A hit in the own fields of the deny scope that is not excused: of an
+        element outside the row, or of a word that is not excused."""
+        tree = self.tree
+        scope: set[int] = set()
+        for t in targets:
+            scope.add(t)
+            if self.clickable[t]:
+                scope.update(tree.subtree(t))
+            up = tree.parent[t]
+            while up != -1:
+                if self.clickable[up]:
+                    scope.update(tree.subtree(up))
+                up = tree.parent[up]
+        for e in sorted(scope):
+            hit = reduced.match(self.elements[e]) if e in inside else self.own_hit[e]
+            if hit:
+                return Detail(
+                    "deny_word",
+                    word=hit[0],
+                    field=hit[1],
+                    element_id=self.elements[e].id,
+                )
+        return None
+
+    def _joined_refusals(
+        self,
+        targets: set[int],
+        i: int,
+        inside: frozenset[int],
+        excused: frozenset[str],
+        reduced: _Matcher,
+    ) -> Detail | None:
+        """A joined-text hit of the deny scope that is not excused."""
+        tree = self.tree
+        candidates: set[int] = set()
+        for t in targets:
+            root = self.top[t]
+            if root == -1:
+                continue
+            candidates.add(root)
+            if self.matcher.excuses:
+                candidates.update(
+                    j for j in tree.subtree(root)[1:] if self.clickable[j]
+                )
+        for c in sorted(candidates):
+            if self.joined_hit(c) is None:
+                continue
+            if c in inside:
+                # Every text of it is the row's: only a word that is not
+                # excused can still refuse.
+                texts = [self.elements[j] for j in tree.subtree(c)]
+                word = self._joined_word(texts, reduced)
+                refusing = None if word is None else self._joined_detail(word, c)
+            else:
+                refusing = self._joined_refusal(c, i, inside, excused)
+            if refusing is not None:
+                return refusing
+        return None
+
+    def _joined_refusal(
+        self, c: int, i: int, inside: frozenset[int], excused: frozenset[str]
+    ) -> Detail | None:
+        """The detail of a joined hit of the clickable `c` (outside the row, with
+        a hit in its joined subtree text) that is not excused, or None."""
+        tree = self.tree
+        members = tree.subtree(c)
+        elements = [self.elements[j] for j in members]
+        contains_row = tree.tin[c] <= tree.tin[i] < tree.tin[c] + tree.size[c]
+        for word in self.policy.deny_words:
+            if self._joined_word(elements, self._word_matcher(word)) is None:
+                continue
+            if word not in excused or not contains_row:
+                return self._joined_detail(word, c)
+            lists: tuple[tuple[list[str], list[int]], ...] = (
+                ([], []),
+                ([], []),
+                ([], []),
+            )
+            for j in members:
+                element = self.elements[j]
+                for kind, value in ((0, element.text), (1, element.content_desc)):
+                    if not value:
+                        continue
+                    for index in (0, 1) if kind == 0 else (0, 2):
+                        lists[index][0].append(value)
+                        lists[index][1].append(j)
+            for strings, owners in lists:
+                if not strings:
+                    continue
+                traced = hit_owners(strings, owners, word)
+                if traced is None or any(not owned <= inside for owned in traced):
+                    return self._joined_detail(word, c)
+        return None
+
+    def _joined_detail(self, word: str, c: int) -> Detail:
+        return Detail(
+            "deny_word", word=word, field="joined", element_id=self.elements[c].id
+        )
 
     def unsafe_ids(self) -> frozenset[str]:
         """The ids of every element of the screen, clickable or not, that the tap

@@ -110,13 +110,18 @@ def row_members(i: int, children: Callable[[int], Iterable[int]]) -> list[int]:
     return sorted(found)[:ROW_NAME_MEMBERS]
 
 
-def row_name(elements: Sequence[Element], members: Iterable[int]) -> str:
+def row_name(
+    elements: Sequence[Element],
+    members: Iterable[int],
+    shown: Callable[[int], bool] | None = None,
+) -> str:
     """Return the name of a row: the first text (stripped) that is not empty
-    among its `members` in document order, else the first content description
-    (stripped) that is not empty, else ``""``. This is the name `uiprobe tree`
-    shows, apart from its placeholders for a password row and for a run that
-    recorded no text."""
-    found = list(members)
+    among its `members` in the order given, else the first content description
+    (stripped) that is not empty, else ``""``. With `shown`, only members for
+    which it is True are read (the judge passes "has a part on the display").
+    Without it this is the name `uiprobe tree` shows, apart from its
+    placeholders for a password row and for a run that recorded no text."""
+    found = [j for j in members if shown is None or shown(j)]
     for j in found:
         if text := elements[j].text.strip():
             return text

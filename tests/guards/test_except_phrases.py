@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from typing import Any
 
 import pytest
 
@@ -403,3 +404,167 @@ def test_the_tree_names_the_row_as_the_judge_does() -> None:
         policy = Policy(deny_words=words, except_phrases=(tree_row.name,))
         got = judge(screen, PKG, policy, foreground=PKG)
         assert decision(got, "e2").except_phrase == tree_row.name, tree_row.name
+
+
+# -- the name is a visible one; a hit is excused only when the row made it ------------
+
+
+def test_an_off_screen_first_text_is_not_the_name() -> None:
+    elements = [
+        el("e2", cls=ROW, bounds=ROW_BOUNDS),
+        el(
+            "e3",
+            parent="e2",
+            cls=TEXT,
+            flags=(),
+            text="Quick Share",
+            bounds=(10, 700, 310, 740),
+        ),
+        el(
+            "e4",
+            parent="e2",
+            cls=TEXT,
+            flags=(),
+            text="Share all",
+            bounds=(10, 100, 310, 140),
+        ),
+    ]
+    d = verdict(elements)
+    assert "deny_word" in d.reasons
+    assert d.except_phrase == ""
+
+
+def test_the_first_visible_text_is_the_name_even_after_an_off_screen_one() -> None:
+    elements = [
+        el("e2", cls=ROW, bounds=ROW_BOUNDS),
+        el(
+            "e3",
+            parent="e2",
+            cls=TEXT,
+            flags=(),
+            text="Junk",
+            bounds=(10, 700, 310, 740),
+        ),
+        el(
+            "e4",
+            parent="e2",
+            cls=TEXT,
+            flags=(),
+            text="Quick Share",
+            bounds=(10, 100, 310, 140),
+        ),
+    ]
+    assert verdict(elements).except_phrase == "Quick Share"
+
+
+def test_a_row_of_more_than_the_cap_members_gets_no_phrase() -> None:
+    elements = [el("e2", cls=ROW, bounds=ROW_BOUNDS)]
+    elements.append(
+        el(
+            "e3",
+            parent="e2",
+            cls=TEXT,
+            flags=(),
+            text="Preferences",
+            bounds=(10, 100, 310, 110),
+        )
+    )
+    elements += [
+        el(f"x{n}", parent="e2", cls=TEXT, flags=(), bounds=(10, 110, 310, 120))
+        for n in range(498)
+    ]
+    elements.append(
+        el(
+            "e9",
+            parent="e2",
+            cls=TEXT,
+            flags=(),
+            text="Quick Share",
+            bounds=(10, 120, 310, 190),
+        )
+    )
+    assert len(elements) == 501
+    d = verdict(elements)
+    assert d.except_phrase == ""
+    assert "deny_word" in d.reasons
+    # With one member fewer the same row is within the cap (and its name is
+    # "Preferences", so it is refused for the deny word all the same).
+    assert verdict(elements[:-1]).except_phrase == ""
+
+
+def nested(parent_text, child_text, *, sibling="", policy):
+    elements = [
+        el("e2", cls=ROW, bounds=(0, 100, 320, 400), text=parent_text),
+        el("e3", parent="e2", cls=ROW, bounds=(10, 200, 310, 260), text=child_text),
+    ]
+    if sibling:
+        elements.append(
+            el(
+                "e4",
+                parent="e2",
+                cls=TEXT,
+                flags=(),
+                text=sibling,
+                bounds=(10, 300, 310, 340),
+            )
+        )
+    return decision(run(elements, policy=policy), "e3")
+
+
+def test_a_hit_made_with_text_outside_the_row_is_not_excused() -> None:
+    # "Or" + "Der Recorder" read as "order" across the two texts; listing the
+    # child's name must not hide a hit that the parent's text takes part in.
+    words: dict[str, Any] = {
+        "deny_words": ("order",),
+        "deny_exceptions": ("recorder",),
+    }
+    assert "deny_word" in nested("Or", "Der Recorder", policy=Policy(**words)).reasons
+    d = nested(
+        "Or", "Der Recorder", policy=Policy(**words, except_phrases=("Der Recorder",))
+    )
+    assert "deny_word" in d.reasons
+    assert d.except_phrase == ""
+    # The same child alone in a parent that adds nothing is let through.
+    d = nested(
+        ".", "Der Recorder", policy=Policy(**words, except_phrases=("Der Recorder",))
+    )
+    assert d.reasons == ()
+
+
+def test_texts_around_the_row_do_not_invent_a_hit() -> None:
+    # "De" + "lete" are not adjacent (the row's text is between them): no
+    # `delete`, and the row's own `share` is excused.
+    d = nested("De", "Quick Share", sibling="lete", policy=QUICK)
+    assert d.reasons == ()
+    assert d.except_phrase == "Quick Share"
+
+
+def test_a_deny_word_of_the_parents_own_text_still_refuses() -> None:
+    d = nested("Share", "Quick Share", policy=QUICK)
+    assert "deny_word" in d.reasons
+
+
+def test_judging_a_screen_with_many_phrase_rows_is_one_summary(monkeypatch) -> None:
+    from uiprobe.guards.judge import _Judge
+
+    calls = []
+    original = _Judge._summarize
+
+    def counting(self):
+        calls.append(1)
+        return original(self)
+
+    monkeypatch.setattr(_Judge, "_summarize", counting)
+    elements = []
+    for n in range(32):
+        top = 30 + n * 17
+        elements.append(
+            el(f"r{n}", cls=ROW, bounds=(0, top, 320, top + 16), text="Share (.*)")
+        )
+    policy = Policy(except_phrases=("Share (.*)",))
+    got = run(elements, policy=policy)
+    assert calls == [1]
+    assert all(
+        "deny_word" not in d.reasons and d.except_phrase == "Share (.*)"
+        for d in got.decisions
+    )
