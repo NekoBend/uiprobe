@@ -173,6 +173,33 @@ class _Seen:
     focus: FocusedWindow | None
 
 
+_CO_VARKEYWORDS = 0x08  # CPython's flag of a function with ``**kwargs``
+_TAKES_NAMED: dict[object, bool] = {}
+
+
+def _takes_named(method: object) -> bool:
+    """Whether the callable `method` (a bound method of a `Device` or a
+    subclass override) accepts a ``named`` keyword, by a parameter of that
+    name or ``**kwargs``. Read from the function's code once. An override
+    written before ``named`` existed does not, and is called without it (the
+    values that need it then refuse); a callable that is no plain function
+    or method is taken as not accepting it."""
+    function = getattr(method, "__func__", method)
+    known = _TAKES_NAMED.get(function)
+    if known is not None:
+        return known
+    code = getattr(function, "__code__", None)
+    taken = False
+    if code is not None:
+        count = code.co_argcount + code.co_kwonlyargcount
+        taken = "named" in code.co_varnames[:count] or bool(
+            code.co_flags & _CO_VARKEYWORDS
+        )
+    if len(_TAKES_NAMED) < 64:
+        _TAKES_NAMED[function] = taken
+    return taken
+
+
 def _app_named(package: str, window: InputWindow) -> bool:
     """Whether the title of `window` names the app: the package, or the
     package and ``/`` first (as an activity's window does)."""

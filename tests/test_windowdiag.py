@@ -2158,3 +2158,123 @@ def test_a_list_the_reader_entered_is_reached():
     assert "the list of every display, 0 windows read, the check refused here" in (
         found.to_text()
     )
+
+
+# --- samsungFlags=0x100000 and 0x100001: their own note ---
+
+
+def _new_flagged(row: int, value: str) -> str:
+    return _edit_row(SAMSUNG36, row, "samsungFlags=0x0", f"samsungFlags={value}")
+
+
+@pytest.mark.parametrize("value", ["0x100000", "0x100001"])
+def test_the_note_of_a_new_value_names_it_and_the_test_that_refused(value):
+    text = _new_flagged(OWN_ROW, value)
+    head = (
+        f"a crawl accepts samsungFlags={value} only on the target app's own window,"
+        " by its owner uid and by a title that names the app; "
+    )
+    yes, no = (lambda _w: True), (lambda _w: False)
+    cases = [
+        (
+            (None, None),
+            "diagnose is not told an app (add --package PKG to test that app's"
+            " windows)",
+        ),
+        (
+            (no, yes),
+            "this window's owner uid is not the given app's by the given owned test",
+        ),
+        (
+            (yes, no),
+            "this window's title does not name the given app by the given named test",
+        ),
+        ((yes, None), "the name test (named) was not given, so this value refuses"),
+    ]
+    for (given, named_given), tail in cases:
+        found = diagnose_tap_window(text, owned=given, named=named_given)
+        assert (found.reason, found.rule) == ("line_format", "samsung_flags")
+        assert found.note == head + tail
+        assert found.to_dict()["note"] == head + tail
+        assert "0x1 " not in (found.note or "") + " "
+    both = diagnose_tap_window(text, owned=yes, named=yes)
+    assert both.readable
+    assert both.note is None
+
+
+@pytest.mark.parametrize("value", ["0x100000", "0x100001"])
+def test_the_note_of_a_new_value_with_the_crawls_tests(value):
+    app = PackageUid(LAUNCHER_UID, shared=False)
+    owned = _crawl_test(LAUNCHER, app)
+    named = crawl_driver._app_named
+
+    # The crawl's tests, as `--package` builds them.
+    def named_test(window):
+        return named(LAUNCHER, window)
+
+    own = diagnose_tap_window(
+        _new_flagged(OWN_ROW, value), owned=owned, named=named_test
+    )
+    assert own.readable
+    other = diagnose_tap_window(
+        _new_flagged(OTHER_ROW, value), owned=owned, named=named_test
+    )
+    assert other.rule == "samsung_flags"
+    assert "owner uid is not the given app's" in (other.note or "")
+    # An unshared uid and a title that does not name the app (row 6).
+    unnamed = diagnose_tap_window(
+        _new_flagged(UNNAMED_ROW, value), owned=owned, named=named_test
+    )
+    assert unnamed.rule == "samsung_flags"
+    assert "title does not name the given app" in (unnamed.note or "")
+    # The reader reads the same as `explain_input_windows`.
+    verdict = explain_input_windows(
+        _new_flagged(UNNAMED_ROW, value), owned=owned, named=named_test
+    )
+    assert (verdict.reason, verdict.rule) == (unnamed.reason, unnamed.rule)
+    # 0x1 keeps its notes: the same row, the old text.
+    old = diagnose_tap_window(_flagged(OTHER_ROW), owned=owned, named=named_test)
+    assert old.note == NOTE_TESTED
+
+
+def test_a_new_value_with_an_unreadable_uid_keeps_the_uid_note():
+    found = diagnose_tap_window(_new_flagged(OWN_ROW, "0x100000"))
+    from dataclasses import replace
+
+    unread = replace(found, app_test=APP_UID_UNREADABLE)
+    assert "uid could not be read" in (unread.note or "")
+    assert "0x100000" in (unread.note or "")
+
+
+class _OldSignatureDevice:
+    """Overrides written before ``named`` existed."""
+
+    def __init__(self, text: str) -> None:
+        self.text = text
+        self.calls = 0
+
+    def package_uid(self, _package: str) -> PackageUid:
+        return PackageUid(LAUNCHER_UID, shared=False)
+
+    def diagnose_tap_window(self, *, show_device_text=False, owned=None):
+        self.calls += 1
+        return diagnose_tap_window(
+            self.text, show_device_text=show_device_text, owned=owned
+        )
+
+
+def test_diagnose_with_an_old_signature_override_still_works():
+    from uiprobe.cli.diagnose import _diagnose_on
+
+    plain = _OldSignatureDevice(SAMSUNG36)
+    found = _diagnose_on(plain, LAUNCHER, show_device_text=False)  # ty: ignore[invalid-argument-type]
+    assert found.readable
+    assert plain.calls == 1
+    flagged = _OldSignatureDevice(_new_flagged(OWN_ROW, "0x100000"))
+    refused = _diagnose_on(flagged, LAUNCHER, show_device_text=False)  # ty: ignore[invalid-argument-type]
+    assert (refused.reason, refused.rule) == ("line_format", "samsung_flags")
+    assert refused.app_test == APP_CRAWL_TESTED
+    assert "the name test (named) was not given" in (refused.note or "")
+    # 0x1 on the app's own window still reads with the old signature.
+    old = _OldSignatureDevice(_flagged(OWN_ROW))
+    assert _diagnose_on(old, LAUNCHER, show_device_text=False).readable  # ty: ignore[invalid-argument-type]

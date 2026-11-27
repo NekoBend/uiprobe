@@ -28,6 +28,7 @@ from uiprobe.crawl_driver.helpers import (
     _app_window,
     _failure_word,
     _Seen,
+    _takes_named,
     _unreadable_launcher,
 )
 from uiprobe.crawl_driver.state import _RunState
@@ -125,7 +126,10 @@ class _GateMixin(_RunState):
         def named(window: InputWindow) -> bool:
             return _app_named(package, window)
 
-        found = self.device.window_at(point, owned=owned, named=named)
+        if _takes_named(self.device.window_at):
+            found = self.device.window_at(point, owned=owned, named=named)
+        else:  # an override from before `named`: those values then refuse
+            found = self.device.window_at(point, owned=owned)
         if isinstance(found, Unreadable):  # the reason, and the check that refused
             return NOT_SENT_COVER_UNKNOWN, {
                 "unreadable": str(found),

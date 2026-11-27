@@ -10,7 +10,7 @@ from uiprobe._json import dumps
 from uiprobe.cli.commands import _single_serial
 from uiprobe.cli.output import _emit, _fail
 from uiprobe.cli.parser import _UsageError
-from uiprobe.crawl_driver import _app_named, _app_window
+from uiprobe.crawl_driver import _app_named, _app_window, _takes_named
 from uiprobe.crawl_preview import MAX_PACKAGE_LENGTH, check_package
 from uiprobe.device import Device
 from uiprobe.errors import INTERNAL_ERROR, USAGE_ERROR, UiprobeError
@@ -113,11 +113,16 @@ def _diagnose_on(
     if app is None:
         found = device.diagnose_tap_window(show_device_text=show_device_text)
         return replace(found, app_test=APP_UID_UNREADABLE)
-    found = device.diagnose_tap_window(
-        show_device_text=show_device_text,
-        owned=_crawl_owned(package, app),
-        named=_crawl_named(package),
-    )
+    if _takes_named(device.diagnose_tap_window):
+        found = device.diagnose_tap_window(
+            show_device_text=show_device_text,
+            owned=_crawl_owned(package, app),
+            named=_crawl_named(package),
+        )
+    else:  # an override from before `named`: those values then refuse
+        found = device.diagnose_tap_window(
+            show_device_text=show_device_text, owned=_crawl_owned(package, app)
+        )
     return replace(found, app_test=APP_CRAWL_TESTED)
 
 

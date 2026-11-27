@@ -205,12 +205,13 @@ class _ForegroundMixin(_DeviceState):
         `uiprobe.inputwindows.read_window_at`; without it none may). The
         `named` tells the windows whose title names the app: with ``owned``
         it is needed for ``samsungFlags=0x100000`` and ``0x100001`` (without
-        it those refuse). The crawl always passes `owned` and `named` by
-        keyword. An override in a subclass that does not accept them raises
-        `TypeError` on the first guarded tap; one that accepts them but does
-        not forward them makes the app's own windows with ``samsungFlags=0x1``
-        (and, without `named`, ``0x100000`` and ``0x100001``) refuse the tap
-        (``samsung_flags``).
+        it those refuse). The crawl always passes `owned` by keyword, and
+        `named` when the method it calls accepts a `named` parameter or
+        ``**kwargs``. An override in a subclass that does not accept `owned`
+        raises `TypeError` on the first guarded tap; one without `named` is
+        called without it (``0x100000`` and ``0x100001`` then refuse); one
+        that accepts `owned` but does not forward it makes the app's own
+        windows with ``samsungFlags=0x1`` refuse the tap (``samsung_flags``).
         ``Display: N`` sections of two or more numbers in the read count as
         several displays for `displays_seen`.
 

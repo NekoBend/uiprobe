@@ -33,8 +33,9 @@ where a crawl of the app would read it, and the report says so in a note
 
 ``samsungFlags=0x100000`` and ``0x100001`` read only where ``owned`` and
 ``named`` (the title names the app) both say yes, and refuse as ``0x1``
-does otherwise (``samsung_flags``), so the note of that rule names
-``0x1`` for them too.
+does otherwise (``samsung_flags``); the note of that result names the value
+seen and says which test refused (the owner uid, the title) or that the name
+test was not given.
 """
 
 from __future__ import annotations
@@ -127,6 +128,34 @@ NOTE_UID_UNREADABLE: Final = (
     " window counted as its own, and a crawl of it would refuse every tap with"
     " the tap window check on"
 )
+# What a samsung_flags result means when the window printed 0x100000 or
+# 0x100001 (`TapWindowDiagnosis.samsung_value`): those two values need the
+# owner uid test and the title test, so the note says which one refused.
+_NEW_NOTE_HEAD: Final = (
+    "a crawl accepts samsungFlags={value} only on the target app's own window,"
+    " by its owner uid and by a title that names the app; "
+)
+_NEW_NOTE_TAILS: Final = {
+    ("uid", None): "diagnose is not told an app (add --package PKG to test that"
+    " app's windows)",
+    ("uid", APP_UID_UNREADABLE): "the given app's uid could not be read (dumpsys"
+    " package), so no window counted as its own, and a crawl of it would refuse"
+    " every tap with the tap window check on",
+    ("uid", APP_TESTED): "this window's owner uid is not the given app's by the"
+    " given owned test",
+    ("uid", APP_CRAWL_TESTED): "this window's owner uid is not the given app's by"
+    " the crawl's owner uid test",
+    ("name", APP_TESTED): "this window's title does not name the given app by the"
+    " given named test",
+    ("name", APP_CRAWL_TESTED): "this window's title does not name the given app"
+    " by the crawl's title test",
+    ("name_untested", APP_TESTED): "the name test (named) was not given, so this"
+    " value refuses",
+    ("name_untested", APP_CRAWL_TESTED): "the name test (named) was not given, so"
+    " this value refuses",
+}
+_SAMSUNG_NEW_VALUES: Final = frozenset({"0x100000", "0x100001"})
+_NEW_VALUE = re.compile(r", samsungFlags=(?P<value>0x100000|0x100001), ")
 # With an app whose uid could not be read and any other result.
 NOTE_UID_UNREADABLE_ANY: Final = (
     "the given app's uid could not be read (dumpsys package); no window"
@@ -365,6 +394,8 @@ class TapWindowDiagnosis:
     forms: tuple[Form, ...] = ()
     show_device_text: bool = False
     app_test: str | None = None
+    samsung_value: str | None = None
+    samsung_why: str | None = None
 
     def __post_init__(self) -> None:
         if self.app_test not in _APP_TESTS:
@@ -409,13 +440,26 @@ class TapWindowDiagnosis:
             if self.app_test == APP_UID_UNREADABLE:
                 return NOTE_UID_UNREADABLE_ANY
             return None
-        if self.app_test == APP_TESTED:
-            return NOTE_TESTED
-        if self.app_test == APP_CRAWL_TESTED:
-            return NOTE_CRAWL_TESTED
-        if self.app_test == APP_UID_UNREADABLE:
-            return NOTE_UID_UNREADABLE
-        return NOTE
+        newer = self._new_value_note()
+        if newer is not None:
+            return newer
+        by_test = {
+            APP_TESTED: NOTE_TESTED,
+            APP_CRAWL_TESTED: NOTE_CRAWL_TESTED,
+            APP_UID_UNREADABLE: NOTE_UID_UNREADABLE,
+        }
+        return by_test.get(self.app_test or "", NOTE)
+
+    def _new_value_note(self) -> str | None:
+        """The note for a window with ``samsungFlags=0x100000`` or
+        ``0x100001`` (which of the owner uid and title tests refused), None
+        for any other window."""
+        if self.samsung_value not in _SAMSUNG_NEW_VALUES:
+            return None
+        tail = _NEW_NOTE_TAILS.get((self.samsung_why or "uid", self.app_test))
+        if tail is None:
+            return None
+        return _NEW_NOTE_HEAD.format(value=self.samsung_value) + tail
 
     def to_dict(self) -> dict[str, object]:
         """Return the ``uiprobe.diagnose_tap_window/1`` JSON object."""
@@ -922,6 +966,18 @@ def _forms(lines: list[str], verdict: Verdict) -> tuple[Form, ...]:
     return tuple(forms[:_MAX_FORMS])
 
 
+def _new_value(lines: list[str], verdict: Verdict) -> str | None:
+    """The ``samsungFlags=`` value (``0x100000`` or ``0x100001``) of the row a
+    ``samsung_flags`` refusal was made at, None for any other result. Only
+    one of two fixed words, never other text of the line."""
+    if verdict.rule != _SAMSUNG_FLAGS or verdict.why is None:
+        return None
+    if verdict.line is None or not 0 <= verdict.line < len(lines):
+        return None
+    found = _NEW_VALUE.search(lines[verdict.line])
+    return None if found is None else found["value"]
+
+
 def diagnose_tap_window(
     text: str,
     *,
@@ -953,6 +1009,7 @@ def diagnose_tap_window(
     if verdict.line is not None:
         part, number = _part(verdict.line, verdict)
     shapes = _around(dump) or _outline(dump)
+    value = _new_value(lines, verdict)
     return TapWindowDiagnosis(
         verdict.reason,
         verdict.rule,
@@ -967,4 +1024,6 @@ def diagnose_tap_window(
         _forms(lines, verdict) if show_device_text else (),
         show_device_text=show_device_text,
         app_test=None if owned is None else APP_TESTED,
+        samsung_value=value,
+        samsung_why=verdict.why if value is not None else None,
     )

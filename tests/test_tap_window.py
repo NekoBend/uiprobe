@@ -826,3 +826,63 @@ def test_samsung_flags_0x1_on_an_off_point_window_of_the_apps_uid_is_refused(
         "rule": "samsung_flags",
     }
     assert (result.cover_unknown, result.cover_rule) == ("line_format", "samsung_flags")
+
+
+# --- a Device subclass that overrides window_at as before `named` existed ---
+
+
+@pytest.mark.parametrize("value", [None, "0x100000"], ids=["0x0", "0x100000"])
+def test_an_old_signature_window_at_override_works_and_refuses_the_new_values(
+    tmp_path: Path, device, android, clock, monkeypatch, value
+):
+    if android.api < 33:
+        pytest.skip("the Samsung form is of API 36")
+    original = device.window_at
+    calls: list[dict[str, object]] = []
+
+    def old(point: tuple[int, int], *, owned=None):
+        calls.append({"owned": owned})
+        return original(point, owned=owned)
+
+    monkeypatch.setattr(device, "window_at", old)
+    dumped = android._dumpsys_input
+    if value is not None:
+        monkeypatch.setattr(
+            android,
+            "_dumpsys_input",
+            lambda: _samsung_rows(dumped(), lambda line: f" {SHOP}" in line, value),
+        )
+    else:
+        monkeypatch.setattr(
+            android, "_dumpsys_input", lambda: _samsung_rows(dumped(), lambda _l: False)
+        )
+    out = tmp_path / "run"
+    result = run(device, clock, out, limits=Limits(actions=3))
+    assert calls
+    if value is None:
+        assert BROWSE in _taps(android)
+        assert result.cover_unknown is None
+        return
+    assert BROWSE not in _taps(android)
+    assert _covered(out)[0]["details"] == {
+        "unreadable": "line_format",
+        "rule": "samsung_flags",
+    }
+
+
+def test_takes_named_reads_the_signature():
+    from uiprobe.crawl_driver import _takes_named
+
+    class New:
+        def window_at(self, point, *, owned=None, named=None): ...
+
+    class Kwargs:
+        def window_at(self, point, **kwargs): ...
+
+    class Old:
+        def window_at(self, point, *, owned=None): ...
+
+    assert _takes_named(New().window_at)
+    assert _takes_named(Kwargs().window_at)
+    assert not _takes_named(Old().window_at)
+    assert _takes_named(Device.window_at)

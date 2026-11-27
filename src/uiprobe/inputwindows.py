@@ -413,6 +413,11 @@ _SAMSUNG_OWN_ONLY: Final = "0x1"
 # The two values seen only on the app's own window that the caller also finds
 # named for the app (``owned`` and ``named`` both say yes).
 _SAMSUNG_NAMED_ONLY: Final = frozenset({"0x100000", "0x100001"})
+# Which test refused a window with one of those values (`_Refusal.why`): the
+# owner uid test (or none given), the title test, or the title test not given.
+WHY_UID: Final = "uid"
+WHY_NAME: Final = "name"
+WHY_NAME_UNTESTED: Final = "name_untested"
 _SAMSUNG_REGION = re.compile(
     rf", touchableRegion=(?:<empty>|\[{_NUMBER},{_NUMBER}\]\[{_NUMBER},{_NUMBER}\]), "
     r"pTouchableRegion=<empty>, 1HXY=\[0, 0, [01]\]" + _NEXT
@@ -512,12 +517,15 @@ class _Refusal:
     """Why a list is not read: the public reason, the rule that refused (one
     of `RULES`), the index, in the text's lines, of the line it refused at
     (None when no one line is to blame) and the index of the ``Windows``
-    line of the list it refused in (None when it was no one list)."""
+    line of the list it refused in (None when it was no one list). ``why``
+    tells, for ``samsung_flags`` on ``0x100000`` or ``0x100001``, which test
+    failed: `WHY_UID`, `WHY_NAME` or `WHY_NAME_UNTESTED`; None otherwise."""
 
     reason: str
     rule: str
     line: int | None = None
     head: int | None = None
+    why: str | None = None
 
 
 @dataclass(slots=True)
@@ -1223,9 +1231,12 @@ def _own_only(
     if not mine:
         return _Refusal(LINE_FORMAT, "samsung_fields", at)
     if owned is None or not owned(window):
-        return _Refusal(LINE_FORMAT, "samsung_flags", at)
-    if window.samsung_named_only and (named is None or not named(window)):
-        return _Refusal(LINE_FORMAT, "samsung_flags", at)
+        why = WHY_UID if window.samsung_named_only else None
+        return _Refusal(LINE_FORMAT, "samsung_flags", at, why=why)
+    if window.samsung_named_only and named is None:
+        return _Refusal(LINE_FORMAT, "samsung_flags", at, why=WHY_NAME_UNTESTED)
+    if window.samsung_named_only and named is not None and not named(window):
+        return _Refusal(LINE_FORMAT, "samsung_flags", at, why=WHY_NAME)
     return window
 
 
@@ -1434,6 +1445,7 @@ class Verdict:
     kinds: dict[int, str] = field(default_factory=dict)
     reached: tuple[bool, ...] = ()
     chosen: int | None = None
+    why: str | None = None
 
 
 def _spans(lines: list[str], start: int) -> tuple[ListSpan, ...]:
@@ -1487,9 +1499,9 @@ def explain_input_windows(
     kinds = _heading_kinds(lines, first, tuple(chosen)) | trace.kinds
     reached = tuple(span.head in trace.reached for span in lists)
     found = (
-        (read.reason, read.rule, read.line, read.head)
+        (read.reason, read.rule, read.line, read.head, read.why)
         if isinstance(read, _Refusal)
-        else (None, None, None, None)
+        else (None, None, None, None, None)
     )
     return Verdict(
         *found[:3],
@@ -1502,6 +1514,7 @@ def explain_input_windows(
         kinds=kinds,
         reached=reached,
         chosen=trace.chosen,
+        why=found[4],
     )
 
 
