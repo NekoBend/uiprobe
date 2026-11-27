@@ -33,6 +33,7 @@ from uiprobe.guards.policy import (
     api36_fallback_areas,
     edge_areas,
 )
+from uiprobe.guards.scroll import elements_at
 from uiprobe.guards.tree import (
     _CONFIRM,
     _DENY,
@@ -807,48 +808,98 @@ class _Judge:
             details.append(irreversible)
 
     def phrase_candidate(self, i: int) -> tuple[str, int] | None:
-        """Return ``(phrase, name index)`` when candidate `i` is a row an
-        exception phrase may let through (see `_apply_phrases`), else None.
+        """Return ``(phrase, name index)`` when candidate `i` is structurally a
+        row an exception phrase may let through (see `_apply_phrases`), else
+        None. The reasons are not looked at here.
 
         The row must be plain: it is not long-clickable, checkable,
         scrollable, editable or a text or password field, none of its
-        descendants is clickable or any of those, and it has at most
-        `ROW_NAME_MEMBERS` elements. The element on top of its tap point is the
-        row or one of its descendants, and no ancestor is clickable (the judge
+        descendants is clickable or any of those, it has at most
+        `ROW_NAME_MEMBERS` elements and no ancestor is clickable (the judge
         joins the texts of a clickable's whole subtree, so no hit can be formed
-        with text outside the row). Its name element N is the first element
-        in document order with a text and some area on the display (not
-        `min_visible_px`); N's text must equal a phrase after `normalize`, and
-        N itself must be the topmost meaningful element at N's center.
+        with text outside the row). Its name element N is the first element in
+        document order with a text at all, drawn or not (the tree names the row
+        by the same text); N needs some area on the display (not
+        `min_visible_px`) and its text must equal a phrase after `normalize`.
+        At the row's tap point and at N's center the element on top is the row
+        or inside it, and every element whose drawn part holds the point and
+        is interactive (clickable, long-clickable, checkable, scrollable,
+        editable, a text or password field), meaningful or not, is the row,
+        inside it or one of its ancestors.
         """
-        tree = self.tree
-        members = tree.subtree(i)
+        members = self.tree.subtree(i)
+        if not self._plain_row(i, members):
+            return None
+        name = next((j for j in members if self.elements[j].text.strip()), None)
+        if name is None:
+            return None
+        phrase = self._phrases.get(normalize(self.elements[name].text), "")
+        part = self.screen._clip(self.elements[name])  # noqa: SLF001
         visible = self.visible[i]
+        if part is None or not phrase or visible is None:
+            return None
+        inside = frozenset(members)
+        if self.topmost(part.center) != name or not all(
+            self._only_row_at(point, i, inside)
+            for point in (visible.center, part.center)
+        ):
+            return None
+        return phrase, name
+
+    def _plain_row(self, i: int, members: list[int]) -> bool:
+        """The shape rules of `phrase_candidate`."""
+        tree = self.tree
         if (
             len(members) > ROW_NAME_MEMBERS
-            or visible is None
+            or self.visible[i] is None
             or _interactive(self.elements[i], clickable_ok=True)
             or any(_interactive(self.elements[j]) for j in members[1:])
         ):
-            return None
-        top = self.topmost(visible.center)
-        if not tree.tin[i] <= tree.tin[top] < tree.tin[i] + tree.size[i]:
-            return None
+            return False
         up = tree.parent[i]
         while up != -1:
             if self.clickable[up]:
-                return None  # inside another clickable: its texts are joined
+                return False  # inside another clickable: its texts are joined
             up = tree.parent[up]
-        for j in members:
-            text = self.elements[j].text
-            part = self.screen._clip(self.elements[j])  # noqa: SLF001
-            if not text.strip() or part is None:
-                continue
-            phrase = self._phrases.get(normalize(text), "")
-            if phrase and self.topmost(part.center) == j:
-                return phrase, j
-            return None
-        return None
+        return True
+
+    def _only_row_at(
+        self, point: tuple[int, int], i: int, inside: frozenset[int]
+    ) -> bool:
+        """The element on top of `point` is in the row, and no interactive element
+        outside the row (other than its ancestors) has a drawn part there."""
+        tree = self.tree
+        if self.topmost(point) not in inside:
+            return False
+        for element in elements_at(self.screen, point):
+            j = tree.index[element.id]
+            if (
+                _interactive(element)
+                and j not in inside
+                and not tree.tin[j] <= tree.tin[i] < tree.tin[j] + tree.size[j]
+            ):
+                return False
+        return True
+
+    def phrase_words_agree(self, i: int, name: int) -> bool:
+        """True when the deny words found in the row `i` are exactly the ones
+        found in the name text alone (same matcher, exceptions and readings), so
+        no word is made with the rest of the row: ``Log`` + ``out`` reads
+        ``log out`` only together."""
+        members = self.tree.subtree(i)
+        elements = [self.elements[j] for j in members]
+        alone = [replace(self.elements[name], content_desc="", hint="", resource_id="")]
+        for word in self.policy.deny_words:
+            matcher = _Matcher([word], self.policy.deny_exceptions)
+            in_row = any(matcher.match(e) for e in elements) or (
+                self._joined_word(elements, matcher) is not None
+            )
+            in_name = matcher.match(alone[0]) is not None or (
+                self._joined_word(alone, matcher) is not None
+            )
+            if in_row != in_name:
+                return False
+        return True
 
     def unsafe_ids(self) -> frozenset[str]:
         """The ids of every element of the screen, clickable or not, that the tap
@@ -1051,13 +1102,19 @@ def _apply_phrases(
     """
     found: list[tuple[int, int, str, int]] = []
     for k, decision in enumerate(decisions):
-        if decision.reasons != ("deny_word",):
-            continue
         i = state.tree.index[decision.element.id]
         candidate = state.phrase_candidate(i)
         if candidate is not None:
             found.append((k, i, candidate[0], candidate[1]))
-    if not found or len(found) > MAX_PHRASE_CANDIDATES:
+    if len(found) > MAX_PHRASE_CANDIDATES:
+        return decisions  # counted before the reasons are looked at
+    found = [
+        item
+        for item in found
+        if decisions[item[0]].reasons == ("deny_word",)
+        and state.phrase_words_agree(item[1], item[3])
+    ]
+    if not found:
         return decisions
     policy = replace(state.policy, except_phrases=())
     result = list(decisions)

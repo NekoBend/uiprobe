@@ -439,7 +439,8 @@ def test_an_off_screen_first_text_is_not_the_name() -> None:
     assert d.except_phrase == ""
 
 
-def test_the_first_visible_text_is_the_name_even_after_an_off_screen_one() -> None:
+def test_an_earlier_off_screen_text_means_no_phrase() -> None:
+    # The tree names this row by its first text, `Junk`, drawn or not.
     elements = [
         el("e2", cls=ROW, bounds=ROW_BOUNDS),
         el(
@@ -459,7 +460,9 @@ def test_the_first_visible_text_is_the_name_even_after_an_off_screen_one() -> No
             bounds=(10, 100, 310, 140),
         ),
     ]
-    assert verdict(elements).except_phrase == "Quick Share"
+    d = verdict(elements)
+    assert "deny_word" in d.reasons
+    assert d.except_phrase == ""
 
 
 def test_a_row_of_more_than_the_cap_members_gets_no_phrase() -> None:
@@ -754,3 +757,91 @@ def test_a_parent_with_many_labels_costs_nothing_extra() -> None:
     ]
     got = run(elements, policy=Policy(except_phrases=("Share (.*)",)))
     assert decision(got, "e3").except_phrase == "Share (.*)"
+
+
+# -- the fourth check: word boundaries, invisible overlays, the cap, the name ---------
+
+
+def test_a_word_made_with_the_summary_refuses_the_row() -> None:
+    # `log out` reads only as the title + the summary; taking the title out
+    # would hide it.
+    policy = Policy(deny_words=("log out",), except_phrases=("Log",))
+    d = verdict(row("Log", "out"), policy)
+    assert "deny_word" in d.reasons
+    assert d.except_phrase == ""
+
+
+def test_a_word_in_the_summary_that_the_title_does_not_hold_refuses_the_row() -> None:
+    policy = Policy(
+        deny_words=("order",), deny_exceptions=("recorder",), except_phrases=("Audio",)
+    )
+    assert verdict(row("Audio", "Recorder"), policy).except_phrase == ""
+    policy = Policy(deny_words=("order",), except_phrases=("Audio",))
+    d = verdict(row("Audio", "Recorder"), policy)
+    assert "deny_word" in d.reasons
+    assert d.except_phrase == ""
+
+
+def test_a_hidden_interactive_overlay_at_the_tap_point_refuses_the_row() -> None:
+    over = el(
+        "e9",
+        parent="e1",
+        cls="android.view.View",
+        flags=("clickable", "long_clickable"),
+        bounds=ROW_BOUNDS,
+    )
+    d = verdict(row(extra=[over]))
+    assert d.except_phrase == ""
+    assert "deny_word" in d.reasons
+
+
+def test_an_interactive_overlay_over_the_title_only_refuses_the_row() -> None:
+    elements = row("Quick Share", "Summary")
+    over = el(
+        "e9",
+        parent="e1",
+        cls="android.view.View",
+        flags=("long_clickable",),
+        bounds=(10, 100, 310, 140),
+    )
+    assert verdict([*elements, over]).except_phrase == ""
+
+
+def test_a_scrollable_ancestor_does_not_stop_a_phrase() -> None:
+    elements = [
+        el(
+            "e2",
+            cls="androidx.recyclerview.widget.RecyclerView",
+            flags=("scrollable",),
+            bounds=(0, 60, 320, 600),
+        ),
+        el("e3", parent="e2", cls=ROW, bounds=ROW_BOUNDS),
+        el(
+            "e4",
+            parent="e3",
+            cls=TEXT,
+            flags=(),
+            text="Quick Share",
+            bounds=(10, 100, 310, 140),
+        ),
+    ]
+    assert decision(run(elements, policy=QUICK), "e3").except_phrase == "Quick Share"
+
+
+def test_the_cap_counts_eligible_rows_before_the_reasons_are_looked_at() -> None:
+    elements = share_rows(9)
+    elements[0] = replace(elements[0], flags=("clickable", "disabled"))
+    got = run(elements, policy=Policy(except_phrases=("Share (.*)",)))
+    assert all(d.except_phrase == "" for d in got.decisions)
+    # Eight eligible rows, one of them disabled: the other seven are marked.
+    elements = share_rows(8)
+    elements[0] = replace(elements[0], flags=("clickable", "disabled"))
+    got = run(elements, policy=Policy(except_phrases=("Share (.*)",)))
+    assert sum(d.except_phrase != "" for d in got.decisions) == 7
+
+
+def test_a_phrase_matches_after_nfkc_like_deny_words() -> None:
+    policy = Policy(except_phrases=("\u24c8\u24d7\u24d0\u24e1\u24d4",))
+    assert (
+        verdict(row("Share"), policy).except_phrase == "\u24c8\u24d7\u24d0\u24e1\u24d4"
+    )

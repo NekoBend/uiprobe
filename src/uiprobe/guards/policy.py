@@ -214,12 +214,14 @@ class Policy:
     long-clickable, checkable, scrollable, editable or a text or password
     field; nothing inside it clickable or any of those; at most 500 elements;
     not inside another clickable; its tap point held by it or something
-    inside it) whose only reason is
-    ``deny_word`` and whose name element (its first text with some area on the
-    display, with nothing covering its middle) equals a phrase after
-    `normalize` is judged once more with only that text replaced; with no
-    reason left it is let through, and its decision carries the phrase as
-    written in ``except_phrase``. With more than 8 such rows on a screen no
+    inside it; no other interactive element drawn over its tap point or its
+    name) whose only reason is ``deny_word``, whose name element (its first
+    text, drawn or not, with some area on the display and nothing covering its
+    middle) equals a phrase after `normalize`, and whose deny words are
+    exactly those of the name text alone, is judged once more with only that
+    text replaced; with no reason left it is let through, and its decision
+    carries the phrase as written in ``except_phrase``. With more than 8
+    structurally eligible rows on a screen (counted before the reasons) no
     phrase applies. The wheel scroll never turns over such an element
     (`Judgement.unsafe`). Each phrase is 1 to 80 characters, with no control
     or invisible character and at least one letter, and phrases must differ
