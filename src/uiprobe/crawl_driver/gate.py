@@ -159,6 +159,38 @@ class _GateMixin(_RunState):
             return "target_uid"
         return None
 
+    def back_window(
+        self, focus: FocusedWindow | None, package: str
+    ) -> dict[str, str | int] | None:
+        """Why a BACK decided on a screen of the app must not go to `focus`
+        (the window that takes it, owned by `package`), or None. The details
+        are those of a tap refused by `uncovered`: ``unreadable`` is
+        ``target_user`` or ``target_uid``.
+
+        As for a tap, the focused window must be of Android user 0, and its
+        owner uid, when read, the app's. With ``Policy.check_tap_window`` on
+        the app's uid must also have been read at the start and read again
+        now with the same value (the tap path's rule: fail closed). With it
+        off the app's uid is never read, as for taps, so only the user is
+        checked. The owner package is compared by the caller, so the title
+        rule for shared and system uids (which tells packages apart in the
+        window list) is not needed here.
+        """
+        if focus is None:
+            return None  # refused as unreadable by the caller
+        if focus.user != 0:
+            return {"unreadable": "target_user"}
+        if not self.policy.check_tap_window:
+            return None
+        app = self.app_uid if package == self.package else self.also_uids.get(package)
+        if (
+            app is None
+            or (focus.owner_uid is not None and focus.owner_uid != app.uid)
+            or self.device.package_uid(package) != app
+        ):
+            return {"unreadable": "target_uid"}
+        return None
+
     def refused_tap(
         self, tap: Tap, screen: Screen | None, seen: _Seen
     ) -> Observation | None:
@@ -260,7 +292,8 @@ class _GateMixin(_RunState):
             back = isinstance(action, Back)
             # A BACK goes to the window with input focus. One decided on a
             # screen of the app (the keyboard BACK, a navigation BACK) is sent
-            # only while the app owns that window; one decided on a screen of
+            # only while the app owns that window, in Android user 0 (as for
+            # a tap); one decided on a screen of
             # another app exists only with Policy.back_on_other_screens.
             own_back = (
                 back
@@ -268,6 +301,20 @@ class _GateMixin(_RunState):
                 and before.screen is not None
                 and self.on_target(before.screen, before.foreground)
             )
+            # Only the user and uid of a window the app owns are asked: any
+            # other owner is refused by the package check below.
+            other = (
+                self.back_window(focus, focus.owner)
+                if own_back
+                and not unchecked
+                and before is not None
+                and before.screen is not None
+                and focus is not None
+                and focus.owner == self.tap_package(before.screen)
+                else None
+            )
+            if other is not None:
+                self.gate_focus_details = other
             checks = (
                 (unchecked, NOT_SENT_FOCUS_UNKNOWN),
                 (before is None, NOT_SENT_CHANGED),  # not reached: a launch only
@@ -281,6 +328,7 @@ class _GateMixin(_RunState):
                     and focus.owner != self.tap_package(before.screen),
                     NOT_SENT_FOCUS_OTHER,
                 ),
+                (other is not None, NOT_SENT_FOCUS_OTHER),
                 (back and keyboard is None, NOT_SENT_KEYBOARD_UNKNOWN),
                 (
                     before is not None
