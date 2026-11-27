@@ -469,6 +469,7 @@ from uiprobe.guards.tree import (  # noqa: F401
     _CONFIRM,
     _DENY,
     _EMPTY_AGG,
+    _EXACT,
     _JOINED,
     _NONE,
     _PASSWORD_AT,

@@ -38,6 +38,7 @@ from uiprobe.guards.tree import (
     _CONFIRM,
     _DENY,
     _EMPTY_AGG,
+    _EXACT,
     _JOINED,
     _NONE,
     _PASSWORD_AT,
@@ -90,6 +91,10 @@ class _Judge:
         self.elements = screen.elements
         self.matcher = _Matcher(policy.deny_words, policy.deny_exceptions)
         self.confirm = frozenset(_confirm_form(w) for w in policy.confirm_words)
+        # The words that count only as the whole label of a button on a dialog
+        # (`Policy.dialog_exact_labels`). They take no part in the confirm
+        # matching below; `exact_label` reads them on their own.
+        self._exact = frozenset(_confirm_form(w) for w in policy.dialog_exact_labels)
         # The lengths of the confirm words, shortest first: only a start of a
         # label of one of these lengths can be a confirm word.
         self._dialog_only = frozenset(
@@ -141,6 +146,8 @@ class _Judge:
         self._joined_below: dict[int, int] = {}
         self._labels: dict[int, str] = {}
         self._wide_labels: dict[int, str] = {}
+        self._exact_labels: dict[int, str] = {}
+        self._joined_label: dict[int, tuple[str, ...]] = {}
         self._contrib: dict[int, _Agg] = {}
         self._everywhere: _Agg | None = None
         self._cells: dict[int, _Agg] = {}
@@ -223,6 +230,15 @@ class _Judge:
             self.tree.tin[i] if self._own_confirm(e) else _NONE
             for i, e in enumerate(self.elements)
         ]
+        # The same for the exact-label words, only where they can count: on a
+        # dialog that is refused, with such words in use.
+        self._exact_on = bool(
+            self._exact and self.dialog and self.policy.refuse_dialog_confirm
+        )
+        self.sub_exact = [
+            self.tree.tin[i] if self._exact_on and self._own_exact(e) else _NONE
+            for i, e in enumerate(self.elements)
+        ]
         self.core_text = [int(self._is_core(e.text)) for e in self.elements]
         self.core_desc = [int(self._is_core(e.content_desc)) for e in self.elements]
         self.sub_core_text = list(self.core_text)
@@ -248,6 +264,7 @@ class _Judge:
                 if first is not None:
                     self.below_label[up] = first
                 self.sub_confirm[up] = min(self.sub_confirm[up], self.sub_confirm[i])
+                self.sub_exact[up] = min(self.sub_exact[up], self.sub_exact[i])
                 self.sub_core_text[up] += self.sub_core_text[i]
                 self.sub_core_desc[up] += self.sub_core_desc[i]
         # The smallest index of an own-field hit in the subtrees of the
@@ -466,19 +483,72 @@ class _Judge:
                 form = self._form(value)
                 if self._is_confirm(form):
                     return form
-        below = self.tree.subtree(i)[1:]
-        # A single part is a field that was matched above.
-        for getter, count in (
-            (lambda e: e.text, self.sub_core_text[i] - self.core_text[i]),
-            (lambda e: e.content_desc, self.sub_core_desc[i] - self.core_desc[i]),
-        ):
-            if count < _MIN_JOINED_PARTS:
-                continue
-            values = (getter(self.elements[j]) for j in below)
-            for form in self._joined_forms(values):
-                if self._is_confirm(form):
-                    return form
+        for form in self._joined_label_forms(i):
+            if self._is_confirm(form):
+                return form
         return ""
+
+    def _joined_label_forms(self, i: int) -> tuple[str, ...]:
+        """Return the forms of the descendants' texts, then content_descs,
+        joined in document order (`_joined_forms`), for each of the two that
+        has at least two parts. Kept, so that the confirm words and the
+        exact-label words read the same forms without another walk."""
+        cached = self._joined_label.get(i)
+        if cached is None:
+            below = self.tree.subtree(i)[1:]
+            forms: list[str] = []
+            # A single part is a field that was matched on its own.
+            for getter, count in (
+                (lambda e: e.text, self.sub_core_text[i] - self.core_text[i]),
+                (lambda e: e.content_desc, self.sub_core_desc[i] - self.core_desc[i]),
+            ):
+                if count >= _MIN_JOINED_PARTS:
+                    values = (getter(self.elements[j]) for j in below)
+                    forms.extend(self._joined_forms(values))
+            cached = self._joined_label[i] = tuple(forms)
+        return cached
+
+    def exact_label(self, i: int) -> str:
+        """Return the form of the label of a clickable element when it is
+        exactly one of the exact-label words, or ``""``.
+
+        The label is the one `confirm_label` reads, with the same sources and
+        the same order (the first element of the subtree, in document order,
+        with such a form in its own text, content_desc or hint; else the
+        joined descendant texts or content_descs), but a form counts only when
+        it equals a word whole, and a label of two or more parts below the
+        element is judged as a whole (a word in one part does not count). Only
+        on a dialog that is refused. It never changes `confirm_label`.
+        """
+        if not self._exact_on:
+            return ""
+        cached = self._exact_labels.get(i)
+        if cached is None:
+            cached = self._exact_labels[i] = self._find_exact_label(i)
+        return cached
+
+    def _find_exact_label(self, i: int) -> str:
+        joined = self._joined_label_forms(i)
+        position = self.sub_exact[i]
+        # A label of two or more parts below the element is a whole: a word in
+        # one part (`オン` of `オン` + `ライン`) is not the label, so only the
+        # element's own fields and the joined forms count then.
+        if position != _NONE and (self.tree.pre[position] == i or not joined):
+            element = self.elements[self.tree.pre[position]]
+            for value in (element.text, element.content_desc, element.hint):
+                form = self._form(value)
+                if form in self._exact:
+                    return form
+        for form in joined:
+            if form in self._exact:
+                return form
+        return ""
+
+    def _own_exact(self, element: Element) -> bool:
+        return any(
+            self._form(value) in self._exact
+            for value in (element.text, element.content_desc, element.hint)
+        )
 
     def wide_label(self, i: int) -> str:
         """Return the confirm form of a clickable element that counts on any
@@ -560,6 +630,7 @@ class _Judge:
                 i if clickable and self.confirm_label(i) else _NONE,
                 deny,
                 self.joined_root(i),
+                i if clickable and self.exact_label(i) else _NONE,
             )
         return cached
 
@@ -709,6 +780,8 @@ class _Judge:
         self._word_rules(found, reasons, details)
         if found[_CONFIRM] != _NONE:
             self._confirm_reasons(i, own, found, reasons, details)
+        if found[_EXACT] != _NONE:
+            self._exact_reasons(i, own, found, reasons, details)
         self._positive_button_reason(i, point, reasons, details)
         if point is not None and any(_contains(area, point) for area in self._avoid):
             reasons.append("screen_edge")
@@ -1093,6 +1166,23 @@ class _Judge:
         if self.dialog and self.policy.refuse_dialog_confirm:
             reasons.append("dialog_confirm_button")
             details.append(Detail("dialog_confirm_button", note=note))
+
+    def _exact_reasons(
+        self,
+        i: int,
+        own: _Agg,
+        found: _Agg,
+        reasons: list[Reason],
+        details: list[Detail],
+    ) -> None:
+        """Add ``dialog_confirm_button`` for an exact-label word (see
+        `exact_label`), on its own: it never touches ``confirm_button``."""
+        hit, elsewhere = self._hit(own, found, _EXACT, i)
+        label = self.exact_label(hit)
+        note = f"{label} (hit target {self.elements[hit].id})" if elsewhere else label
+        if "dialog_confirm_button" not in reasons:
+            reasons.append("dialog_confirm_button")
+        details.append(Detail("dialog_confirm_button", note=note))
 
 
 def _contains(bounds: Bounds, point: tuple[int, int]) -> bool:

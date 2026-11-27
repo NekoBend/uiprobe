@@ -28,6 +28,7 @@ from uiprobe.guards import (
     DEFAULT_DENY_WORDS,
     IRREVERSIBLE_PHRASES,
 )
+from uiprobe.guards.constants import DIALOG_ONLY_EXACT_LABELS
 from uiprobe.model import MIN_VISIBLE_PX
 from uiprobe.settings import (
     FIXED_DEVICE_KEYS,
@@ -304,6 +305,11 @@ V9_CONFIRM = ("turn on", "enable", "オンにする", "有効にする")
 # The file that `uiprobe init` wrote at defaults version 10 (rendered at
 # revision 70bf78e, before version 11 existed), unchanged.
 V10_FILE = DATA / "settings_v10.toml"
+# The file that `uiprobe init` wrote at defaults version 11 (rendered at
+# revision e2f7a9d, before version 12 existed), unchanged.
+V11_FILE = DATA / "settings_v11.toml"
+# The version 12 items: the confirm words that count only as a whole label.
+V12_CONFIRM = ("on", "オン")
 # The version 7 items, pinned like version 1 and 2: the state-changing words.
 V7_DENY = (
     "切断",
@@ -352,7 +358,7 @@ def test_the_defaults_round_trip(tmp_path):
     loaded = load_settings(default_file(tmp_path))
     assert loaded.source == tmp_path / SETTINGS_FILE
     assert loaded.format_version == 1
-    assert loaded.defaults_version == CURRENT == 11
+    assert loaded.defaults_version == CURRENT == 12
     assert loaded.press is False
     assert loaded.deny_words == DEFAULT_DENY_WORDS
     assert loaded.deny_exceptions == DEFAULT_DENY_EXCEPTIONS
@@ -382,7 +388,7 @@ def test_the_rendered_file_layout():
     assert text.startswith("# uiprobe settings")
     assert text.endswith("\n")
     assert "\r" not in text
-    assert "format_version = 1\ndefaults_version = 11\n" in text
+    assert "format_version = 1\ndefaults_version = 12\n" in text
     assert "press = false\n" in text
     for table in (
         "[deny]",
@@ -1058,8 +1064,8 @@ def test_numbers_at_the_limits_are_accepted(tmp_path, old, new):
     [
         ("format_version = 1", "format_version = 2", "format_version"),
         ("format_version = 1", "format_version = 0", "format_version"),
-        ("defaults_version = 11", "defaults_version = 0", "defaults_version"),
-        ("defaults_version = 11", "defaults_version = 12", "defaults_version"),
+        ("defaults_version = 12", "defaults_version = 0", "defaults_version"),
+        ("defaults_version = 12", "defaults_version = 13", "defaults_version"),
     ],
 )
 def test_versions_out_of_range_are_refused(tmp_path, old, new, key):
@@ -1857,7 +1863,7 @@ def _digit_limit() -> Iterator[None]:
 def _huge_cases() -> list[tuple[str, str, str]]:
     cases = [
         ("format_version = 1", f"format_version = {HUGE}", "format_version"),
-        ("defaults_version = 11", f"defaults_version = {HUGE}", "defaults_version"),
+        ("defaults_version = 12", f"defaults_version = {HUGE}", "defaults_version"),
     ]
     for old, key in [
         ("min_visible_px = 8", "min_visible_px"),
@@ -2149,10 +2155,10 @@ def test_the_generated_file_holds_the_version_2_values_plus_the_later_keys():
     # slider rules and, with version 5, the replay rule and, with version 6, the
     # record_text key and, with version 7, the state-changing deny words and,
     # with version 10, the back_on_other_screens rule and, with version 11, the
-    # scroll rule and its three limits.
+    # scroll rule and its three limits (version 12 added two confirm words).
     current = tomllib.loads(render_default_settings())
     assert current["deny"].pop("except") == []
-    assert current.pop("defaults_version") == 11
+    assert current.pop("defaults_version") == 12
     assert current["rules"].pop("back_on_other_screens") is False
     assert current["rules"].pop("scroll_lists") is False
     assert current["limits"].pop("scrolls_per_screen") == 10
@@ -2168,6 +2174,8 @@ def test_the_generated_file_holds_the_version_2_values_plus_the_later_keys():
     assert tuple(words[-len(V7_DENY) :]) == V7_DENY
     del words[-len(V7_DENY) :]
     confirm = current["confirm"]["words"]
+    assert tuple(confirm[-len(V12_CONFIRM) :]) == V12_CONFIRM
+    del confirm[-len(V12_CONFIRM) :]
     assert tuple(confirm[-len(V9_CONFIRM) :]) == V9_CONFIRM
     del confirm[-len(V9_CONFIRM) :]
     older = tomllib.loads(v2_text())
@@ -2332,6 +2340,7 @@ def test_settings_built_with_the_earlier_fields_still_work(tmp_path):
         "scroll_amount",
         "scroll_incidents",
         "deny_except_phrases",
+        "dialog_exact_labels",
     ]
 
 
@@ -2388,7 +2397,7 @@ def test_a_current_file_needs_the_row_rules(tmp_path, key):
 
 def test_the_generated_file_writes_both_row_rules():
     text = render_default_settings()
-    assert "defaults_version = 11\n" in text
+    assert "defaults_version = 12\n" in text
     rules = text.split("[rules]\n")[1].split("[limits]")[0]
     assert "skip_two_target_rows = true\n" in rules
     assert "skip_rows_with_buttons = false\n" in rules
@@ -2399,9 +2408,9 @@ def test_a_newer_defaults_version_is_refused_with_its_number(tmp_path):
     # What an older uiprobe says about a file that `uiprobe init` writes now
     # (the message of the defaults_version range check names both numbers).
     text = render_default_settings().replace(
-        "defaults_version = 11", "defaults_version = 12"
+        "defaults_version = 12", "defaults_version = 13"
     )
-    refused(write(tmp_path, text), "defaults_version", "must be from 1 to 11, not 12")
+    refused(write(tmp_path, text), "defaults_version", "must be from 1 to 12, not 13")
 
 
 def test_version_3_added_no_list_defaults():
@@ -2622,7 +2631,7 @@ def test_policy_replay_path_defaults_on_and_must_be_a_bool():
 
 def test_replay_path_comes_after_runs_dir_so_positional_settings_still_work(tmp_path):
     names = [f.name for f in dataclasses.fields(settings.Settings)]
-    assert names[-10:] == [
+    assert names[-11:] == [
         "runs_dir",
         "replay_path",
         "record_text",
@@ -2633,11 +2642,12 @@ def test_replay_path_comes_after_runs_dir_so_positional_settings_still_work(tmp_
         "scroll_amount",
         "scroll_incidents",
         "deny_except_phrases",
+        "dialog_exact_labels",
     ]
     loaded = load_settings(default_file(tmp_path))
     # Built by position with every field up to runs_dir, as before version 5:
     # replay_path takes its default and runs_dir keeps its place.
-    values = [getattr(loaded, name) for name in names[:-9]]
+    values = [getattr(loaded, name) for name in names[:-10]]
     by_position = settings.Settings(*values)
     assert by_position.replay_path is True
     assert by_position.record_text is True
@@ -2693,8 +2703,8 @@ def test_an_older_file_may_turn_record_text_off(tmp_path, version):
 
 def test_the_generated_file_is_the_current_version_and_writes_record_text_on_top():
     text = render_default_settings()
-    assert settings.DEFAULTS_VERSION == 11
-    assert "defaults_version = 11\n" in text
+    assert settings.DEFAULTS_VERSION == 12
+    assert "defaults_version = 12\n" in text
     top = text.split("[deny]")[0]
     assert "record_text = true\n" in top
     assert tomllib.loads(text)["record_text"] is True
@@ -2747,7 +2757,7 @@ def test_version_6_added_no_list_defaults():
             item for version, item in getattr(settings, table) if version == 6
         ] == []
     assert settings._LATER_TOP == {"record_text": 6}
-    assert settings._FIRST_EXCEPT == 12
+    assert settings._FIRST_EXCEPT == 13
 
 
 def test_record_text_is_not_a_policy_field():
@@ -2778,7 +2788,7 @@ def test_the_version_7_defaults_are_pinned():
         assert [
             item for version, item in getattr(settings, table) if version == 7
         ] == []
-    assert settings._FIRST_EXCEPT == 12
+    assert settings._FIRST_EXCEPT == 13
 
 
 def test_the_generated_file_lists_the_version_7_words(tmp_path):
@@ -2863,7 +2873,7 @@ def v8_text() -> str:
 def test_the_version_9_defaults_are_pinned():
     version_9 = tuple(item for version, item in settings._CONFIRM_WORDS if version == 9)
     assert version_9 == V9_CONFIRM
-    assert settings.DEFAULTS_VERSION == 11
+    assert settings.DEFAULTS_VERSION == 12
     for table in (
         "_DENY_WORDS",
         "_DENY_EXCEPTIONS",
@@ -2874,12 +2884,12 @@ def test_the_version_9_defaults_are_pinned():
         assert [
             item for version, item in getattr(settings, table) if version == 9
         ] == []
-    assert settings._FIRST_EXCEPT == 12
+    assert settings._FIRST_EXCEPT == 13
 
 
 def test_the_generated_file_lists_the_version_9_words(tmp_path):
     loaded = load_settings(default_file(tmp_path))
-    assert loaded.defaults_version == 11
+    assert loaded.defaults_version == 12
     for word in V9_CONFIRM:
         assert word in loaded.confirm_words
 
@@ -2941,7 +2951,7 @@ def version_text(version: int) -> str:
     return text
 
 
-@pytest.mark.parametrize("version", range(1, 12))
+@pytest.mark.parametrize("version", range(1, 13))
 def test_every_defaults_version_reads_back_on_other_screens_off(tmp_path, version):
     loaded = load_settings(write(tmp_path, version_text(version)))
     assert loaded.defaults_version == version
@@ -3203,6 +3213,133 @@ def test_the_settings_docstring_names_the_version_of_the_scroll_fields():
     assert "`DEFAULT_SCROLL_INCIDENTS`), added with defaults version 11." in doc
     assert "scroll_lists" in doc
     assert "defaults version 7" not in doc.split("scroll_lists")[1]
+
+
+# -- the dialog exact labels on and オン (defaults version 12) ------------------------
+
+
+def v11_text() -> str:
+    text = V11_FILE.read_text(encoding="utf-8")
+    assert "defaults_version = 11\n" in text
+    assert '    "on",\n' not in text
+    assert '    "オン",\n' not in text
+    return text
+
+
+def test_the_version_12_defaults_are_pinned():
+    version_12 = tuple(item for version, item in settings._EXACT_LABELS)
+    assert version_12 == V12_CONFIRM == DIALOG_ONLY_EXACT_LABELS
+    assert {version for version, _ in settings._EXACT_LABELS} == {12}
+    assert settings.DEFAULTS_VERSION == 12
+    for table in (
+        "_DENY_WORDS",
+        "_DENY_EXCEPTIONS",
+        "_CONFIRM_WORDS",
+        "_IRREVERSIBLE_PHRASES",
+        "_REFUSE_KEYS",
+        "_REFUSE_PREFIXES",
+    ):
+        assert [
+            item for version, item in getattr(settings, table) if version == 12
+        ] == []
+    assert settings._FIRST_EXCEPT == 13
+
+
+def test_the_default_policy_has_the_labels_but_not_as_confirm_words():
+    policy = guards.Policy()
+    assert policy.dialog_exact_labels == ("on", "オン")
+    assert "on" not in policy.confirm_words
+    assert "オン" not in policy.confirm_words
+    assert "on" not in CONFIRM_WORDS
+
+
+def test_the_generated_file_lists_the_version_12_words(tmp_path):
+    text = render_default_settings()
+    assert "defaults_version = 12\n" in text
+    assert '    "on",\n' in text
+    assert '    "オン",\n' in text
+    loaded = load_settings(write(tmp_path, text))
+    assert loaded.defaults_version == 12
+    assert loaded.dialog_exact_labels == V12_CONFIRM
+    assert loaded.confirm_words == CONFIRM_WORDS
+    policy = settings.policy_from_settings(loaded)
+    assert policy.dialog_exact_labels == V12_CONFIRM
+    assert policy.confirm_words == CONFIRM_WORDS
+
+
+@pytest.mark.parametrize("version", range(1, 12))
+def test_an_older_file_gets_the_version_12_labels_through_the_map(tmp_path, version):
+    # The fixture of every version from 1 to 11 does not list the two words;
+    # loading it adds them as labels newer than the file, and
+    # `[confirm] remove` keeps one out.
+    text = version_text(version)
+    assert '    "on",\n' not in text
+    assert '    "オン",\n' not in text
+    loaded = load_settings(write(tmp_path, text))
+    assert loaded.defaults_version == version
+    assert loaded.warnings == ()
+    assert loaded.dialog_exact_labels == V12_CONFIRM
+    assert loaded.confirm_words == CONFIRM_WORDS
+    head, confirm = text.split("[confirm]")
+    removed = head + "[confirm]" + confirm.replace("remove = []", 'remove = ["ON"]', 1)
+    kept = load_settings(write(tmp_path, removed))
+    assert kept.dialog_exact_labels == ("オン",)
+
+
+def test_a_version_12_file_removes_a_label_with_remove(tmp_path):
+    text = render_default_settings()
+    head, confirm = text.split("[confirm]")
+    removed = (
+        head + "[confirm]" + confirm.replace("remove = []", 'remove = ["オン"]', 1)
+    )
+    loaded = load_settings(write(tmp_path, removed))
+    assert loaded.dialog_exact_labels == ("on",)
+    assert "オン" not in loaded.confirm_words
+
+
+def test_a_version_12_file_without_a_label_does_not_get_it_back(tmp_path):
+    text = render_default_settings().replace('    "on",\n', "", 1)
+    loaded = load_settings(write(tmp_path, text))
+    assert loaded.dialog_exact_labels == ("オン",)
+
+
+def test_the_version_11_file_loads_as_the_current_defaults(tmp_path):
+    loaded = load_settings(write(tmp_path, v11_text()))
+    assert loaded.defaults_version == 11
+    assert loaded.warnings == ()
+    (tmp_path / "now").mkdir()
+    current = load_settings(default_file(tmp_path / "now"))
+    assert (
+        dataclasses.replace(loaded, source=current.source, defaults_version=CURRENT)
+        == current
+    )
+
+
+def _with_confirm_word(text: str, word: str) -> str:
+    head, confirm = text.split("[confirm]")
+    listed = confirm.replace("words = [\n", f'words = [\n    "{word}",\n', 1)
+    return head + "[confirm]" + listed
+
+
+@pytest.mark.parametrize("version", range(1, 12))
+@pytest.mark.parametrize("word", ["on", "ON", "オン"])
+def test_an_older_file_keeps_a_hand_written_word_as_a_confirm_word(
+    tmp_path, version, word
+):
+    text = _with_confirm_word(version_text(version), word)
+    loaded = load_settings(write(tmp_path, text))
+    assert word in loaded.confirm_words
+    assert loaded.dialog_exact_labels == V12_CONFIRM
+    policy = settings.policy_from_settings(loaded)
+    assert word in policy.confirm_words
+    assert policy.with_deny_words(["zzz"]).dialog_exact_labels == V12_CONFIRM
+
+
+@pytest.mark.parametrize("word", ["on", "オン"])
+def test_a_version_12_file_listing_a_label_makes_it_a_label_only(tmp_path, word):
+    loaded = load_settings(write(tmp_path, render_default_settings()))
+    assert word in loaded.dialog_exact_labels
+    assert word not in loaded.confirm_words
 
 
 # -- the exception phrases ([deny] except_phrases) -----------------------------------

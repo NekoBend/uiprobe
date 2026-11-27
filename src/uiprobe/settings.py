@@ -63,6 +63,12 @@ keys ``scrolls_per_screen``, ``scroll_amount`` and ``scroll_incidents`` of
 version 11 must have all four, and an older uiprobe refuses a version 11 file.
 With true, a pressing crawl may turn a mouse wheel over a list (opt-in, off by
 default; see `uiprobe.guards.scroll_target`).
+Version 12 added the dialog labels ``on`` and ``オン`` (no rules or keys),
+listed under ``[confirm] words`` but kept in ``Settings.dialog_exact_labels``,
+not in ``confirm_words``: a dialog button whose whole label is one of them is
+refused, a longer label that merely starts with one is not
+(`DIALOG_ONLY_EXACT_LABELS`). An ``on`` or ``オン`` that an older file lists
+by hand stays a confirm word.
 
 ``[deny] except`` holds exception words (see `uiprobe.guards.word_matches`): a
 deny-word hit that lies completely inside one of them, where it stands as a
@@ -161,6 +167,7 @@ from uiprobe.guards import (
     _phrase_key,
     normalize,
 )
+from uiprobe.guards.constants import DIALOG_ONLY_EXACT_LABELS
 from uiprobe.model import MIN_VISIBLE_PX
 from uiprobe.pngfile import check_new_path
 
@@ -182,7 +189,7 @@ __all__ = [
 
 SETTINGS_FILE: Final = "uiprobe.toml"
 FORMAT_VERSION: Final = 1
-DEFAULTS_VERSION: Final = 11
+DEFAULTS_VERSION: Final = 12
 MAX_SETTINGS_BYTES: Final = 1024 * 1024
 
 # Every default list item with the defaults version that introduced it. Each
@@ -211,6 +218,8 @@ MAX_SETTINGS_BYTES: Final = 1024 * 1024
 # Version 10 added the rule back_on_other_screens (no list items; a missing one
 # reads False). Version 11 added the rule scroll_lists and the [limits] keys
 # scrolls_per_screen, scroll_amount and scroll_incidents (no list items).
+# Version 12 added the dialog labels on and オン (`_EXACT_LABELS`), which count
+# only as the whole label of a button on a dialog; they are not confirm words.
 _LATER_DENY: Final[dict[str, int]] = {
     "やり直": 2,
     "元に戻": 2,
@@ -221,7 +230,11 @@ _LATER_DENY: Final[dict[str, int]] = {
 # The [deny] except list has no built-in words. One added later starts at the
 # next defaults version (raise DEFAULTS_VERSION with it); before that, the
 # test that no default is tagged beyond the current version fails.
-_FIRST_EXCEPT: Final = 12
+_FIRST_EXCEPT: Final = 13
+# The dialog exact labels (`DIALOG_ONLY_EXACT_LABELS`) came with version 12.
+# A file lists them under [confirm] words, but they are not confirm words.
+_FIRST_EXACT: Final = 12
+_EXACT_FORMS: Final = frozenset(_confirm_form(w) for w in DIALOG_ONLY_EXACT_LABELS)
 _LATER_EXCEPT: Final[dict[str, int]] = {}
 _LATER_CONFIRM: Final[dict[str, int]] = {
     "turn on": 9,
@@ -242,6 +255,9 @@ _DENY_EXCEPTIONS: Final[tuple[tuple[int, str], ...]] = tuple(
 )
 _CONFIRM_WORDS: Final[tuple[tuple[int, str], ...]] = tuple(
     (_LATER_CONFIRM.get(word, 1), word) for word in CONFIRM_WORDS
+)
+_EXACT_LABELS: Final[tuple[tuple[int, str], ...]] = tuple(
+    (_FIRST_EXACT, word) for word in DIALOG_ONLY_EXACT_LABELS
 )
 _IRREVERSIBLE_PHRASES: Final[tuple[tuple[int, str], ...]] = tuple(
     (_LATER_IRREVERSIBLE.get(phrase, _FIRST_IRREVERSIBLE), phrase)
@@ -449,6 +465,11 @@ class Settings:
     # The optional key ``[deny] except_phrases`` (no new defaults version):
     # row names that are let through for the deny words inside them.
     deny_except_phrases: tuple[str, ...] = ()
+    # Added with defaults version 12: the labels refused on a dialog only when
+    # they are the whole label of a button (`Policy.dialog_exact_labels`). They
+    # are listed under ``[confirm] words`` in a file, but they are not confirm
+    # words.
+    dialog_exact_labels: tuple[str, ...] = DIALOG_ONLY_EXACT_LABELS
 
 
 def _separators() -> str:
@@ -532,6 +553,7 @@ def policy_from_settings(
         deny_words=settings.deny_words,
         deny_exceptions=settings.deny_exceptions,
         confirm_words=settings.confirm_words,
+        dialog_exact_labels=settings.dialog_exact_labels,
         irreversible_phrases=settings.irreversible_phrases,
         skip_irreversible=settings.refuse_irreversible_screens,
         tap_unlabeled=settings.tap_unlabeled
@@ -647,7 +669,7 @@ def render_default_settings() -> str:
         '# character that is not a letter ("Yes, continue"). A word that ends in a',
         "# Japanese letter (kana, kanji) needs no character after it, so the word",
         '# "はい" also matches "はいる".',
-        *_toml_list("words", _current(_CONFIRM_WORDS)),
+        *_toml_list("words", _current((*_CONFIRM_WORDS, *_EXACT_LABELS))),
         "remove = []",
         "",
         "[irreversible]",
@@ -1342,6 +1364,17 @@ def load_settings(path: str | os.PathLike[str]) -> Settings:
     confirm_removed = reader.strings(
         confirm, "confirm", "remove", _confirm_identity, optional=True
     )
+    # In a file of version 12 or later, the entries of [confirm] words that are
+    # dialog exact labels are those labels (`init` writes them there). In an
+    # older file such an entry was written by hand: it stays a confirm word,
+    # with the matching of every confirm word, and the labels reach the file
+    # as defaults newer than it.
+    exact_listed = (
+        [w for w in confirm_listed if _confirm_form(w) in _EXACT_FORMS]
+        if defaults_version >= _FIRST_EXACT
+        else []
+    )
+    confirm_plain = [w for w in confirm_listed if w not in exact_listed]
 
     irreversible = reader.table(
         parsed,
@@ -1434,9 +1467,16 @@ def load_settings(path: str | os.PathLike[str]) -> Settings:
         deny_exceptions=deny_exceptions,
         deny_except_phrases=except_phrases,
         confirm_words=_merge(
-            confirm_listed,
+            confirm_plain,
             confirm_removed,
             _CONFIRM_WORDS,
+            defaults_version,
+            _confirm_form,
+        ),
+        dialog_exact_labels=_merge(
+            exact_listed,
+            confirm_removed,
+            _EXACT_LABELS,
             defaults_version,
             _confirm_form,
         ),
