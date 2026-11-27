@@ -186,6 +186,81 @@ class _GateMixin(_RunState):
             return "target_uid"
         return None
 
+    def read_state(
+        self, action: Action
+    ) -> tuple[str | None, FocusedWindow | None, bool | None]:
+        """Read the foreground app, the focused window and the keyboard.
+
+        A tap reads them in this order (the keyboard last); a BACK goes to
+        the focused window, so for it the focus is the last read.
+        """
+        foreground = self.device.foreground()
+        if isinstance(action, Back):
+            keyboard = self.device.keyboard_shown()
+            return foreground, self.device.focused_window(), keyboard
+        focus = self.device.focused_window()
+        return foreground, focus, self.device.keyboard_shown()
+
+    def back_uid(
+        self, action: Action, observation: Observation | None
+    ) -> PackageUid | None:
+        """The app's uid, read now, for a BACK decided on a screen of the app
+        (None for any other action, with the tap window check off, or when it
+        cannot be read).
+
+        It is asked before the gate's reads of the foreground, focus and
+        keyboard, so the focused window is read after it and nothing slow runs
+        between that read and the decision. A read that fails is a uid that is
+        not readable: the BACK is then not sent, as with a uid that differs.
+        """
+        if (
+            not isinstance(action, Back)
+            or observation is None
+            or observation.screen is None
+            or not self.policy.check_tap_window
+            or not self.on_target(observation.screen, observation.foreground)
+        ):
+            return None
+        try:
+            return self.device.package_uid(self.tap_package(observation.screen))
+        except UiprobeError:
+            return None
+
+    def back_window(
+        self, focus: FocusedWindow | None, package: str, fresh: PackageUid | None
+    ) -> dict[str, str | int] | None:
+        """Why a BACK decided on a screen of the app must not go to `focus`
+        (the window that takes it, owned by `package`), or None. `fresh` is the
+        app's uid read by the gate before its reads of the focus (None when it
+        could not be read; unused with the tap window check off). The details
+        are those of a tap refused by `uncovered`: ``unreadable`` is
+        ``target_user`` or ``target_uid``.
+
+        As for a tap, the focused window must be of Android user 0, and its
+        owner uid, when read, the app's. With ``Policy.check_tap_window`` on
+        the app's uid must also have been read at the start and read again
+        before the gate's reads with the same value (the tap path's rule:
+        fail closed; a read that failed counts as not readable). With it
+        off the app's uid is never read, as for taps, so only the user is
+        checked. The owner package is compared by the caller, so the title
+        rule for shared and system uids (which tells packages apart in the
+        window list) is not needed here.
+        """
+        if focus is None:
+            return None  # refused as unreadable by the caller
+        if focus.user != 0:
+            return {"unreadable": "target_user"}
+        if not self.policy.check_tap_window:
+            return None
+        app = self.app_uid if package == self.package else self.also_uids.get(package)
+        if (
+            app is None
+            or (focus.owner_uid is not None and focus.owner_uid != app.uid)
+            or fresh != app
+        ):
+            return {"unreadable": "target_uid"}
+        return None
+
     def refused_tap(
         self, action: Tap | Scroll, screen: Screen | None, seen: _Seen
     ) -> Observation | None:
@@ -221,9 +296,11 @@ class _GateMixin(_RunState):
         checked device (an error if not), then `stop` again (the pin check can
         wait for the device), then a fresh read: for a tap the dump
         first and then foreground, focused window and keyboard, so the reads
-        nearest the press come last. Anything that cannot be read, or that
-        differs from what the action was chosen on, is a refusal. After the
-        decision nothing else runs before the input is sent.
+        nearest the press come last; for a BACK the foreground, the keyboard
+        and last the focused window (the window that takes the key). Anything
+        that cannot be read, or that differs from what the action was chosen
+        on, is a refusal. After the decision nothing else runs before the
+        input is sent.
         """
         now = self.now()  # the one time taken, before any read
         reason = self.halt(now)
@@ -238,14 +315,13 @@ class _GateMixin(_RunState):
             return NOT_SENT_STOPPED, None
         self.gate_epoch = self.device.pin_epoch
         tap = isinstance(action, Tap | Scroll)
+        fresh = self.back_uid(action, observation)
         # For a tap or a scroll: the focused window before and after the dump
         # must be the same window of the app, so the dump shows that window (uiautomator
         # dumps the focused window: seen on API 24, 30 and 36 with the shade).
         before = self.device.focused_window() if tap else None
         screen = self.dump() if tap else None
-        foreground = self.device.foreground()
-        focus = self.device.focused_window()
-        keyboard = self.device.keyboard_shown()
+        foreground, focus, keyboard = self.read_state(action)
         self.gate_details = None
         self.gate_focus_details = None
         # With several displays the focus reading is best effort against
@@ -300,7 +376,8 @@ class _GateMixin(_RunState):
             back = isinstance(action, Back)
             # A BACK goes to the window with input focus. One decided on a
             # screen of the app (the keyboard BACK, a navigation BACK) is sent
-            # only while the app owns that window; one decided on a screen of
+            # only while the app owns that window, in Android user 0 (as for
+            # a tap); one decided on a screen of
             # another app exists only with Policy.back_on_other_screens.
             own_back = (
                 back
@@ -308,6 +385,20 @@ class _GateMixin(_RunState):
                 and before.screen is not None
                 and self.on_target(before.screen, before.foreground)
             )
+            # Only the user and uid of a window the app owns are asked: any
+            # other owner is refused by the package check below.
+            other = (
+                self.back_window(focus, focus.owner, fresh)
+                if own_back
+                and not unchecked
+                and before is not None
+                and before.screen is not None
+                and focus is not None
+                and focus.owner == self.tap_package(before.screen)
+                else None
+            )
+            if other is not None:
+                self.gate_focus_details = other
             checks = (
                 (unchecked, NOT_SENT_FOCUS_UNKNOWN),
                 (before is None, NOT_SENT_CHANGED),  # not reached: a launch only
@@ -331,6 +422,8 @@ class _GateMixin(_RunState):
                     ),
                     NOT_SENT_CHANGED,
                 ),
+                # Last of the checks of this branch: every existing reason wins.
+                (other is not None, NOT_SENT_FOCUS_OTHER),
             )
         # The engine re-checks with the same time the gate took first, which was
         # before the limit, so its refusal is never about the time.

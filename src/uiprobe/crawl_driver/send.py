@@ -10,6 +10,7 @@ from uiprobe.crawl_driver.constants import (
     _COVER_REASONS,
     _FIRST_ACTION,
     _HALF_RELAUNCH,
+    NOT_SENT_FOCUS_OTHER,
     NOT_SENT_FOCUS_UNKNOWN,
     NOT_SENT_RECONNECTED,
     NOT_SENT_START,
@@ -103,7 +104,7 @@ class _SendMixin(_RunState):
                 self.gate_details
                 if reason in _COVER_REASONS
                 else self.gate_focus_details
-                if reason == NOT_SENT_FOCUS_UNKNOWN
+                if reason in {NOT_SENT_FOCUS_UNKNOWN, NOT_SENT_FOCUS_OTHER}
                 else None
             )
             self.end_not_sent(action_id, reason, details)
