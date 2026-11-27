@@ -36,6 +36,7 @@ from uiprobe.crawl import (
     Observation,
     Relaunch,
     Reread,
+    Scroll,
     SkippedElement,
     Stop,
     Tap,
@@ -82,7 +83,9 @@ def test_constructor_and_observation_validation() -> None:
 
 
 def test_only_the_listed_action_types_exist() -> None:
-    assert set(get_args(Action)) == {Launch, Tap, Back, Relaunch, Reread, Stop}
+    assert set(get_args(Action)) == {Launch, Tap, Scroll, Back, Relaunch, Reread, Stop}
+    # A scroll is a wheel turn at one point: no direction, duration or other field.
+    assert [f.name for f in fields(Scroll)] == ["screen_id", "point", "amount"]
     assert {f.name for f in fields(Tap)} == {
         "screen_id",
         "element_id",
@@ -110,6 +113,7 @@ def test_only_the_listed_action_types_exist() -> None:
         "Back",
         "Relaunch",
         "Reread",
+        "Scroll",
         "Stop",
         "Limits",
         "Observation",
@@ -119,15 +123,20 @@ def test_only_the_listed_action_types_exist() -> None:
         "_Pending",
         "_Plan",
         "_Replay",
+        "_ScrollPlan",
         "_State",
         "_Way",
     }
-    words = ("text", "key", "swipe", "long", "press", "input", "scroll")
+    # `Scroll` is the one swipe the engine knows (upward, see its tests); the
+    # words of the other inputs still name nothing in the package.
+    words = ("text", "key", "swipe", "long", "press", "input")
     for name in defined:
         assert not any(word in name.lower() for word in words)
-    for kind in (Launch, Tap, Back, Relaunch, Reread, Stop):
+    for kind in (Launch, Tap, Scroll, Back, Relaunch, Reread, Stop):
         assert not any(
-            w in f.name for f in fields(kind) for w in ("text", "key", "duration")
+            w in f.name
+            for f in fields(kind)
+            for w in ("text", "key", "duration", "direction")
         )
 
 

@@ -33,7 +33,13 @@ from uiprobe.crawl_driver import crawl as crawl_run
 from uiprobe.crawl_preview import preview as make_preview
 from uiprobe.device import PIN_WAIT_STOPPED, Device
 from uiprobe.errors import INTERRUPTED, NotEmulatorError, UiprobeError
-from uiprobe.settings import Settings, _shown
+from uiprobe.settings import (
+    _DEFAULT_SCROLL_AMOUNT,
+    _DEFAULT_SCROLL_INCIDENTS,
+    _DEFAULT_SCROLLS_PER_SCREEN,
+    Settings,
+    _shown,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -50,6 +56,8 @@ _LimitSource = Literal["option", "file", "default"]
 # Where BACK on screens of other apps came from (the
 # "back_on_other_screens_source" values).
 _BackSource = Literal["option", "file", "default"]
+# Where scrolling lists came from (the "scroll_lists_source" values).
+_ScrollSource = Literal["option", "file", "default"]
 
 
 def _cmd_crawl(args: argparse.Namespace) -> int:
@@ -119,7 +127,22 @@ def _press_limits(
             raise _UsageError(msg)
         values[name] = value
         sources[name] = source
-    return Limits(**values), sources
+    # The scroll values have no option: the file's [limits] value, else the
+    # default (`uiprobe init` writes the same).
+    scrolls = (
+        {
+            "scrolls_per_screen": _DEFAULT_SCROLLS_PER_SCREEN,
+            "scroll_amount": _DEFAULT_SCROLL_AMOUNT,
+            "scroll_incidents": _DEFAULT_SCROLL_INCIDENTS,
+        }
+        if settings is None
+        else {
+            "scrolls_per_screen": settings.scrolls_per_screen,
+            "scroll_amount": settings.scroll_amount,
+            "scroll_incidents": settings.scroll_incidents,
+        }
+    )
+    return Limits(**values, **scrolls), sources
 
 
 def _limit_source_text(name: str, source: str) -> str:
@@ -138,6 +161,23 @@ def _press_back(args: argparse.Namespace, policy: Policy) -> tuple[bool, _BackSo
     if args.no_back_on_other_screens:
         return False, "option"
     if policy.back_on_other_screens:
+        return True, "file"
+    return False, "default"
+
+
+def _press_scroll(
+    args: argparse.Namespace, policy: Policy
+) -> tuple[bool, _ScrollSource]:
+    """Whether the run asks to scroll lists with the mouse wheel, and why.
+
+    An option decides when given (the parser refuses both together), else the
+    settings file's ``scroll_lists`` (already in `policy`), else off.
+    """
+    if args.scroll:
+        return True, "option"
+    if args.no_scroll:
+        return False, "option"
+    if policy.scroll_lists:
         return True, "file"
     return False, "default"
 
@@ -248,9 +288,11 @@ def _cmd_crawl_press(args: argparse.Namespace, setup: _CrawlSetup) -> int:  # no
         )
         raise _UsageError(msg)
     back, back_source = _press_back(args, setup.policy)
+    scroll, scroll_source = _press_scroll(args, setup.policy)
     policy = replace(
         setup.policy,
         back_on_other_screens=back,
+        scroll_lists=scroll,
         check_tap_window=not args.no_tap_window_check,
     )
     assert setup.out is not None  # noqa: S101 - _crawl_policy sets it to press
@@ -280,6 +322,9 @@ def _cmd_crawl_press(args: argparse.Namespace, setup: _CrawlSetup) -> int:  # no
                 details={"serial": device.serial, "reason": reason},
             )
             raise _cli_not_emulator(device, refusal)
+    # The device's own `input` usage is read once, by the run itself, and only
+    # when the run asks to scroll; the plan is printed when the run has read it
+    # (see `show_plan` below), so the plan shows the answer the run uses.
     plan: dict[str, object] = {
         "package": args.package,
         "device": {"serial": device.serial, "emulator": emulator},
@@ -299,6 +344,12 @@ def _cmd_crawl_press(args: argparse.Namespace, setup: _CrawlSetup) -> int:  # no
         "restart": not args.no_restart,
         "record_text": record_text,
         **({"also_target": list(policy.also_target)} if policy.also_target else {}),
+        "scroll_lists": False,  # set by `show_plan` from the run's own read
+        "scroll_lists_source": scroll_source,
+        "scroll_input": None,
+        "scrolls_per_screen": limits.scrolls_per_screen,
+        "scroll_amount": limits.scroll_amount,
+        "scroll_incidents": limits.scroll_incidents,
     }
     # The plan is out (and flushed) before the first request that changes the
     # device; with --json it goes to stderr, so stdout stays one JSON document.
@@ -306,11 +357,19 @@ def _cmd_crawl_press(args: argparse.Namespace, setup: _CrawlSetup) -> int:  # no
     if plan_stream is None:  # a closed stream at start: refuse before pressing
         msg = "the plan cannot be shown: " + ("stderr" if args.json else "stdout")
         raise _UsageError(msg + " is closed, so nothing was pressed")
-    _emit(
-        _press_plan_text(plan, settings=str(setup.settings.source)),
-        stream=plan_stream,
-    )
-    _flush(plan_stream)
+
+    def show_plan(wheel: bool | None) -> None:  # noqa: FBT001 - called by the run
+        """Print the plan once the run has checked the device and read the
+        input usage (`wheel`: what it said, None when nothing was read); nothing
+        has been sent or written by then."""
+        plan["scroll_lists"] = policy.scroll_lists and wheel is True
+        plan["scroll_input"] = wheel
+        _emit(
+            _press_plan_text(plan, settings=str(setup.settings.source)),
+            stream=plan_stream,
+        )
+        _flush(plan_stream)
+
     try:
         result = crawl_run(
             device,
@@ -327,6 +386,7 @@ def _cmd_crawl_press(args: argparse.Namespace, setup: _CrawlSetup) -> int:  # no
             restart=not args.no_restart,
             record_text=record_text,
             on_progress=None if args.quiet else _ProgressPrinter(sys.stderr),
+            _on_checked=show_plan,
         )
     except KeyboardInterrupt as exc:
         # crawl_run wrote run.json with "interrupted" when it still could.
@@ -474,6 +534,7 @@ def _press_plan_text(plan: dict[str, object], *, settings: str) -> str:
             + ("yes" if plan["check_tap_window"] else "no"),
             _RESTART_PLAN[bool(plan["restart"])],
             *_also_target_plan(plan),
+            *_press_scroll_text(plan),
             *(
                 []
                 if plan.get("record_text", True)
@@ -498,6 +559,31 @@ def _also_target_plan(plan: dict[str, object]) -> list[str]:
         " and the home app are refused; the controls of permission screens are"
         " never tapped, and they get BACK when BACK on other screens is on)"
     ]
+
+
+def _press_scroll_text(plan: dict[str, object]) -> list[str]:
+    """The plan line about scrolling lists (none for a plan without the key).
+
+    It names where the choice came from and the limits, and says that an app's
+    own view can react to the wheel; scrolling is off unless asked for.
+    """
+    if "scroll_lists" not in plan:
+        return []
+    if plan["scroll_lists"]:
+        origin = (
+            "settings file" if plan.get("scroll_lists_source") == "file" else "--scroll"
+        )
+        answer = (
+            f"yes ({origin}), at most {plan['scrolls_per_screen']} per screen,"
+            f" wheel amount {plan['scroll_amount']}; an app's own view, or a window"
+            " that appears just before the wheel, can react to it (see"
+            " docs/safety.md)"
+        )
+    elif plan.get("scroll_input") is False:
+        answer = "no (this device's input does not list the wheel scroll)"
+    else:
+        answer = "no"
+    return [f"scroll lists with the mouse wheel: {answer}"]
 
 
 def _press_because_text(plan: dict[str, object], settings: str) -> str:

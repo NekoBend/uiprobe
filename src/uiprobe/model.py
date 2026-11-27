@@ -157,6 +157,10 @@ class Element:
     hint: str = ""
     package: str = ""
     flags: tuple[str, ...] = ()
+    # The dump's ``editable`` attribute. Kept apart from `flags` and out of
+    # equality, the JSON form and every fingerprint, so that nothing a tap is
+    # checked against changes: only the crawl's wheel point reads it.
+    editable: bool = dataclasses.field(default=False, compare=False)
 
     def to_dict(self) -> dict[str, object]:
         """Return the JSON form; empty optional values are omitted."""
@@ -836,6 +840,7 @@ def _element(node: ET.Element, element_id: str, parent: str | None) -> Element:
         hint=node.get("hint", ""),
         package=node.get("package", ""),
         flags=_flags(node),
+        editable=node.get("editable") == "true",
     )
 
 

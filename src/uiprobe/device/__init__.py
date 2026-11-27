@@ -107,6 +107,7 @@ from uiprobe.device.gestures import (  # noqa: F401
     DEFAULT_SWIPE_MS,
     LONG_PRESS_MS,
     MAX_PRESS_MS,
+    MAX_WHEEL_AMOUNT,
     SCROLL_EDGE_PERCENT,
     SCROLL_INSET_PERCENT,
     DisplaySizeUnknownError,

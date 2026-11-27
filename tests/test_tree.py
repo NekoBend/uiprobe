@@ -128,7 +128,7 @@ ABOUT = make_screen(".About", [el(1, cls="FrameLayout"), el(2, 1, text="Version 
 class Folder:
     """A run folder written by the real RunWriter."""
 
-    def __init__(self, tmp_path: Path) -> None:
+    def __init__(self, tmp_path: Path, *, record_text: bool | None = None) -> None:
         self.path = tmp_path / "run"
         self.writer = RunWriter.create(
             self.path,
@@ -136,6 +136,7 @@ class Folder:
             limits=Limits(),
             deny_words=["delete"],
             serial="emulator-5554",
+            record_text=record_text,
         )
         _WRITERS.append(self.writer)
         self.action = 0

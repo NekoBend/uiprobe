@@ -82,7 +82,12 @@ class _ObserveMixin(_RunState):
             if screen is None:
                 self.writer.write_transition_end(action_id, dump_failed=True)
             else:
-                self.writer.write_transition_end(action_id, screen.screen_id)
+                # What a scroll did beyond scrolling (None for every other
+                # action and for a scroll that only scrolled).
+                effect = self.engine.scroll_effect(screen, foreground)
+                self.writer.write_transition_end(
+                    action_id, screen.screen_id, scroll_effect=effect
+                )
         if screen is not None and self.on_target(screen, foreground):
             self.screens_seen.add(screen.screen_id)  # counted when observed
 
@@ -94,13 +99,38 @@ class _ObserveMixin(_RunState):
         """
         self.focus = seen.focus
         screen = seen.observation.screen
-        if screen is None or not self.on_target(screen, seen.observation.foreground):
+        if screen is None:
+            return  # a scroll's result screen is the next read that works
+        scrolled = self.scrolled
+        if not self.on_target(screen, seen.observation.foreground):
+            self.scrolled = None  # the result of the scroll is another app's
             return
         if self.device.pin_epoch != epoch:
-            return
+            return  # an event crossed the reads: the next read is the result
+        self.scrolled = None
+        if scrolled is not None and (
+            self.engine.scroll_effect(screen, seen.observation.foreground)
+            == "navigation"
+        ):
+            # The scroll's own end line said the dump failed, and the read that
+            # worked is another page (another activity, a dialog): it is not
+            # more of the list, so no read is written under the scroll.
+            scrolled = None
         self.screens_seen.add(screen.screen_id)
-        if not self.writer.write_screen(screen) or not self.screenshots:
-            return
+        first = self.writer.write_screen(screen)
+        reads = self.reads.setdefault(screen.screen_id, [])
+        if first:
+            reads.append((None, screen.elements))
+        if scrolled is not None:
+            # What a scroll showed, whatever the screen's id: its rows are
+            # listed under the screen it was scrolled from (`uiprobe tree`).
+            self.writer.write_scroll_screen(scrolled, screen)
+            reads.append((scrolled, screen.elements))
+        if first and self.screenshots:
+            self.take_screenshot(screen, epoch)
+
+    def take_screenshot(self, screen: Screen, epoch: int) -> None:
+        """Take and write the image of a screen that was just written."""
         try:
             png = self.device.screenshot()
             after = self.device.foreground()

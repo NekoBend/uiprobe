@@ -405,6 +405,9 @@ def _crawl_policy(args: argparse.Namespace) -> _CrawlSetup:
             "--back-on-other-screens and --no-back-on-other-screens cannot be combined"
         )
         raise _UsageError(msg)
+    if args.scroll and args.no_scroll:
+        msg = "--scroll and --no-scroll cannot be combined"
+        raise _UsageError(msg)
     # A plain str, whatever the subclass (as crawl_run does), for the check,
     # the run folder's name and the run itself.
     args.package = str.__str__(args.package)
