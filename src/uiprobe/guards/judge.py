@@ -37,6 +37,7 @@ from uiprobe.guards.tree import (
     _CONFIRM,
     _DENY,
     _EMPTY_AGG,
+    _EXACT,
     _JOINED,
     _NONE,
     _PASSWORD_AT,
@@ -85,23 +86,26 @@ class _Judge:
         self.tree = _Tree(screen)
         self.elements = screen.elements
         self.matcher = _Matcher(policy.deny_words, policy.deny_exceptions)
-        self.confirm = frozenset(_confirm_form(w) for w in policy.confirm_words)
+        # The exact-label words (`DIALOG_ONLY_EXACT_LABELS`) are left out of
+        # `self.confirm`, so that every match below is exactly what it is
+        # without them; a word that a file older than version 12 lists by hand
+        # (`Policy.legacy_confirm_words`) stays in as an ordinary word.
+        exact = frozenset(_confirm_form(w) for w in DIALOG_ONLY_EXACT_LABELS)
+        legacy = frozenset(_confirm_form(w) for w in policy.legacy_confirm_words)
+        forms = frozenset(_confirm_form(w) for w in policy.confirm_words)
+        self.confirm = frozenset(f for f in forms if f not in exact or f in legacy)
+        # The exact-label words in use: counted by `exact_label`, on a dialog.
+        self._exact = forms & exact
         # The lengths of the confirm words, shortest first: only a start of a
         # label of one of these lengths can be a confirm word.
-        self._exact_only = frozenset(_confirm_form(w) for w in DIALOG_ONLY_EXACT_LABELS)
-        self._dialog_only = self._exact_only | frozenset(
+        self._dialog_only = frozenset(
             _confirm_form(w) for w in DIALOG_ONLY_CONFIRM_WORDS
         )
-        # An exact-label word is never the start of a longer label.
-        self._confirm_lengths = sorted(
-            {len(form) for form in self.confirm - self._exact_only}
-        )
+        self._confirm_lengths = sorted({len(form) for form in self.confirm})
         # A confirm word that ends in a letter of the Japanese script can be
         # followed by anything; the others need a boundary (`_is_confirm`).
         self._open_ended = frozenset(
-            form
-            for form in self.confirm - self._exact_only
-            if _is_japanese_letter(form[-1])
+            form for form in self.confirm if _is_japanese_letter(form[-1])
         )
         # A screen of a listed also_target package is judged as the target's
         # own: its package is then the target of this screen (an element of
@@ -143,6 +147,7 @@ class _Judge:
         self._joined_below: dict[int, int] = {}
         self._labels: dict[int, str] = {}
         self._wide_labels: dict[int, str] = {}
+        self._exact_labels: dict[int, str] = {}
         self._contrib: dict[int, _Agg] = {}
         self._everywhere: _Agg | None = None
         self._cells: dict[int, _Agg] = {}
@@ -307,9 +312,7 @@ class _Judge:
         A confirm word at the start counts when a boundary follows it: a
         character that is not a letter, or nothing. A word ending in a
         letter of the Japanese script needs no boundary. With ``wide``, the
-        dialog-only words (`DIALOG_ONLY_CONFIRM_WORDS` and
-        `DIALOG_ONLY_EXACT_LABELS`) do not count. An exact-label word counts
-        only as the whole form, never as the start of a longer one.
+        dialog-only words (`DIALOG_ONLY_CONFIRM_WORDS`) do not count.
         """
         if not form:
             return False
@@ -321,12 +324,44 @@ class _Judge:
             head = form[:end]
             if (
                 head in self.confirm
-                and head not in self._exact_only
                 and not (wide and head in self._dialog_only)
                 and (head in self._open_ended or not form[end].isalpha())
             ):
                 return True
         return False
+
+    def exact_label(self, i: int) -> str:
+        """Return the form of the whole label of a clickable element when it is
+        exactly an exact-label word, or ``""``.
+
+        Only on a dialog that is refused (``refuse_dialog_confirm``). The label
+        is assembled the way the other words see it: one of the element's own
+        text, content_desc or hint, or the texts (or content_descs) of its
+        descendants joined in document order (`_joined_forms`). A word that is
+        only a part of a longer assembled label (``オン`` and ``ライン`` in two
+        children) does not count. This never changes `confirm_label`.
+        """
+        if not self._exact or not self.dialog or not self.policy.refuse_dialog_confirm:
+            return ""
+        cached = self._exact_labels.get(i)
+        if cached is None:
+            cached = self._exact_labels[i] = self._find_exact_label(i)
+        return cached
+
+    def _find_exact_label(self, i: int) -> str:
+        element = self.elements[i]
+        for value in (element.text, element.content_desc, element.hint):
+            form = self._form(value)
+            if form in self._exact:
+                return form
+        below = self.tree.subtree(i)[1:]
+        if not below:
+            return ""
+        for getter in (lambda e: e.text, lambda e: e.content_desc):
+            for form in self._joined_forms(getter(self.elements[j]) for j in below):
+                if form in self._exact:
+                    return form
+        return ""
 
     def _form(self, value: str) -> str:
         form = self._confirm_forms.get(value)
@@ -565,6 +600,7 @@ class _Judge:
                 i if clickable and self.confirm_label(i) else _NONE,
                 deny,
                 self.joined_root(i),
+                i if clickable and self.exact_label(i) else _NONE,
             )
         return cached
 
@@ -714,6 +750,8 @@ class _Judge:
         self._word_rules(found, reasons, details)
         if found[_CONFIRM] != _NONE:
             self._confirm_reasons(i, own, found, reasons, details)
+        if found[_EXACT] != _NONE:
+            self._exact_reasons(i, own, found, reasons, details)
         self._positive_button_reason(i, point, reasons, details)
         if point is not None and any(_contains(area, point) for area in self._avoid):
             reasons.append("screen_edge")
@@ -963,6 +1001,23 @@ class _Judge:
         if self.dialog and self.policy.refuse_dialog_confirm:
             reasons.append("dialog_confirm_button")
             details.append(Detail("dialog_confirm_button", note=note))
+
+    def _exact_reasons(
+        self,
+        i: int,
+        own: _Agg,
+        found: _Agg,
+        reasons: list[Reason],
+        details: list[Detail],
+    ) -> None:
+        """Add ``dialog_confirm_button`` for an exact-label word (see
+        `exact_label`), on its own: it never touches ``confirm_button``."""
+        hit, elsewhere = self._hit(own, found, _EXACT, i)
+        label = self.exact_label(hit)
+        note = f"{label} (hit target {self.elements[hit].id})" if elsewhere else label
+        if "dialog_confirm_button" not in reasons:
+            reasons.append("dialog_confirm_button")
+        details.append(Detail("dialog_confirm_button", note=note))
 
 
 def _contains(bounds: Bounds, point: tuple[int, int]) -> bool:

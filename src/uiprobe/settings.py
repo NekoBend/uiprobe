@@ -154,6 +154,7 @@ from uiprobe.guards import (
     _phrase_key,
     normalize,
 )
+from uiprobe.guards.constants import DIALOG_ONLY_EXACT_LABELS
 from uiprobe.model import MIN_VISIBLE_PX
 from uiprobe.pngfile import check_new_path
 
@@ -217,6 +218,10 @@ _LATER_DENY: Final[dict[str, int]] = {
 # next defaults version (raise DEFAULTS_VERSION with it); before that, the
 # test that no default is tagged beyond the current version fails.
 _FIRST_EXCEPT: Final = 13
+# The defaults version that added the exact-label confirm words; one that a
+# file older than this lists by hand keeps the plain matching of its entry.
+_FIRST_EXACT: Final = 12
+_EXACT_FORMS: Final = frozenset(_confirm_form(w) for w in DIALOG_ONLY_EXACT_LABELS)
 _LATER_EXCEPT: Final[dict[str, int]] = {}
 _LATER_CONFIRM: Final[dict[str, int]] = {
     "turn on": 9,
@@ -443,6 +448,10 @@ class Settings:
     scrolls_per_screen: int = DEFAULT_SCROLLS_PER_SCREEN
     scroll_amount: int = DEFAULT_SCROLL_AMOUNT
     scroll_incidents: int = DEFAULT_SCROLL_INCIDENTS
+    # The version 12 words ``on`` and ``オン`` that a file older than version 12
+    # lists by hand: they keep the matching of every other confirm word
+    # (`Policy.legacy_confirm_words`). Empty for a file of version 12 or later.
+    legacy_confirm_words: tuple[str, ...] = ()
 
 
 def _separators() -> str:
@@ -526,6 +535,7 @@ def policy_from_settings(
         deny_words=settings.deny_words,
         deny_exceptions=settings.deny_exceptions,
         confirm_words=settings.confirm_words,
+        legacy_confirm_words=settings.legacy_confirm_words,
         irreversible_phrases=settings.irreversible_phrases,
         skip_irreversible=settings.refuse_irreversible_screens,
         tap_unlabeled=settings.tap_unlabeled
@@ -1409,6 +1419,11 @@ def load_settings(path: str | os.PathLike[str]) -> Settings:
         record_text=record_text,
         deny_words=deny_words,
         deny_exceptions=deny_exceptions,
+        legacy_confirm_words=tuple(
+            word
+            for word in confirm_listed
+            if defaults_version < _FIRST_EXACT and _confirm_form(word) in _EXACT_FORMS
+        ),
         confirm_words=_merge(
             confirm_listed,
             confirm_removed,

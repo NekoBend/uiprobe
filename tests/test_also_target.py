@@ -130,7 +130,7 @@ def test_the_settings_fields_end_with_also_target():
 
     names = [f.name for f in dataclasses.fields(settings.Settings)]
     # later fields follow in the order of the defaults versions
-    assert names[-6:] == [
+    assert names[-7:-1] == [
         "also_target",
         "back_on_other_screens",
         "scroll_lists",
@@ -138,7 +138,8 @@ def test_the_settings_fields_end_with_also_target():
         "scroll_amount",
         "scroll_incidents",
     ]
-    assert names[-7] == "record_text"
+    assert names[-1] == "legacy_confirm_words"
+    assert names[-8] == "record_text"
 
 
 def test_no_default_exception_is_tagged_with_the_new_version():

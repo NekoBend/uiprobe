@@ -2339,6 +2339,7 @@ def test_settings_built_with_the_earlier_fields_still_work(tmp_path):
         "scrolls_per_screen",
         "scroll_amount",
         "scroll_incidents",
+        "legacy_confirm_words",
     ]
 
 
@@ -2629,7 +2630,7 @@ def test_policy_replay_path_defaults_on_and_must_be_a_bool():
 
 def test_replay_path_comes_after_runs_dir_so_positional_settings_still_work(tmp_path):
     names = [f.name for f in dataclasses.fields(settings.Settings)]
-    assert names[-9:] == [
+    assert names[-10:] == [
         "runs_dir",
         "replay_path",
         "record_text",
@@ -2639,6 +2640,7 @@ def test_replay_path_comes_after_runs_dir_so_positional_settings_still_work(tmp_
         "scrolls_per_screen",
         "scroll_amount",
         "scroll_incidents",
+        "legacy_confirm_words",
     ]
     loaded = load_settings(default_file(tmp_path))
     # Built by position with every field up to runs_dir, as before version 5:
@@ -3288,3 +3290,40 @@ def test_the_version_11_file_loads_as_the_current_defaults(tmp_path):
     assert settings.policy_from_settings(loaded).confirm_words == (
         settings.policy_from_settings(current).confirm_words
     )
+
+
+def _with_confirm_word(text: str, word: str) -> str:
+    head, confirm = text.split("[confirm]")
+    return (
+        head
+        + "[confirm]"
+        + confirm.replace("words = [\n", f'words = [\n    "{word}",\n', 1)
+    )
+
+
+@pytest.mark.parametrize("version", range(1, 12))
+@pytest.mark.parametrize("word", ["on", "ON", "オン"])
+def test_an_older_file_that_lists_a_version_12_word_keeps_the_plain_matching(
+    tmp_path, version, word
+):
+    text = _with_confirm_word(version_text(version), word)
+    loaded = load_settings(write(tmp_path, text))
+    assert loaded.legacy_confirm_words == (word,)
+    policy = settings.policy_from_settings(loaded)
+    assert policy.legacy_confirm_words == (word,)
+    assert policy.with_deny_words(["zzz"]).legacy_confirm_words == (word,)
+
+
+@pytest.mark.parametrize("version", range(1, 12))
+def test_an_older_file_that_does_not_list_them_has_no_legacy_words(tmp_path, version):
+    loaded = load_settings(write(tmp_path, version_text(version)))
+    assert loaded.legacy_confirm_words == ()
+    assert settings.policy_from_settings(loaded).legacy_confirm_words == ()
+
+
+def test_a_version_12_file_has_no_legacy_words(tmp_path):
+    text = render_default_settings()
+    assert '    "on",\n' in text
+    loaded = load_settings(write(tmp_path, text))
+    assert loaded.legacy_confirm_words == ()
+    assert settings.policy_from_settings(loaded).legacy_confirm_words == ()

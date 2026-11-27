@@ -151,10 +151,19 @@ def _is_number_only(label: str) -> bool:
 
 # An aggregate holds, for the hit targets of one press point, the smallest
 # element index that has each property (_NONE when no hit target has it).
-_PKG, _PERM, _TEXT, _PASSWORD_AT, _CONFIRM, _DENY, _JOINED = range(7)
+_PKG, _PERM, _TEXT, _PASSWORD_AT, _CONFIRM, _DENY, _JOINED, _EXACT = range(8)
 _NONE: Final = 1 << 30
-_Agg = tuple[int, int, int, int, int, int, int]
-_EMPTY_AGG: Final[_Agg] = (_NONE, _NONE, _NONE, _NONE, _NONE, _NONE, _NONE)
+_Agg = tuple[int, int, int, int, int, int, int, int]
+_EMPTY_AGG: Final[_Agg] = (
+    _NONE,
+    _NONE,
+    _NONE,
+    _NONE,
+    _NONE,
+    _NONE,
+    _NONE,
+    _NONE,
+)
 _CELLS_X: Final = 24
 _CELLS_Y: Final = 48
 
@@ -168,6 +177,7 @@ def _merge(first: _Agg, second: _Agg) -> _Agg:
         min(first[4], second[4]),
         min(first[5], second[5]),
         min(first[6], second[6]),
+        min(first[7], second[7]),
     )
 
 

@@ -237,6 +237,16 @@ class Policy:
     stays refused (``outside_target_app``). With the empty default nothing
     differs from a policy without the field.
 
+    ``legacy_confirm_words`` (default ``()``) names confirm words that were
+    written by hand in a settings file older than defaults version 12 and that
+    equal one of `DIALOG_ONLY_EXACT_LABELS` (``on``, ``オン``). Such a word
+    keeps the matching of every other confirm word (a start of a label, and the
+    screen-wide ``confirm_button``). Without it, ``on`` and ``オン`` in
+    ``confirm_words`` are the built-in exact-only words: they never match as
+    the start of a label and never give ``confirm_button``; on a dialog they
+    give ``dialog_confirm_button`` when the whole label is the word. A legacy
+    word gets that dialog refusal too.
+
     ``scroll_lists`` (default `DEFAULT_SCROLL_LISTS`, False) is read by the
     pressing crawl only, not by `judge`. True lets the crawl turn a mouse wheel
     over a list (content further down comes up) on a screen with nothing left
@@ -290,6 +300,7 @@ class Policy:
     replay_path: bool = True
     also_target: tuple[str, ...] = ()
     scroll_lists: bool = DEFAULT_SCROLL_LISTS
+    legacy_confirm_words: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if type(self.back_on_other_screens) is not bool:
@@ -374,6 +385,7 @@ class Policy:
             skip_sliders=self.skip_sliders,
             replay_path=self.replay_path,
             also_target=self.also_target,
+            legacy_confirm_words=self.legacy_confirm_words,
             scroll_lists=self.scroll_lists,
         )
 

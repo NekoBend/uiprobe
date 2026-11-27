@@ -479,6 +479,7 @@ def test_the_policy_copy_keeps_every_field():
         "replay_path": False,
         "also_target": ("com.example.helper",),
         "scroll_lists": True,
+        "legacy_confirm_words": ("on",),
     }
     assert set(values) == {f.name for f in fields(Policy)}
     default = Policy()
