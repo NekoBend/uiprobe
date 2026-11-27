@@ -100,6 +100,8 @@ class _Plan:
     below: tuple[Element, ...]
     shape: tuple[object, ...]
     labels: tuple[tuple[str, str, str], ...]
+    # The phrase of `Policy.except_phrases` that let the element through.
+    except_phrase: str = ""
     # A tap that presses an element again to get back down (see `_Replay`).
     replay: bool = False
     # The badge-free (screen id, fingerprint) of the element, None with
@@ -783,6 +785,14 @@ class CrawlEngine:
         only for the very `Tap` instance that `next` returned last as one."""
         return tap is self._replay_tap
 
+    def except_phrase_of(self, tap: Tap) -> str:
+        """The phrase of ``Policy.except_phrases`` that let the element of `tap`
+        through a deny word (the driver records it as ``except_phrase`` in the
+        tap's start line), or ``""``. It answers for the very `Tap` instance
+        `next` returned last, before `recheck`."""
+        planned = self._planned
+        return planned.except_phrase if planned and planned.tap is tap else ""
+
     # -- internals ----------------------------------------------------------------
 
     def _drop_unsent_tap(self) -> None:
@@ -1310,6 +1320,7 @@ class CrawlEngine:
                     prints.descendants(decision.element),
                     shape,
                     prints.labels(decision.element),
+                    except_phrase=decision.except_phrase,
                     bare=key,
                 )
                 if not counting:
@@ -1688,6 +1699,7 @@ class CrawlEngine:
                         prints.descendants(decision.element),
                         shape,
                         prints.labels(decision.element),
+                        except_phrase=decision.except_phrase,
                         replay=True,
                         bare=None
                         if bare is None
@@ -1783,6 +1795,7 @@ class CrawlEngine:
             prints = _Prints(screen)
             return (
                 decision.point == tap.point
+                and decision.except_phrase == plan.except_phrase
                 and fresh == plan.element
                 and prints.descendants(fresh) == plan.below
                 and prints.of(fresh) == tap.fingerprint

@@ -405,6 +405,7 @@ def _crawl_on(
         restart=restart,
         record_text=record_text,
         also_target=policy.also_target,
+        deny_except_phrases=policy.except_phrases,
         scrolls_per_screen=limits.scrolls_per_screen if asked else None,
         scroll_amount=limits.scroll_amount,
         scroll_incidents=limits.scroll_incidents,

@@ -65,7 +65,7 @@ from tests.helpers import is_port_allowed, reset_allowed_ports
 from tests.offline_check import offline_violation
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Generator, Iterator
 
 ENVIRONMENT_VARIABLES = (
     "ADB_SERVER_SOCKET",
@@ -629,3 +629,55 @@ def fake_adb() -> Iterator[FakeAdbServer]:
     assert not server.protocol_errors, server.protocol_errors
     assert not server.handler_errors, server.handler_errors
     assert not server.unexpected, server.unexpected
+
+
+@pytest.hookimpl(wrapper=True)
+def pytest_runtest_makereport(
+    call: pytest.CallInfo[None],
+) -> Generator[None, pytest.TestReport, pytest.TestReport]:
+    """Add the address and cause of an adb error to the failure report.
+
+    An error such as `AdbServerUnavailableError` keeps its cause (the socket
+    error, for example) in `details`, which pytest does not show; the report
+    then names it. Tests talk only to fakes, so no device value reaches it.
+    """
+    report = yield
+    try:
+        lines = _error_details(call)
+    except Exception:  # noqa: BLE001 - never turn a report into an internal error
+        lines = []
+    if report.failed and lines:
+        report.sections.append(("uiprobe error details", "\n".join(lines)))
+    return report
+
+
+# The detail keys shown: the server address and the cause of a uiprobe error
+# (a socket error, for example). Other keys can hold host paths.
+_SHOWN_DETAILS = ("address", "reason")
+
+
+def _error_details(call: pytest.CallInfo[None]) -> list[str]:
+    """The shown details of each uiprobe error in the failure's cause chain."""
+    from uiprobe.errors import UiprobeError
+
+    excinfo = call.excinfo
+    if excinfo is None:
+        return []
+    lines: list[str] = []
+    seen: set[int] = set()
+    error: BaseException | None = excinfo.value
+    while error is not None and id(error) not in seen and len(seen) < 10:
+        seen.add(id(error))
+        if isinstance(error, UiprobeError):
+            shown = {
+                key: str(error.details[key])[:500]
+                for key in _SHOWN_DETAILS
+                if key in error.details
+            }
+            if shown:
+                lines.append(f"{type(error).__name__}: {shown}")
+        cause = error.__cause__
+        if cause is None and not error.__suppress_context__:
+            cause = error.__context__
+        error = cause
+    return lines

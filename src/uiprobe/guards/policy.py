@@ -18,6 +18,7 @@ from uiprobe.guards.constants import (
     DEFAULT_DENY_EXCEPTIONS,
     DEFAULT_DENY_WORDS,
     DEFAULT_SCROLL_LISTS,
+    DIALOG_ONLY_EXACT_LABELS,
     IRREVERSIBLE_PHRASES,
     Reason,
 )
@@ -26,8 +27,11 @@ from uiprobe.guards.words import (
     _check_word,
     _confirm_form,
     _deny_forms,
+    _except_phrase_key,
     _exception_conflict,
     _exception_keys,
+    _forms,
+    _forms_match,
 )
 from uiprobe.model import MIN_VISIBLE_PX, Bounds
 
@@ -206,6 +210,27 @@ class Policy:
     behind ``confirm_button`` never uses them. An exception word must not
     equal a deny word (any of its forms).
 
+    ``except_phrases`` (default ``()``) are exception phrases (the settings
+    file's ``[deny] except_phrases``). A plain clickable row (not
+    long-clickable, checkable, scrollable, editable or a text or password
+    field; nothing inside it clickable or any of those; at most 500 elements;
+    not inside another clickable; its tap point held by it or something
+    inside it; the last element drawn at its tap point and at its name's
+    middle is in the row, except Samsung's empty ``round_corner`` view; no
+    other interactive element drawn over them) whose only reason is
+    ``deny_word``, that has only its name as text (one element with any text,
+    description or hint, the last two saying what the text says), whose name
+    has some area on the display with its middle inside the row and equals a
+    phrase after `normalize`, is judged once more with only that text replaced;
+    with no reason left it is let through, and its decision
+    carries the phrase as written in ``except_phrase``. With more than 8
+    structurally eligible rows on a screen (counted before the reasons) no
+    phrase applies. The wheel scroll never turns over such an element
+    (`Judgement.unsafe`). Each phrase is 1 to 80 characters, with no control
+    or invisible character and at least one letter, and phrases must differ
+    after `normalize`. `with_deny_words` drops a phrase that holds an added
+    word.
+
     ``back_on_other_screens`` (default False) is read by the pressing crawl
     only, not by `judge`. True lets the crawl press BACK while a screen of
     another app is in front (up to 2 in a row, then a relaunch), and that BACK
@@ -236,6 +261,15 @@ class Policy:
     (``permission_screen``) and an element of another package than the screen's
     stays refused (``outside_target_app``). With the empty default nothing
     differs from a policy without the field.
+
+    ``dialog_exact_labels`` (default `DIALOG_ONLY_EXACT_LABELS`, ``on`` and
+    ``オン``) are labels that are refused on a dialog (``dialog_confirm_button``,
+    unless ``refuse_dialog_confirm`` is False) when the label of a button is
+    exactly one of them, ignoring case, full-width letters and spaces. The
+    label is the one the confirm words are matched against. They are not
+    confirm words: a longer label that starts with one is not touched, and
+    they never give ``confirm_button``. ``confirm_words`` keeps its meaning for
+    every entry, ``on`` and ``オン`` included.
 
     ``scroll_lists`` (default `DEFAULT_SCROLL_LISTS`, False) is read by the
     pressing crawl only, not by `judge`. True lets the crawl turn a mouse wheel
@@ -290,6 +324,8 @@ class Policy:
     replay_path: bool = True
     also_target: tuple[str, ...] = ()
     scroll_lists: bool = DEFAULT_SCROLL_LISTS
+    dialog_exact_labels: tuple[str, ...] = DIALOG_ONLY_EXACT_LABELS
+    except_phrases: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if type(self.back_on_other_screens) is not bool:
@@ -316,6 +352,7 @@ class Policy:
             raise TypeError(msg)
         for word in (*self.deny_words, *self.confirm_words, *self.irreversible_phrases):
             _check_word(word)
+        _check_except_phrases(self.except_phrases)
         _exception_keys(self.deny_exceptions)
         _check_no_conflict(self.deny_exceptions, self.deny_words)
         if self.edges is not None and (
@@ -327,10 +364,14 @@ class Policy:
         if type(self.min_visible_px) is not int or self.min_visible_px < 1:
             msg = "min_visible_px must be an integer of at least 1"
             raise ValueError(msg)
-        for word in self.confirm_words:
-            if not _confirm_form(word):
-                msg = f"confirm word is empty after cleaning: {word!r}"
-                raise ValueError(msg)
+        for kind, words in (
+            ("confirm word", self.confirm_words),
+            ("dialog exact label", self.dialog_exact_labels),
+        ):
+            for word in words:
+                if not _confirm_form(word):
+                    msg = f"{kind} is empty after cleaning: {word!r}"
+                    raise ValueError(msg)
 
     def with_deny_words(self, extra: Iterable[str]) -> Policy:
         """Return a copy with `extra` words (for example ``--deny``) added.
@@ -353,6 +394,11 @@ class Policy:
             for exception in self.deny_exceptions
             if _exception_conflict(exception, added_forms) is None
         )
+        phrases = tuple(
+            phrase
+            for phrase in self.except_phrases
+            if not any(_forms_match(_forms(word), _forms(phrase)) for word in added)
+        )
         return Policy(
             deny_words=merged,
             confirm_words=self.confirm_words,
@@ -374,8 +420,27 @@ class Policy:
             skip_sliders=self.skip_sliders,
             replay_path=self.replay_path,
             also_target=self.also_target,
+            dialog_exact_labels=self.dialog_exact_labels,
             scroll_lists=self.scroll_lists,
+            except_phrases=phrases,
         )
+
+
+def _check_except_phrases(phrases: object) -> None:
+    """Check ``Policy.except_phrases``: a tuple of valid phrases, distinct
+    after `normalize`."""
+    if not isinstance(phrases, tuple | list) or not all(
+        type(phrase) is str for phrase in phrases
+    ):
+        msg = "except_phrases must be a tuple of strings"
+        raise TypeError(msg)
+    seen: set[str] = set()
+    for phrase in phrases:
+        key = _except_phrase_key(phrase)
+        if key in seen:
+            msg = f"except_phrases lists {phrase!r} twice (after normalization)"
+            raise ValueError(msg)
+        seen.add(key)
 
 
 def parse_deny_file(data: bytes) -> tuple[str, ...]:
@@ -487,12 +552,16 @@ class Decision:
     ``Screen.find``, or None without a visible part (under 8 x 8 pixels counts
     as none). ``reasons`` follow the
     order of `REASONS`; empty means the element may be pressed.
+    ``except_phrase`` is the phrase of ``Policy.except_phrases`` (as written)
+    that let this element through a deny word; it is ``""`` otherwise, always
+    with no phrases in the policy.
     """
 
     element: Element
     point: tuple[int, int] | None
     reasons: tuple[Reason, ...] = ()
     details: tuple[Detail, ...] = ()
+    except_phrase: str = ""
 
     @property
     def pressable(self) -> bool:

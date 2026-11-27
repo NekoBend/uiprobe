@@ -483,6 +483,7 @@ class RunWriter:
         scroll_amount: int | None = None,
         scroll_incidents: int | None = None,
         scroll_input: bool | None = None,
+        deny_except_phrases: Iterable[str] = (),
     ) -> RunWriter:
         """Make the run folder `out` and write ``run-start.json`` into it.
 
@@ -515,6 +516,8 @@ class RunWriter:
         hidden either way. `also_target` (``Policy.also_target``) is written
         as ``also_target``, a list, only when it is not empty: the packages
         besides `package` whose screens the crawl counted as the app's own.
+        `deny_except_phrases` (``Policy.except_phrases``) is written as
+        ``deny_except_phrases``, a list, only when it is not empty.
 
         Before anything is made, `out` gets the checks of
         `uiprobe.pngfile.check_new_path`: it must not be empty, hold a null
@@ -561,6 +564,7 @@ class RunWriter:
         also = _check_texts("also_target", also_target)
         words = _check_texts("deny_words", deny_words)
         exceptions = _check_texts("deny_exceptions", deny_exceptions)
+        phrases = _check_texts("deny_except_phrases", deny_except_phrases)
         limit_values = _limits_dict(limits)
         when = _check_moment("started_at", _now() if started_at is None else started_at)
         folder = _new_folder(out)
@@ -584,6 +588,8 @@ class RunWriter:
             record["record_text"] = record_text
         if also:
             record["also_target"] = also
+        if phrases:
+            record["deny_except_phrases"] = phrases
         if scrolls_per_screen is not None:
             record["scroll_lists"] = True
             record["scrolls_per_screen"] = _check_number(
@@ -656,7 +662,7 @@ class RunWriter:
 
     # -- the records --
 
-    def write_transition_start(
+    def write_transition_start(  # noqa: PLR0912 - one check per optional key
         self,
         action_id: int,
         kind: str,
@@ -671,6 +677,7 @@ class RunWriter:
         replay: bool = False,
         amount: int | None = None,
         after_scroll: int | None = None,
+        except_phrase: str = "",
     ) -> None:
         """Write the line that says an action is about to be sent.
 
@@ -704,13 +711,19 @@ class RunWriter:
         on: the line then has ``after_scroll``, so a reader knows which read of
         the screen the tap's element belongs to. It needs the kind ``tap``.
 
+        `except_phrase` is the phrase of ``Policy.except_phrases`` (as written)
+        that let a tap through a deny word: the line then has ``except_phrase``.
+        It needs the kind ``tap`` and is left out when empty.
+
         Raises:
-            TypeError: `restart` or `replay` is not a bool.
+            TypeError: `restart` or `replay` is not a bool, or `except_phrase`
+                is not a str.
             ValueError: `off_target_foreground` or `off_target_focus` is given
                 without `off_target_package`, `replay` is True for a kind
                 other than ``tap``, or `amount` is given for a kind other
                 than ``scroll`` (or missing for it), or `after_scroll` is
-                given for a kind other than ``tap``.
+                given for a kind other than ``tap``, or `except_phrase` is not
+                empty for a kind other than ``tap``.
         """
         line: dict[str, object] = {
             "schema": TRANSITION_START_SCHEMA,
@@ -754,6 +767,14 @@ class RunWriter:
                 msg = "replay needs the kind tap"
                 raise ValueError(msg)
             line["replay"] = True
+        if not isinstance(except_phrase, str):
+            msg = "except_phrase must be a str"
+            raise TypeError(msg)
+        if except_phrase:
+            if action["kind"] != "tap":
+                msg = "except_phrase needs the kind tap"
+                raise ValueError(msg)
+            line["except_phrase"] = _check_text("except_phrase", except_phrase)
         line.update(_after_scroll_field(action["kind"], after_scroll))
         self._append("transitions.jsonl", _json_text(line) + "\n", start=True)
 

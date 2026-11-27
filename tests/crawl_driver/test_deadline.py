@@ -479,6 +479,8 @@ def test_the_policy_copy_keeps_every_field():
         "replay_path": False,
         "also_target": ("com.example.helper",),
         "scroll_lists": True,
+        "dialog_exact_labels": ("off",),
+        "except_phrases": ("quick zap",),
     }
     assert set(values) == {f.name for f in fields(Policy)}
     default = Policy()

@@ -73,12 +73,13 @@ def test_the_guards_package_holds_exactly_the_known_files() -> None:
 def test_every_annotation_in_the_guards_package_resolves() -> None:
     # Names that were only imported for type checking in the single module;
     # a test may supply them, nothing else may be missing at run time.
-    from collections.abc import Iterable, Sequence
+    from collections.abc import Callable, Iterable, Sequence
 
     from uiprobe.guards.policy import Judgement
     from uiprobe.model import Bounds, Element, Screen
 
     extra = {
+        "Callable": Callable,
         "Judgement": Judgement,
         "Iterable": Iterable,
         "Sequence": Sequence,
