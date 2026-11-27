@@ -10,7 +10,7 @@ from uiprobe._json import dumps
 from uiprobe.cli.commands import _single_serial
 from uiprobe.cli.output import _emit, _fail
 from uiprobe.cli.parser import _UsageError
-from uiprobe.crawl_driver import _app_window
+from uiprobe.crawl_driver import _app_named, _app_window
 from uiprobe.crawl_preview import MAX_PACKAGE_LENGTH, check_package
 from uiprobe.device import Device
 from uiprobe.errors import INTERNAL_ERROR, USAGE_ERROR, UiprobeError
@@ -67,6 +67,16 @@ def _crawl_owned(package: str, app: PackageUid) -> Callable[[InputWindow], bool]
     return owned
 
 
+def _crawl_named(package: str) -> Callable[[InputWindow], bool]:
+    """The crawl's name test of the app's windows (`_app_named`), for
+    `package`."""
+
+    def named(window: InputWindow) -> bool:
+        return _app_named(package, window)
+
+    return named
+
+
 def _cmd_diagnose(args: argparse.Namespace) -> int:
     serial = _single_serial(args)
     package = _diagnose_package(args)
@@ -104,7 +114,9 @@ def _diagnose_on(
         found = device.diagnose_tap_window(show_device_text=show_device_text)
         return replace(found, app_test=APP_UID_UNREADABLE)
     found = device.diagnose_tap_window(
-        show_device_text=show_device_text, owned=_crawl_owned(package, app)
+        show_device_text=show_device_text,
+        owned=_crawl_owned(package, app),
+        named=_crawl_named(package),
     )
     return replace(found, app_test=APP_CRAWL_TESTED)
 

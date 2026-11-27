@@ -30,6 +30,11 @@ Without ``owned``
 every such window of the display's list refuses (``samsung_flags``), also
 where a crawl of the app would read it, and the report says so in a note
 (`NOTE`). With ``owned`` the windows it accepts read as in the crawl.
+
+``samsungFlags=0x100000`` and ``0x100001`` read only where ``owned`` and
+``named`` (the title names the app) both say yes, and refuse as ``0x1``
+does otherwise (``samsung_flags``), so the note of that rule names
+``0x1`` for them too.
 """
 
 from __future__ import annotations
@@ -923,6 +928,7 @@ def diagnose_tap_window(
     show_device_text: bool = False,
     display_id: int = 0,
     owned: Callable[[InputWindow], bool] | None = None,
+    named: Callable[[InputWindow], bool] | None = None,
 ) -> TapWindowDiagnosis:
     """Diagnose the tap window check on the whole text of ``dumpsys input``.
 
@@ -932,10 +938,11 @@ def diagnose_tap_window(
     tokens and the rows' forms, which hold device text. `owned` tells the
     app's own windows, the only ones whose ``samsungFlags=0x1`` reads, as
     in the crawl (`uiprobe.inputwindows.explain_input_windows`); with it
-    ``app_test`` is `APP_TESTED`.
+    ``app_test`` is `APP_TESTED`. `named` is the title test that
+    ``samsungFlags=0x100000`` and ``0x100001`` also need.
     """
     lines = [line.removesuffix("\r") for line in text.split("\n")]
-    verdict = explain_input_windows(text, display_id, owned=owned)
+    verdict = explain_input_windows(text, display_id, owned=owned, named=named)
     if verdict.rule is not None and verdict.rule not in RULES[verdict.reason or ""]:
         msg = "the reader refused with a rule outside RULES"  # a bug, not the text
         raise AssertionError(msg)

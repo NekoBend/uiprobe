@@ -24,6 +24,7 @@ from uiprobe.crawl_driver.constants import (
     NOT_SENT_TIME_LIMIT,
 )
 from uiprobe.crawl_driver.helpers import (
+    _app_named,
     _app_window,
     _failure_word,
     _Seen,
@@ -106,7 +107,9 @@ class _GateMixin(_RunState):
         the package or begin with the package and ``/`` (as an activity's
         window does); a window of the app with another title is refused.
         The same test tells the reader which windows may print
-        ``samsungFlags=0x1`` (`uiprobe.inputwindows.read_window_at`).
+        ``samsungFlags=0x1``; ``0x100000`` and ``0x100001`` need the title
+        test as well, even for an app with a uid of its own
+        (`uiprobe.inputwindows.read_window_at`).
         """
         package = self.tap_package(screen)
         app = self.app_uid if package == self.package else self.also_uids.get(package)
@@ -119,7 +122,10 @@ class _GateMixin(_RunState):
         def owned(window: InputWindow) -> bool:
             return self.app_window(window, app, package)
 
-        found = self.device.window_at(point, owned=owned)
+        def named(window: InputWindow) -> bool:
+            return _app_named(package, window)
+
+        found = self.device.window_at(point, owned=owned, named=named)
         if isinstance(found, Unreadable):  # the reason, and the check that refused
             return NOT_SENT_COVER_UNKNOWN, {
                 "unreadable": str(found),

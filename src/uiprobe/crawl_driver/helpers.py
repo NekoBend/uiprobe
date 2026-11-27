@@ -173,12 +173,18 @@ class _Seen:
     focus: FocusedWindow | None
 
 
+def _app_named(package: str, window: InputWindow) -> bool:
+    """Whether the title of `window` names the app: the package, or the
+    package and ``/`` first (as an activity's window does)."""
+    return window.title == package or window.title.startswith(package + "/")
+
+
 def _app_window(package: str, window: InputWindow, app: PackageUid) -> bool:
     """Whether `window` belongs to the app (see `cover`): its owner uid
     is the app's, and its title names the app unless the app has a uid
     of its own (not shared, 10000 or more)."""
     uid, shared = app.uid, app.shared
-    named = window.title == package or window.title.startswith(package + "/")
+    named = _app_named(package, window)
     return window.owner_uid == uid and (named or (not shared and uid >= _FIRST_APP_UID))
 
 
