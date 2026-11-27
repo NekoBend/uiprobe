@@ -128,6 +128,9 @@ class Row:
     # screen's own file, a negative number for the file of another id of the
     # same screen).
     view_key: int | None = None
+    # The group of the screen's list the row lies in (see `_assign_groups`),
+    # or None: the row is outside the list, or the screen has no separator.
+    group: int | None = None
 
 
 @dataclass(slots=True)
@@ -142,6 +145,9 @@ class ScreenNode:
     screen_reasons: tuple[str, ...] = ()
     unmatched_why: str | None = None  # why they were not matched, when not tried
     popup: bool = False  # the crawl's own dialog rule holds for the screen
+    # The text of the separator that starts each group, by group number (group
+    # 0 has none): empty when the screen has no separator in its list.
+    groups: list[str | None] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -1674,6 +1680,126 @@ def _check_folds(rows: list[Row]) -> None:
             row.folded_into = None
 
 
+def _holds_clickable(screen: Screen, index: dict[str, int]) -> list[bool]:
+    """For each element: it is clickable, or something below it is."""
+    elements = screen.elements
+    holds = ["clickable" in e.flags for e in elements]
+    for element in elements:
+        if "clickable" not in element.flags:
+            continue
+        node = index.get(element.parent) if element.parent is not None else None
+        while node is not None and not holds[node]:
+            holds[node] = True
+            parent = elements[node].parent
+            node = index.get(parent) if parent is not None else None
+    return holds
+
+
+def _separator_text(
+    screen: Screen, i: int, children: dict[str, list[int]], *, record_text: bool
+) -> str | None:
+    """The first non-empty text of the element and what is below it, in
+    document order; None when there is none, or when texts were not recorded."""
+    if not record_text:
+        return None
+    for j in _subtree(i, children, screen):
+        element = screen.elements[j]
+        text = element.text.strip()
+        if text:
+            return _PASSWORD_NAME if "password" in element.flags else text
+    return None
+
+
+def _read_groups(
+    screen: Screen, *, record_text: bool
+) -> tuple[dict[str, int], list[str | None]]:
+    """The groups of one read: the group number of every element under the
+    list's children, and the text of each separator (group 1, 2, ...).
+
+    The list is the element with the most direct children that are or hold a
+    clickable, at least 3 (the first one on a tie). Among its children, one that
+    holds no clickable and lies between two that do is a separator; it starts a
+    new group, and the children before the first separator are group 0."""
+    index = {e.id: i for i, e in enumerate(screen.elements)}
+    children: dict[str, list[int]] = {}
+    for i, element in enumerate(screen.elements):
+        if element.parent in index:
+            children.setdefault(element.parent, []).append(i)  # type: ignore[arg-type]
+    holds = _holds_clickable(screen, index)
+    best = -1
+    best_count = 2  # a list has at least 3
+    for i, element in enumerate(screen.elements):
+        count = sum(1 for c in children.get(element.id, ()) if holds[c])
+        if count > best_count:
+            best, best_count = i, count
+    if best < 0:
+        return {}, []
+    kids = children[screen.elements[best].id]
+    marked = [n for n, c in enumerate(kids) if holds[c]]
+    first, last = marked[0], marked[-1]
+    members: dict[str, int] = {}
+    texts: list[str | None] = []
+    for n, child in enumerate(kids):
+        if not holds[child] and first < n < last:
+            texts.append(
+                _separator_text(screen, child, children, record_text=record_text)
+            )
+        stack = [child]
+        while stack:
+            i = stack.pop()
+            element_id = screen.elements[i].id
+            if element_id not in members:
+                members[element_id] = len(texts)
+                stack.extend(children.get(element_id, ()))
+    return members, texts
+
+
+def _assign_groups(
+    rows: list[Row], views: list[_View], *, record_text: bool
+) -> list[str | None]:
+    """Give each row its group and return the group texts (by group number);
+    nothing is changed, and the result is empty, when no read of the screen has
+    a separator.
+
+    Each read is grouped on its own. The first read keeps its numbers. For a
+    read after a scroll: its group 0 (what comes before its first separator)
+    continues the last group listed so far; its other groups take the number of
+    the group already listed with the same text, and a new number otherwise (a
+    separator with no text is always a new group)."""
+    found = [
+        (key, *_read_groups(screen, record_text=record_text)) for key, screen in views
+    ]
+    if not any(texts for _, _, texts in found):
+        return []
+    listed: list[str | None] = [None]
+    numbers: dict[int | None, dict[int, int]] = {}
+    for position, (key, _, texts) in enumerate(found):
+        mapping = {0: 0 if position == 0 else len(listed) - 1}
+        for local, text in enumerate(texts, 1):
+            same = None
+            if position > 0 and text is not None:
+                taken = {n for local_n, n in mapping.items() if local_n}
+                same = next(
+                    (
+                        n
+                        for n, t in enumerate(listed)
+                        if n and t == text and n not in taken
+                    ),
+                    None,
+                )
+            if same is None:
+                listed.append(text)
+                same = len(listed) - 1
+            mapping[local] = same
+        numbers[key] = mapping
+    members = {key: element_ids for key, element_ids, _ in found}
+    for row in rows:
+        local = members.get(row.view_key, {}).get(row.element_id)
+        if local is not None:
+            row.group = numbers[row.view_key][local]
+    return listed
+
+
 def _node(  # noqa: PLR0912 - one step per kind of read
     sid: str,
     loaded: tuple[Screen, str, str | None],
@@ -1741,6 +1867,7 @@ def _node(  # noqa: PLR0912 - one step per kind of read
     for row, taps in attached.values():
         _attach(row, taps, sid, own, reader, moves)
     _check_folds(rows)
+    groups = _assign_groups(rows, views, record_text=record_text)
     return ScreenNode(
         sid,
         screen_package,
@@ -1754,6 +1881,7 @@ def _node(  # noqa: PLR0912 - one step per kind of read
         ),
         "too_many_elements" if unchecked else None,
         _is_dialog(_Tree(screen)),
+        groups,
     )
 
 
@@ -2021,6 +2149,7 @@ def _element_dict(row: Row) -> dict[str, object]:
         data["folded_into"] = row.folded_into
     if row.after_scroll is not None:
         data["after_scroll"] = row.after_scroll
+    data["group"] = row.group
     if row.kind == "row":
         data["pressed"] = row.pressed
         data["action_id"] = row.action_id
@@ -2062,6 +2191,10 @@ def tree_to_dict(tree: RunTree) -> dict[str, object]:
             entry["screen_reasons"] = list(node.screen_reasons)
         if node.popup:
             entry["popup"] = True
+        if node.groups:
+            entry["groups"] = [
+                {"index": n, "text": text} for n, text in enumerate(node.groups)
+            ]
         screens[sid] = entry
     return {
         "schema": TREE_SCHEMA,

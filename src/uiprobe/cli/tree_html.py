@@ -38,6 +38,9 @@ li{margin:.1em 0}
 summary{cursor:pointer}
 .unpressed{color:#6b7280}
 @media (prefers-color-scheme:dark){.unpressed{color:#9ca3af}}
+.between{margin-top:.9em;font-size:.8em;line-height:1.2;color:#6b7280;overflow-wrap:anywhere}
+@media (prefers-color-scheme:dark){.between{color:#9ca3af}}
+.between:empty{height:.9em;margin-top:0}
 .fold>summary{font-style:italic}
 footer{margin-top:1.5em;border-top:1px solid #8884;padding-top:.6em}
 footer ul{padding-left:0}
@@ -59,6 +62,10 @@ class HRow:
     see: tuple[str, str] | None = None  # (anchor id, name shown)
     anchor: str | None = None
     children: list[HRow | HFold] = field(default_factory=list)
+    # The row starts a new group of its screen's list: a gap is left above it,
+    # with `gap_text` (the text between the rows) in small type when not empty.
+    gap: bool = False
+    gap_text: str = ""
 
 
 @dataclass(slots=True)
@@ -139,6 +146,8 @@ def _items(children: Sequence[HRow | HFold | str], out: list[str]) -> None:
         if isinstance(child, str):
             out.append(f'<li class="item">{_esc(child)}</li>')
             continue
+        if isinstance(child, HRow) and child.gap:
+            out.append(f'<li class="between">{_esc(child.gap_text)}</li>')
         if isinstance(child, HFold):
             summary = f'<span class="head">{_esc(child.label)}</span>'
             item, kind, opened, nested = "<li>", ' class="fold"', "", level

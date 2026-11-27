@@ -138,6 +138,10 @@ class _Entry:
     dot: bool = False
     reasons: str = ""
     kinds: str = ""  # " [toggle, disabled]": shown in place of the dot
+    # For the HTML page: the row starts a new group of the screen's list, and
+    # the text between the rows there (already made safe for display).
+    gap: bool = False
+    gap_text: str = ""
 
 
 def _heading_text(tree: RunTree, sid: str) -> str:
@@ -348,6 +352,31 @@ def _left_out(row: Row, *, kept: bool) -> list[str]:
     return [*lines, *_left_out_lines(row, shown, kept=kept)]
 
 
+def _gap_text(node: ScreenNode, before: int, group: int) -> str:
+    """The text between the rows of group `before` and group `group`: the text
+    of the last separator on the way (a group between them may have no line of
+    its own), shortened and escaped as a label; empty when there is none."""
+    low, high = sorted((before, group))
+    for number in range(high, low, -1):
+        text = node.groups[number]
+        if text is not None:
+            return _label(text)
+    return ""
+
+
+def _mark_gap(
+    entry: _Entry, node: ScreenNode, previous: int | None, group: int | None
+) -> int | None:
+    """Note on `entry` that it starts a new group of the list when the line
+    drawn before it was in another group; return the group to remember."""
+    if group is None:
+        return previous
+    if previous is not None and group != previous:
+        entry.gap = True
+        entry.gap_text = _gap_text(node, previous, group)
+    return group
+
+
 def _entries(
     tree: RunTree,
     sid: str,
@@ -366,6 +395,7 @@ def _entries(
     tally.unmatched += len(node.unmatched)
     extra = _NO_OTHERS if others is None else others
     extra.unmatched(node)
+    previous: int | None = None  # the group of the last line drawn
     folds: dict[str, list[Row]] = {}
     for row in node.rows:
         if row.folded_into is not None:
@@ -403,6 +433,7 @@ def _entries(
         entry = _row_line(row, note, why=why, tally=tally, no_change=no_change)
         tally.names[entry.name] = tally.names.get(entry.name, 0) + 1
         entry.more = tuple(row.also_to)
+        previous = _mark_gap(entry, node, previous, line_row.group)
         entries.append(entry)
     return entries
 
@@ -783,7 +814,15 @@ class _HtmlBuilder:
     def row(self, entry: _Entry) -> HRow:
         if entry.label is None:
             return HRow(entry.text)
-        return HRow(entry.label, entry.note, entry.dot, entry.reasons, entry.kinds)
+        return HRow(
+            entry.label,
+            entry.note,
+            entry.dot,
+            entry.reasons,
+            entry.kinds,
+            gap=entry.gap,
+            gap_text=entry.gap_text,
+        )
 
     def forest(self, section: _Section) -> list[HRow | HFold]:
         """The rows of a section, with the folds that hang on them."""

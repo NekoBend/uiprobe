@@ -880,6 +880,7 @@ def test_json_shape(tmp_path, capsys):
         "name": "Network",
         "name_from": "text",
         "texts": ["Network", "Mobile, Wi-Fi"],
+        "group": None,
         "pressed": True,
         "action_id": 2,
         "to": {"screen_id": NETWORK.screen_id},
