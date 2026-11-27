@@ -923,12 +923,100 @@ def test_the_scan_stops_at_the_ninth_candidate(monkeypatch) -> None:
     from uiprobe.guards.judge import _Judge
 
     calls = []
-    original = _Judge.phrase_candidate
+    original = _Judge.phrase_geometry
 
-    def counting(self, i):
+    def counting(self, i, name):
         calls.append(i)
-        return original(self, i)
+        return original(self, i, name)
 
-    monkeypatch.setattr(_Judge, "phrase_candidate", counting)
+    monkeypatch.setattr(_Judge, "phrase_geometry", counting)
     run(share_rows(20), policy=Policy(except_phrases=("Share (.*)",)))
     assert len(calls) == 9
+
+
+# -- the sixth check: the real center, the package of the decoration, the cost --------
+
+
+def test_a_title_whose_real_center_is_off_the_row_gets_no_phrase() -> None:
+    # The title spans x=-40..160 (center 60) in a row spanning 75..235; clipping
+    # to the display would move the checked point to 80, inside the row.
+    elements = [
+        el("e2", cls=ROW, bounds=(75, 100, 235, 200)),
+        el(
+            "e3",
+            parent="e2",
+            cls=TEXT,
+            flags=(),
+            text="Quick Share",
+            bounds=(-40, 100, 160, 140),
+        ),
+        el("e4", bounds=(40, 100, 70, 200)),
+    ]
+    d = verdict(elements)
+    assert d.except_phrase == ""
+    assert "deny_word" in d.reasons
+
+
+def test_a_title_whose_real_center_is_off_the_display_gets_no_phrase() -> None:
+    elements = [
+        el("e2", cls=ROW, bounds=(0, 100, 320, 200)),
+        el(
+            "e3",
+            parent="e2",
+            cls=TEXT,
+            flags=(),
+            text="Quick Share",
+            bounds=(-400, 100, 100, 140),
+        ),
+    ]
+    assert verdict(elements).except_phrase == ""
+
+
+@pytest.mark.parametrize(
+    ("owner", "ok"),
+    [
+        ("com.sec.android.app.launcher", True),
+        ("android", True),
+        ("a.b", True),
+        ("com.example_1.app2", True),
+        ("bad owner", False),
+        ("", False),
+        ("single", False),
+        ("com..example", False),
+        ("com.1example", False),
+        ("com.example.", False),
+        ("\u00e9.example", False),
+        ("com.exa-mple", False),
+    ],
+)
+def test_the_decoration_owner_must_be_a_package_name(owner, ok) -> None:
+    corner = el(
+        "e9",
+        parent="e1",
+        cls="android.view.View",
+        flags=(),
+        rid=f"{owner}:id/round_corner",
+        bounds=(0, 0, 320, 640),
+    )
+    assert (verdict(row(extra=[corner])).except_phrase == "Quick Share") is ok
+
+
+def test_at_most_sixteen_named_rows_are_examined(monkeypatch) -> None:
+    import importlib
+
+    judge_module = importlib.import_module("uiprobe.guards.judge")
+
+    calls = []
+    original = judge_module.elements_at
+
+    def counting(screen, point):
+        calls.append(point)
+        return original(screen, point)
+
+    monkeypatch.setattr(judge_module, "elements_at", counting)
+    elements = [
+        el(f"r{n}", cls=ROW, bounds=ROW_BOUNDS, text="Share (.*)") for n in range(800)
+    ]
+    got = run(elements, policy=Policy(except_phrases=("Share (.*)",)))
+    assert len(calls) <= 2 * 16
+    assert all(d.except_phrase == "" for d in got.decisions)

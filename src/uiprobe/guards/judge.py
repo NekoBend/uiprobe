@@ -807,30 +807,15 @@ class _Judge:
             reasons.append("irreversible_screen")
             details.append(irreversible)
 
-    def phrase_candidate(self, i: int) -> tuple[str, int] | None:
-        """Return ``(phrase, name index)`` when candidate `i` is structurally a
-        row an exception phrase may let through (see `_apply_phrases`), else
-        None. The reasons are not looked at here.
-
-        The row must be plain: it is not long-clickable, checkable,
-        scrollable, editable or a text or password field, none of its
-        descendants is clickable or any of those, it has at most
-        `ROW_NAME_MEMBERS` elements and no ancestor is clickable (the judge
-        joins the texts of a clickable's whole subtree, so no hit can be formed
-        with text outside the row). Its name element N is the first element in
-        document order with a text at all, drawn or not (the tree names the row
-        by the same text); N needs some area on the display (not
-        `min_visible_px`) and its text must equal a phrase after `normalize`.
-        At the row's tap point and at N's center the element on top is the row
-        or inside it, and every element whose drawn part holds the point and
-        is interactive (clickable, long-clickable, checkable, scrollable,
-        editable, a text or password field), meaningful or not, is the row,
-        inside it or one of its ancestors.
-        """
-        members = self.tree.subtree(i)
-        if not self._plain_row(i, members):
-            return None
-        labeled = [j for j in members if self._has_any_text(self.elements[j])]
+    def phrase_name(self, i: int) -> tuple[str, int] | None:
+        """The cheap part of the test for a phrase: ``(phrase, name index)`` when
+        exactly one element of row `i` has any text, description or hint, that
+        is the name N, N has a text, its description and hint are empty or say
+        the same as the text, and the text equals a phrase after `normalize`.
+        Nothing is scanned: it is the test that runs before any point scan."""
+        labeled = [
+            j for j in self.tree.subtree(i) if self._has_any_text(self.elements[j])
+        ]
         if len(labeled) != 1:
             return None  # only the name may carry text: nothing to join with
         name = labeled[0]
@@ -841,26 +826,45 @@ class _Judge:
         ):
             return None
         phrase = self._phrases.get(normalize(element.text), "")
-        part = self.screen._clip(element)  # noqa: SLF001
+        return (phrase, name) if phrase else None
+
+    def phrase_geometry(self, i: int, name: int) -> bool:
+        """True when row `i`, whose name element is `name` (`phrase_name`), is
+        structurally a row an exception phrase may let through; the reasons are
+        not looked at (see `_apply_phrases`).
+
+        The row must be plain: it is not long-clickable, checkable,
+        scrollable, editable or a text or password field, none of its
+        descendants is clickable or any of those, it has at most
+        `ROW_NAME_MEMBERS` elements and no ancestor is clickable (the judge
+        joins the texts of a clickable's whole subtree, so no hit can be formed
+        with text outside the row). The center of N's full bounds is on the
+        display and inside the row's drawn part. The last element drawn at the
+        row's tap point and at that center, seen or not, is in the row (at the
+        center it is N), except Samsung's empty ``round_corner`` view, and no
+        interactive element (clickable, long-clickable, checkable, scrollable,
+        editable, a text or password field) outside the row and its ancestors
+        is drawn there.
+        """
+        members = self.tree.subtree(i)
+        if not self._plain_row(i, members):
+            return False
+        center = self.elements[name].bounds.center
+        width, height = self.screen.display
         row_part = self.screen._clip(self.elements[i])  # noqa: SLF001
         visible = self.visible[i]
         if (
-            part is None
+            not (0 <= center[0] < width and 0 <= center[1] < height)
             or row_part is None
-            or not phrase
             or visible is None
-            or not _contains(row_part, part.center)
+            or not _contains(row_part, center)
         ):
-            return None
+            return False
         inside = frozenset(members)
-        if not all(
-            self._only_row_at(
-                point, i, inside, last=name if point == part.center else None
-            )
-            for point in (visible.center, part.center)
-        ):
-            return None
-        return phrase, name
+        return all(
+            self._only_row_at(point, i, inside, last=name if point == center else None)
+            for point in (visible.center, center)
+        )
 
     @staticmethod
     def _has_any_text(element: Element) -> bool:
@@ -1105,6 +1109,7 @@ _INTERACTIVE = frozenset(
 # so that the label rules (unlabeled, number_only) decide as before.
 _PLACEHOLDER = "\u00b7"
 MAX_PHRASE_CANDIDATES = 8
+MAX_PHRASE_NAMED = 16
 
 
 def _interactive(element: Element, *, clickable_ok: bool = False) -> bool:
@@ -1138,10 +1143,16 @@ def _apply_phrases(
     hit made with a neighbouring text may over-refuse.
     """
     found: list[tuple[int, int, str, int]] = []
+    named = 0
     for k, decision in enumerate(decisions):
         i = state.tree.index[decision.element.id]
-        candidate = state.phrase_candidate(i)
-        if candidate is not None:
+        candidate = state.phrase_name(i)
+        if candidate is None:
+            continue
+        named += 1
+        if named > MAX_PHRASE_NAMED:
+            return decisions  # too many rows to examine: no phrase on this screen
+        if state.phrase_geometry(i, candidate[1]):
             found.append((k, i, candidate[0], candidate[1]))
             if len(found) > MAX_PHRASE_CANDIDATES:
                 return decisions  # counted before the reasons; stop at once
