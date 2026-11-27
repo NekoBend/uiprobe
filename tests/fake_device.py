@@ -41,7 +41,7 @@ import shlex
 import struct
 import threading
 import zlib
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from types import MappingProxyType
 from typing import TYPE_CHECKING
 
@@ -151,6 +151,26 @@ class El:
 
 
 @dataclass(frozen=True, slots=True)
+class Scrolling:
+    """A vertical list drawn through a window of a screen.
+
+    ``rows`` have their bounds in content coordinates (the first row's top is
+    where the list starts, 0). ``window`` is the visible rectangle on the
+    display; the scrollable container is drawn there, and a row is part of the
+    dump only while it lies completely inside the window. A mouse wheel turn
+    (``input mouse scroll X Y --axis VSCROLL,-N``) at a point inside the window
+    moves the content up by N times ``unit`` pixels, never past the last row. A
+    swipe does not move the list.
+    """
+
+    rows: tuple[El, ...]
+    window: tuple[int, int, int, int]
+    unit: int = 80
+    cls: str = "androidx.recyclerview.widget.RecyclerView"
+    rid: str = "com.example.shop:id/list"
+
+
+@dataclass(frozen=True, slots=True)
 class Screen:
     """A screen of an app. Later elements are drawn on top of earlier ones."""
 
@@ -159,6 +179,7 @@ class Screen:
     elements: tuple[El, ...] = ()
     keyboard: bool = False  # the soft keyboard is up while this screen shows
     protected: bool = False  # screencap is blanked (FLAG_SECURE)
+    scrolling: Scrolling | None = None  # a list drawn after `elements`
 
     @property
     def package(self) -> str:
@@ -277,6 +298,8 @@ class FakeAndroid:
     # package, touchable region); they take touches without taking the focus
     # (dumpsys input lists them above the app).
     overlays: list[tuple[str, str, tuple[int, int, int, int]]]
+    # The scroll offset of each screen that has a list, by screen name.
+    offsets: dict[str, int]
     # Lines appended to a dumpsys service's output, by service name.
     extra_dumpsys: dict[str, str]
     # A uid per package; packages not listed get one from their name.
@@ -341,6 +364,9 @@ class FakeAndroid:
             r" getprop ro\.build\.fingerprint;"
             r' echo "\$\(cat /proc/sys/kernel/random/boot_id 2>/dev/null\)"\Z'
         ),
+        # The usage text of `input`, which a crawl reads once to see whether the
+        # device lists the wheel scroll.
+        re.compile(r"^input\Z"),
         re.compile(r"^input tap [0-9]+ [0-9]+\Z"),
         re.compile(r"^input swipe ([0-9]+) ([0-9]+) \1 \2 800\Z"),
         # The marker forms ``uiprobe tap`` sends; no other compound command.
@@ -376,6 +402,28 @@ class FakeAndroid:
             rf"^input swipe {_COORD} {_COORD} (?!\1 \2 ){_COORD} {_COORD} "
             r"([1-9][0-9]{0,3}|10000); echo uiprobe-exit:\$\?\Z"
         ),
+    )
+    # The marker form of the crawl's wheel scroll (`Device._wheel_scroll`),
+    # admitted only by a device made with ``wheel=True``: a vertical wheel turn
+    # of 1 to 10 steps the content further down.
+    WHEEL_ALLOWED = (
+        re.compile(
+            rf"^input mouse scroll {_COORD} {_COORD} --axis VSCROLL,-([1-9]|10)"
+            r"; echo uiprobe-exit:\$\?\Z"
+        ),
+    )
+    # What `input` prints with no arguments: before API 35 without `scroll`.
+    USAGE_OLD = (
+        "Usage: input [<source>] <command> [<arg>...]\n\n"
+        "The sources are:\n      mouse\n      keyboard\n      touchscreen\n\n"
+        "The commands and default sources are:\n"
+        "      text <string> (Default: touchscreen)\n"
+        "      keyevent [--longpress] <key code number or name> ...\n"
+        "      tap <x> <y> (Default: touchscreen)\n"
+        "      swipe <x1> <y1> <x2> <y2> [duration(ms)] (Default: touchscreen)\n"
+    )
+    USAGE_WHEEL = USAGE_OLD + (
+        "      scroll <x> <y> [--axis VSCROLL,<v>] (Default: mouse)\n"
     )
     EXEC_ALLOWED = (
         re.compile(rf"^cat {_TMP}\Z"),
@@ -482,12 +530,13 @@ class FakeAndroid:
             "shell": (
                 *self.SHELL_ALLOWED,
                 *(self.SWIPE_ALLOWED if self.general_swipes else ()),
+                *(self.WHEEL_ALLOWED if self.wheel else ()),
                 *patterns,
             ),
             "exec": self.EXEC_ALLOWED,
         }
 
-    def __init__(
+    def __init__(  # noqa: PLR0915 - one setting per line
         self,
         server: FakeAdbServer,
         serial: str,
@@ -504,6 +553,7 @@ class FakeAndroid:
         strict: bool = True,
         extra_packages: Collection[str] = (),
         general_swipes: bool = False,
+        wheel: bool = False,
     ) -> None:
         """Create the device and register it with `server`.
 
@@ -530,6 +580,9 @@ class FakeAndroid:
                 test can send the launch of a missing package (see `allowed`).
             general_swipes: Also admit the marker form of a swipe that moves
                 (`SWIPE_ALLOWED`); off, only the long press form is admitted.
+            wheel: The device lists the wheel scroll in the usage of `input`
+                and admits the crawl's wheel input (`WHEEL_ALLOWED`); a wheel
+                turn at a point inside a screen's list moves the list.
 
         Raises:
             ValueError: A component is malformed, a screen name is declared
@@ -554,8 +607,10 @@ class FakeAndroid:
                 for target in (element.go, element.long_go):
                     if target is not None and target != "back":
                         self._require(target, f"screen {screen.name!r} leads to")
-        self.general_swipes = general_swipes
-        self.stack = [start]
+        # What `input` prints with no arguments is a test's to change.
+        self.general_swipes, self.wheel = general_swipes, wheel
+        self.input_usage = self.USAGE_WHEEL if wheel else self.USAGE_OLD
+        self.stack, self.offsets = [start], {}
         self.inputs: list[Input] = []
         self.dumps = 0
         self.api = api
@@ -620,9 +675,43 @@ class FakeAndroid:
 
     @property
     def screen(self) -> Screen:
-        """The screen that is showing."""
+        """The screen that is showing (a list shows the rows at its offset)."""
         with self._lock:
-            return self.screens[self.stack[-1]]
+            base = self.screens[self.stack[-1]]
+            return base if base.scrolling is None else self._scrolled(base)
+
+    def _scrolled(self, base: Screen) -> Screen:
+        """`base` with its list as it shows at the current offset."""
+        listing = base.scrolling
+        assert listing is not None
+        _, top, _, bottom = listing.window
+        offset = self.offsets.get(base.name, 0)
+        container = El(
+            listing.window, cls=listing.cls, rid=listing.rid, scrollable=True
+        )
+        shown = []
+        for row in listing.rows:
+            row_left, row_top, row_right, row_bottom = row.bounds
+            y_top, y_bottom = top + row_top - offset, top + row_bottom - offset
+            if top <= y_top and y_bottom <= bottom:
+                shown.append(
+                    replace(row, bounds=(row_left, y_top, row_right, y_bottom))
+                )
+        return replace(base, elements=(*base.elements, container, *shown))
+
+    def _wheeled(self, x: int, y: int, amount: int) -> None:
+        """Move the list of the screen showing, when the wheel is turned in it."""
+        base = self.screens[self.stack[-1]]
+        listing = base.scrolling
+        if listing is None:
+            return
+        left, top, right, bottom = listing.window
+        if not (left <= x < right and top <= y < bottom):
+            return
+        content = max((row.bounds[3] for row in listing.rows), default=0)
+        most = max(0, content - (bottom - top))
+        now = self.offsets.get(base.name, 0)
+        self.offsets[base.name] = min(most, max(0, now + amount * listing.unit))
 
     @property
     def keyboard_visible(self) -> bool:
@@ -743,7 +832,7 @@ class FakeAndroid:
         lines.append(self.boot_id or "")
         return "".join(line + "\n" for line in lines).encode()
 
-    def _run(self, command: str) -> bytes | Reset:
+    def _run(self, command: str) -> bytes | Reset:  # noqa: PLR0912 - one case per command
         identity = command == IDENTITY_COMMAND
         with self._lock:
             out = self._identity() if identity else b""
@@ -772,6 +861,8 @@ class FakeAndroid:
                     out = self._dumpsys_activities().encode()
                 case ["dumpsys", "input" | "input_method" | "package", *_]:
                     out = self._dumpsys_service(words[1:]).encode()
+                case ["input"]:
+                    out = self.input_usage.encode()
                 case ["input", *args]:
                     self._input(args)
                 case ["cmd", "package", "resolve-activity", *_] | ["am", *_]:
@@ -889,6 +980,13 @@ class FakeAndroid:
                 # A short hold in place is a tap (below the long-press timeout).
                 self.inputs.append(Input("tap", tuple(args), screen, point))
                 self._press(point, long=False)
+            case ["mouse", "scroll", x, y, "--axis", axis] if (
+                point := _point(x, y)
+            ) is not None and (
+                found := re.fullmatch(r"VSCROLL,-([0-9]+)", axis)
+            ) is not None:
+                self.inputs.append(Input("wheel", tuple(args), screen, point))
+                self._wheeled(point[0], point[1], int(found[1]))
             case ["swipe", *_]:
                 self.inputs.append(Input("swipe", tuple(args), screen))
             case ["keyevent", *keys]:
@@ -1015,9 +1113,19 @@ class FakeAndroid:
     def _window(self, package: str, elements: Sequence[El], index: int) -> str:
         width, height = self.display
         root = El((0, 0, width, height), cls="android.widget.FrameLayout")
+        # A scrollable element holds the elements drawn after it (the rows of
+        # a list), as the nodes of a real list are its children.
+        split = next((i for i, el in enumerate(elements) if el.scrollable), None)
+        end = len(elements) if split is None else split
         nodes = "".join(
-            self._node(i, i + 1, el, package) for i, el in enumerate(elements)
+            self._node(i, i + 1, el, package) for i, el in enumerate(elements[:end])
         )
+        if split is not None:
+            inside = "".join(
+                self._node(i, i + 1, el, package)
+                for i, el in enumerate(elements[split + 1 :], start=split + 1)
+            )
+            nodes += self._node(split, split + 1, elements[split], package, inside)
         return self._node(index, 0, root, package, nodes)
 
     def render_xml(self) -> bytes:

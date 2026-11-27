@@ -72,11 +72,11 @@ MAX_DURATION: Final = "max_duration"  # the engine's reason for the time limit
 PAUSE_STEP: Final = 0.1
 
 # The requests that change the device, each passing `_Run.final_check` right
-# before it is sent: a tap, BACK, the force-stop of a relaunch (and of the
-# first launch, by default), the first launch's start without a force-stop
-# and the start after a force-stop (a relaunch's, and the first launch's by
-# default).
-_SEND_PATHS: Final = ("tap", "back", "force-stop", "launch", "start")
+# before it is sent: a tap, an upward swipe (a scroll), BACK, the force-stop
+# of a relaunch (and of the first launch, by default), the first launch's
+# start without a force-stop and the start after a force-stop (a relaunch's,
+# and the first launch's by default).
+_SEND_PATHS: Final = ("tap", "scroll", "back", "force-stop", "launch", "start")
 
 # The default clock of `crawl`: uiprobe's own (`time.monotonic`).
 _OWN_CLOCK: Final = time.monotonic

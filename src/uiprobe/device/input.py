@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
-from uiprobe.adb import quote_args
-from uiprobe.device.failure import _EXIT_SUFFIX, _input_failure
+import re
+
+from uiprobe.adb import AdbError, quote_args
+from uiprobe.device.failure import _EXIT_SUFFIX, _input_failure, _lines
 from uiprobe.device.gestures import (
     _SWIPE_SLACK,
     DEFAULT_PRESS_MS,
     DEFAULT_SWIPE_MS,
     LONG_PRESS_MS,
+    MAX_WHEEL_AMOUNT,
     DisplaySizeUnknownError,
     _check_direction,
     _check_duration,
@@ -27,8 +30,158 @@ from uiprobe.device.text import (
     _text_pieces,
     _typing_stopped,
 )
-from uiprobe.errors import UiprobeError
+from uiprobe.errors import InputFailedError, UiprobeError
 from uiprobe.model import Bounds, Element
+
+_SCROLL_LINE = re.compile(
+    r"(?:(?P<source>[A-Za-z_]+)\s+)?scroll\s+<x>\s+<y>(?P<rest>.*)"
+)
+_BRACKET = re.compile(r"\[(?P<inside>[^\[\]]*)\]")
+_AXIS_IN_BRACKET = re.compile(r"--axis\s+(?P<axes>.*)", re.DOTALL)
+_DEFAULT_SOURCES = re.compile(r"\(\s*Default:\s*(?P<sources>[^)]*)\)")
+# The real usage says "(for pointer-based sources)": the mouse is one.
+_POINTER_SOURCES = re.compile(r"\(\s*for\s+pointer-based\s+sources\s*\)", re.IGNORECASE)
+_AXIS_OPTIONS_LINE = re.compile(r"Axis options:\s*(?P<names>.*)", re.IGNORECASE)
+_AXIS_NAMES = re.compile(r"[A-Z_]+(?:\s*,\s*[A-Z_]+)*")
+_NEGATIVE = re.compile(
+    r"\b(?:unsupported|not\s+supported|unavailable|not\s+available|disabled)\b",
+    re.IGNORECASE,
+)
+_PLACEHOLDER = re.compile(r"<[^<>\s]+>")
+_SOURCE_WORDS = frozenset(
+    {
+        "dpad",
+        "keyboard",
+        "mouse",
+        "touchpad",
+        "touchscreen",
+        "touchnavigation",
+        "joystick",
+        "gamepad",
+        "trackball",
+        "stylus",
+        "rotary_encoder",
+        "rotary",
+        "sensor",
+    }
+)
+
+
+def _line_sources(found: re.Match[str]) -> set[str]:
+    """The sources a ``scroll <x> <y>`` line is for: the word before the
+    command, else the ``(Default: ...)`` of the line, else ``mouse`` when the
+    line says it is for pointer-based sources; none when it names none."""
+    if found["source"]:
+        return {found["source"].lower()}
+    default = _DEFAULT_SOURCES.search(found["rest"])
+    if default is not None:
+        return {
+            word.lower() for word in re.split(r"[\s,]+", default["sources"]) if word
+        }
+    if _POINTER_SOURCES.search(found["rest"]):
+        return {"mouse"}
+    return set()
+
+
+def _bracket_axes(rest: str) -> set[str]:
+    """Every axis named by ``--axis NAME`` in the bracket groups of a line: the
+    word must stand alone, followed by its value placeholder or the end of the
+    group."""
+    names: set[str] = set()
+    for group in _BRACKET.finditer(rest):
+        option = _AXIS_IN_BRACKET.search(group["inside"])
+        if option is None:
+            continue
+        words = [w for w in re.split(r"[,\s]+", option["axes"]) if w]
+        for index, word in enumerate(words):
+            after = words[index + 1] if index + 1 < len(words) else None
+            if re.fullmatch(r"[A-Z_]+", word) and (
+                after is None or _PLACEHOLDER.fullmatch(after)
+            ):
+                names.add(word)
+    return names
+
+
+def _scroll_blocks(raw: list[str]) -> list[list[str]]:
+    """The blocks of the usage that belong to a ``scroll`` command: its command
+    line (``scroll ...``, or ``<source> scroll ...``) and every following line
+    that is indented deeper than it, up to the next line at that same or a lower
+    indentation (blank lines do not count). Each block is its stripped lines."""
+    blocks = []
+    for index, line in enumerate(raw):
+        words = line.split()
+        if not words:
+            continue
+        first = words[0].lower()
+        if first != "scroll" and not (
+            len(words) > 1 and words[1] == "scroll" and first in _SOURCE_WORDS
+        ):
+            continue
+        indent = len(line) - len(line.lstrip())
+        block = [line.strip()]
+        for following in raw[index + 1 :]:
+            if not following.strip():
+                continue
+            if len(following) - len(following.lstrip()) <= indent:
+                break
+            block.append(following.strip())
+        blocks.append(block)
+    return blocks
+
+
+def _block_supports_vscroll(block: list[str]) -> bool:
+    """Whether one ``scroll`` block has a pointer-based syntax line that names
+    the mouse and ``VSCROLL`` among the axes of that block, and no wording that
+    says it is unsupported."""
+    if any(_NEGATIVE.search(line) for line in block):
+        return False
+    if not any(
+        (found := _SCROLL_LINE.fullmatch(line)) is not None
+        and "mouse" in _line_sources(found)
+        for line in block
+    ):
+        return False
+    axes: set[str] = set()
+    for line in block:
+        axes |= _bracket_axes(line)
+        options = _AXIS_OPTIONS_LINE.fullmatch(line)
+        if options is not None and _AXIS_NAMES.fullmatch(options["names"].strip()):
+            axes |= {w for w in re.split(r"[,\s]+", options["names"]) if w}
+    return "VSCROLL" in axes
+
+
+def _lists_wheel(usage: str) -> bool:
+    """Whether the usage text of ``input`` lists the ``mouse`` source and a
+    ``scroll`` command block with a pointer-based syntax line for it and
+    ``VSCROLL`` among its axes.
+
+    The usage is read by blocks. The sources list must include ``mouse``. The
+    ``scroll`` command block runs from its command line to the next line at the
+    same or a lower indentation (the API 36 and 37 emulators print the command
+    with ``Has the following syntax:`` and, indented under it, the syntax lines
+    ``scroll <x> <y> [axis_value] (for pointer-based sources)`` and ``scroll
+    [axis_value] (for non-pointer-based sources)``, then ``Axis options: SCROLL,
+    HSCROLL, VSCROLL``). In that block only: there must be a pointer-based syntax
+    line (``scroll <x> <y> ...``) that is the mouse's (``(for pointer-based
+    sources)``, which includes the mouse, a source word before the command, or its
+    own ``(Default: ...)``; a line for another source, or naming none, is no
+    support); the axes are every ``--axis NAME`` of the bracket groups (``VSCROLL``
+    as a word of its own with its value placeholder) and the names of the
+    ``Axis options:`` lines (nothing but names); and any ``unsupported``, ``not
+    supported``, ``unavailable``, ``not available`` or ``disabled`` in the block
+    means no support. Lines outside the block (another command's, another
+    source's) are never read for the axes.
+    """
+    raw = _lines(usage)
+    stripped = [line.strip() for line in raw]
+    mouse = any(
+        line == "mouse"
+        or (line.startswith("The sources are") and "mouse" in re.split(r"[\s,]+", line))
+        for line in stripped
+    )
+    return mouse and any(
+        _block_supports_vscroll(block) for block in _scroll_blocks(raw)
+    )
 
 
 class _InputMixin(_DeviceState):
@@ -148,6 +301,62 @@ class _InputMixin(_DeviceState):
         if failure is not None:
             raise self._doubt(failure)
         return point
+
+    def _wheel_scroll(
+        self,
+        point: tuple[int, int],
+        amount: int,
+        *,
+        _send_by: float | None = None,
+        _epoch: int | None = None,
+    ) -> tuple[int, int]:
+        """Turn a mouse wheel one way (content further down) at one point.
+
+        For uiprobe's crawl only, not part of the API; `scroll` and `swipe` are
+        unchanged. It sends ``input mouse scroll X Y --axis VSCROLL,-N`` once,
+        with `_send_by` and `_epoch` checked on the request's own connection
+        right before it is written, exactly as `tap` does. Unlike a touch, the
+        wheel event goes to the window under the pointer, not to the focused
+        window: whoever calls this must have checked which window that is.
+        `amount` is N, from 1 to `MAX_WHEEL_AMOUNT`; the sign is always
+        negative, so this never scrolls up. Returns the point.
+
+        Raises:
+            TypeError: `amount` is not an int, or a private argument has the
+                wrong type.
+            ValueError: `amount` is outside 1 to `MAX_WHEEL_AMOUNT`, or a
+                coordinate is not usable (see `tap`).
+            InputFailedError: The device did not report success.
+        """
+        dispatch = _dispatch(_send_by, _epoch)
+        if type(amount) is not int:
+            msg = f"amount must be an int, not {type(amount).__name__}"
+            raise TypeError(msg)
+        if not 1 <= amount <= MAX_WHEEL_AMOUNT:
+            msg = f"amount must be from 1 to {MAX_WHEEL_AMOUNT}, not {amount}"
+            raise ValueError(msg)
+        x, y = _press_point(point)
+        words = ("input", "mouse", "scroll", str(x), str(y), "--axis")
+        words = (*words, f"VSCROLL,-{amount}")
+        output = self._shell_text(quote_args(*words) + _EXIT_SUFFIX, dispatch=dispatch)
+        failure = _input_failure("wheel", {"point": [x, y], "amount": amount}, output)
+        if failure is not None:
+            raise self._doubt(failure)
+        return (x, y)
+
+    def _wheel_supported(self) -> bool:
+        """Whether the usage text of ``input`` lists the wheel scroll (see
+        `_lists_wheel`).
+
+        Read through the ordinary shell path, nothing is changed on the device.
+        When the read fails (any adb error but a lost device) or the usage does
+        not list it, the answer is False: the crawl then does not scroll.
+        """
+        try:
+            text = self._shell_text("input")
+        except (AdbError, InputFailedError):
+            return False
+        return _lists_wheel(text)
 
     def swipe(
         self,

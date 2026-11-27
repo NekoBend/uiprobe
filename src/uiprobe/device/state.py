@@ -183,6 +183,15 @@ class _DeviceState:
             _send_by: float | None = None,
             _epoch: int | None = None,
         ) -> tuple[int, int]: ...
+        def _wheel_scroll(
+            self,
+            point: tuple[int, int],
+            amount: int,
+            *,
+            _send_by: float | None = None,
+            _epoch: int | None = None,
+        ) -> tuple[int, int]: ...
+        def _wheel_supported(self) -> bool: ...
         def swipe(
             self,
             start: tuple[int, int] | list[int],

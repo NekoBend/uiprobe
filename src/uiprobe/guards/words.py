@@ -208,6 +208,34 @@ def _check_word(word: str) -> str:
     return word
 
 
+MAX_EXCEPT_PHRASE_LENGTH: Final = 80
+
+
+def _except_phrase_key(phrase: str) -> str:
+    """Check an exception phrase; return `normalize` of it, the form it is
+    compared with (two phrases with the same form are one phrase).
+
+    Raises:
+        ValueError: The phrase is not 1 to 80 characters long, holds a control
+            or an invisible character, or has no letter.
+    """
+    if not 1 <= len(phrase) <= MAX_EXCEPT_PHRASE_LENGTH:
+        msg = (
+            f"phrase must be 1 to {MAX_EXCEPT_PHRASE_LENGTH} characters long,"
+            f" this one has {len(phrase)}"
+        )
+        raise ValueError(msg)
+    for char in phrase:
+        if unicodedata.category(char) == "Cc" or _is_invisible(char):
+            msg = f"phrase holds a control or invisible character (U+{ord(char):04X})"
+            raise ValueError(msg)
+    key = normalize(phrase)
+    if not any(char.isalpha() for char in key):
+        msg = f"phrase has no letter: {phrase!r}"
+        raise ValueError(msg)
+    return key
+
+
 def _forms_match(word_forms: tuple[str, ...], field_forms: tuple[str, ...]) -> bool:
     return any(w in f for w in word_forms if w for f in field_forms)
 

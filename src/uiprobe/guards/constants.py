@@ -250,6 +250,17 @@ DIALOG_ONLY_CONFIRM_WORDS: Final[tuple[str, ...]] = (
     "有効にする",
 )
 
+# Labels that are refused on a dialog only, and only as the whole label of a
+# button (after the usual clean-up: case, full width, spaces). A label that
+# merely starts with one does not count, so "Online", "On-screen", "オンライン"
+# and "ログオン" are not touched. They are not confirm words: `Policy` keeps
+# them in its own field `dialog_exact_labels`, and a confirm word "on" that a
+# caller writes into `confirm_words` keeps the matching of every confirm word.
+DIALOG_ONLY_EXACT_LABELS: Final[tuple[str, ...]] = (
+    "on",
+    "オン",
+)
+
 # Labels of buttons that confirm what the screen asks for.
 CONFIRM_WORDS: Final[tuple[str, ...]] = (
     "OK",
@@ -320,6 +331,48 @@ _UP_IDS: Final = (":id/home", ":id/up")
 _NAVIGATE_UP: Final = "Navigate up"
 # The class name endings of adjustable controls (see the ``slider`` rule).
 _SLIDER_CLASSES: Final = ("SeekBar", "RatingBar", "Slider")
+# The crawl's scrolling (see `Policy.scroll_lists`). Every default lives here
+# and nowhere else: the policy, the limits, the settings file and `uiprobe init`
+# read them.
+DEFAULT_SCROLL_LISTS: Final = False
+DEFAULT_SCROLLS_PER_SCREEN: Final = 10
+# The size of one wheel event (``VSCROLL,-N``) and how many screens may show
+# that the wheel changed something before scrolling stops for the run.
+DEFAULT_SCROLL_AMOUNT: Final = 3
+MAX_SCROLL_AMOUNT: Final = 10
+DEFAULT_SCROLL_INCIDENTS: Final = 2
+# The wheel scroll works from allow lists, fixed here and not settings, so that a
+# settings file cannot extend them. The container (the scrollable element) must
+# have exactly one of these classes (exact names, no substrings):
+SCROLL_CONTAINER_CLASSES: Final = frozenset(
+    {
+        "android.widget.ListView",
+        "android.widget.ScrollView",
+        "androidx.recyclerview.widget.RecyclerView",
+        "androidx.core.widget.NestedScrollView",
+    }
+)
+# and every element whose part on the display holds the point must be the
+# container itself or have exactly one of these classes (plain layouts and
+# labels, which do nothing with a wheel event):
+SCROLL_POINT_CLASSES: Final = frozenset(
+    {
+        "android.widget.LinearLayout",
+        "android.widget.FrameLayout",
+        "android.widget.RelativeLayout",
+        "androidx.constraintlayout.widget.ConstraintLayout",
+        "android.view.View",
+        "android.view.ViewGroup",
+        "android.widget.TextView",
+        "android.widget.ImageView",
+    }
+)
+# The one exception beside the list: a decoration view that Samsung's apps draw
+# over a list page. It is exactly `android.view.View`, its resource id is
+# `<package>:id/<name>` with one of these names, and it has no flag, label or
+# child (see `uiprobe.guards.scroll._allowed`).
+DECORATION_CLASS: Final = "android.view.View"
+DECORATION_IDS: Final = frozenset({"round_corner"})
 _NUMBER_CATEGORIES: Final = frozenset({"Nd", "Nl", "No"})
 _ID_SEPARATOR: Final = ":id/"
 _UTF16_BOMS: Final = (b"\xff\xfe", b"\xfe\xff")

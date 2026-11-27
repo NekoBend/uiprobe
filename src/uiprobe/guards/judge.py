@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import TYPE_CHECKING, Literal
 
 from uiprobe.guards.constants import (
@@ -32,16 +33,19 @@ from uiprobe.guards.policy import (
     api36_fallback_areas,
     edge_areas,
 )
+from uiprobe.guards.scroll import _is_decoration, elements_at
 from uiprobe.guards.tree import (
     _CONFIRM,
     _DENY,
     _EMPTY_AGG,
+    _EXACT,
     _JOINED,
     _NONE,
     _PASSWORD_AT,
     _PERM,
     _PKG,
     _TEXT,
+    ROW_NAME_MEMBERS,
     _add_part,
     _Agg,
     _Grid,
@@ -81,10 +85,16 @@ class _Judge:
     ) -> None:
         self.screen = screen
         self.policy = policy
+        # The exception phrases by their normalized form (see `_excusing_phrase`).
+        self._phrases = {normalize(phrase): phrase for phrase in policy.except_phrases}
         self.tree = _Tree(screen)
         self.elements = screen.elements
         self.matcher = _Matcher(policy.deny_words, policy.deny_exceptions)
         self.confirm = frozenset(_confirm_form(w) for w in policy.confirm_words)
+        # The words that count only as the whole label of a button on a dialog
+        # (`Policy.dialog_exact_labels`). They take no part in the confirm
+        # matching below; `exact_label` reads them on their own.
+        self._exact = frozenset(_confirm_form(w) for w in policy.dialog_exact_labels)
         # The lengths of the confirm words, shortest first: only a start of a
         # label of one of these lengths can be a confirm word.
         self._dialog_only = frozenset(
@@ -136,6 +146,8 @@ class _Judge:
         self._joined_below: dict[int, int] = {}
         self._labels: dict[int, str] = {}
         self._wide_labels: dict[int, str] = {}
+        self._exact_labels: dict[int, str] = {}
+        self._joined_label: dict[int, tuple[str, ...]] = {}
         self._contrib: dict[int, _Agg] = {}
         self._everywhere: _Agg | None = None
         self._cells: dict[int, _Agg] = {}
@@ -218,6 +230,15 @@ class _Judge:
             self.tree.tin[i] if self._own_confirm(e) else _NONE
             for i, e in enumerate(self.elements)
         ]
+        # The same for the exact-label words, only where they can count: on a
+        # dialog that is refused, with such words in use.
+        self._exact_on = bool(
+            self._exact and self.dialog and self.policy.refuse_dialog_confirm
+        )
+        self.sub_exact = [
+            self.tree.tin[i] if self._exact_on and self._own_exact(e) else _NONE
+            for i, e in enumerate(self.elements)
+        ]
         self.core_text = [int(self._is_core(e.text)) for e in self.elements]
         self.core_desc = [int(self._is_core(e.content_desc)) for e in self.elements]
         self.sub_core_text = list(self.core_text)
@@ -243,6 +264,7 @@ class _Judge:
                 if first is not None:
                     self.below_label[up] = first
                 self.sub_confirm[up] = min(self.sub_confirm[up], self.sub_confirm[i])
+                self.sub_exact[up] = min(self.sub_exact[up], self.sub_exact[i])
                 self.sub_core_text[up] += self.sub_core_text[i]
                 self.sub_core_desc[up] += self.sub_core_desc[i]
         # The smallest index of an own-field hit in the subtrees of the
@@ -461,19 +483,72 @@ class _Judge:
                 form = self._form(value)
                 if self._is_confirm(form):
                     return form
-        below = self.tree.subtree(i)[1:]
-        # A single part is a field that was matched above.
-        for getter, count in (
-            (lambda e: e.text, self.sub_core_text[i] - self.core_text[i]),
-            (lambda e: e.content_desc, self.sub_core_desc[i] - self.core_desc[i]),
-        ):
-            if count < _MIN_JOINED_PARTS:
-                continue
-            values = (getter(self.elements[j]) for j in below)
-            for form in self._joined_forms(values):
-                if self._is_confirm(form):
-                    return form
+        for form in self._joined_label_forms(i):
+            if self._is_confirm(form):
+                return form
         return ""
+
+    def _joined_label_forms(self, i: int) -> tuple[str, ...]:
+        """Return the forms of the descendants' texts, then content_descs,
+        joined in document order (`_joined_forms`), for each of the two that
+        has at least two parts. Kept, so that the confirm words and the
+        exact-label words read the same forms without another walk."""
+        cached = self._joined_label.get(i)
+        if cached is None:
+            below = self.tree.subtree(i)[1:]
+            forms: list[str] = []
+            # A single part is a field that was matched on its own.
+            for getter, count in (
+                (lambda e: e.text, self.sub_core_text[i] - self.core_text[i]),
+                (lambda e: e.content_desc, self.sub_core_desc[i] - self.core_desc[i]),
+            ):
+                if count >= _MIN_JOINED_PARTS:
+                    values = (getter(self.elements[j]) for j in below)
+                    forms.extend(self._joined_forms(values))
+            cached = self._joined_label[i] = tuple(forms)
+        return cached
+
+    def exact_label(self, i: int) -> str:
+        """Return the form of the label of a clickable element when it is
+        exactly one of the exact-label words, or ``""``.
+
+        The label is the one `confirm_label` reads, with the same sources and
+        the same order (the first element of the subtree, in document order,
+        with such a form in its own text, content_desc or hint; else the
+        joined descendant texts or content_descs), but a form counts only when
+        it equals a word whole, and a label of two or more parts below the
+        element is judged as a whole (a word in one part does not count). Only
+        on a dialog that is refused. It never changes `confirm_label`.
+        """
+        if not self._exact_on:
+            return ""
+        cached = self._exact_labels.get(i)
+        if cached is None:
+            cached = self._exact_labels[i] = self._find_exact_label(i)
+        return cached
+
+    def _find_exact_label(self, i: int) -> str:
+        joined = self._joined_label_forms(i)
+        position = self.sub_exact[i]
+        # A label of two or more parts below the element is a whole: a word in
+        # one part (`オン` of `オン` + `ライン`) is not the label, so only the
+        # element's own fields and the joined forms count then.
+        if position != _NONE and (self.tree.pre[position] == i or not joined):
+            element = self.elements[self.tree.pre[position]]
+            for value in (element.text, element.content_desc, element.hint):
+                form = self._form(value)
+                if form in self._exact:
+                    return form
+        for form in joined:
+            if form in self._exact:
+                return form
+        return ""
+
+    def _own_exact(self, element: Element) -> bool:
+        return any(
+            self._form(value) in self._exact
+            for value in (element.text, element.content_desc, element.hint)
+        )
 
     def wide_label(self, i: int) -> str:
         """Return the confirm form of a clickable element that counts on any
@@ -555,6 +630,7 @@ class _Judge:
                 i if clickable and self.confirm_label(i) else _NONE,
                 deny,
                 self.joined_root(i),
+                i if clickable and self.exact_label(i) else _NONE,
             )
         return cached
 
@@ -704,6 +780,8 @@ class _Judge:
         self._word_rules(found, reasons, details)
         if found[_CONFIRM] != _NONE:
             self._confirm_reasons(i, own, found, reasons, details)
+        if found[_EXACT] != _NONE:
+            self._exact_reasons(i, own, found, reasons, details)
         self._positive_button_reason(i, point, reasons, details)
         if point is not None and any(_contains(area, point) for area in self._avoid):
             reasons.append("screen_edge")
@@ -801,6 +879,165 @@ class _Judge:
         if irreversible is not None:
             reasons.append("irreversible_screen")
             details.append(irreversible)
+
+    def phrase_name(self, i: int) -> tuple[str, int] | None:
+        """The cheap part of the test for a phrase: ``(phrase, name index)`` when
+        exactly one element of row `i` has any text, description or hint, that
+        is the name N, N has a text, its description and hint are empty or say
+        the same as the text, and the text equals a phrase after `normalize`.
+        Nothing is scanned: it is the test that runs before any point scan."""
+        labeled = [
+            j for j in self.tree.subtree(i) if self._has_any_text(self.elements[j])
+        ]
+        if len(labeled) != 1:
+            return None  # only the name may carry text: nothing to join with
+        name = labeled[0]
+        element = self.elements[name]
+        if not element.text.strip() or any(
+            value.strip() and normalize(value) != normalize(element.text)
+            for value in (element.content_desc, element.hint)
+        ):
+            return None
+        phrase = self._phrases.get(normalize(element.text), "")
+        return (phrase, name) if phrase else None
+
+    def phrase_geometry(self, i: int, name: int) -> bool:
+        """True when row `i`, whose name element is `name` (`phrase_name`), is
+        structurally a row an exception phrase may let through; the reasons are
+        not looked at (see `_apply_phrases`).
+
+        The row must be plain: it is not long-clickable, checkable,
+        scrollable, editable or a text or password field, none of its
+        descendants is clickable or any of those, it has at most
+        `ROW_NAME_MEMBERS` elements and no ancestor is clickable (the judge
+        joins the texts of a clickable's whole subtree, so no hit can be formed
+        with text outside the row). The center of N's full bounds is on the
+        display and inside the row's drawn part. The last element drawn at the
+        row's tap point and at that center, seen or not, is in the row (at the
+        center it is N), except Samsung's empty ``round_corner`` view, and no
+        interactive element (clickable, long-clickable, checkable, scrollable,
+        editable, a text or password field) outside the row and its ancestors
+        is drawn there.
+        """
+        members = self.tree.subtree(i)
+        if not self._plain_row(i, members):
+            return False
+        center = self.elements[name].bounds.center
+        width, height = self.screen.display
+        row_part = self.screen._clip(self.elements[i])  # noqa: SLF001
+        visible = self.visible[i]
+        if (
+            not (0 <= center[0] < width and 0 <= center[1] < height)
+            or row_part is None
+            or visible is None
+            or not _contains(row_part, center)
+        ):
+            return False
+        inside = frozenset(members)
+        return all(
+            self._only_row_at(point, i, inside, last=name if point == center else None)
+            for point in (visible.center, center)
+        )
+
+    @staticmethod
+    def _has_any_text(element: Element) -> bool:
+        return any(
+            value.strip()
+            for value in (element.text, element.content_desc, element.hint)
+        )
+
+    def _plain_row(self, i: int, members: list[int]) -> bool:
+        """The shape rules of `phrase_candidate`."""
+        tree = self.tree
+        if (
+            len(members) > ROW_NAME_MEMBERS
+            or self.visible[i] is None
+            or _interactive(self.elements[i], clickable_ok=True)
+            or any(_interactive(self.elements[j]) for j in members[1:])
+        ):
+            return False
+        up = tree.parent[i]
+        while up != -1:
+            if self.clickable[up]:
+                return False  # inside another clickable: its texts are joined
+            up = tree.parent[up]
+        return True
+
+    def _only_row_at(
+        self,
+        point: tuple[int, int],
+        i: int,
+        inside: frozenset[int],
+        *,
+        last: int | None,
+    ) -> bool:
+        """The last element in document order whose drawn part holds `point`,
+        seen or not, is in the row (is `last`, when given), and no interactive
+        element outside the row (other than its ancestors) has a drawn part
+        there."""
+        tree = self.tree
+        held = elements_at(self.screen, point)
+        # The one decoration the user allows (Samsung's `round_corner`) is
+        # drawn over the list and takes nothing: it is passed over.
+        drawn = [e for e in held if not _is_decoration(self.screen, e)]
+        if not drawn:
+            return False
+        end = tree.index[drawn[-1].id]
+        if end not in inside or (last is not None and end != last):
+            return False
+        for element in held:
+            j = tree.index[element.id]
+            if (
+                _interactive(element)
+                and j not in inside
+                and not tree.tin[j] <= tree.tin[i] < tree.tin[j] + tree.size[j]
+            ):
+                return False
+        return True
+
+    def phrase_words_agree(self, i: int, name: int) -> bool:
+        """True when the deny words found in the row `i` are exactly the ones
+        found in the name text alone (same matcher, exceptions and readings), so
+        no word is made with the rest of the row: ``Log`` + ``out`` reads
+        ``log out`` only together."""
+        members = self.tree.subtree(i)
+        elements = [self.elements[j] for j in members]
+        alone = [replace(self.elements[name], content_desc="", hint="", resource_id="")]
+        for word in self.policy.deny_words:
+            matcher = _Matcher([word], self.policy.deny_exceptions)
+            in_row = any(matcher.match(e) for e in elements) or (
+                self._joined_word(elements, matcher) is not None
+            )
+            in_name = matcher.match(alone[0]) is not None or (
+                self._joined_word(alone, matcher) is not None
+            )
+            if in_row != in_name:
+                return False
+        return True
+
+    def unsafe_ids(self) -> frozenset[str]:
+        """The ids of every element of the screen, clickable or not, that the tap
+        rules would refuse to press for what it is or says: it is of a package
+        other than this screen's target, or its own text, description or hint
+        holds a deny word (the same matcher, exceptions included) or, with the
+        irreversibility rule on, one of its phrases. The decisions of `judge`
+        exist only for clickable elements, so the wheel scroll asks this for every
+        element at its point."""
+        phrases = (
+            _PhraseMatcher(self.policy.irreversible_phrases)
+            if self.policy.skip_irreversible and self.policy.irreversible_phrases
+            else None
+        )
+        found = set()
+        for i, element in enumerate(self.elements):
+            hit = self.own_hit[i]
+            if (
+                element.package != self.target
+                or (hit is not None and hit[1] != "resource_id")
+                or (phrases is not None and phrases.find([element]) is not None)
+            ):
+                found.add(element.id)
+        return frozenset(found)
 
     def irreversible_detail(self) -> Detail | None:
         """Return the irreversibility phrase found on the screen, if any.
@@ -930,10 +1167,112 @@ class _Judge:
             reasons.append("dialog_confirm_button")
             details.append(Detail("dialog_confirm_button", note=note))
 
+    def _exact_reasons(
+        self,
+        i: int,
+        own: _Agg,
+        found: _Agg,
+        reasons: list[Reason],
+        details: list[Detail],
+    ) -> None:
+        """Add ``dialog_confirm_button`` for an exact-label word (see
+        `exact_label`), on its own: it never touches ``confirm_button``."""
+        hit, elsewhere = self._hit(own, found, _EXACT, i)
+        label = self.exact_label(hit)
+        note = f"{label} (hit target {self.elements[hit].id})" if elsewhere else label
+        if "dialog_confirm_button" not in reasons:
+            reasons.append("dialog_confirm_button")
+        details.append(Detail("dialog_confirm_button", note=note))
+
 
 def _contains(bounds: Bounds, point: tuple[int, int]) -> bool:
     x, y = point
     return bounds.left <= x < bounds.right and bounds.top <= y < bounds.bottom
+
+
+# Flags (and kinds of element) that make a row or what is inside it more than a
+# plain label for `[deny] except_phrases`.
+_INTERACTIVE = frozenset(
+    {_CLICKABLE, _CHECKABLE, _PASSWORD, "long_clickable", "scrollable"}
+)
+# What replaces the name text when a phrase is tried: a label with no deny word,
+# so that the label rules (unlabeled, number_only) decide as before.
+_PLACEHOLDER = "\u00b7"
+MAX_PHRASE_CANDIDATES = 8
+MAX_PHRASE_NAMED = 16
+
+
+def _interactive(element: Element, *, clickable_ok: bool = False) -> bool:
+    """True for an element that is more than a plain label: long-clickable,
+    checkable, scrollable, editable or a text or password field, and, unless
+    `clickable_ok`, clickable."""
+    flags = _INTERACTIVE - {_CLICKABLE} if clickable_ok else _INTERACTIVE
+    return (
+        any(flag in element.flags for flag in flags)
+        or element.editable
+        or _is_text_field(element)
+    )
+
+
+def _apply_phrases(
+    state: _Judge,
+    decisions: tuple[Decision, ...],
+    target_package: str,
+    foreground: str | None,
+) -> tuple[Decision, ...]:
+    """Let through the rows that an exception phrase excuses.
+
+    Candidates are the rows whose only reason is ``deny_word`` and that
+    `_Judge.phrase_candidate` accepts (a plain row whose name equals a phrase).
+    With more than `MAX_PHRASE_CANDIDATES` of them on the screen no phrase
+    applies. Each candidate is judged once more on the same screen with only
+    its name text replaced by a neutral label: when it then has no reason at
+    all, the hits were made of the phrase's own characters and it is let
+    through, marked with the phrase. The judge's own matching decides, with its
+    exceptions and readings; any other deny word anywhere still refuses, and a
+    hit made with a neighbouring text may over-refuse.
+    """
+    found: list[tuple[int, int, str, int]] = []
+    named = 0
+    for k, decision in enumerate(decisions):
+        i = state.tree.index[decision.element.id]
+        candidate = state.phrase_name(i)
+        if candidate is None:
+            continue
+        named += 1
+        if named > MAX_PHRASE_NAMED:
+            return decisions  # too many rows to examine: no phrase on this screen
+        if state.phrase_geometry(i, candidate[1]):
+            found.append((k, i, candidate[0], candidate[1]))
+            if len(found) > MAX_PHRASE_CANDIDATES:
+                return decisions  # counted before the reasons; stop at once
+    found = [
+        item
+        for item in found
+        if decisions[item[0]].reasons == ("deny_word",)
+        and state.phrase_words_agree(item[1], item[3])
+    ]
+    if not found:
+        return decisions
+    policy = replace(state.policy, except_phrases=())
+    result = list(decisions)
+    for k, i, phrase, name in found:
+        elements = list(state.elements)
+        # A description or hint of the name is the name again (checked in
+        # `phrase_candidate`): it goes with it.
+        elements[name] = replace(
+            elements[name], text=_PLACEHOLDER, content_desc="", hint=""
+        )
+        other = _Judge(
+            replace(state.screen, elements=tuple(elements)),
+            target_package,
+            policy,
+            foreground,
+        ).decide(i)
+        if not other.reasons:
+            before = decisions[k]
+            result[k] = Decision(before.element, before.point, (), (), phrase)
+    return tuple(result)
 
 
 def judge(
@@ -1033,6 +1372,10 @@ def judge(
       or hint, or in one field's value inside a joined text with real
       boundaries around it, does not count (see the module docstring); the
       resource id has no exceptions.
+      A plain row whose only reason is this one and whose name text equals a
+      phrase of ``policy.except_phrases`` is judged once more with only that
+      text replaced; with no reason left it is let through (see
+      `_apply_phrases` and `Policy`) and ``Decision`` has ``except_phrase``.
     * ``irreversible_screen``: the text, content description or hint of any
       element of the screen holds a phrase of ``policy.irreversible_phrases``
       (unless ``skip_irreversible`` is False). Every candidate gets it. The
@@ -1073,8 +1416,19 @@ def judge(
             )
         )
     state = _Judge(screen, target_package, policy, foreground)
+    decisions = tuple(
+        state.decide(i) for i, element in enumerate(elements) if state.clickable[i]
+    )
+    unsafe = state.unsafe_ids()
+    if policy.except_phrases:
+        decisions = _apply_phrases(state, decisions, target_package, foreground)
+        # A row an exception phrase lets through is still unsafe for the wheel:
+        # the phrase lets a tap through, nothing else.
+        unsafe |= frozenset(d.element.id for d in decisions if d.except_phrase)
     return Judgement(
-        tuple(
-            state.decide(i) for i, element in enumerate(elements) if state.clickable[i]
-        )
+        decisions,
+        dialog=state.dialog,
+        irreversible=state.irreversible_detail() is not None,
+        edges=state._avoid,  # noqa: SLF001 - the areas of `screen_edge`
+        unsafe=unsafe,
     )

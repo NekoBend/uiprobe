@@ -5,11 +5,12 @@ from __future__ import annotations
 import contextlib
 from typing import TYPE_CHECKING
 
-from uiprobe.crawl import Back, Launch, Observation, Relaunch, Tap
+from uiprobe.crawl import Back, Launch, Observation, Relaunch, Scroll, Tap
 from uiprobe.crawl_driver.constants import (
     _COVER_REASONS,
     _FIRST_ACTION,
     _HALF_RELAUNCH,
+    NOT_SENT_FOCUS_OTHER,
     NOT_SENT_FOCUS_UNKNOWN,
     NOT_SENT_RECONNECTED,
     NOT_SENT_START,
@@ -24,7 +25,8 @@ from uiprobe.runlog import RunFolderError
 
 if TYPE_CHECKING:
     from uiprobe.crawl import Action
-    from uiprobe.model import Element
+    from uiprobe.crawl_driver.helpers import _Seen
+    from uiprobe.model import Element, Screen
 
 
 class _SendMixin(_RunState):
@@ -45,6 +47,13 @@ class _SendMixin(_RunState):
             if isinstance(action, Tap):
                 self.device.tap(
                     action.point, _send_by=self.send_by, _epoch=self.approved
+                )
+            elif isinstance(action, Scroll):
+                self.device._wheel_scroll(  # noqa: SLF001 - internal to uiprobe
+                    action.point,
+                    action.amount,
+                    _send_by=self.send_by,
+                    _epoch=self.approved,
                 )
             elif isinstance(action, Back):
                 self.device.key("back", _send_by=self.send_by, _epoch=self.approved)
@@ -95,7 +104,7 @@ class _SendMixin(_RunState):
                 self.gate_details
                 if reason in _COVER_REASONS
                 else self.gate_focus_details
-                if reason == NOT_SENT_FOCUS_UNKNOWN
+                if reason in {NOT_SENT_FOCUS_UNKNOWN, NOT_SENT_FOCUS_OTHER}
                 else None
             )
             self.end_not_sent(action_id, reason, details)
@@ -105,7 +114,7 @@ class _SendMixin(_RunState):
                 # read.
                 self.withdraw(action)
                 return reason, None
-            if seen is not None and isinstance(action, Tap):
+            if seen is not None and isinstance(action, Tap | Scroll):
                 return reason, self.refused_tap(action, screen, seen)
             return reason, None
         # Nothing of the caller's runs between the gate's last comparison and
@@ -126,13 +135,26 @@ class _SendMixin(_RunState):
             raise
         if refused is not None:
             return refused, None
+        self.sent(action, action_id, screen, seen)
+        return None, None
+
+    def sent(
+        self,
+        action: Action,
+        action_id: int,
+        screen: Screen | None,
+        seen: _Seen | None,
+    ) -> None:
+        """What follows a sent action: tell the engine, then the pause."""
         if isinstance(action, Tap):
             self.engine.tap_sent(action)
             if seen is not None:
                 self.write_skips(screen, seen.observation.screen, tap=action)
-        if isinstance(action, Tap | Back):
+        elif isinstance(action, Scroll):
+            self.engine.scroll_sent(action)
+            self.scrolled = action_id
+        if isinstance(action, Tap | Scroll | Back):
             self.pause()
-        return None, None
 
     def write_start(
         self, action_id: int, action: Action, observation: Observation | None
@@ -158,10 +180,14 @@ class _SendMixin(_RunState):
             other = screen.package
             foreground = observation.foreground
             focus = None if self.focus is None else self.focus.owner
+        amount: int | None = None
         if isinstance(action, Tap):
             from_id = action.screen_id
             point = action.point
             element = _element_of(screen, action.element_id)
+        elif isinstance(action, Scroll):
+            from_id = action.screen_id
+            point, amount = action.point, action.amount
         elif isinstance(action, Launch):
             from_id = None
         elif not isinstance(action, Back | Relaunch):  # Stop and Reread
@@ -178,7 +204,29 @@ class _SendMixin(_RunState):
             off_target_focus=focus,
             restart=isinstance(action, Launch) and self.restart,
             replay=isinstance(action, Tap) and self.engine.is_replay(action),
+            amount=amount,
+            after_scroll=self.read_of(action, screen),
+            except_phrase=(
+                self.engine.except_phrase_of(action) if isinstance(action, Tap) else ""
+            ),
         )
+
+    def read_of(self, action: Action, screen: Screen | None) -> int | None:
+        """The scroll whose result screen is the screen a tap was decided on
+        (the latest written read of that screen id that equals it: the first
+        read of an id that a scroll brought is both the id's own file and that
+        scroll's read, and it is the scroll's), or None: the tap is of the
+        screen's own file, or of a state nothing written holds."""
+        if (
+            not self.policy.scroll_lists
+            or not isinstance(action, Tap)
+            or screen is None
+        ):
+            return None
+        for scroll_id, elements in reversed(self.reads.get(action.screen_id, ())):
+            if elements == screen.elements:
+                return scroll_id
+        return None
 
     def close_unsent(self, reason: str) -> None:
         """Close the action in the gate (if any) as not sent for `reason`.

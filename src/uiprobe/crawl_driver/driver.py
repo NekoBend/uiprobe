@@ -5,7 +5,7 @@ from __future__ import annotations
 import contextlib
 import os
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 
 from uiprobe.also_target import (
@@ -135,6 +135,7 @@ def crawl(
     restart: bool = True,
     record_text: bool = True,
     on_progress: Callable[[Progress], None] | None = None,
+    _on_checked: Callable[[bool | None], None] | None = None,
 ) -> CrawlResult:
     """Crawl `package` on `device`, pressing what the guards allow, into `out`.
 
@@ -267,6 +268,9 @@ def crawl(
         depth=int.__int__(limits.depth),
         actions=int.__int__(limits.actions),
         minutes=int.__int__(limits.minutes),
+        scrolls_per_screen=int.__int__(limits.scrolls_per_screen),
+        scroll_amount=int.__int__(limits.scroll_amount),
+        scroll_incidents=int.__int__(limits.scroll_incidents),
     )
     if not isinstance(out, str | os.PathLike):
         msg = f"out must be a str or a path, not {type(out).__name__}"
@@ -275,6 +279,8 @@ def crawl(
     _check_flag("allow_real_device", allow_real_device)
     _check_flag("restart", restart)
     _check_flag("record_text", record_text)
+    if _on_checked is not None:
+        _check_callable("_on_checked", _on_checked)
     if screenshots and not record_text:
         msg = (
             "screenshots cannot be combined with record_text=False: a screenshot"
@@ -325,6 +331,7 @@ def crawl(
             restart=restart,
             record_text=record_text,
             on_progress=on_progress,
+            on_checked=_on_checked,
         )
     finally:
         device.set_pin_watch(caller_watch)
@@ -347,11 +354,27 @@ def _crawl_on(
     restart: bool,
     record_text: bool,
     on_progress: Callable[[Progress], None] | None,
+    on_checked: Callable[[bool | None], None] | None,
 ) -> CrawlResult:
     """`crawl` after its arguments were checked: pin, check, run."""
     forget_displays(device)  # several displays seen count within one run
     device.pin_transport()
     _check_device(device, allow_real_device=allow_real_device)
+    # Whether the device can scroll with a mouse wheel comes from its own
+    # `input` usage, which only the driver reads, once, after the device check
+    # and before anything is sent or written; no caller can say what it lists.
+    # When it cannot be read or does not list the wheel scroll, the run does not
+    # scroll (the engine gets the policy with the switch off). With the switch
+    # off nothing is read. `uiprobe crawl --press` is told the answer (or None
+    # when nothing was read) through `_on_checked` to print it in its plan.
+    asked = policy.scroll_lists
+    wheel = False
+    if asked:
+        wheel = device._wheel_supported()  # noqa: SLF001 - internal to uiprobe
+        if not wheel:
+            policy = replace(policy, scroll_lists=False)
+    if on_checked is not None:
+        on_checked(wheel if asked else None)
     # The app's uid, which a tap's window must have (Policy.check_tap_window),
     # and whether other packages share it; None when it cannot be read: then
     # every tap is refused (cover_unknown) before any window is read.
@@ -382,6 +405,11 @@ def _crawl_on(
         restart=restart,
         record_text=record_text,
         also_target=policy.also_target,
+        deny_except_phrases=policy.except_phrases,
+        scrolls_per_screen=limits.scrolls_per_screen if asked else None,
+        scroll_amount=limits.scroll_amount,
+        scroll_incidents=limits.scroll_incidents,
+        scroll_input=wheel,
     )
     try:
         run = _Run(

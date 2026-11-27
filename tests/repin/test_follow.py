@@ -427,7 +427,7 @@ def test_a_stopped_wait_swallowed_by_a_dump_read_sends_no_tap(
     out = tmp_path / "run"
     result = run(device, LateClock(), out)
     assert result.stop_reason == "max_duration"
-    assert not [c for _, _, c in fake_adb.commands if c.startswith("input")]
+    assert not [c for _, _, c in fake_adb.commands if c.startswith("input ")]
     assert android.inputs == []
     records = lines(out / "transitions.jsonl")
     assert [r["reason"] for r in records if r.get("not_sent")] == ["time_limit"]

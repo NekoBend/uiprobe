@@ -49,8 +49,8 @@ def with_also(text: str, value: str) -> str:
 
 def test_the_generated_file_is_current_and_writes_the_key_commented():
     text = settings.render_default_settings()
-    assert "format_version = 1\ndefaults_version = 10\n" in text
-    assert settings.DEFAULTS_VERSION == 10
+    assert "format_version = 1\ndefaults_version = 12\n" in text
+    assert settings.DEFAULTS_VERSION == 12
     assert text.count("also_target") == 1
     assert ENTRY + "\n" in text
     rules = text.split("[rules]\n")[1].split("[limits]")[0]
@@ -64,9 +64,9 @@ def test_the_generated_file_loads_with_an_empty_list(tmp_path):
     assert settings.policy_from_settings(loaded).also_target == ()
 
 
-@pytest.mark.parametrize("version", range(1, 11))
+@pytest.mark.parametrize("version", range(1, 13))
 def test_every_defaults_version_loads_with_an_empty_list(tmp_path, version):
-    if version <= 9:
+    if version <= 11:
         text = (DATA / f"settings_v{version}.toml").read_text(encoding="utf-8")
     else:
         text = settings.render_default_settings()
@@ -78,9 +78,9 @@ def test_every_defaults_version_loads_with_an_empty_list(tmp_path, version):
     assert loaded.warnings == ()
 
 
-@pytest.mark.parametrize("version", range(1, 11))
+@pytest.mark.parametrize("version", range(1, 12))
 def test_every_defaults_version_may_list_packages(tmp_path, version):
-    if version <= 9:
+    if version <= 10:
         text = (DATA / f"settings_v{version}.toml").read_text(encoding="utf-8")
     else:
         text = settings.render_default_settings()
@@ -129,9 +129,18 @@ def test_the_settings_fields_end_with_also_target():
     import dataclasses
 
     names = [f.name for f in dataclasses.fields(settings.Settings)]
-    assert names[-1] == "back_on_other_screens"
-    assert names[-2] == "also_target"
-    assert names[-3] == "record_text"
+    # later fields follow in the order of the defaults versions
+    assert names[-8:-1] == [
+        "also_target",
+        "back_on_other_screens",
+        "scroll_lists",
+        "scrolls_per_screen",
+        "scroll_amount",
+        "scroll_incidents",
+        "deny_except_phrases",
+    ]
+    assert names[-1] == "dialog_exact_labels"
+    assert names[-9] == "record_text"
 
 
 def test_no_default_exception_is_tagged_with_the_new_version():

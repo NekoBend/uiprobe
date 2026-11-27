@@ -50,7 +50,7 @@ from typing import IO, TYPE_CHECKING, Any, Final
 from uiprobe._json import dumps
 from uiprobe.crawl import Limits
 from uiprobe.errors import UiprobeError
-from uiprobe.guards import _WORD_REASONS
+from uiprobe.guards import _WORD_REASONS, MAX_SCROLL_AMOUNT
 from uiprobe.model import Element, Screen, _name, _quote
 from uiprobe.pngfile import check_new_path, depends_on_a_drive_folder
 
@@ -285,6 +285,32 @@ def _check_point(point: Sequence[int] | None) -> list[int] | None:
     return [_check_number("point", value) for value in values]
 
 
+def _amount_field(kind: object, amount: int | None) -> dict[str, object]:
+    """The ``amount`` key of a scroll's action (the size of the wheel turn),
+    given for the kind ``scroll`` and only for it, from 1 to
+    `MAX_SCROLL_AMOUNT` (the range `uiprobe tree` accepts on a start line)."""
+    if (amount is not None) != (kind == "scroll"):
+        msg = "amount goes with the kind scroll, and only with it"
+        raise ValueError(msg)
+    if amount is None:
+        return {}
+    number = _check_number("amount", amount)
+    if not 1 <= number <= MAX_SCROLL_AMOUNT:
+        msg = f"amount must be from 1 to {MAX_SCROLL_AMOUNT}, got {number}"
+        raise ValueError(msg)
+    return {"amount": number}
+
+
+def _after_scroll_field(kind: object, after_scroll: int | None) -> dict[str, object]:
+    """The ``after_scroll`` key of a tap's start line (only a tap has one)."""
+    if after_scroll is None:
+        return {}
+    if kind != "tap":
+        msg = "after_scroll needs the kind tap"
+        raise ValueError(msg)
+    return {"after_scroll": _check_action_id(after_scroll)}
+
+
 def _limits_dict(limits: Limits | dict[str, int]) -> dict[str, int]:
     """Read depth, actions and minutes from a `Limits` or a mapping."""
     if isinstance(limits, Limits):
@@ -429,13 +455,15 @@ class RunWriter:
         self._streams: dict[str, IO[str]] = {}
         self._screens: dict[str, Screen] = {}
         self._pictures: set[str] = set()
+        # The screens read after a scroll, by screen id, for the summary.
+        self._scrolled_labels: dict[str, list[Screen]] = {}
         self._skipped: set[tuple[str, str, tuple[str, ...]]] = set()
         self._made_screens_folder = False
         self._starts_written = 0
         self._record_text = True
 
     @classmethod
-    def create(
+    def create(  # noqa: PLR0912, PLR0915 - one check and one key per setting
         cls,
         out: str | os.PathLike[str],
         *,
@@ -451,6 +479,11 @@ class RunWriter:
         restart: bool | None = None,
         record_text: bool | None = None,
         also_target: Iterable[str] = (),
+        scrolls_per_screen: int | None = None,
+        scroll_amount: int | None = None,
+        scroll_incidents: int | None = None,
+        scroll_input: bool | None = None,
+        deny_except_phrases: Iterable[str] = (),
     ) -> RunWriter:
         """Make the run folder `out` and write ``run-start.json`` into it.
 
@@ -466,7 +499,14 @@ class RunWriter:
         given, is written as ``check_tap_window`` (the crawl's
         ``Policy.check_tap_window``). `restart`, when given, is written as
         ``restart``: whether the crawl force-stops the app before its first
-        start. `record_text`, when given, is written as ``record_text`` and
+        start. `scrolls_per_screen`, when given (the crawl passes it only when
+        it may scroll, ``Policy.scroll_lists``), is written as
+        ``scrolls_per_screen`` together with ``scroll_lists: true``,
+        `scroll_amount`, `scroll_incidents` and `scroll_input` (a bool: the
+        device's own ``input`` usage lists the wheel scroll, so the run may
+        scroll at all); a run folder without them was made by a crawl that sent
+        no wheel input.
+        `record_text`, when given, is written as ``record_text`` and
         decides whether the texts of screens are kept (see `RunWriter` and
         the run folder page): False writes every element's ``text``,
         ``content_desc`` and ``hint`` as ``""`` (named in ``hidden``), the
@@ -476,6 +516,8 @@ class RunWriter:
         hidden either way. `also_target` (``Policy.also_target``) is written
         as ``also_target``, a list, only when it is not empty: the packages
         besides `package` whose screens the crawl counted as the app's own.
+        `deny_except_phrases` (``Policy.except_phrases``) is written as
+        ``deny_except_phrases``, a list, only when it is not empty.
 
         Before anything is made, `out` gets the checks of
         `uiprobe.pngfile.check_new_path`: it must not be empty, hold a null
@@ -522,6 +564,7 @@ class RunWriter:
         also = _check_texts("also_target", also_target)
         words = _check_texts("deny_words", deny_words)
         exceptions = _check_texts("deny_exceptions", deny_exceptions)
+        phrases = _check_texts("deny_except_phrases", deny_except_phrases)
         limit_values = _limits_dict(limits)
         when = _check_moment("started_at", _now() if started_at is None else started_at)
         folder = _new_folder(out)
@@ -545,6 +588,21 @@ class RunWriter:
             record["record_text"] = record_text
         if also:
             record["also_target"] = also
+        if phrases:
+            record["deny_except_phrases"] = phrases
+        if scrolls_per_screen is not None:
+            record["scroll_lists"] = True
+            record["scrolls_per_screen"] = _check_number(
+                "scrolls_per_screen", scrolls_per_screen
+            )
+            record["scroll_amount"] = _check_number("scroll_amount", scroll_amount)
+            record["scroll_incidents"] = _check_number(
+                "scroll_incidents", scroll_incidents
+            )
+            if not isinstance(scroll_input, bool):
+                msg = "scroll_input must be a bool when scrolls_per_screen is given"
+                raise TypeError(msg)
+            record["scroll_input"] = scroll_input
         text = _json_text(record, indent=2) + "\n"
         try:
             _make_dir(folder)  # the very str that was checked
@@ -604,7 +662,7 @@ class RunWriter:
 
     # -- the records --
 
-    def write_transition_start(
+    def write_transition_start(  # noqa: PLR0912 - one check per optional key
         self,
         action_id: int,
         kind: str,
@@ -617,6 +675,9 @@ class RunWriter:
         off_target_focus: str | None = None,
         restart: bool = False,
         replay: bool = False,
+        amount: int | None = None,
+        after_scroll: int | None = None,
+        except_phrase: str = "",
     ) -> None:
         """Write the line that says an action is about to be sent.
 
@@ -640,11 +701,29 @@ class RunWriter:
         ``replay: true`` (the key is absent otherwise). It needs `kind`
         ``tap``.
 
+        `amount` is the size of the mouse wheel turn of a scroll (kind
+        ``scroll``, whose `point` is where the pointer is put): written as
+        ``amount`` in ``action``. It is allowed only for the kind ``scroll``,
+        which needs it.
+
+        `after_scroll` is the action id of a scroll whose result screen
+        (``screens/scroll-<id>.json``) is exactly the screen a tap was decided
+        on: the line then has ``after_scroll``, so a reader knows which read of
+        the screen the tap's element belongs to. It needs the kind ``tap``.
+
+        `except_phrase` is the phrase of ``Policy.except_phrases`` (as written)
+        that let a tap through a deny word: the line then has ``except_phrase``.
+        It needs the kind ``tap`` and is left out when empty.
+
         Raises:
-            TypeError: `restart` or `replay` is not a bool.
+            TypeError: `restart` or `replay` is not a bool, or `except_phrase`
+                is not a str.
             ValueError: `off_target_foreground` or `off_target_focus` is given
-                without `off_target_package`, or `replay` is True for a kind
-                other than ``tap``.
+                without `off_target_package`, `replay` is True for a kind
+                other than ``tap``, or `amount` is given for a kind other
+                than ``scroll`` (or missing for it), or `after_scroll` is
+                given for a kind other than ``tap``, or `except_phrase` is not
+                empty for a kind other than ``tap``.
         """
         line: dict[str, object] = {
             "schema": TRANSITION_START_SCHEMA,
@@ -655,6 +734,7 @@ class RunWriter:
         checked_point = _check_point(point)
         if checked_point is not None:
             action["point"] = checked_point
+        action.update(_amount_field(action["kind"], amount))
         if element is not None:
             action["element"] = _element_dict(element, record_text=self._record_text)
         line["action"] = action
@@ -687,9 +767,18 @@ class RunWriter:
                 msg = "replay needs the kind tap"
                 raise ValueError(msg)
             line["replay"] = True
+        if not isinstance(except_phrase, str):
+            msg = "except_phrase must be a str"
+            raise TypeError(msg)
+        if except_phrase:
+            if action["kind"] != "tap":
+                msg = "except_phrase needs the kind tap"
+                raise ValueError(msg)
+            line["except_phrase"] = _check_text("except_phrase", except_phrase)
+        line.update(_after_scroll_field(action["kind"], after_scroll))
         self._append("transitions.jsonl", _json_text(line) + "\n", start=True)
 
-    def write_transition_end(
+    def write_transition_end(  # noqa: PLR0912 - one branch per kind of end line
         self,
         action_id: int,
         to_screen_id: str | None = None,
@@ -698,8 +787,13 @@ class RunWriter:
         not_sent: str | None = None,
         details: Mapping[str, str | int] | None = None,
         failed: str | None = None,
+        scroll_effect: str | None = None,
     ) -> None:
         """Write the line that says where an action led, or that it was not sent.
+
+        ``scroll_effect`` (``changed`` or ``navigation``) marks the end of a
+        scroll that did more than scroll (see `CrawlEngine.scroll_effect`); it
+        goes only on an ordinary end line, with a screen.
 
         ``to_screen_id`` is required when ``dump_failed`` is False and must be
         None when it is True. ``not_sent`` is the reason (a short word) when
@@ -766,6 +860,14 @@ class RunWriter:
                 raise ValueError(msg)
         else:
             line["to_screen_id"] = _check_screen_id(to_screen_id)
+            if scroll_effect is not None:
+                if scroll_effect not in ("changed", "navigation"):
+                    msg = "scroll_effect must be changed or navigation"
+                    raise ValueError(msg)
+                line["scroll_effect"] = scroll_effect
+        if dump_failed and scroll_effect is not None:
+            msg = "scroll_effect needs a screen"
+            raise ValueError(msg)
         self._append("transitions.jsonl", _json_text(line) + "\n")
 
     def write_skip(
@@ -840,6 +942,30 @@ class RunWriter:
             self._write_new(self._screen_path(screen_id, "json"), text, in_screens=True)
             self._screens[screen_id] = screen
         return True
+
+    def write_scroll_screen(self, action_id: int, screen: Screen) -> None:
+        """Write ``screens/scroll-<action_id>.json``: the screen as it was read
+        after the scroll with that action id, in the same form as
+        ``screens/<screen_id>.json``. One file per scroll, never overwritten.
+
+        The file is not the first sight of a screen id, so `write_screen` is
+        not affected by it, and it adds nothing to ``summary.txt`` except the
+        labels of its clickable elements that the summary does not list yet
+        under the same screen id (a row found only after scrolling).
+        """
+        number = _check_action_id(action_id)
+        _check_screen_id(screen.screen_id)
+        with self.critical():
+            self._check_usable()
+            data = screen.to_dict()
+            data["elements"] = [
+                _hide_texts(dict(item), record_text=self._record_text)
+                for item in data["elements"]  # ty: ignore[not-iterable]
+            ]
+            text = _json_text(data, indent=2) + "\n"
+            path = self._root / "screens" / f"scroll-{number}.json"
+            self._write_new(path, text, in_screens=True)
+            self._scrolled_labels.setdefault(screen.screen_id, []).append(screen)
 
     def write_screenshot(self, screen_id: str, png: bytes) -> bool:
         """Write ``screens/<screen_id>.png`` the first time this id is seen.
@@ -1064,6 +1190,17 @@ class RunWriter:
                 if "clickable" in element.flags
                 and (label := _label(element, record_text=self._record_text))
             ]
+            if self._record_text:
+                # Rows found only after scrolling, under the screen they were
+                # scrolled on (the label text itself tells them apart).
+                for later in self._scrolled_labels.get(screen_id, ()):
+                    labels.extend(
+                        found
+                        for element in later.elements
+                        if "clickable" in element.flags
+                        and (found := _label(element))
+                        and found not in labels
+                    )
             lines.extend(f"  {_quote(label)}" for label in labels)
             if not labels:
                 lines.append("  (no labelled buttons)")
