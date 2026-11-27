@@ -51,6 +51,35 @@ def test_a_uiprobe_error_behind_another_error_is_named_too() -> None:
     assert "timed out" in report.sections[0][1]
 
 
+def test_only_the_address_and_the_reason_are_shown() -> None:
+    error = AdbServerUnavailableError(
+        "down", details={"reason": "refused", "adb_path": "/home/x/adb"}
+    )
+    text = _report(error, failed=True).sections[0][1]
+    assert "refused" in text
+    assert "adb_path" not in text
+
+
+def test_a_suppressed_context_is_not_shown() -> None:
+    try:
+        try:
+            raise AdbServerUnavailableError("down", details={"reason": "hidden"})
+        except AdbServerUnavailableError:
+            raise RuntimeError("plain") from None
+    except RuntimeError as outer:
+        report = _report(outer, failed=True)
+    assert report.sections == []
+
+
+def test_a_detail_that_fails_to_print_keeps_the_report() -> None:
+    class Broken:
+        def __str__(self) -> str:
+            raise RuntimeError("no")
+
+    error = AdbServerUnavailableError("down", details={"reason": Broken()})
+    assert _report(error, failed=True).sections == []
+
+
 def test_a_passing_test_or_another_error_adds_nothing() -> None:
     assert _report(None, failed=False).sections == []
     assert _report(ValueError("x"), failed=True).sections == []
