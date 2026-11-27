@@ -122,14 +122,6 @@ def test_the_name_is_the_first_text_of_the_element_then_its_descendants() -> Non
             text="Quick Share",
             bounds=(10, 140, 310, 190),
         ),
-        el(
-            "e5",
-            parent="e2",
-            cls=TEXT,
-            flags=(),
-            text="Other",
-            bounds=(10, 190, 310, 199),
-        ),
     ]
     assert verdict(elements).except_phrase == "Quick Share"
 
@@ -394,12 +386,8 @@ def test_an_added_deny_word_inside_a_phrase_drops_the_phrase() -> None:
 def test_the_tree_names_the_row_as_the_judge_does() -> None:
     # The name `uiprobe tree` shows for the row is the name the judge compares
     # with the phrases: a phrase equal to it lets the row through.
-    cases = [
-        row("Quick Share", "Summary"),
-        row("", "Second"),
-        row("Settings", "x", desc="Other"),
-    ]
-    words = ("share", "second", "description", "settings")
+    cases = [row("Quick Share"), row("Settings")]
+    words = ("share", "settings")
     for elements in cases:
         screen = make_screen([root(), *elements])
         (tree_row,) = (
@@ -845,3 +833,102 @@ def test_a_phrase_matches_after_nfkc_like_deny_words() -> None:
     assert (
         verdict(row("Share"), policy).except_phrase == "\u24c8\u24d7\u24d0\u24e1\u24d4"
     )
+
+
+# -- the fifth check: one text only, the last drawn element, the cap ------------------
+
+
+def test_a_row_with_a_second_text_gets_no_phrase() -> None:
+    d = verdict(row("Quick Share", "Summary"))
+    assert d.except_phrase == ""
+    assert "deny_word" in d.reasons
+
+
+def test_a_description_or_hint_other_than_the_name_gets_no_phrase() -> None:
+    def named(**kw):
+        return [
+            el("e2", cls=ROW, bounds=ROW_BOUNDS),
+            el(
+                "e3",
+                parent="e2",
+                cls=TEXT,
+                flags=(),
+                text="Quick Share",
+                bounds=(10, 100, 310, 140),
+                **kw,
+            ),
+        ]
+
+    assert verdict(named(desc="Quick  SHARE")).except_phrase == "Quick Share"
+    assert verdict(named(desc="Other")).except_phrase == ""
+    assert verdict(named(hint="Other")).except_phrase == ""
+
+
+def test_a_title_that_reads_with_the_summary_gets_no_phrase() -> None:
+    # `Share Sha` + `re` read `share` across the two texts.
+    policy = Policy(except_phrases=("Share Sha",))
+    d = verdict(row("Share Sha", "re"), policy)
+    assert d.except_phrase == ""
+    assert "deny_word" in d.reasons
+
+
+def test_an_unlabelled_plain_view_drawn_over_the_row_gets_no_phrase() -> None:
+    cover = el(
+        "e9", parent="e1", cls="android.widget.ImageView", flags=(), bounds=ROW_BOUNDS
+    )
+    d = verdict(row(extra=[cover]))
+    assert d.except_phrase == ""
+    plain = el("e9", parent="e1", cls="android.view.View", flags=(), bounds=ROW_BOUNDS)
+    assert verdict(row(extra=[plain])).except_phrase == ""
+
+
+def test_the_round_corner_decoration_is_passed_over_and_nothing_else_is() -> None:
+    corner = el(
+        "e9",
+        parent="e1",
+        cls="android.view.View",
+        flags=(),
+        rid="com.sec.android.app.launcher:id/round_corner",
+        bounds=(0, 0, 320, 640),
+    )
+    assert verdict(row(extra=[corner])).except_phrase == "Quick Share"
+    other_id = replace(corner, resource_id="com.example:id/scrim")
+    assert verdict(row(extra=[other_id])).except_phrase == ""
+    flagged = replace(corner, flags=("focusable",))
+    assert verdict(row(extra=[flagged])).except_phrase == ""
+    labelled = replace(corner, text="x")
+    assert verdict(row(extra=[labelled])).except_phrase == ""
+    child = el("e10", parent="e9", cls=TEXT, flags=(), bounds=(0, 0, 10, 10))
+    assert verdict(row(extra=[corner, child])).except_phrase == ""
+
+
+def test_a_title_drawn_outside_its_row_gets_no_phrase() -> None:
+    elements = [
+        el("e2", cls=ROW, bounds=(0, 100, 320, 140)),
+        el(
+            "e3",
+            parent="e2",
+            cls=TEXT,
+            flags=(),
+            text="Quick Share",
+            bounds=(10, 300, 310, 340),
+        ),
+    ]
+    d = verdict(elements)
+    assert d.except_phrase == ""
+    assert "deny_word" in d.reasons
+
+
+def test_the_scan_stops_at_the_ninth_candidate(monkeypatch) -> None:
+    from uiprobe.guards.judge import _Judge
+
+    calls = []
+    original = _Judge.phrase_candidate
+
+    def counting(self, i):
+        calls.append(i)
+        return original(self, i)
+
+    monkeypatch.setattr(_Judge, "phrase_candidate", counting)
+    run(share_rows(20), policy=Policy(except_phrases=("Share (.*)",)))
+    assert len(calls) == 9

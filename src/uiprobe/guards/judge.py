@@ -33,7 +33,7 @@ from uiprobe.guards.policy import (
     api36_fallback_areas,
     edge_areas,
 )
-from uiprobe.guards.scroll import elements_at
+from uiprobe.guards.scroll import _is_decoration, elements_at
 from uiprobe.guards.tree import (
     _CONFIRM,
     _DENY,
@@ -830,21 +830,44 @@ class _Judge:
         members = self.tree.subtree(i)
         if not self._plain_row(i, members):
             return None
-        name = next((j for j in members if self.elements[j].text.strip()), None)
-        if name is None:
+        labeled = [j for j in members if self._has_any_text(self.elements[j])]
+        if len(labeled) != 1:
+            return None  # only the name may carry text: nothing to join with
+        name = labeled[0]
+        element = self.elements[name]
+        if not element.text.strip() or any(
+            value.strip() and normalize(value) != normalize(element.text)
+            for value in (element.content_desc, element.hint)
+        ):
             return None
-        phrase = self._phrases.get(normalize(self.elements[name].text), "")
-        part = self.screen._clip(self.elements[name])  # noqa: SLF001
+        phrase = self._phrases.get(normalize(element.text), "")
+        part = self.screen._clip(element)  # noqa: SLF001
+        row_part = self.screen._clip(self.elements[i])  # noqa: SLF001
         visible = self.visible[i]
-        if part is None or not phrase or visible is None:
+        if (
+            part is None
+            or row_part is None
+            or not phrase
+            or visible is None
+            or not _contains(row_part, part.center)
+        ):
             return None
         inside = frozenset(members)
-        if self.topmost(part.center) != name or not all(
-            self._only_row_at(point, i, inside)
+        if not all(
+            self._only_row_at(
+                point, i, inside, last=name if point == part.center else None
+            )
             for point in (visible.center, part.center)
         ):
             return None
         return phrase, name
+
+    @staticmethod
+    def _has_any_text(element: Element) -> bool:
+        return any(
+            value.strip()
+            for value in (element.text, element.content_desc, element.hint)
+        )
 
     def _plain_row(self, i: int, members: list[int]) -> bool:
         """The shape rules of `phrase_candidate`."""
@@ -864,14 +887,28 @@ class _Judge:
         return True
 
     def _only_row_at(
-        self, point: tuple[int, int], i: int, inside: frozenset[int]
+        self,
+        point: tuple[int, int],
+        i: int,
+        inside: frozenset[int],
+        *,
+        last: int | None,
     ) -> bool:
-        """The element on top of `point` is in the row, and no interactive element
-        outside the row (other than its ancestors) has a drawn part there."""
+        """The last element in document order whose drawn part holds `point`,
+        seen or not, is in the row (is `last`, when given), and no interactive
+        element outside the row (other than its ancestors) has a drawn part
+        there."""
         tree = self.tree
-        if self.topmost(point) not in inside:
+        held = elements_at(self.screen, point)
+        # The one decoration the user allows (Samsung's `round_corner`) is
+        # drawn over the list and takes nothing: it is passed over.
+        drawn = [e for e in held if not _is_decoration(self.screen, e)]
+        if not drawn:
             return False
-        for element in elements_at(self.screen, point):
+        end = tree.index[drawn[-1].id]
+        if end not in inside or (last is not None and end != last):
+            return False
+        for element in held:
             j = tree.index[element.id]
             if (
                 _interactive(element)
@@ -1106,8 +1143,8 @@ def _apply_phrases(
         candidate = state.phrase_candidate(i)
         if candidate is not None:
             found.append((k, i, candidate[0], candidate[1]))
-    if len(found) > MAX_PHRASE_CANDIDATES:
-        return decisions  # counted before the reasons are looked at
+            if len(found) > MAX_PHRASE_CANDIDATES:
+                return decisions  # counted before the reasons; stop at once
     found = [
         item
         for item in found
@@ -1120,7 +1157,11 @@ def _apply_phrases(
     result = list(decisions)
     for k, i, phrase, name in found:
         elements = list(state.elements)
-        elements[name] = replace(elements[name], text=_PLACEHOLDER)
+        # A description or hint of the name is the name again (checked in
+        # `phrase_candidate`): it goes with it.
+        elements[name] = replace(
+            elements[name], text=_PLACEHOLDER, content_desc="", hint=""
+        )
         other = _Judge(
             replace(state.screen, elements=tuple(elements)),
             target_package,
